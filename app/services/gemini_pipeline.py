@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 GEMINI_VOICE_DEFAULT = "Puck"       # Male, warm, American
 GEMINI_VOICE_SPANISH = "Orus"       # Male, multilingual
 
-GEMINI_MODEL = "gemini-2.5-flash-live-preview-native-audio"
+GEMINI_MODEL = "gemini-2.5-flash-native-audio-latest"
 
 
 def _gemini_ws_url() -> str:

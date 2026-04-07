@@ -135,6 +135,8 @@ class GeminiPipeline:
                     "system_instruction": {
                         "parts": [{"text": self._system_prompt}]
                     },
+                    "input_audio_transcription": {},
+                    "output_audio_transcription": {},
                 }
             }
 
@@ -307,8 +309,14 @@ class GeminiPipeline:
                     if self._exchange_count >= 3 and not self._unavailable_task:
                         self._unavailable_task = asyncio.create_task(self._unavailable_timer())
 
-                # Handle Kevin's spoken transcript (outputTranscript from native audio)
+                # Handle Kevin's spoken transcript (outputTranscript/outputTranscription)
                 output_transcript = server_content.get("outputTranscript", "")
+                if not output_transcript:
+                    ot = server_content.get("outputTranscription", {})
+                    if isinstance(ot, dict):
+                        output_transcript = ot.get("text", "")
+                    elif isinstance(ot, str):
+                        output_transcript = ot
                 if output_transcript:
                     self._transcript_lines.append(f"Kevin: {output_transcript}")
                     await self.on_transcript("Kevin", output_transcript)
@@ -324,6 +332,12 @@ class GeminiPipeline:
 
                 # Handle input transcript (caller's words, from Gemini's STT)
                 input_transcript = server_content.get("inputTranscript", "")
+                if not input_transcript:
+                    it = server_content.get("inputTranscription", {})
+                    if isinstance(it, dict):
+                        input_transcript = it.get("text", "")
+                    elif isinstance(it, str):
+                        input_transcript = it
                 if not input_transcript:
                     input_transcript = data.get("inputTranscript", "")
                 if input_transcript:

@@ -94,6 +94,10 @@ class GeminiPipeline:
         # Transcript accumulation (for post-call processing)
         self._transcript_lines: list[str] = []
 
+        # Buffers for streaming transcript fragments (Gemini sends word-by-word)
+        self._kevin_transcript_buf: list[str] = []
+        self._caller_transcript_buf: list[str] = []
+
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("mode", "business")
         if mode == "personal":
@@ -248,44 +252,20 @@ class GeminiPipeline:
                     break
 
                 data = json.loads(message)
-
-                # Debug: log non-audio message keys to understand Gemini's response structure
-                debug_data = {k: v for k, v in data.items() if k != "serverContent"}
-                sc = data.get("serverContent", {})
-                debug_sc = {}
-                for k, v in sc.items():
-                    if k == "modelTurn":
-                        # Summarize parts without huge audio blobs
-                        parts_summary = []
-                        for p in v.get("parts", []):
-                            if "inlineData" in p:
-                                parts_summary.append({"inlineData": {"mimeType": p["inlineData"].get("mimeType", ""), "bytes": len(p["inlineData"].get("data", ""))}})
-                            else:
-                                parts_summary.append(p)
-                        debug_sc["modelTurn"] = {"parts": parts_summary}
-                    else:
-                        debug_sc[k] = v
-                if debug_data:
-                    logger.info(f"Gemini msg (top-level): {json.dumps(debug_data)[:500]}")
-                if debug_sc:
-                    logger.info(f"Gemini msg (serverContent): {json.dumps(debug_sc)[:500]}")
-
-                server_content = sc
+                server_content = data.get("serverContent", {})
 
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):
                     self._interrupt_speaking = True
+                    self._kevin_transcript_buf.clear()
                     if self.on_clear_audio:
                         await self.on_clear_audio()
                     logger.info("Gemini: caller interrupted (barge-in)")
                     continue
 
-                # Handle model turn (audio + text output)
+                # Handle model turn (audio output)
                 model_turn = server_content.get("modelTurn", {})
-                parts = model_turn.get("parts", [])
-
-                for part in parts:
-                    # Audio output from Gemini
+                for part in model_turn.get("parts", []):
                     inline_data = part.get("inlineData", {})
                     if inline_data.get("mimeType", "").startswith("audio/"):
                         audio_b64 = inline_data.get("data", "")
@@ -295,73 +275,53 @@ class GeminiPipeline:
                             await self.on_audio_out(mulaw_chunk)
                             self._is_speaking = True
 
-                    # Native audio models emit "thinking" text, not spoken words.
-                    # We ignore these for transcript display but still use them
-                    # internally for goodbye detection below.
+                # Buffer Kevin's transcript fragments (sent word-by-word)
+                output_text = self._extract_transcript(server_content, "output")
+                if output_text:
+                    self._kevin_transcript_buf.append(output_text)
+
+                # Buffer caller's transcript fragments (sent word-by-word)
+                input_text = self._extract_transcript(server_content, "input")
+                if not input_text:
+                    input_text = self._extract_transcript(data, "input")
+                if input_text:
+                    self._caller_transcript_buf.append(input_text)
+
+                # Flush caller transcript when Kevin starts speaking (turn boundary)
+                if model_turn.get("parts") and self._caller_transcript_buf:
+                    await self._flush_caller_transcript()
 
                 # Handle turn completion — Kevin finished speaking
                 if server_content.get("turnComplete"):
                     self._is_speaking = False
-                    self._exchange_count += 1
-                    self._last_speech_time = time.time()
+                    # Flush Kevin's buffered transcript as one message
+                    if self._kevin_transcript_buf:
+                        full_text = " ".join(self._kevin_transcript_buf)
+                        self._kevin_transcript_buf.clear()
+                        self._transcript_lines.append(f"Kevin: {full_text}")
+                        await self.on_transcript("Kevin", full_text)
+                        self._last_speech_time = time.time()
+                        self._exchange_count += 1
 
-                    # Start unavailability timer after 3 exchanges
-                    if self._exchange_count >= 3 and not self._unavailable_task:
-                        self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+                        # Goodbye detection
+                        if any(p in full_text.lower() for p in self.GOODBYE_PHRASES):
+                            logger.info("Kevin said goodbye — ending call in 2 seconds")
+                            await asyncio.sleep(2)
+                            if self.on_call_complete:
+                                await self.on_call_complete()
+                            return
 
-                # Handle Kevin's spoken transcript (outputTranscript/outputTranscription)
-                output_transcript = server_content.get("outputTranscript", "")
-                if not output_transcript:
-                    ot = server_content.get("outputTranscription", {})
-                    if isinstance(ot, dict):
-                        output_transcript = ot.get("text", "")
-                    elif isinstance(ot, str):
-                        output_transcript = ot
-                if output_transcript:
-                    self._transcript_lines.append(f"Kevin: {output_transcript}")
-                    await self.on_transcript("Kevin", output_transcript)
-                    self._last_speech_time = time.time()
-
-                    # Goodbye detection on actual spoken words
-                    if any(p in output_transcript.lower() for p in self.GOODBYE_PHRASES):
-                        logger.info("Kevin said goodbye — ending call in 2 seconds")
-                        await asyncio.sleep(2)
-                        if self.on_call_complete:
-                            await self.on_call_complete()
-                        return
-
-                # Handle input transcript (caller's words, from Gemini's STT)
-                input_transcript = server_content.get("inputTranscript", "")
-                if not input_transcript:
-                    it = server_content.get("inputTranscription", {})
-                    if isinstance(it, dict):
-                        input_transcript = it.get("text", "")
-                    elif isinstance(it, str):
-                        input_transcript = it
-                if not input_transcript:
-                    input_transcript = data.get("inputTranscript", "")
-                if input_transcript:
-                    self._transcript_lines.append(f"Caller: {input_transcript}")
-                    await self.on_transcript("Caller", input_transcript)
-                    self._last_speech_time = time.time()
-
-                    # Urgency detection
-                    if not self._urgency_detected and self.on_urgency_detected:
-                        text_lower = input_transcript.lower()
-                        for keyword in self.URGENCY_KEYWORDS:
-                            if keyword in text_lower:
-                                self._urgency_detected = True
-                                logger.info(f"URGENCY DETECTED: '{keyword}' in '{input_transcript}'")
-                                asyncio.create_task(self.on_urgency_detected(input_transcript))
-                                if self._unavailable_task and not self._unavailable_task.done():
-                                    self._unavailable_task.cancel()
-                                    self._unavailable_task = None
-                                break
+                        # Start unavailability timer after 3 exchanges
+                        if self._exchange_count >= 3 and not self._unavailable_task:
+                            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
 
                 # Handle tool calls
                 tool_call = data.get("toolCall", {})
                 function_calls = tool_call.get("functionCalls", [])
                 if function_calls:
+                    # Flush any pending caller transcript before tool execution
+                    if self._caller_transcript_buf:
+                        await self._flush_caller_transcript()
                     await self._handle_tool_calls(function_calls)
 
         except asyncio.CancelledError:
@@ -378,6 +338,44 @@ class GeminiPipeline:
                         await self.on_call_complete()
         except Exception as e:
             logger.error(f"Gemini receive error: {e}", exc_info=True)
+
+    @staticmethod
+    def _extract_transcript(obj: dict, direction: str) -> str:
+        """Extract transcript text from a Gemini message for 'input' or 'output'."""
+        # Try outputTranscript / inputTranscript (string)
+        text = obj.get(f"{direction}Transcript", "")
+        if text:
+            return text
+        # Try outputTranscription / inputTranscription (dict with text field)
+        t = obj.get(f"{direction}Transcription", {})
+        if isinstance(t, dict):
+            return t.get("text", "")
+        if isinstance(t, str):
+            return t
+        return ""
+
+    async def _flush_caller_transcript(self):
+        """Flush buffered caller transcript fragments as one message."""
+        full_text = " ".join(self._caller_transcript_buf)
+        self._caller_transcript_buf.clear()
+        if not full_text.strip():
+            return
+        self._transcript_lines.append(f"Caller: {full_text}")
+        await self.on_transcript("Caller", full_text)
+        self._last_speech_time = time.time()
+
+        # Urgency detection
+        if not self._urgency_detected and self.on_urgency_detected:
+            text_lower = full_text.lower()
+            for keyword in self.URGENCY_KEYWORDS:
+                if keyword in text_lower:
+                    self._urgency_detected = True
+                    logger.info(f"URGENCY DETECTED: '{keyword}' in '{full_text}'")
+                    asyncio.create_task(self.on_urgency_detected(full_text))
+                    if self._unavailable_task and not self._unavailable_task.done():
+                        self._unavailable_task.cancel()
+                        self._unavailable_task = None
+                    break
 
     # --- Tool Calling ---
 

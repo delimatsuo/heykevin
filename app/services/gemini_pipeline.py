@@ -246,7 +246,29 @@ class GeminiPipeline:
                     break
 
                 data = json.loads(message)
-                server_content = data.get("serverContent", {})
+
+                # Debug: log non-audio message keys to understand Gemini's response structure
+                debug_data = {k: v for k, v in data.items() if k != "serverContent"}
+                sc = data.get("serverContent", {})
+                debug_sc = {}
+                for k, v in sc.items():
+                    if k == "modelTurn":
+                        # Summarize parts without huge audio blobs
+                        parts_summary = []
+                        for p in v.get("parts", []):
+                            if "inlineData" in p:
+                                parts_summary.append({"inlineData": {"mimeType": p["inlineData"].get("mimeType", ""), "bytes": len(p["inlineData"].get("data", ""))}})
+                            else:
+                                parts_summary.append(p)
+                        debug_sc["modelTurn"] = {"parts": parts_summary}
+                    else:
+                        debug_sc[k] = v
+                if debug_data:
+                    logger.info(f"Gemini msg (top-level): {json.dumps(debug_data)[:500]}")
+                if debug_sc:
+                    logger.info(f"Gemini msg (serverContent): {json.dumps(debug_sc)[:500]}")
+
+                server_content = sc
 
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):

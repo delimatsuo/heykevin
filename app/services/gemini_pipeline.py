@@ -296,7 +296,7 @@ class GeminiPipeline:
                     self._is_speaking = False
                     # Flush Kevin's buffered transcript as one message
                     if self._kevin_transcript_buf:
-                        full_text = " ".join(self._kevin_transcript_buf)
+                        full_text = "".join(self._kevin_transcript_buf)
                         self._kevin_transcript_buf.clear()
                         self._transcript_lines.append(f"Kevin: {full_text}")
                         await self.on_transcript("Kevin", full_text)
@@ -356,7 +356,7 @@ class GeminiPipeline:
 
     async def _flush_caller_transcript(self):
         """Flush buffered caller transcript fragments as one message."""
-        full_text = " ".join(self._caller_transcript_buf)
+        full_text = "".join(self._caller_transcript_buf)
         self._caller_transcript_buf.clear()
         if not full_text.strip():
             return

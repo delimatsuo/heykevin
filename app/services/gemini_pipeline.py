@@ -135,11 +135,6 @@ class GeminiPipeline:
                     "system_instruction": {
                         "parts": [{"text": self._system_prompt}]
                     },
-                    "session_config": {
-                        "contextWindowCompression": {
-                            "enabled": True,
-                        },
-                    },
                 }
             }
 

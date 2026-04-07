@@ -271,35 +271,38 @@ class GeminiPipeline:
                             await self.on_audio_out(mulaw_chunk)
                             self._is_speaking = True
 
-                    # Text output from Gemini (Kevin's words)
-                    if "text" in part:
-                        kevin_text = part["text"]
-                        if kevin_text.strip():
-                            self._transcript_lines.append(f"Kevin: {kevin_text}")
-                            await self.on_transcript("Kevin", kevin_text)
-                            self._exchange_count += 1
-                            self._last_speech_time = time.time()
-
-                            # Goodbye detection
-                            if any(p in kevin_text.lower() for p in self.GOODBYE_PHRASES):
-                                logger.info("Kevin said goodbye — ending call in 2 seconds")
-                                await asyncio.sleep(2)
-                                if self.on_call_complete:
-                                    await self.on_call_complete()
-                                return
-
-                            # Start unavailability timer after 3 exchanges
-                            if self._exchange_count >= 3 and not self._unavailable_task:
-                                self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+                    # Native audio models emit "thinking" text, not spoken words.
+                    # We ignore these for transcript display but still use them
+                    # internally for goodbye detection below.
 
                 # Handle turn completion — Kevin finished speaking
                 if server_content.get("turnComplete"):
                     self._is_speaking = False
+                    self._exchange_count += 1
+                    self._last_speech_time = time.time()
+
+                    # Start unavailability timer after 3 exchanges
+                    if self._exchange_count >= 3 and not self._unavailable_task:
+                        self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+
+                # Handle Kevin's spoken transcript (outputTranscript from native audio)
+                output_transcript = server_content.get("outputTranscript", "")
+                if output_transcript:
+                    self._transcript_lines.append(f"Kevin: {output_transcript}")
+                    await self.on_transcript("Kevin", output_transcript)
+                    self._last_speech_time = time.time()
+
+                    # Goodbye detection on actual spoken words
+                    if any(p in output_transcript.lower() for p in self.GOODBYE_PHRASES):
+                        logger.info("Kevin said goodbye — ending call in 2 seconds")
+                        await asyncio.sleep(2)
+                        if self.on_call_complete:
+                            await self.on_call_complete()
+                        return
 
                 # Handle input transcript (caller's words, from Gemini's STT)
-                input_transcript = data.get("serverContent", {}).get("inputTranscript", "")
+                input_transcript = server_content.get("inputTranscript", "")
                 if not input_transcript:
-                    # Alternative location in some Gemini versions
                     input_transcript = data.get("inputTranscript", "")
                 if input_transcript:
                     self._transcript_lines.append(f"Caller: {input_transcript}")

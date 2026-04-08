@@ -183,57 +183,164 @@ async def update_contractor(contractor_id: str, updates: dict) -> bool:
     return True
 
 
-async def provision_twilio_number(contractor_id: str, area_code: str = "") -> str:
-    """Buy a Twilio phone number and assign it to a contractor.
-    Returns the provisioned phone number (E.164 format).
+async def _create_regulatory_bundle(client, loop, country_code: str, business_name: str, address: str, city: str) -> str:
+    """Create a Twilio regulatory bundle for EU/BR number provisioning.
+
+    Returns the bundle SID. Raises if the bundle cannot be created or approved.
+    """
+    country_name = COUNTRY_NAMES.get(country_code, "")
+
+    # Look up the regulation SID for this country + number type
+    regulations = await loop.run_in_executor(
+        None,
+        lambda: client.numbers.v2.regulatory_compliance.regulations.list(
+            iso_country=country_code, number_type="local", limit=1
+        )
+    )
+    if not regulations:
+        raise Exception(f"No Twilio regulations found for {country_name} local numbers")
+    regulation_sid = regulations[0].sid
+
+    # Create an address in Twilio
+    twilio_address = await loop.run_in_executor(
+        None,
+        lambda: client.addresses.create(
+            friendly_name=f"{business_name} - {city}",
+            street=address,
+            city=city,
+            region="",
+            postal_code="",
+            iso_country=country_code,
+            customer_name=business_name,
+        )
+    )
+
+    # Create a regulatory bundle
+    bundle = await loop.run_in_executor(
+        None,
+        lambda: client.numbers.v2.regulatory_compliance.bundles.create(
+            friendly_name=f"{business_name} - {country_name} number",
+            regulation_sid=regulation_sid,
+            iso_country=country_code,
+            number_type="local",
+        )
+    )
+
+    # Attach the address as a supporting document
+    await loop.run_in_executor(
+        None,
+        lambda: client.numbers.v2.regulatory_compliance.bundles(bundle.sid)
+        .item_assignments.create(object_sid=twilio_address.sid)
+    )
+
+    # Submit the bundle for review
+    await loop.run_in_executor(
+        None,
+        lambda: client.numbers.v2.regulatory_compliance.bundles(bundle.sid)
+        .update(status="pending-review")
+    )
+
+    # Poll for approval (usually instant, max 30 seconds)
+    for _ in range(15):
+        await asyncio.sleep(2)
+        updated = await loop.run_in_executor(
+            None,
+            lambda: client.numbers.v2.regulatory_compliance.bundles(bundle.sid).fetch()
+        )
+        if updated.status == "twilio-approved":
+            logger.info(f"Regulatory bundle approved: {bundle.sid} ({country_code})")
+            return bundle.sid
+        if updated.status == "provisionally-approved":
+            logger.info(f"Regulatory bundle provisionally approved: {bundle.sid}")
+            return bundle.sid
+        if updated.status == "twilio-rejected":
+            raise Exception(f"Regulatory bundle rejected for {country_name}. Please verify your business address.")
+
+    # Bundle still pending — try to provision anyway (Twilio may accept provisionally)
+    logger.info(f"Regulatory bundle pending after 30s: {bundle.sid} ({country_code})")
+    return bundle.sid
+
+
+async def provision_twilio_number(contractor_id: str, country_code: str = "US", area_code: str = "") -> str:
+    """Buy a Twilio phone number in the contractor's country and assign it.
+
+    For EU/BR countries, creates a regulatory bundle first using the contractor's
+    business address. Returns the provisioned phone number (E.164 format).
     """
     from twilio.rest import Client
     from app.config import settings
 
+    if country_code not in COUNTRY_NAMES:
+        raise Exception(f"Unsupported country: {country_code}")
+
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
     loop = asyncio.get_event_loop()
 
+    # For regulatory countries, create a bundle first
+    bundle_sid = None
+    if country_code in REGULATORY_COUNTRIES:
+        contractor = await get_contractor(contractor_id)
+        if not contractor:
+            raise Exception("Contractor not found")
+        business_address = contractor.get("business_address", "")
+        business_city = contractor.get("business_city", "")
+        business_name = contractor.get("business_name", "")
+        if not business_address or not business_city:
+            raise Exception("Business address and city required for number provisioning in this country")
+
+        bundle_sid = await _create_regulatory_bundle(
+            client, loop, country_code, business_name, business_address, business_city
+        )
+
     # Search for available numbers
-    search_params = {"voice_enabled": True, "sms_enabled": True}
+    # Note: sms_enabled only for US/CA — EU/BR local numbers often don't support SMS
+    search_params = {"voice_enabled": True}
+    if country_code in ("US", "CA"):
+        search_params["sms_enabled"] = True
     if area_code:
         search_params["area_code"] = area_code
 
     numbers = await loop.run_in_executor(
         None,
-        lambda: client.available_phone_numbers("US").local.list(**search_params, limit=1)
+        lambda: client.available_phone_numbers(country_code).local.list(**search_params, limit=1)
     )
 
-    if not numbers:
-        # Fallback: try without area code
+    if not numbers and area_code:
+        # Retry without area code
+        search_params.pop("area_code", None)
         numbers = await loop.run_in_executor(
             None,
-            lambda: client.available_phone_numbers("US").local.list(voice_enabled=True, sms_enabled=True, limit=1)
+            lambda: client.available_phone_numbers(country_code).local.list(**search_params, limit=1)
         )
 
     if not numbers:
-        raise Exception("No phone numbers available")
+        raise Exception(f"No phone numbers available in {COUNTRY_NAMES.get(country_code, country_code)}")
 
-    # Buy the number
+    # Buy the number (bundle_sid goes here, NOT in search)
     webhook_url = f"{settings.cloud_run_url}/webhooks/twilio/incoming"
     status_url = f"{settings.cloud_run_url}/webhooks/twilio/status"
 
+    purchase_params = {
+        "phone_number": numbers[0].phone_number,
+        "voice_url": webhook_url,
+        "voice_method": "POST",
+        "status_callback": status_url,
+        "status_callback_method": "POST",
+        "sms_url": f"{settings.cloud_run_url}/webhooks/twilio/mms-incoming",
+        "sms_method": "POST",
+    }
+    if bundle_sid:
+        purchase_params["bundle_sid"] = bundle_sid
+
     purchased = await loop.run_in_executor(
         None,
-        lambda: client.incoming_phone_numbers.create(
-            phone_number=numbers[0].phone_number,
-            voice_url=webhook_url,
-            voice_method="POST",
-            status_callback=status_url,
-            status_callback_method="POST",
-            sms_url=f"{settings.cloud_run_url}/webhooks/twilio/mms-incoming",
-            sms_method="POST",
-        )
+        lambda: client.incoming_phone_numbers.create(**purchase_params)
     )
 
     # Update contractor profile with the number
     await update_contractor(contractor_id, {"twilio_number": purchased.phone_number})
 
-    logger.info(f"Provisioned {redact_phone(purchased.phone_number)} for contractor {contractor_id}")
+    logger.info(f"Provisioned {redact_phone(purchased.phone_number)} ({country_code}) for contractor {contractor_id}")
     return purchased.phone_number
 
 

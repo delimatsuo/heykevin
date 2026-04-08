@@ -144,7 +144,18 @@ class SubscriptionManager: ObservableObject {
     }
 
     private func verifyWithServer(transactionID: String) async {
-        await APIClient.shared.verifySubscription(transactionId: transactionID)
+        let success = await APIClient.shared.verifySubscription(transactionId: transactionID)
+        if success {
+            // Refresh subscription state from backend after successful verification
+            let contractorId = AppState.shared.contractorId
+            guard !contractorId.isEmpty else { return }
+            if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
+                let status = profile["subscription_status"] as? String ?? ""
+                let tier = profile["subscription_tier"] as? String ?? ""
+                if !status.isEmpty { AppState.shared.subscriptionStatus = status }
+                if !tier.isEmpty { AppState.shared.subscriptionTier = tier }
+            }
+        }
     }
 
     // MARK: - Transaction Updates

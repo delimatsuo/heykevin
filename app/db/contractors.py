@@ -10,6 +10,38 @@ logger = get_logger(__name__)
 
 COLLECTION = "contractors"
 
+# Supported countries for Kevin AI
+SUPPORTED_COUNTRIES = {"US", "CA", "BR", "GB", "DE", "FR", "IT", "ES", "PT"}
+
+# Countries that require Twilio regulatory bundles for number provisioning
+REGULATORY_COUNTRIES = {"DE", "FR", "IT", "ES", "PT", "BR"}
+
+# Country code to full name mapping
+COUNTRY_NAMES = {
+    "US": "United States",
+    "CA": "Canada",
+    "BR": "Brazil",
+    "GB": "United Kingdom",
+    "DE": "Germany",
+    "FR": "France",
+    "IT": "Italy",
+    "ES": "Spain",
+    "PT": "Portugal",
+}
+
+
+def detect_country_from_phone(phone: str) -> str:
+    """Detect ISO 3166-1 alpha-2 country code from a phone number. Defaults to 'US'."""
+    import phonenumbers
+    try:
+        parsed = phonenumbers.parse(phone, None)
+        region = phonenumbers.region_code_for_number(parsed)
+        if region and region in SUPPORTED_COUNTRIES:
+            return region
+    except phonenumbers.NumberParseException:
+        pass
+    return "US"
+
 
 async def get_contractor_by_twilio_number(twilio_number: str) -> Optional[dict]:
     """Look up contractor profile by their Kevin Twilio number."""
@@ -121,6 +153,10 @@ async def create_contractor(data: dict) -> str:
     data["active"] = True
     data.setdefault("mode", "kevin")
     data.setdefault("voice_engine", "elevenlabs")
+    data.setdefault("country_code", "US")
+    data.setdefault("business_address", "")
+    data.setdefault("business_city", "")
+    data.setdefault("business_country_name", "")
     data.setdefault("callback_sla_minutes", 15)
     # Generate a random 6-digit dial-in PIN
     data.setdefault("dial_in_pin", f"{secrets.randbelow(1000000):06d}")

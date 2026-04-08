@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     google_calendar_client_id: str = ""
     google_calendar_client_secret: str = ""
 
+    # App Store Server API (for subscription verification and offer signing)
+    appstore_key_id: str = ""         # Key ID from App Store Connect
+    appstore_issuer_id: str = ""      # Issuer ID from App Store Connect
+    appstore_private_key: str = ""    # .p8 key content (PEM, | as newline separator)
+    appstore_bundle_id: str = "com.kevin.callscreen"  # App bundle ID
+    appstore_environment: str = "sandbox"  # "sandbox" or "production"
+
     # Cloud Run URL (for WebSocket URL generation)
     cloud_run_url: str = "https://kevin-api-752910912062.us-central1.run.app"
 

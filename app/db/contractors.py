@@ -10,6 +10,14 @@ logger = get_logger(__name__)
 
 COLLECTION = "contractors"
 
+PROTECTED_FIELDS = frozenset({
+    "subscription_tier",
+    "subscription_status",
+    "subscription_expires",
+    "trial_start",
+    "deleted_app_detected_at",
+})
+
 # Supported countries for Kevin AI
 SUPPORTED_COUNTRIES = {"US", "CA", "BR", "GB", "DE", "FR", "IT", "ES", "PT"}
 
@@ -163,6 +171,11 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("callback_sla_minutes", 15)
     # Generate a random 6-digit dial-in PIN
     data.setdefault("dial_in_pin", f"{secrets.randbelow(1000000):06d}")
+    trial_start = data.setdefault("trial_start", time.time())
+    data.setdefault("subscription_status", "trial")
+    data.setdefault("subscription_tier", "none")
+    data.setdefault("subscription_expires", trial_start + 14 * 86400)
+    data.setdefault("deleted_app_detected_at", None)
     loop = asyncio.get_event_loop()
     doc_ref = await loop.run_in_executor(
         None,

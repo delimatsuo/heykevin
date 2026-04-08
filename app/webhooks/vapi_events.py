@@ -9,19 +9,22 @@ Handles:
 """
 
 import asyncio
+import hashlib
+import hmac
 import time
 from typing import Optional
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
-from app.config import settings
+from app.config import settings, get_dial_in_number
 from app.db.cache import get_active_call, update_active_call, save_active_call
 from app.db.contacts import get_contact
 from app.services.state_machine import ActiveCall, CallState
 from app.services.scoring import calculate_trust_score
 from app.services.routing import determine_route, Route
 from app.services.telegram_bot import update_transcript, send_call_notification
-from app.utils.logging import get_logger, call_sid_var
+from app.utils.logging import get_logger, call_sid_var, redact_phone
 from app.utils.phone import normalize_phone
 
 logger = get_logger(__name__)
@@ -33,7 +36,7 @@ _last_transcript_update: dict = {}
 TRANSCRIPT_THROTTLE = 2.0
 
 
-def _kevin_assistant_config(caller_phone: str, caller_name: str = "") -> dict:
+def _kevin_assistant_config(caller_phone: str, caller_name: str = "", contractor_id: str = "") -> dict:
     """Build the Kevin assistant configuration for Vapi."""
     caller_info = f"The caller's number is {caller_phone}."
     if caller_name:
@@ -90,14 +93,28 @@ RULES:
         "silenceTimeoutSeconds": 120,
         "maxDurationSeconds": 300,
         "endCallFunctionEnabled": True,
-        "forwardingPhoneNumber": settings.dial_in_number,
-        "serverUrl": "https://kevin-api-752910912062.us-central1.run.app/webhooks/vapi/events",
+        "forwardingPhoneNumber": get_dial_in_number("US"),  # Vapi is US-only legacy
+        "serverUrl": "https://kevin-api-752910912062.us-central1.run.app/webhooks/vapi/events"
+        + (f"?contractor_id={contractor_id}" if contractor_id else ""),
     }
 
 
 @router.post("/webhooks/vapi/events")
 async def handle_vapi_event(request: Request):
     """Handle events from Vapi's serverUrl webhook."""
+    # Verify webhook signature if secret is configured
+    if settings.vapi_webhook_secret:
+        body = await request.body()
+        signature = request.headers.get("X-Vapi-Signature", "")
+        expected = hmac.new(
+            settings.vapi_webhook_secret.encode(),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            logger.warning("Vapi webhook signature mismatch — rejecting request")
+            return JSONResponse(status_code=401, content={"error": "invalid signature"})
+
     try:
         data = await request.json()
         message = data.get("message", {})
@@ -142,12 +159,28 @@ async def _handle_assistant_request(data: dict) -> dict:
     caller_phone = normalize_phone(customer.get("number", "")) or customer.get("number", "")
     call_id = call_data.get("id", "")  # Vapi's call ID
 
-    logger.info(f"Assistant request for caller: {caller_phone}")
+    logger.info(f"Assistant request for caller: {redact_phone(caller_phone)}")
+
+    # Determine contractor_id from the Vapi phone number that received the call
+    contractor_id = ""
+    vapi_phone = call_data.get("phoneNumber", {}).get("number", "")
+    if vapi_phone:
+        try:
+            from app.db.contractors import get_contractor_by_twilio_number
+            contractor = await asyncio.wait_for(
+                get_contractor_by_twilio_number(vapi_phone), timeout=2.0
+            )
+            if contractor:
+                contractor_id = contractor.get("contractor_id", "")
+        except Exception:
+            pass
 
     # Fast lookups (< 2 seconds)
     contact = None
     try:
-        contact = await asyncio.wait_for(get_contact(caller_phone), timeout=2.0)
+        contact = await asyncio.wait_for(
+            get_contact(caller_phone, contractor_id=contractor_id), timeout=2.0
+        )
     except Exception:
         pass
 
@@ -214,7 +247,7 @@ async def _handle_assistant_request(data: dict) -> dict:
     else:
         # AI Screening (unknown + ring-then-screen) — Kevin answers
         return {
-            "assistant": _kevin_assistant_config(caller_phone, caller_name),
+            "assistant": _kevin_assistant_config(caller_phone, caller_name, contractor_id),
         }
 
 

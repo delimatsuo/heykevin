@@ -10,13 +10,11 @@ To pick up:
 """
 
 import asyncio
-import random
 import secrets
-import string
 
 from twilio.rest import Client
 
-from app.config import settings
+from app.config import settings, get_dial_in_number
 from app.db.cache import get_active_call, transition_state, update_active_call
 from app.services.state_machine import CallState
 from app.services.telegram_bot import send_dial_in_message
@@ -27,9 +25,6 @@ logger = get_logger(__name__)
 
 def _get_twilio_client() -> Client:
     return Client(settings.twilio_account_sid, settings.twilio_auth_token)
-
-
-STATIC_PIN = "0909"
 
 
 async def execute_pickup(call_sid: str) -> bool:
@@ -43,7 +38,7 @@ async def execute_pickup(call_sid: str) -> bool:
     try:
         twilio = _get_twilio_client()
         conference_name = secrets.token_urlsafe(16)
-        pin = STATIC_PIN
+        pin = ''.join(secrets.choice('0123456789') for _ in range(4))
 
         # Save pickup state
         await update_active_call(call_sid, {
@@ -62,13 +57,21 @@ async def execute_pickup(call_sid: str) -> bool:
 </Dial>
 </Response>"""
 
-        twilio.calls(call_sid).update(twiml=conf_twiml)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: twilio.calls(call_sid).update(twiml=conf_twiml)
+        )
         logger.info(f"Caller redirected to pickup conference: {conference_name}")
+
+        # Look up contractor's country for regional dial-in
+        from app.db.contractors import get_contractor
+        _contractor = await get_contractor(active_call.contractor_id) if active_call.contractor_id else None
+        _country = _contractor.get("country_code", "US") if _contractor else "US"
 
         # Send user the dial-in number + PIN via Telegram
         await send_dial_in_message(
             chat_id=settings.telegram_chat_id,
-            conference_number=settings.dial_in_number,
+            conference_number=get_dial_in_number(_country),
             pin=pin,
             caller_phone=active_call.caller_phone,
             caller_name=active_call.caller_name,

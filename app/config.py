@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     vapi_api_key: str = ""
     vapi_public_key: str = ""
     vapi_phone_number_id: str = ""
+    vapi_webhook_secret: str = ""
 
     # AI Services
     anthropic_api_key: str = ""
@@ -48,14 +49,27 @@ class Settings(BaseSettings):
     apns_key_content: str = ""        # .p8 key file content (PEM)
     apns_bundle_id: str = ""          # App bundle ID (e.g., com.kevin.app)
 
-    # Dial-in number (for Pick Up — user calls this to join conference)
+    # Dial-in number (DEPRECATED — use dial_in_numbers for per-country support)
     dial_in_number: str = "+16504222696"
+
+    # Regional dial-in numbers (JSON string, parsed by get_dial_in_number helper)
+    # One per supported country. Provision new numbers as countries are added.
+    dial_in_numbers: str = ""
+
+    # Jobber (FSM integration)
+    jobber_client_id: str = ""
+    jobber_client_secret: str = ""
+
+    # Google Calendar (fallback scheduling for non-Jobber contractors)
+    google_calendar_client_id: str = ""
+    google_calendar_client_secret: str = ""
 
     # Cloud Run URL (for WebSocket URL generation)
     cloud_run_url: str = "https://kevin-api-752910912062.us-central1.run.app"
 
     # App
     environment: str = "development"
+    apns_sandbox: bool = True  # Use APNs sandbox endpoint; set to false for App Store builds
     log_level: str = "INFO"
     port: int = 8080
 
@@ -67,3 +81,19 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+import json as _json
+_dial_in_cache: dict | None = None
+
+
+def get_dial_in_number(country_code: str = "US") -> str:
+    """Get the dial-in number for a country, falling back to US, then legacy field."""
+    global _dial_in_cache
+    if _dial_in_cache is None:
+        try:
+            _dial_in_cache = _json.loads(settings.dial_in_numbers) if settings.dial_in_numbers else {}
+        except (_json.JSONDecodeError, TypeError):
+            _dial_in_cache = {}
+    if _dial_in_cache:
+        return _dial_in_cache.get(country_code, _dial_in_cache.get("US", settings.dial_in_number))
+    return settings.dial_in_number

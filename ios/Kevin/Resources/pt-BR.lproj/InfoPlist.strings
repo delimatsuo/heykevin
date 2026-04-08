@@ -1,0 +1,4 @@
+/* Permission dialog strings - Brazilian Portuguese */
+"NSContactsUsageDescription" = "Kevin precisa acessar seus contatos para adicionar números VIP que tocam diretamente sem triagem.";
+"NSMicrophoneUsageDescription" = "Kevin precisa de acesso ao microfone para conectar você com quem liga e gravar treinamento de voz.";
+"NSSpeechRecognitionUsageDescription" = "Kevin usa reconhecimento de fala para aprender sobre seu negócio pela sua voz.";

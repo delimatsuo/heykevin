@@ -33,6 +33,7 @@ class SettingsUpdate(BaseModel):
     text_reply_message: Optional[str] = None
     escalation_enabled: Optional[bool] = None
     voice_engine: Optional[str] = None
+    country_code: Optional[str] = None
 
 
 def _settings_ref(contractor_id: str):
@@ -66,6 +67,20 @@ async def api_update_settings(request: Request, body: SettingsUpdate, contractor
     """Update settings for a contractor."""
     require_contractor_access(request, contractor_id)
     updates = {k: v for k, v in body.dict().items() if v is not None}
+
+    # country_code lives on the main contractor document
+    if "country_code" in updates:
+        cc = updates.pop("country_code")
+        from app.db.contractors import SUPPORTED_COUNTRIES
+        if cc and cc.upper() in SUPPORTED_COUNTRIES:
+            try:
+                db = get_firestore_client()
+                db.collection("contractors").document(contractor_id).update({"country_code": cc.upper()})
+            except Exception as e:
+                logger.error(f"country_code update failed for {contractor_id}: {e}", exc_info=True)
+                return {"error": "Failed to save country_code"}
+        elif cc:
+            return {"error": f"Unsupported country code: {cc}"}
 
     # voice_engine lives on the main contractor document (not settings subcollection)
     if "voice_engine" in updates:

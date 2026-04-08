@@ -97,7 +97,10 @@ async def get_contractor_by_owner_phone(owner_phone: str) -> Optional[dict]:
     if not owner_phone:
         return None
     from app.utils.phone import normalize_phone
-    normalized = normalize_phone(owner_phone)
+    # Try parsing as E.164 first (no region needed), fall back to US
+    normalized = normalize_phone(owner_phone, default_region=None)
+    if not normalized:
+        normalized = normalize_phone(owner_phone, default_region="US")
     if not normalized:
         return None
     db = get_firestore_client()

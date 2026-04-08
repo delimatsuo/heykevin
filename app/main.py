@@ -212,13 +212,7 @@ async def _expired_contractor_cleanup():
 
                 logger.info(f"14-day cleanup: deactivating {contractor_id}")
 
-                try:
-                    from app.db.contractors import deactivate_contractor
-                    await deactivate_contractor(contractor_id)
-                except Exception as e:
-                    logger.error(f"Deactivate failed for {contractor_id}: {e}")
-                    continue
-
+                # Send final SMS before releasing the number
                 if owner_phone:
                     final_sms = (
                         "Kevin AI: Your call forwarding has been disabled after 14 days "
@@ -226,6 +220,13 @@ async def _expired_contractor_cleanup():
                         "If you need help, visit kevinai.app."
                     )
                     await send_sms(owner_phone, final_sms, from_number=twilio_number)
+
+                try:
+                    from app.db.contractors import deactivate_contractor
+                    await deactivate_contractor(contractor_id)
+                except Exception as e:
+                    logger.error(f"Deactivate failed for {contractor_id}: {e}")
+                    continue
 
         except Exception as e:
             logger.warning(f"Expired contractor cleanup error: {e}")

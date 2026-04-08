@@ -235,8 +235,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         # Subscription check — must happen BEFORE routing decisions
         subscription_status = contractor.get("subscription_status", "trial") if contractor else "trial"
         subscription_expires = contractor.get("subscription_expires", 0) if contractor else 0
-        import time as _time_mod
-        now = _time_mod.time()
+        now = time.time()
 
         # Treat as active if: trial, active, or expires timestamp is in the future (fail-open)
         is_subscription_active = (
@@ -254,6 +253,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             device_token = await get_device_token(token_type="voip", contractor_id=contractor_id)
 
             push_succeeded = False
+            conference_name = ""
             if device_token:
                 from app.api.voip import _generate_access_token
                 access_token = _generate_access_token()
@@ -894,6 +894,19 @@ async def handle_voicemail_transcription(request: Request, _=Depends(verify_twil
         from app.db.contractors import get_contractor_by_twilio_number
         contractor = await get_contractor_by_twilio_number(to_number)
         if not contractor:
+            # Also check inactive contractors (app may have been deactivated by cleanup)
+            from app.db.firestore_client import get_firestore_client
+            import asyncio as _asyncio
+            db = get_firestore_client()
+            loop = _asyncio.get_event_loop()
+            docs = await loop.run_in_executor(
+                None,
+                lambda: list(db.collection("contractors").where("twilio_number", "==", to_number).limit(1).stream())
+            )
+            if docs:
+                contractor = docs[0].to_dict()
+                contractor["contractor_id"] = docs[0].id
+        if not contractor:
             return {"status": "ok"}
 
         owner_phone = contractor.get("owner_phone", "")
@@ -907,14 +920,14 @@ async def handle_voicemail_transcription(request: Request, _=Depends(verify_twil
             sms_body = (
                 f"Voicemail from {caller_display}: \"{transcription_text}\"\n\n"
                 f"Kevin AI is no longer installed on your phone. "
-                f"To stop forwarding calls, dial *73."
+                f"To remove call forwarding, visit kevinai.app/support."
             )
         else:
             sms_body = (
                 f"You received a voicemail from {caller_display} "
                 f"(transcription unavailable).\n\n"
                 f"Kevin AI is no longer installed on your phone. "
-                f"To stop forwarding calls, dial *73."
+                f"To remove call forwarding, visit kevinai.app/support."
             )
 
         twilio_number = contractor.get("twilio_number", "")

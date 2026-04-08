@@ -582,6 +582,18 @@ class APIClient {
         return false
     }
 
+    // MARK: - Subscription (Stubs — implemented in Task 5)
+
+    /// Verify a StoreKit transaction with the server.
+    func verifySubscription(transactionId: String) async { }
+
+    /// Sign a promotional offer server-side and return the signed parameters.
+    func signSubscriptionOffer(productId: String, offerId: String, applicationUsername: String) async -> [String: Any]? {
+        return nil
+    }
+
+    // MARK: - Services (existing)
+
     func updateServices(contractorId: String, services: [[String: Any]]) async -> Bool {
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId

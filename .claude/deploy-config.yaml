@@ -30,9 +30,8 @@ ci_cd:
   deploy_workflow: .github/workflows/deploy.yml
   rollback_workflow: .github/workflows/rollback.yml
   auth_method: workload-identity-federation
-  # TODO: Set these after configuring WIF in GCP Console:
-  # wif_provider: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
-  # wif_service_account: github-actions@kevin-491315.iam.gserviceaccount.com
+  wif_provider: projects/752910912062/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  wif_service_account: github-actions@kevin-491315.iam.gserviceaccount.com
 
 reviewer:
   tech_stack: Python 3.12, FastAPI, Cloud Run, Firestore, Firebase, Twilio, iOS Swift/SwiftUI, StoreKit 2

@@ -167,6 +167,70 @@ async def _orphan_call_cleanup():
             logger.warning(f"Orphan call cleanup error: {e}")
 
 
+async def _expired_contractor_cleanup():
+    """Periodically clean up contractors with deleted app for 14+ days.
+
+    Runs every 6 hours. For contractors where:
+    - subscription_status == "expired"
+    - deleted_app_detected_at is set and > 14 days ago
+
+    Releases Twilio number, sends final SMS, deactivates account.
+    """
+    import time
+    from app.db.firestore_client import get_firestore_client
+    from app.services.sms import send_sms
+
+    FOURTEEN_DAYS = 14 * 86400
+
+    while True:
+        await asyncio.sleep(6 * 3600)  # Every 6 hours
+        try:
+            db = get_firestore_client()
+            loop = asyncio.get_event_loop()
+            now = time.time()
+            cutoff = now - FOURTEEN_DAYS
+
+            docs = await loop.run_in_executor(
+                None,
+                lambda: list(
+                    db.collection("contractors")
+                    .where("subscription_status", "==", "expired")
+                    .where("active", "==", True)
+                    .stream()
+                )
+            )
+
+            for doc in docs:
+                data = doc.to_dict()
+                deleted_at = data.get("deleted_app_detected_at")
+                if not deleted_at or deleted_at > cutoff:
+                    continue
+
+                contractor_id = doc.id
+                owner_phone = data.get("owner_phone", "")
+                twilio_number = data.get("twilio_number", "")
+
+                logger.info(f"14-day cleanup: deactivating {contractor_id}")
+
+                try:
+                    from app.db.contractors import deactivate_contractor
+                    await deactivate_contractor(contractor_id)
+                except Exception as e:
+                    logger.error(f"Deactivate failed for {contractor_id}: {e}")
+                    continue
+
+                if owner_phone:
+                    final_sms = (
+                        "Kevin AI: Your call forwarding has been disabled after 14 days "
+                        "of inactivity. To reactivate, reinstall Kevin AI. "
+                        "If you need help, visit kevinai.app."
+                    )
+                    await send_sms(owner_phone, final_sms, from_number=twilio_number)
+
+        except Exception as e:
+            logger.warning(f"Expired contractor cleanup error: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     # Validate required config
@@ -182,6 +246,7 @@ async def startup():
 
     # Start orphan call cleanup background task
     asyncio.create_task(_orphan_call_cleanup())
+    asyncio.create_task(_expired_contractor_cleanup())
 
     logger.info(
         "Kevin starting up",

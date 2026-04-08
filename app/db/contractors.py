@@ -2,6 +2,7 @@
 
 import asyncio
 import secrets
+import time
 from typing import Optional
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
@@ -11,10 +12,12 @@ logger = get_logger(__name__)
 COLLECTION = "contractors"
 
 PROTECTED_FIELDS = frozenset({
+    # Subscription billing — written only by App Store webhook / subscription service
     "subscription_tier",
     "subscription_status",
     "subscription_expires",
     "trial_start",
+    # App lifecycle — written only by backend
     "deleted_app_detected_at",
 })
 
@@ -159,7 +162,6 @@ async def get_contractor_by_pin(pin: str) -> Optional[dict]:
 async def create_contractor(data: dict) -> str:
     """Create a new contractor profile. Returns the contractor_id."""
     db = get_firestore_client()
-    import time
     data["created_at"] = time.time()
     data["active"] = True
     data.setdefault("mode", "kevin")

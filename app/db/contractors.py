@@ -3,6 +3,7 @@
 import asyncio
 import secrets
 import time
+import uuid as _uuid
 from typing import Optional
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
@@ -178,6 +179,7 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("subscription_tier", "none")
     data.setdefault("subscription_expires", trial_start + 14 * 86400)
     data.setdefault("deleted_app_detected_at", None)
+    data.setdefault("subscription_uuid", str(_uuid.uuid4()))
     loop = asyncio.get_event_loop()
     doc_ref = await loop.run_in_executor(
         None,

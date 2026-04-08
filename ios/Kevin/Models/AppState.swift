@@ -60,6 +60,15 @@ class AppState: ObservableObject {
             }
         }
     }
+    @Published var subscriptionUUID: String = KeychainManager.shared.retrieve("subscriptionUUID") ?? "" {
+        didSet {
+            if subscriptionUUID.isEmpty {
+                KeychainManager.shared.delete("subscriptionUUID")
+            } else {
+                KeychainManager.shared.save("subscriptionUUID", value: subscriptionUUID)
+            }
+        }
+    }
 
     var isSubscriptionActive: Bool {
         subscriptionStatus == "trial" || subscriptionStatus == "active"

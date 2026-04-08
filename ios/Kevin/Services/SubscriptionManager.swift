@@ -65,10 +65,15 @@ class SubscriptionManager: ObservableObject {
 
         var purchaseOptions: Set<Product.PurchaseOption> = []
 
-        // Set the contractor ID as appAccountToken for server-side ownership verification
-        let contractorId = AppState.shared.contractorId
-        if let uuid = UUID(uuidString: contractorId) {
+        // Set the subscription UUID as appAccountToken for server-side ownership verification
+        let subscriptionUUID = AppState.shared.subscriptionUUID
+        if let uuid = UUID(uuidString: subscriptionUUID) {
             purchaseOptions.insert(.appAccountToken(uuid))
+        } else {
+            // subscriptionUUID not yet loaded — generate and store a temporary one
+            let tempUUID = UUID()
+            AppState.shared.subscriptionUUID = tempUUID.uuidString
+            purchaseOptions.insert(.appAccountToken(tempUUID))
         }
 
         // Attach promotional offer if provided

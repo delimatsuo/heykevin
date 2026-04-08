@@ -662,6 +662,7 @@ struct OnboardingView: View {
         let biz = profile["business_name"] as? String ?? ""
         let mode = profile["mode"] as? String ?? "business"
         let number = profile["twilio_number"] as? String ?? ""
+        let subUUID = profile["subscription_uuid"] as? String ?? ""
 
         await MainActor.run {
             if !name.isEmpty { appState.userName = name }
@@ -669,6 +670,7 @@ struct OnboardingView: View {
             appState.mode = (mode == "personal") ? "personal" : "business"
             if !number.isEmpty { appState.kevinNumber = number }
             appState.isOnboarded = true
+            if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
         }
 
         // Sync contacts in background
@@ -788,6 +790,14 @@ struct OnboardingView: View {
 
         // Clear identity token after successful provisioning
         appState.appleIdentityToken = ""
+
+        // Load subscription_uuid from backend profile
+        if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
+            let subUUID = profile["subscription_uuid"] as? String ?? ""
+            await MainActor.run {
+                if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
+            }
+        }
 
         step = .forwarding
         isLoading = false

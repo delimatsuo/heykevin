@@ -131,10 +131,16 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
         logger.error(f"Unknown product ID: {product_id}")
         return False
 
-    # Validate ownership: appAccountToken must match contractor_id
+    # Validate ownership: appAccountToken must match contractor's subscription_uuid
+    from app.db.contractors import get_contractor
     app_account_token = transaction_info.get("appAccountToken", "")
-    if not app_account_token or app_account_token != contractor_id:
-        logger.error(f"appAccountToken mismatch: expected {contractor_id}, got {app_account_token!r}")
+    if not app_account_token:
+        logger.error(f"appAccountToken missing in transaction for contractor {contractor_id}")
+        return False
+    contractor_profile = await get_contractor(contractor_id)
+    expected_uuid = (contractor_profile or {}).get("subscription_uuid", "")
+    if not expected_uuid or app_account_token != expected_uuid:
+        logger.error(f"appAccountToken mismatch: expected subscription_uuid={expected_uuid!r}, got {app_account_token!r}")
         return False
 
     expires_ms = transaction_info.get("expiresDate", 0)
@@ -269,24 +275,31 @@ async def handle_appstore_notification(payload: dict) -> bool:
         except Exception as e:
             logger.error(f"Failed to decode transaction JWT: {e}")
 
-    # Look up contractor by app account token (= contractor_id stored at purchase)
+    # Look up contractor by app account token (= subscription_uuid stored at purchase)
     app_account_token = transaction_info.get("appAccountToken", "")
     if not app_account_token:
         logger.warning(f"No appAccountToken in notification: type={notification_type}")
         return False
 
-    contractor_id = app_account_token  # We set this to contractor_id at purchase time
-
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
-    doc = await loop.run_in_executor(
-        None, lambda: db.collection("contractors").document(contractor_id).get()
+    # subscription_uuid is stored in contractor document; look up by that field
+    docs = await loop.run_in_executor(
+        None,
+        lambda: list(
+            db.collection("contractors")
+            .where("subscription_uuid", "==", app_account_token)
+            .where("active", "==", True)
+            .limit(1)
+            .stream()
+        ),
     )
-    if not doc.exists:
-        logger.warning(f"Contractor not found for appAccountToken: {contractor_id}")
+    if not docs:
+        logger.warning(f"Contractor not found for appAccountToken (subscription_uuid): {app_account_token}")
         return False
+    contractor_id = docs[0].id
 
-    if notification_type in ("DID_RENEW",):
+    if notification_type in ("DID_RENEW", "SUBSCRIBED"):
         product_id = transaction_info.get("productId", "")
         tier = PRODUCT_TO_TIER.get(product_id, "")
         expires_ms = transaction_info.get("expiresDate", 0)

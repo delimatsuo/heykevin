@@ -5,8 +5,6 @@ Apple Server Notifications V2 webhook processing.
 """
 
 import base64
-import hashlib
-import hmac
 import json
 import time
 import uuid
@@ -59,7 +57,7 @@ def _get_appstore_jwt() -> str:
     payload = {
         "iss": settings.appstore_issuer_id,
         "iat": now,
-        "exp": now + 3600,
+        "exp": now + 1200,
         "aud": "appstoreconnect-v1",
         "bid": settings.appstore_bundle_id,
     }
@@ -131,6 +129,12 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
     tier = PRODUCT_TO_TIER.get(product_id)
     if not tier:
         logger.error(f"Unknown product ID: {product_id}")
+        return False
+
+    # Validate ownership: appAccountToken must match contractor_id
+    app_account_token = transaction_info.get("appAccountToken", "")
+    if app_account_token and app_account_token != contractor_id:
+        logger.error(f"appAccountToken mismatch: expected {contractor_id}, got {app_account_token}")
         return False
 
     expires_ms = transaction_info.get("expiresDate", 0)
@@ -244,15 +248,13 @@ async def handle_appstore_notification(payload: dict) -> bool:
     payload is the decoded signed payload (already JWT-verified by the webhook).
     Returns True if handled successfully.
     """
-    from app.db.contractors import get_contractor_by_twilio_number, update_contractor
+    from app.db.contractors import update_contractor
     from app.db.firestore_client import get_firestore_client
 
     notification_type = payload.get("notificationType", "")
-    subtype = payload.get("subtype", "")
 
     # Extract transaction info from signed renewal info
     renewal_info = payload.get("data", {})
-    signed_renewal = renewal_info.get("signedRenewalInfo", "")
     signed_transaction = renewal_info.get("signedTransactionInfo", "")
 
     # Decode the signed JWTs from Apple (trust after signature verified upstream)

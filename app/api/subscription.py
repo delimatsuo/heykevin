@@ -2,7 +2,6 @@
 
 import time
 from collections import defaultdict
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -102,11 +101,7 @@ async def sign_offer(body: SignOfferRequest, request: Request):
 
     from app.services.subscription import claim_promo_slot, sign_promotional_offer
 
-    # Atomically claim the slot
-    claimed = await claim_promo_slot()
-    if not claimed:
-        return {"status": "ineligible", "message": "promo_limit_reached"}
-
+    # 1. Try signing first (pure local operation)
     signature_data = sign_promotional_offer(
         product_id=body.product_id,
         offer_id=body.offer_id,
@@ -114,5 +109,10 @@ async def sign_offer(body: SignOfferRequest, request: Request):
     )
     if not signature_data:
         return {"status": "error", "message": "signing_failed"}
+
+    # 2. Only claim slot if signing succeeded
+    claimed = await claim_promo_slot()
+    if not claimed:
+        return {"status": "ineligible", "message": "promo_limit_reached"}
 
     return {"status": "ok", "signature": signature_data}

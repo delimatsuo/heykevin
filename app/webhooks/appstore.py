@@ -7,7 +7,6 @@ We verify the JWT signature using Apple's public keys before processing.
 import base64
 import json
 
-import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -16,34 +15,6 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
-
-# Apple's JWKS endpoint for verifying notification JWTs
-APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
-
-_apple_jwks_cache: dict = {}
-_apple_jwks_cache_time: float = 0
-JWKS_CACHE_TTL = 3600  # 1 hour
-
-
-async def _get_apple_public_keys() -> dict:
-    """Fetch and cache Apple's public JWKS for JWT verification."""
-    global _apple_jwks_cache, _apple_jwks_cache_time
-    import time
-
-    if _apple_jwks_cache and time.time() - _apple_jwks_cache_time < JWKS_CACHE_TTL:
-        return _apple_jwks_cache
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(APPLE_JWKS_URL, timeout=10.0)
-            if response.status_code == 200:
-                _apple_jwks_cache = response.json()
-                _apple_jwks_cache_time = time.time()
-                return _apple_jwks_cache
-    except Exception as e:
-        logger.error(f"Failed to fetch Apple JWKS: {e}")
-
-    return _apple_jwks_cache  # Return stale cache on error
 
 
 def _decode_notification_payload(signed_payload: str) -> dict:
@@ -56,7 +27,6 @@ def _decode_notification_payload(signed_payload: str) -> dict:
     """
     try:
         from app.config import settings
-        import jwt as pyjwt
 
         # For now: decode without signature verification (Apple certs are complex)
         # In production, implement full chain verification against Apple root CA

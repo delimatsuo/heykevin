@@ -584,11 +584,11 @@ class APIClient {
 
     // MARK: - Subscription
 
-    func verifySubscription(transactionId: String) async {
+    @discardableResult
+    func verifySubscription(transactionId: String) async -> Bool {
         let contractorId = await MainActor.run { AppState.shared.contractorId }
-        guard !contractorId.isEmpty else { return }
+        guard !contractorId.isEmpty else { return false }
         do {
-            let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/subscription/verify")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -599,9 +599,13 @@ class APIClient {
                 "contractor_id": contractorId,
             ])
             authorize(&request)
-            let (_, _) = try await retryRequest(request)
+            let (_, response) = try await retryRequest(request)
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200
+            if !ok { debugLog("Verify subscription returned non-200") }
+            return ok
         } catch {
             debugLog("Verify subscription failed: \(error.localizedDescription)")
+            return false
         }
     }
 

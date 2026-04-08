@@ -3,7 +3,7 @@ import StoreKit
 
 struct PaywallView: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var subscriptionManager = SubscriptionManager.shared
+    @ObservedObject private var subscriptionManager = SubscriptionManager.shared
     @Environment(\.dismiss) var dismiss
 
     @State private var isPromoEligible = false
@@ -158,7 +158,11 @@ struct PaywallView: View {
                 do {
                     let offerID = isPromoEligible ? "founding_member_75off" : nil
                     let purchased = try await subscriptionManager.purchase(product, offerID: offerID)
-                    if purchased { dismiss() }
+                    if purchased {
+                        isPurchasing = false
+                        dismiss()
+                        return
+                    }
                 } catch {
                     purchaseError = error.localizedDescription
                 }
@@ -271,7 +275,7 @@ private struct TierCard: View {
     // 75% off promotional price
     private var promoPrice: String {
         let price = product.price
-        let discounted = (price * 0.25).rounded(toPlaces: 2)
+        let discounted = (price / 4).rounded(toPlaces: 2)
         return "$\(String(format: "%.2f", discounted))"
     }
 

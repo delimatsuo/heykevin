@@ -534,7 +534,7 @@ struct SettingsView: View {
         case "active": return "Active — \(tierLabel)"
         case "expired": return "Expired"
         case "cancelled": return "Cancelled"
-        default: return "Free Trial"
+        default: return appState.subscriptionStatus.isEmpty ? "Free Trial" : appState.subscriptionStatus.capitalized
         }
     }
 

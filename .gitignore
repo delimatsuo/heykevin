@@ -12,3 +12,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 .worktrees/
+.DS_Store
+HANDOFF*.md
+HANDOFF-*.md

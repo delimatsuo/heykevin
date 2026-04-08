@@ -1,4 +1,8 @@
-"""Firestore operations for knowledge base."""
+"""Firestore operations for knowledge base.
+
+Knowledge entries are stored per-contractor under:
+  contractors/{contractor_id}/knowledge_base/{kb_id}
+"""
 
 from typing import Optional
 
@@ -10,12 +14,19 @@ logger = get_logger(__name__)
 COLLECTION = "knowledge_base"
 
 
-async def add_kb_entry(data: dict) -> str:
+def _kb_collection(contractor_id: str):
+    """Return the knowledge_base subcollection for a contractor."""
+    db = get_firestore_client()
+    return db.collection("contractors").document(contractor_id).collection(COLLECTION)
+
+
+async def add_kb_entry(data: dict, contractor_id: str) -> str:
     """Add a knowledge base entry. Returns doc ID."""
     try:
-        db = get_firestore_client()
-        doc_ref = db.collection(COLLECTION).document()
+        col = _kb_collection(contractor_id)
+        doc_ref = col.document()
         data["id"] = doc_ref.id
+        data["contractor_id"] = contractor_id
         doc_ref.set(data)
         return doc_ref.id
     except Exception as e:
@@ -23,11 +34,10 @@ async def add_kb_entry(data: dict) -> str:
         return ""
 
 
-async def get_kb_entry(kb_id: str) -> Optional[dict]:
+async def get_kb_entry(kb_id: str, contractor_id: str) -> Optional[dict]:
     """Get a knowledge base entry by ID."""
     try:
-        db = get_firestore_client()
-        doc = db.collection(COLLECTION).document(kb_id).get()
+        doc = _kb_collection(contractor_id).document(kb_id).get()
         if doc.exists:
             return doc.to_dict()
     except Exception as e:
@@ -35,39 +45,36 @@ async def get_kb_entry(kb_id: str) -> Optional[dict]:
     return None
 
 
-async def update_kb_entry(kb_id: str, data: dict):
+async def update_kb_entry(kb_id: str, data: dict, contractor_id: str):
     """Update a knowledge base entry."""
     try:
-        db = get_firestore_client()
-        db.collection(COLLECTION).document(kb_id).set(data, merge=True)
+        _kb_collection(contractor_id).document(kb_id).set(data, merge=True)
     except Exception as e:
         logger.error(f"KB update failed: {e}", exc_info=True)
 
 
-async def delete_kb_entry(kb_id: str):
+async def delete_kb_entry(kb_id: str, contractor_id: str):
     """Delete a knowledge base entry."""
     try:
-        db = get_firestore_client()
-        db.collection(COLLECTION).document(kb_id).delete()
+        _kb_collection(contractor_id).document(kb_id).delete()
     except Exception as e:
         logger.error(f"KB delete failed: {e}", exc_info=True)
 
 
-async def list_kb_entries() -> list:
-    """List all knowledge base entries."""
+async def list_kb_entries(contractor_id: str) -> list:
+    """List all enabled knowledge base entries for a contractor."""
     try:
-        db = get_firestore_client()
-        docs = db.collection(COLLECTION).where("enabled", "==", True).stream()
+        docs = _kb_collection(contractor_id).where("enabled", "==", True).stream()
         return [doc.to_dict() for doc in docs]
     except Exception as e:
         logger.error(f"KB list failed: {e}", exc_info=True)
         return []
 
 
-async def search_kb(query: str) -> Optional[dict]:
+async def search_kb(query: str, contractor_id: str) -> Optional[dict]:
     """Search knowledge base by keyword matching. Returns best match or None."""
     try:
-        entries = await list_kb_entries()
+        entries = await list_kb_entries(contractor_id)
         query_lower = query.lower()
 
         best_match = None

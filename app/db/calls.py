@@ -1,5 +1,6 @@
 """Firestore operations for call records."""
 
+import time
 from typing import Optional
 
 from google.cloud import firestore
@@ -10,6 +11,9 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 COLLECTION = "calls"
+
+# Call records older than 7 days are eligible for cleanup
+RETENTION_DAYS = 7
 
 
 async def save_call(call_sid: str, data: dict):
@@ -49,3 +53,45 @@ async def get_call_history(e164_phone: str, limit: int = 10) -> list[dict]:
     except Exception as e:
         logger.error(f"Firestore call history failed: {e}", exc_info=True)
         return []
+
+
+async def get_calls_for_contractor(contractor_id: str, limit: int = 50) -> list[dict]:
+    """Get recent calls for a specific contractor, within retention window."""
+    try:
+        db = get_firestore_client()
+        cutoff = time.time() - (RETENTION_DAYS * 86400)
+        docs = (
+            db.collection(COLLECTION)
+            .where("contractor_id", "==", contractor_id)
+            .where("timestamp", ">=", cutoff)
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        return [doc.to_dict() for doc in docs]
+    except Exception as e:
+        logger.error(f"Firestore contractor calls failed: {e}", exc_info=True)
+        return []
+
+
+async def cleanup_old_calls() -> int:
+    """Delete call records older than RETENTION_DAYS. Returns count deleted."""
+    try:
+        db = get_firestore_client()
+        cutoff = time.time() - (RETENTION_DAYS * 86400)
+        docs = (
+            db.collection(COLLECTION)
+            .where("timestamp", "<", cutoff)
+            .limit(500)
+            .stream()
+        )
+        count = 0
+        for doc in docs:
+            doc.reference.delete()
+            count += 1
+        if count:
+            logger.info(f"Cleaned up {count} call records older than {RETENTION_DAYS} days")
+        return count
+    except Exception as e:
+        logger.error(f"Call cleanup failed: {e}", exc_info=True)
+        return 0

@@ -4,6 +4,7 @@ Uses firebase_admin for server-side access (bypasses security rules).
 Provides atomic state transitions via RTDB transactions.
 """
 
+import asyncio
 import time
 from typing import Optional
 
@@ -45,7 +46,8 @@ async def save_active_call(call: ActiveCall):
     """Save active call state to RTDB."""
     try:
         ref = _get_ref(call.call_sid)
-        ref.set(call.to_dict())
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, ref.set, call.to_dict())
         logger.info(f"Active call saved: state={call.state.value}")
     except Exception as e:
         logger.error(f"RTDB save failed: {e}", exc_info=True)
@@ -55,7 +57,8 @@ async def get_active_call(call_sid: str) -> Optional[ActiveCall]:
     """Get active call state from RTDB. Returns None if not found."""
     try:
         ref = _get_ref(call_sid)
-        data = ref.get()
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, ref.get)
         if data:
             return ActiveCall.from_dict(data)
     except Exception as e:
@@ -91,7 +94,8 @@ async def transition_state(call_sid: str, to_state: CallState) -> Optional[Activ
             result[0] = current_data
             return current_data
 
-        ref.transaction(_transaction)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: ref.transaction(_transaction))
 
         if result[0] and result[0].get("state") == to_state.value:
             logger.info(f"State transition: → {to_state.value}")
@@ -109,7 +113,8 @@ async def update_active_call(call_sid: str, updates: dict):
     try:
         ref = _get_ref(call_sid)
         updates["state_updated_at"] = time.time()
-        ref.update(updates)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, ref.update, updates)
     except Exception as e:
         logger.error(f"RTDB update failed: {e}", exc_info=True)
 
@@ -118,7 +123,8 @@ async def delete_active_call(call_sid: str):
     """Remove active call state from RTDB (cleanup after call ends)."""
     try:
         ref = _get_ref(call_sid)
-        ref.delete()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, ref.delete)
         logger.info("Active call cleaned up from RTDB")
     except Exception as e:
         logger.error(f"RTDB delete failed: {e}", exc_info=True)

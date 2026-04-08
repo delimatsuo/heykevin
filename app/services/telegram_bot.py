@@ -11,7 +11,9 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+def _telegram_api() -> str:
+    """Construct Telegram API base URL at call time to avoid exposing the token at import."""
+    return f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
 
 def _format_phone(e164: str) -> str:
@@ -159,7 +161,7 @@ async def _send(payload: dict) -> Optional[dict]:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{TELEGRAM_API}/sendMessage",
+                f"{_telegram_api()}/sendMessage",
                 json=payload,
                 timeout=10.0,
             )
@@ -177,7 +179,7 @@ async def _edit(payload: dict) -> bool:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{TELEGRAM_API}/editMessageText",
+                f"{_telegram_api()}/editMessageText",
                 json=payload,
                 timeout=10.0,
             )
@@ -333,7 +335,7 @@ async def answer_callback_query(callback_query_id: str, text: str = "Processing.
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
-                f"{TELEGRAM_API}/answerCallbackQuery",
+                f"{_telegram_api()}/answerCallbackQuery",
                 json={
                     "callback_query_id": callback_query_id,
                     "text": text,

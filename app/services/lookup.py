@@ -15,26 +15,35 @@ logger = get_logger(__name__)
 LOOKUP_TIMEOUT = 3.0  # seconds per lookup
 
 
-async def _lookup_twilio(phone: str) -> dict:
-    """Twilio Lookup API — carrier and line type."""
+async def _lookup_twilio(phone: str, include_cnam: bool = False) -> dict:
+    """Twilio Lookup API — carrier, line type, and optionally CNAM."""
     try:
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+        fields = "line_type_intelligence"
+        if include_cnam:
+            fields = "line_type_intelligence,caller_name"
         # Run synchronous Twilio API call in executor to avoid blocking
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
                 lambda: client.lookups.v2.phone_numbers(phone).fetch(
-                    fields="line_type_intelligence"
+                    fields=fields
                 ),
             ),
             timeout=LOOKUP_TIMEOUT,
         )
         line_type_info = getattr(result, "line_type_intelligence", {}) or {}
-        return {
+        data = {
             "carrier": line_type_info.get("carrier_name", ""),
             "line_type": line_type_info.get("type", ""),
         }
+        if include_cnam:
+            cnam_info = getattr(result, "caller_name", {}) or {}
+            cnam_name = cnam_info.get("caller_name", "")
+            if cnam_name:
+                data["caller_name"] = cnam_name
+        return data
     except asyncio.TimeoutError:
         logger.warning("Twilio lookup timed out")
         return {}

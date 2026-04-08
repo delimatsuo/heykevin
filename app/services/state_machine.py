@@ -104,6 +104,8 @@ class ActiveCall:
         spam_score: float = 0,
         telegram_message_id: int = 0,
         transcript_buffer: str = "",
+        contractor_id: str = "",
+        ws_token: str = "",
     ):
         self.call_sid = call_sid
         self.caller_phone = caller_phone
@@ -118,6 +120,8 @@ class ActiveCall:
         self.spam_score = spam_score
         self.telegram_message_id = telegram_message_id
         self.transcript_buffer = transcript_buffer
+        self.contractor_id = contractor_id
+        self.ws_token = ws_token
         self.state_updated_at = time.time()
 
     def to_dict(self) -> dict:
@@ -135,6 +139,8 @@ class ActiveCall:
             "spam_score": self.spam_score,
             "telegram_message_id": self.telegram_message_id,
             "transcript_buffer": self.transcript_buffer,
+            "contractor_id": self.contractor_id,
+            "ws_token": self.ws_token,
             "state_updated_at": time.time(),
         }
 
@@ -154,6 +160,8 @@ class ActiveCall:
             spam_score=data.get("spam_score", 0),
             telegram_message_id=data.get("telegram_message_id", 0),
             transcript_buffer=data.get("transcript_buffer", ""),
+            contractor_id=data.get("contractor_id", ""),
         )
         call.state_updated_at = data.get("state_updated_at", time.time())
+        call.accepted = data.get("accepted", False)
         return call

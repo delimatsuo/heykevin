@@ -25,8 +25,18 @@ class JSONFormatter(logging.Formatter):
         # Include any extra fields
         for key in ("caller_phone", "trust_score", "route", "action", "duration_ms"):
             if hasattr(record, key):
-                log_entry[key] = getattr(record, key)
+                value = getattr(record, key)
+                if key == "caller_phone" and isinstance(value, str):
+                    value = redact_phone(value)
+                log_entry[key] = value
         return json.dumps(log_entry)
+
+
+def redact_phone(phone: str) -> str:
+    """Redact phone number for logging, keeping last 4 digits."""
+    if not phone or len(phone) < 4:
+        return "[REDACTED]"
+    return f"***{phone[-4:]}"
 
 
 def setup_logging(level: str = "INFO"):

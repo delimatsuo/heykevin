@@ -7,13 +7,14 @@ POST-CALL buttons:    Call Back | Text Them
 import asyncio
 
 from fastapi import APIRouter, Depends, Request
+from twilio.twiml.voice_response import VoiceResponse, Dial
 
 from app.config import settings
 from app.middleware.telegram_verify import verify_telegram_secret
 from app.services.telegram_bot import answer_callback_query, update_call_ended
 from app.db.cache import get_active_call, transition_state
 from app.services.state_machine import CallState
-from app.utils.logging import get_logger, call_sid_var
+from app.utils.logging import get_logger, call_sid_var, redact_phone
 
 logger = get_logger(__name__)
 
@@ -126,7 +127,7 @@ async def _handle_text_reply(call_sid: str, message_id: int):
         return
 
     # Send the SMS
-    sent = send_text_reply(active_call.caller_phone)
+    sent = await send_text_reply(active_call.caller_phone)
 
     # Transition state (can continue screening after text)
     await transition_state(call_sid, CallState.TEXT_REPLIED)
@@ -205,13 +206,20 @@ async def _handle_callback(call_sid: str, message_id: int):
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
 
         # Call the user first
-        twiml = f"""<Response><Dial callerId="{settings.twilio_phone_number}"><Number>{caller_phone}</Number></Dial></Response>"""
-        client.calls.create(
-            to=settings.user_phone,
-            from_=settings.twilio_phone_number,
-            twiml=twiml,
+        response = VoiceResponse()
+        dial = Dial(caller_id=settings.twilio_phone_number)
+        dial.number(caller_phone)
+        response.append(dial)
+        twiml = str(response)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: client.calls.create(
+                to=settings.user_phone,
+                from_=settings.twilio_phone_number,
+                twiml=twiml,
+            )
         )
-        logger.info(f"Callback initiated to {caller_phone}")
+        logger.info(f"Callback initiated to {redact_phone(caller_phone)}")
     except Exception as e:
         logger.error(f"Callback failed: {e}", exc_info=True)
 
@@ -227,5 +235,5 @@ async def _handle_text_them(call_sid: str, message_id: int):
 
     caller_phone = call.get("caller_phone", "")
     if caller_phone:
-        send_followup_text(caller_phone)
-        logger.info(f"Follow-up text sent to {caller_phone}")
+        await send_followup_text(caller_phone)
+        logger.info(f"Follow-up text sent to {redact_phone(caller_phone)}")

@@ -133,8 +133,8 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
 
     # Validate ownership: appAccountToken must match contractor_id
     app_account_token = transaction_info.get("appAccountToken", "")
-    if app_account_token and app_account_token != contractor_id:
-        logger.error(f"appAccountToken mismatch: expected {contractor_id}, got {app_account_token}")
+    if not app_account_token or app_account_token != contractor_id:
+        logger.error(f"appAccountToken mismatch: expected {contractor_id}, got {app_account_token!r}")
         return False
 
     expires_ms = transaction_info.get("expiresDate", 0)

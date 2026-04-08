@@ -19,9 +19,16 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Gemini voice options — male voices sound best per benchmarks
-GEMINI_VOICE_DEFAULT = "Puck"       # Male, warm, American
-GEMINI_VOICE_SPANISH = "Orus"       # Male, multilingual
+# Per-language Gemini voice selection (male voices for Kevin persona)
+GEMINI_VOICES = {
+    "en": "Puck",      # Warm, upbeat American — best-tested English voice
+    "pt": "Orus",      # Authoritative, clear — suits Brazilian Portuguese formality
+    "de": "Charon",    # Calm, professional — matches German business tone
+    "fr": "Puck",      # Adapts well to French prosody
+    "it": "Puck",      # Expressive, warm — suits Italian's melodic cadence
+    "es": "Charon",    # Clear, composed — suits Castilian Spanish
+}
+GEMINI_VOICE_DEFAULT = "Puck"
 
 GEMINI_MODEL = "gemini-2.5-flash-native-audio-latest"
 
@@ -107,9 +114,9 @@ class GeminiPipeline:
             self._after_hours = not is_business_hours(self._contractor_config)
         self._system_prompt = build_system_prompt(self._contractor_config, after_hours=self._after_hours)
 
-        # Voice selection
+        # Voice selection — pick the best voice for the contractor's language
         user_language = self._contractor_config.get("user_language", "en")
-        self._voice = GEMINI_VOICE_SPANISH if (user_language and user_language != "en") else GEMINI_VOICE_DEFAULT
+        self._voice = GEMINI_VOICES.get(user_language, GEMINI_VOICE_DEFAULT)
 
         # Language for post-call processing
         self._language = user_language or "en"

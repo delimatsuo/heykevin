@@ -447,6 +447,17 @@ struct LiveCallTab: View {
     private func poll() async {
         let sid = await MainActor.run { appState.activeCallSid }
         guard !sid.isEmpty else { return }
+
+        // Check if the call is still active — if not, clear the live screen
+        let activeCall = await APIClient.shared.getActiveCall()
+        if activeCall == nil {
+            await MainActor.run {
+                appState.clearActiveCall()
+                appState.selectedTab = .recents
+            }
+            return
+        }
+
         if let t = await APIClient.shared.getTranscript(callSid: sid) {
             let lines = t.components(separatedBy: "\n")
                 .filter { !$0.isEmpty }

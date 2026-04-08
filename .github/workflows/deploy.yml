@@ -22,10 +22,10 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2f  # v5.3.0
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
@@ -43,18 +43,18 @@ jobs:
     if: github.ref == 'refs/heads/staging'
     environment: staging
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@v4
 
       # TODO: Configure Workload Identity Federation in GCP Console first.
       # See: https://cloud.google.com/blog/products/identity-security/enabling-keyless-authentication-from-github-actions
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f  # v2.1.7
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a  # v2.1.2
+        uses: google-github-actions/setup-gcloud@v2
 
       - name: Deploy to Cloud Run (Staging)
         run: |
@@ -83,16 +83,16 @@ jobs:
     if: github.ref == 'refs/heads/main'
     environment: production
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f  # v2.1.7
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a  # v2.1.2
+        uses: google-github-actions/setup-gcloud@v2
 
       - name: Deploy to Cloud Run (Production)
         run: |

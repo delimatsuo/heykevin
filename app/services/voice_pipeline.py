@@ -192,8 +192,8 @@ RULES:
 
     base_prompt += (
         "\n\nLANGUAGE: You speak all languages fluently. Start in English. "
-        "If the system tells you the caller speaks a different language, switch to that language immediately and continue the conversation naturally. "
-        "Match the caller's language — never force them to speak English."
+        "If the caller speaks a different language, switch to that language immediately and continue the entire conversation in their language. "
+        "Match the caller's language — never force them to speak English. Detect the language from their first words."
     )
 
     return base_prompt

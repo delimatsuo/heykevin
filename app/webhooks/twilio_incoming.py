@@ -132,7 +132,6 @@ async def _ring_expired_contractor(
     """Ring expired-subscription contractor via CallKit for 20s, then voicemail."""
     try:
         from twilio.rest import Client
-        from firebase_admin import db as rtdb
         from app.db.cache import _init_firebase
 
         _init_firebase()

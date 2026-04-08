@@ -14,21 +14,21 @@ struct ContentView: View {
         TabView(selection: $appState.selectedTab) {
             LiveCallTab()
                 .tabItem {
-                    Label("Live", systemImage: "waveform")
+                    Label(String(localized: "Live"), systemImage: "waveform")
                 }
                 .tag(AppTab.live)
                 .badge(appState.hasActiveCall ? "1" : nil)
 
             CallHistoryView()
                 .tabItem {
-                    Label("Recents", systemImage: "clock")
+                    Label(String(localized: "Recents"), systemImage: "clock")
                 }
                 .tag(AppTab.recents)
                 .badge(appState.unreadCallCount > 0 ? "\(appState.unreadCallCount)" : nil)
 
             SettingsView()
                 .tabItem {
-                    Label("Settings", systemImage: "gear")
+                    Label(String(localized: "Settings"), systemImage: "gear")
                 }
                 .tag(AppTab.settings)
         }
@@ -105,18 +105,18 @@ struct LiveCallTab: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.tertiary)
 
-            Text("No Active Call")
+            Text(String(localized: "No Active Call"))
                 .font(.title3.weight(.medium))
                 .foregroundStyle(.secondary)
 
-            Text("When someone calls, Kevin will screen it\nand the live transcript will appear here.")
+            Text(String(localized: "When someone calls, Kevin will screen it\nand the live transcript will appear here."))
                 .font(.subheadline)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
 
             Spacer()
         }
-        .navigationTitle("Live")
+        .navigationTitle(String(localized: "Live"))
     }
 
     // MARK: - Active Call Content
@@ -150,7 +150,7 @@ struct LiveCallTab: View {
                     Circle()
                         .fill(.green)
                         .frame(width: 7, height: 7)
-                    Text("Live")
+                    Text(String(localized: "Live"))
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.green)
                 }
@@ -200,7 +200,7 @@ struct LiveCallTab: View {
                 Circle()
                     .fill(appState.isOnCall ? .green : (appState.callIgnored ? .orange : .green))
                     .frame(width: 6, height: 6)
-                Text(appState.isOnCall ? "Connected" : (appState.callIgnored ? "Kevin is taking a message" : "Kevin is screening"))
+                Text(appState.isOnCall ? String(localized: "Connected") : (appState.callIgnored ? String(localized: "Kevin is taking a message") : String(localized: "Kevin is screening")))
                     .font(.caption)
                     .foregroundStyle(appState.isOnCall ? .green : (appState.callIgnored ? .orange : .green))
             }
@@ -216,7 +216,7 @@ struct LiveCallTab: View {
                     if appState.transcriptLines.isEmpty {
                         VStack(spacing: 8) {
                             ProgressView()
-                            Text("Waiting for conversation...")
+                            Text(String(localized: "Waiting for conversation..."))
                                 .font(.subheadline)
                                 .foregroundStyle(.tertiary)
                         }
@@ -253,7 +253,7 @@ struct LiveCallTab: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "xmark")
-                        Text("Dismiss")
+                        Text(String(localized: "Dismiss"))
                             .fontWeight(.semibold)
                     }
                     .frame(maxWidth: .infinity)
@@ -275,7 +275,7 @@ struct LiveCallTab: View {
                         } else {
                             Image(systemName: "phone.fill")
                         }
-                        Text("Pick Up")
+                        Text(String(localized: "Pick Up"))
                             .fontWeight(.semibold)
                     }
                     .frame(maxWidth: .infinity)
@@ -292,7 +292,7 @@ struct LiveCallTab: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "message.fill")
-                            Text("Text Reply")
+                            Text(String(localized: "Text Reply"))
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -307,7 +307,7 @@ struct LiveCallTab: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "hand.raised.fill")
-                            Text("Ignore")
+                            Text(String(localized: "Ignore"))
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -345,7 +345,7 @@ struct LiveCallTab: View {
 
     private var formattedPhone: String {
         let phone = appState.activeCallerPhone
-        guard !phone.isEmpty else { return "Unknown" }
+        guard !phone.isEmpty else { return String(localized: "Unknown") }
         return PhoneFormatter.format(phone)
     }
 
@@ -469,15 +469,15 @@ struct TextReplySheet: View {
     @FocusState private var isCustomFocused: Bool
 
     private let quickReplies = [
-        "Can't talk right now. What's up?",
-        "I'll call you back in a few minutes.",
-        "Sorry, I'm busy. I'll get back to you soon.",
+        String(localized: "Can't talk right now. What's up?"),
+        String(localized: "I'll call you back in a few minutes."),
+        String(localized: "Sorry, I'm busy. I'll get back to you soon."),
     ]
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Text("to \(callerPhone)")
+                Text(String(localized: "to \(callerPhone)"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -504,7 +504,7 @@ struct TextReplySheet: View {
                     .padding(.vertical, 12)
 
                 HStack(spacing: 10) {
-                    TextField("Type a message...", text: $customMessage)
+                    TextField(String(localized: "Type a message..."), text: $customMessage)
                         .textFieldStyle(.roundedBorder)
                         .focused($isCustomFocused)
 
@@ -526,11 +526,11 @@ struct TextReplySheet: View {
 
                 Spacer()
             }
-            .navigationTitle("Text Reply")
+            .navigationTitle(String(localized: "Text Reply"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(String(localized: "Cancel")) { dismiss() }
                 }
             }
         }
@@ -562,7 +562,7 @@ struct ChatBubble: View {
             if isKevin { Spacer(minLength: 48) }
 
             VStack(alignment: isKevin ? .trailing : .leading, spacing: 3) {
-                Text(speaker.isEmpty ? "System" : speaker)
+                Text(speaker.isEmpty ? String(localized: "System") : speaker)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(isKevin ? .blue : .secondary)
                     .padding(.horizontal, 4)

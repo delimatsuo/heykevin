@@ -22,7 +22,7 @@ struct CallHistoryView: View {
                     }
                 } else if calls.isEmpty && !isLoading {
                     Section {
-                        Text("No screened calls yet. When someone calls, Kevin will screen and it will show here.")
+                        Text(String(localized: "No screened calls yet. When someone calls, Kevin will screen and it will show here."))
                             .foregroundStyle(.secondary)
                             .font(.subheadline)
                             .listRowBackground(Color.clear)
@@ -40,7 +40,7 @@ struct CallHistoryView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Recents")
+            .navigationTitle(String(localized: "Recents"))
             .refreshable { await loadCalls() }
             .task { await loadCalls() }
         }
@@ -53,7 +53,7 @@ struct CallHistoryView: View {
             calls = try await APIClient.shared.getCallHistory()
             await MainActor.run { appState.updateUnreadCount(calls: calls) }
         } catch {
-            errorMessage = "Failed to load calls: \(error.localizedDescription)"
+            errorMessage = String(localized: "Failed to load calls: \(error.localizedDescription)")
         }
         isLoading = false
     }
@@ -103,7 +103,7 @@ struct CallRow: View {
         if calendar.isDateInToday(date) {
             return date.formatted(date: .omitted, time: .shortened) // "10:51 AM"
         } else if calendar.isDateInYesterday(date) {
-            return "Yesterday"
+            return String(localized: "Yesterday")
         } else {
             return date.formatted(.dateTime.month(.abbreviated).day()) // "Apr 6"
         }
@@ -119,11 +119,11 @@ struct CallRow: View {
 
     private var outcomeText: String {
         switch call.outcome {
-        case "picked_up": return "Answered"
-        case "voicemail": return "Voicemail"
-        case "ignored", "declined": return "Ignored"
-        case "spam", "blocked": return "Blocked"
-        default: return "Screened"
+        case "picked_up": return String(localized: "Answered")
+        case "voicemail": return String(localized: "Voicemail")
+        case "ignored", "declined": return String(localized: "Ignored")
+        case "spam", "blocked": return String(localized: "Blocked")
+        default: return String(localized: "Screened")
         }
     }
 
@@ -189,16 +189,16 @@ struct CallDetailView: View {
             }
 
             // Call details
-            Section("Details") {
+            Section(String(localized: "Details")) {
                 HStack {
-                    Text("Date")
+                    Text(String(localized: "Date"))
                     Spacer()
                     Text(call.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
                         .foregroundStyle(.secondary)
                 }
 
                 HStack {
-                    Text("Action")
+                    Text(String(localized: "Action"))
                     Spacer()
                     Label(outcomeText, systemImage: outcomeIcon)
                         .foregroundStyle(outcomeColor)
@@ -206,7 +206,7 @@ struct CallDetailView: View {
 
                 if call.trustScore > 0 {
                     HStack {
-                        Text("Trust Score")
+                        Text(String(localized: "Trust Score"))
                         Spacer()
                         Text("\(call.trustScore)/100")
                             .foregroundStyle(.secondary)
@@ -216,7 +216,7 @@ struct CallDetailView: View {
 
             // Transcript
             if !call.transcript.isEmpty {
-                Section("Transcript") {
+                Section(String(localized: "Transcript")) {
                     let lines = call.transcript.components(separatedBy: "\n").filter { !$0.isEmpty }
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                         TranscriptRow(line: line)
@@ -233,7 +233,7 @@ struct CallDetailView: View {
                         UIApplication.shared.open(url)
                     }
                 } label: {
-                    Label("Call Back \(PhoneFormatter.format(callbackPhone))", systemImage: "phone.fill")
+                    Label(String(localized: "Call Back \(PhoneFormatter.format(callbackPhone))"), systemImage: "phone.fill")
                 }
 
                 Button {
@@ -242,12 +242,12 @@ struct CallDetailView: View {
                         UIApplication.shared.open(url)
                     }
                 } label: {
-                    Label("Send Text", systemImage: "message.fill")
+                    Label(String(localized: "Send Text"), systemImage: "message.fill")
                 }
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Call Details")
+        .navigationTitle(String(localized: "Call Details"))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { appState.markCallAsRead(call.id) }
     }
@@ -268,11 +268,11 @@ struct CallDetailView: View {
 
     private var outcomeText: String {
         switch call.outcome {
-        case "picked_up": return "Answered"
-        case "voicemail": return "Voicemail"
-        case "ignored", "declined": return "Ignored"
-        case "spam", "blocked": return "Blocked"
-        default: return "Screened"
+        case "picked_up": return String(localized: "Answered")
+        case "voicemail": return String(localized: "Voicemail")
+        case "ignored", "declined": return String(localized: "Ignored")
+        case "spam", "blocked": return String(localized: "Blocked")
+        default: return String(localized: "Screened")
         }
     }
 

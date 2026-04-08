@@ -41,6 +41,9 @@ targets:
           ENABLE_DEBUG_DYLIB: false
     dependencies:
       - package: TwilioVoice
+    scheme:
+      testTargets: []
+      storeKitConfiguration: Kevin/Products.storekit
     entitlements:
       path: Kevin/Kevin.entitlements
       properties:

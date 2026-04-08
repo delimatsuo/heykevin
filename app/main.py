@@ -24,6 +24,8 @@ from app.api.vcard import router as vcard_router
 from app.api.estimates import router as estimates_router
 from app.api.integrations import router as integrations_router
 from app.api.forwarding import router as forwarding_router
+from app.api.subscription import router as subscription_router
+from app.webhooks.appstore import router as appstore_router
 
 # Initialize logging
 setup_logging(settings.log_level)
@@ -61,6 +63,8 @@ app.include_router(vcard_router)
 app.include_router(estimates_router)
 app.include_router(integrations_router)
 app.include_router(forwarding_router)
+app.include_router(subscription_router)
+app.include_router(appstore_router)
 
 
 @app.get("/health")
@@ -163,6 +167,71 @@ async def _orphan_call_cleanup():
             logger.warning(f"Orphan call cleanup error: {e}")
 
 
+async def _expired_contractor_cleanup():
+    """Periodically clean up contractors with deleted app for 14+ days.
+
+    Runs every 6 hours. For contractors where:
+    - subscription_status == "expired"
+    - deleted_app_detected_at is set and > 14 days ago
+
+    Releases Twilio number, sends final SMS, deactivates account.
+    """
+    import time
+    from app.db.firestore_client import get_firestore_client
+    from app.services.sms import send_sms
+
+    FOURTEEN_DAYS = 14 * 86400
+
+    while True:
+        await asyncio.sleep(6 * 3600)  # Every 6 hours
+        try:
+            db = get_firestore_client()
+            loop = asyncio.get_event_loop()
+            now = time.time()
+            cutoff = now - FOURTEEN_DAYS
+
+            docs = await loop.run_in_executor(
+                None,
+                lambda: list(
+                    db.collection("contractors")
+                    .where("subscription_status", "==", "expired")
+                    .where("active", "==", True)
+                    .stream()
+                )
+            )
+
+            for doc in docs:
+                data = doc.to_dict()
+                deleted_at = data.get("deleted_app_detected_at")
+                if not deleted_at or deleted_at > cutoff:
+                    continue
+
+                contractor_id = doc.id
+                owner_phone = data.get("owner_phone", "")
+                twilio_number = data.get("twilio_number", "")
+
+                logger.info(f"14-day cleanup: deactivating {contractor_id}")
+
+                # Send final SMS before releasing the number
+                if owner_phone:
+                    final_sms = (
+                        "Kevin AI: Your call forwarding has been disabled after 14 days "
+                        "of inactivity. To reactivate, reinstall Kevin AI. "
+                        "If you need help, visit kevinai.app."
+                    )
+                    await send_sms(owner_phone, final_sms, from_number=twilio_number)
+
+                try:
+                    from app.db.contractors import deactivate_contractor
+                    await deactivate_contractor(contractor_id)
+                except Exception as e:
+                    logger.error(f"Deactivate failed for {contractor_id}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.warning(f"Expired contractor cleanup error: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     # Validate required config
@@ -178,6 +247,7 @@ async def startup():
 
     # Start orphan call cleanup background task
     asyncio.create_task(_orphan_call_cleanup())
+    asyncio.create_task(_expired_contractor_cleanup())
 
     logger.info(
         "Kevin starting up",

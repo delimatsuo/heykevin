@@ -104,6 +104,93 @@ def _voicemail_twiml() -> str:
     return str(response)
 
 
+def _expired_voicemail_twiml() -> str:
+    """TwiML for deleted-app users — simple voicemail, no AI screening."""
+    response = VoiceResponse()
+    response.say(
+        "Hi, the person you are calling is unavailable. Please leave a message after the tone.",
+        voice="Polly.Matthew",
+    )
+    response.record(
+        max_length=120,
+        transcribe=True,
+        transcribe_callback=f"{settings.cloud_run_url}/webhooks/twilio/voicemail-transcription",
+        play_beep=True,
+    )
+    response.say("Thank you. Goodbye.", voice="Polly.Matthew")
+    return str(response)
+
+
+async def _ring_expired_contractor(
+    call_sid: str,
+    caller_phone: str,
+    conference_name: str,
+    contractor_id: str,
+    owner_phone: str,
+    twilio_number: str,
+):
+    """Ring expired-subscription contractor via CallKit for 20s, then voicemail."""
+    try:
+        from twilio.rest import Client
+        from app.db.cache import _init_firebase
+
+        _init_firebase()
+        client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+        loop = asyncio.get_event_loop()
+
+        for _ in range(10):  # 10 × 2s = 20s
+            await asyncio.sleep(2)
+
+            # Check if contractor joined the conference
+            try:
+                conferences = await loop.run_in_executor(
+                    None, lambda: client.conferences.list(friendly_name=conference_name, status="in-progress")
+                )
+                if conferences:
+                    participants = await loop.run_in_executor(
+                        None, lambda: conferences[0].participants.list()
+                    )
+                    if len(participants) >= 2:
+                        logger.info(f"Expired contractor answered: {contractor_id}")
+                        return  # Connected — nothing more to do
+            except Exception:
+                pass
+
+        # Timeout — redirect to voicemail TwiML
+        logger.info(f"Expired contractor {contractor_id} didn't answer — redirecting to voicemail")
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, lambda: client.calls(call_sid).update(twiml=_expired_voicemail_twiml())
+            )
+        except Exception as e:
+            logger.error(f"Failed to redirect expired call to voicemail: {e}")
+
+    except Exception as e:
+        logger.error(f"_ring_expired_contractor failed: {e}", exc_info=True)
+
+
+async def _handle_deleted_app(
+    contractor_id: str,
+    caller_phone: str,
+    owner_phone: str,
+    twilio_number: str,
+):
+    """Handle call when app is deleted — record deleted_app_detected_at, send voicemail SMS."""
+    try:
+        from app.db.contractors import update_contractor, get_contractor
+        import time
+
+        # Set deleted_app_detected_at if not already set
+        contractor = await get_contractor(contractor_id)
+        if contractor and not contractor.get("deleted_app_detected_at"):
+            await update_contractor(contractor_id, {"deleted_app_detected_at": time.time()})
+            logger.info(f"Deleted app detected: {contractor_id}")
+
+    except Exception as e:
+        logger.error(f"_handle_deleted_app failed: {e}", exc_info=True)
+
+
 @router.post("/webhooks/twilio/incoming")
 async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signature)):
     """Handle an incoming call from Twilio.
@@ -144,6 +231,62 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             mode = "kevin"
             contractor = {}
             logger.info("No contractor found — using default settings")
+
+        # Subscription check — must happen BEFORE routing decisions
+        subscription_status = contractor.get("subscription_status", "trial") if contractor else "trial"
+        subscription_expires = contractor.get("subscription_expires", 0) if contractor else 0
+        now = time.time()
+
+        # Treat as active if: trial, active, or expires timestamp is in the future (fail-open)
+        is_subscription_active = (
+            subscription_status in ("trial", "active")
+            or (subscription_status == "expired" and subscription_expires > now)
+            or not contractor  # No contractor → use legacy flow
+        )
+
+        if not is_subscription_active and contractor:
+            # Expired subscription — special handling
+            logger.info(f"Expired subscription for {contractor_id} — attempting VoIP ring-through")
+
+            # Attempt VoIP push to ring via CallKit
+            from app.services.push_notification import send_voip_push, get_device_token
+            device_token = await get_device_token(token_type="voip", contractor_id=contractor_id)
+
+            push_succeeded = False
+            conference_name = ""
+            if device_token:
+                from app.api.voip import _generate_access_token
+                access_token = _generate_access_token()
+                conference_name = f"expired_{call_sid}"
+                push_succeeded = await send_voip_push(
+                    device_token=device_token,
+                    caller_phone=caller_phone,
+                    caller_name="",
+                    call_sid=call_sid,
+                    conference_name=conference_name,
+                    access_token=access_token,
+                )
+
+            if push_succeeded:
+                # App is installed — ring for 20s then voicemail
+                asyncio.create_task(_ring_expired_contractor(
+                    call_sid=call_sid,
+                    caller_phone=caller_phone,
+                    conference_name=conference_name,
+                    contractor_id=contractor_id,
+                    owner_phone=owner_phone,
+                    twilio_number=to_number,
+                ))
+                return twiml_response(_conference_twiml(call_sid, conference_name))
+            else:
+                # App deleted — simple voicemail + SMS
+                asyncio.create_task(_handle_deleted_app(
+                    contractor_id=contractor_id,
+                    caller_phone=caller_phone,
+                    owner_phone=owner_phone,
+                    twilio_number=to_number,
+                ))
+                return twiml_response(_expired_voicemail_twiml())
 
         # Circuit breaker check
         from app.services.circuit_breaker import is_circuit_open
@@ -734,3 +877,64 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
             logger.warning(f"Failed to clean up active call: {e}")
 
     return {"status": "ok"}
+
+
+@router.post("/webhooks/twilio/voicemail-transcription")
+async def handle_voicemail_transcription(request: Request, _=Depends(verify_twilio_signature)):
+    """Handle Twilio transcription callback for deleted-app voicemails."""
+    try:
+        form_data = await request.form()
+        transcription_text = form_data.get("TranscriptionText", "")
+        caller_phone = normalize_phone(form_data.get("From", "")) or form_data.get("From", "")
+        to_number = form_data.get("To", "")
+
+        if not to_number:
+            return {"status": "ok"}
+
+        from app.db.contractors import get_contractor_by_twilio_number
+        contractor = await get_contractor_by_twilio_number(to_number)
+        if not contractor:
+            # Also check inactive contractors (app may have been deactivated by cleanup)
+            from app.db.firestore_client import get_firestore_client
+            import asyncio as _asyncio
+            db = get_firestore_client()
+            loop = _asyncio.get_event_loop()
+            docs = await loop.run_in_executor(
+                None,
+                lambda: list(db.collection("contractors").where("twilio_number", "==", to_number).limit(1).stream())
+            )
+            if docs:
+                contractor = docs[0].to_dict()
+                contractor["contractor_id"] = docs[0].id
+        if not contractor:
+            return {"status": "ok"}
+
+        owner_phone = contractor.get("owner_phone", "")
+        if not owner_phone:
+            return {"status": "ok"}
+
+        from app.services.sms import send_sms
+        caller_display = caller_phone or "Unknown"
+
+        if transcription_text:
+            sms_body = (
+                f"Voicemail from {caller_display}: \"{transcription_text}\"\n\n"
+                f"Kevin AI is no longer installed on your phone. "
+                f"To remove call forwarding, visit kevinai.app/support."
+            )
+        else:
+            sms_body = (
+                f"You received a voicemail from {caller_display} "
+                f"(transcription unavailable).\n\n"
+                f"Kevin AI is no longer installed on your phone. "
+                f"To remove call forwarding, visit kevinai.app/support."
+            )
+
+        twilio_number = contractor.get("twilio_number", "")
+        await send_sms(owner_phone, sms_body, from_number=twilio_number)
+        logger.info(f"Voicemail SMS sent to {contractor['contractor_id']}")
+        return {"status": "ok"}
+
+    except Exception as e:
+        logger.error(f"Voicemail transcription handler error: {e}", exc_info=True)
+        return {"status": "ok"}

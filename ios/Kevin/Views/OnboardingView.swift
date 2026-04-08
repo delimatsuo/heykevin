@@ -14,6 +14,7 @@ struct OnboardingView: View {
     @State private var contactsSynced = 0
     @State private var acceptedTerms = false
     @State private var phoneNumber = ""
+    @State private var showPaywall = false
 
     enum OnboardingStep {
         case welcome, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
@@ -561,15 +562,21 @@ struct OnboardingView: View {
             Spacer()
 
             Button {
-                appState.isOnboarded = true
+                showPaywall = true
             } label: {
-                Text(String(localized: "Start Using Kevin"))
+                Text(String(localized: "Start Free Trial"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
             }
             .buttonStyle(.borderedProminent)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .sheet(isPresented: $showPaywall, onDismiss: {
+                appState.isOnboarded = true
+            }) {
+                PaywallView()
+                    .environmentObject(appState)
+            }
         }
     }
 
@@ -655,6 +662,7 @@ struct OnboardingView: View {
         let biz = profile["business_name"] as? String ?? ""
         let mode = profile["mode"] as? String ?? "business"
         let number = profile["twilio_number"] as? String ?? ""
+        let subUUID = profile["subscription_uuid"] as? String ?? ""
 
         await MainActor.run {
             if !name.isEmpty { appState.userName = name }
@@ -662,6 +670,7 @@ struct OnboardingView: View {
             appState.mode = (mode == "personal") ? "personal" : "business"
             if !number.isEmpty { appState.kevinNumber = number }
             appState.isOnboarded = true
+            if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
         }
 
         // Sync contacts in background
@@ -782,11 +791,20 @@ struct OnboardingView: View {
         // Clear identity token after successful provisioning
         appState.appleIdentityToken = ""
 
+        // Load subscription_uuid from backend profile
+        if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
+            let subUUID = profile["subscription_uuid"] as? String ?? ""
+            await MainActor.run {
+                if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
+            }
+        }
+
         step = .forwarding
         isLoading = false
     }
 
     private func completeOnboarding() {
+        // Note: isOnboarded is set after paywall is dismissed (in doneStep sheet onDismiss)
         step = .done
     }
 }

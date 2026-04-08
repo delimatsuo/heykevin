@@ -11,7 +11,7 @@ from app.config import settings
 from app.middleware.auth import verify_api_token, require_contractor_access
 from app.db.contractors import (
     get_contractor, create_contractor, update_contractor, list_contractors,
-    deactivate_contractor, release_twilio_number,
+    deactivate_contractor, release_twilio_number, PROTECTED_FIELDS,
 )
 from app.utils.logging import get_logger, redact_phone
 
@@ -236,7 +236,7 @@ async def api_provision_number(contractor_id: str, request: Request):
 @router.patch("/{contractor_id}")
 async def api_update_contractor(contractor_id: str, body: ContractorUpdate, request: Request):
     require_contractor_access(request, contractor_id)
-    updates = {k: v for k, v in body.dict().items() if v is not None}
+    updates = {k: v for k, v in body.dict().items() if v is not None and k not in PROTECTED_FIELDS}
     if not updates:
         return {"status": "no changes"}
     await update_contractor(contractor_id, updates)

@@ -8,6 +8,7 @@ private func debugLog(_ message: String) {
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
+    @State private var showPaywall = false
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -29,6 +30,51 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // MARK: - Subscription Status
+
+                Section {
+                    HStack {
+                        Text("Plan")
+                        Spacer()
+                        Text(subscriptionStatusLabel)
+                            .foregroundStyle(subscriptionStatusColor)
+                    }
+
+                    if !appState.isSubscriptionActive {
+                        Button {
+                            showPaywall = true
+                        } label: {
+                            HStack {
+                                Text("Subscribe to Kevin AI")
+                                    .foregroundStyle(.blue)
+                                Spacer()
+                                Image(systemName: "arrow.right.circle.fill")
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                    }
+
+                    Button {
+                        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        HStack {
+                            Text("Manage Subscription")
+                            Spacer()
+                            Image(systemName: "arrow.up.right.square")
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                } header: {
+                    Text("Subscription")
+                }
+                .sheet(isPresented: $showPaywall) {
+                    PaywallView()
+                        .environmentObject(appState)
+                }
+
                 // MARK: - Kevin Status
 
                 Section {
@@ -480,6 +526,36 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Subscription computed properties
+
+    private var subscriptionStatusLabel: String {
+        switch appState.subscriptionStatus {
+        case "trial": return "Free Trial"
+        case "active": return "Active — \(tierLabel)"
+        case "expired": return "Expired"
+        case "cancelled": return "Cancelled"
+        default: return appState.subscriptionStatus.isEmpty ? "Free Trial" : appState.subscriptionStatus.capitalized
+        }
+    }
+
+    private var subscriptionStatusColor: Color {
+        switch appState.subscriptionStatus {
+        case "trial": return .blue
+        case "active": return .green
+        case "expired", "cancelled": return .red
+        default: return .blue
+        }
+    }
+
+    private var tierLabel: String {
+        switch appState.subscriptionTier {
+        case "personal": return "Personal"
+        case "business": return "Business"
+        case "businessPro": return "Business Pro"
+        default: return "Kevin AI"
+        }
+    }
+
     private func loadKnowledge() async {
         guard !appState.contractorId.isEmpty else { return }
         if let contractor = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
@@ -511,6 +587,12 @@ struct SettingsView: View {
                    let endDate = formatter.date(from: endStr) {
                     businessHoursEnd = endDate
                 }
+
+                // Load subscription state
+                let subStatus = contractor["subscription_status"] as? String ?? ""
+                let subTier = contractor["subscription_tier"] as? String ?? ""
+                if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
+                if !subTier.isEmpty { appState.subscriptionTier = subTier }
             }
         }
     }

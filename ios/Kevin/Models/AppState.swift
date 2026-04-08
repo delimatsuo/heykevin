@@ -39,6 +39,41 @@ class AppState: ObservableObject {
             }
         }
     }
+    @Published var isRegistered: Bool = false
+
+    // Subscription state (Keychain-backed — UI cache only, server is source of truth)
+    @Published var subscriptionStatus: String = KeychainManager.shared.retrieve("subscriptionStatus") ?? "trial" {
+        didSet {
+            if subscriptionStatus.isEmpty {
+                KeychainManager.shared.delete("subscriptionStatus")
+            } else {
+                KeychainManager.shared.save("subscriptionStatus", value: subscriptionStatus)
+            }
+        }
+    }
+    @Published var subscriptionTier: String = KeychainManager.shared.retrieve("subscriptionTier") ?? "none" {
+        didSet {
+            if subscriptionTier.isEmpty {
+                KeychainManager.shared.delete("subscriptionTier")
+            } else {
+                KeychainManager.shared.save("subscriptionTier", value: subscriptionTier)
+            }
+        }
+    }
+    @Published var subscriptionUUID: String = KeychainManager.shared.retrieve("subscriptionUUID") ?? "" {
+        didSet {
+            if subscriptionUUID.isEmpty {
+                KeychainManager.shared.delete("subscriptionUUID")
+            } else {
+                KeychainManager.shared.save("subscriptionUUID", value: subscriptionUUID)
+            }
+        }
+    }
+
+    var isSubscriptionActive: Bool {
+        subscriptionStatus == "trial" || subscriptionStatus == "active"
+    }
+
     @Published var kevinNumber: String = UserDefaults.standard.string(forKey: "kevinNumber") ?? "" {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.kevinNumber, forKey: "kevinNumber") } }
     }
@@ -55,7 +90,6 @@ class AppState: ObservableObject {
 
     // Device
     @Published var pushToken: String = ""
-    @Published var isRegistered: Bool = false
 
     // Navigation
     @Published var selectedTab: AppTab = .recents

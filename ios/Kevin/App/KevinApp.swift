@@ -7,6 +7,7 @@ struct KevinApp: App {
     @Environment(\.scenePhase) var scenePhase
     @State private var lastSyncTime: Date = .distantPast
     @State private var isFirstLaunch = true
+    @State private var listenerStarted = false
 
     var body: some Scene {
         WindowGroup {
@@ -20,6 +21,13 @@ struct KevinApp: App {
         }
         .onChange(of: scenePhase) {
             if scenePhase == .active {
+                // Start StoreKit transaction listener once
+                if !listenerStarted {
+                    listenerStarted = true
+                    SubscriptionManager.shared.startTransactionListener()
+                }
+
+                #if DEBUG
                 // Network diagnostic — test both Google (known-good) and our backend
                 Task {
                     // Test 1: Can we reach ANY server?
@@ -46,6 +54,7 @@ struct KevinApp: App {
                         print("🔴 HEALTH FAILED in \(Int(Date().timeIntervalSince(s)*1000))ms: \(error.localizedDescription)")
                     }
                 }
+                #endif
 
                 // Delay API calls on cold start — iOS networking needs time to initialize
                 Task {
@@ -56,6 +65,10 @@ struct KevinApp: App {
                         let pushToken = appState.pushToken
                         if !pushToken.isEmpty {
                             await APIClient.shared.registerDevice(pushToken: pushToken)
+                        }
+                        // Verify subscription entitlements once on cold launch
+                        if !appState.contractorId.isEmpty {
+                            await SubscriptionManager.shared.verifyCurrentEntitlements()
                         }
                     }
                     appState.checkForActiveCall()

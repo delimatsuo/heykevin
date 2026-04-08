@@ -582,6 +582,82 @@ class APIClient {
         return false
     }
 
+    // MARK: - Subscription
+
+    @discardableResult
+    func verifySubscription(transactionId: String) async -> Bool {
+        let contractorId = await MainActor.run { AppState.shared.contractorId }
+        guard !contractorId.isEmpty else { return false }
+        do {
+            let url = URL(string: "\(baseURL)/api/subscription/verify")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 15
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "transaction_id": transactionId,
+                "contractor_id": contractorId,
+            ])
+            authorize(&request)
+            let (_, response) = try await retryRequest(request)
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200
+            if !ok { debugLog("Verify subscription returned non-200") }
+            return ok
+        } catch {
+            debugLog("Verify subscription failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func signSubscriptionOffer(productId: String, offerId: String, applicationUsername: String) async -> [String: Any]? {
+        let contractorId = await MainActor.run { AppState.shared.contractorId }
+        guard !contractorId.isEmpty else { return nil }
+        do {
+            let url = URL(string: "\(baseURL)/api/subscription/sign-offer")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 15
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "contractor_id": contractorId,
+                "product_id": productId,
+                "offer_id": offerId,
+                "application_username": applicationUsername,
+            ])
+            authorize(&request)
+            let (data, response) = try await retryRequest(request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let sig = json["signature"] as? [String: Any] {
+                return sig
+            }
+        } catch {
+            debugLog("Sign subscription offer failed: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
+    func checkPromoEligibility(contractorId: String) async -> Bool {
+        guard !contractorId.isEmpty else { return false }
+        do {
+            var components = URLComponents(string: "\(baseURL)/api/subscription/promo-eligible")!
+            components.queryItems = [URLQueryItem(name: "contractor_id", value: contractorId)]
+            var request = URLRequest(url: components.url!)
+            request.timeoutInterval = 10
+            authorize(&request)
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return json["eligible"] as? Bool ?? false
+            }
+        } catch {
+            debugLog("Promo eligibility check failed: \(error.localizedDescription)")
+        }
+        return false
+    }
+
+    // MARK: - Services (existing)
+
     func updateServices(contractorId: String, services: [[String: Any]]) async -> Bool {
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId

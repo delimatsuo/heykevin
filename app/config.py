@@ -83,7 +83,8 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 import json as _json
-_dial_in_cache: dict | None = None
+from typing import Optional as _Optional
+_dial_in_cache: _Optional[dict] = None
 
 
 def get_dial_in_number(country_code: str = "US") -> str:

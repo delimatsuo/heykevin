@@ -36,9 +36,10 @@ class SubscriptionManager: ObservableObject {
 
     /// Start listening for transaction updates. Call once at app launch.
     func startTransactionListener() {
-        transactionListenerTask = Task.detached(priority: .background) { [weak self] in
+        guard transactionListenerTask == nil else { return }
+        transactionListenerTask = Task {
             for await verificationResult in Transaction.updates {
-                await self?.handleTransactionUpdate(verificationResult)
+                await handleTransactionUpdate(verificationResult)
             }
         }
     }
@@ -123,9 +124,7 @@ class SubscriptionManager: ObservableObject {
             try await AppStore.sync()
             await verifyCurrentEntitlements()
         } catch {
-            await MainActor.run {
-                purchaseError = "Restore failed: \(error.localizedDescription)"
-            }
+            purchaseError = "Restore failed: \(error.localizedDescription)"
         }
     }
 

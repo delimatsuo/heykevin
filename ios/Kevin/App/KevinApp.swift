@@ -4,7 +4,6 @@ import SwiftUI
 struct KevinApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState.shared
-    @StateObject private var subscriptionManager = SubscriptionManager.shared
     @Environment(\.scenePhase) var scenePhase
     @State private var lastSyncTime: Date = .distantPast
     @State private var isFirstLaunch = true
@@ -28,13 +27,7 @@ struct KevinApp: App {
                     SubscriptionManager.shared.startTransactionListener()
                 }
 
-                // Verify current entitlements on launch
-                if !appState.contractorId.isEmpty {
-                    Task {
-                        await SubscriptionManager.shared.verifyCurrentEntitlements()
-                    }
-                }
-
+                #if DEBUG
                 // Network diagnostic — test both Google (known-good) and our backend
                 Task {
                     // Test 1: Can we reach ANY server?
@@ -61,6 +54,7 @@ struct KevinApp: App {
                         print("🔴 HEALTH FAILED in \(Int(Date().timeIntervalSince(s)*1000))ms: \(error.localizedDescription)")
                     }
                 }
+                #endif
 
                 // Delay API calls on cold start — iOS networking needs time to initialize
                 Task {
@@ -71,6 +65,10 @@ struct KevinApp: App {
                         let pushToken = appState.pushToken
                         if !pushToken.isEmpty {
                             await APIClient.shared.registerDevice(pushToken: pushToken)
+                        }
+                        // Verify subscription entitlements once on cold launch
+                        if !appState.contractorId.isEmpty {
+                            await SubscriptionManager.shared.verifyCurrentEntitlements()
                         }
                     }
                     appState.checkForActiveCall()

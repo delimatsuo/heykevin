@@ -24,6 +24,8 @@ from app.api.vcard import router as vcard_router
 from app.api.estimates import router as estimates_router
 from app.api.integrations import router as integrations_router
 from app.api.forwarding import router as forwarding_router
+from app.api.subscription import router as subscription_router
+from app.webhooks.appstore import router as appstore_router
 
 # Initialize logging
 setup_logging(settings.log_level)
@@ -61,6 +63,8 @@ app.include_router(vcard_router)
 app.include_router(estimates_router)
 app.include_router(integrations_router)
 app.include_router(forwarding_router)
+app.include_router(subscription_router)
+app.include_router(appstore_router)
 
 
 @app.get("/health")

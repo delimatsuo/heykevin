@@ -432,11 +432,11 @@ class APIClient {
         let (data, _) = try await retryRequest(request)
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let callsArray = json["calls"] as? [[String: Any]] {
-            return callsArray.compactMap { dict in
-                CallRecord(
-                    // Use call_sid as stable ID. Fall back to timestamp+phone so
-                    // read state persists across fetches (UUID() would break this).
-                    id: dict["call_sid"] as? String ?? "\(dict["timestamp"] as? Double ?? 0)-\(dict["caller_phone"] as? String ?? "")",
+            let records = callsArray.compactMap { dict -> CallRecord? in
+                let callSid = dict["call_sid"] as? String ?? "\(dict["timestamp"] as? Double ?? 0)-\(dict["caller_phone"] as? String ?? "")"
+                let serverRead = dict["read"] as? Bool ?? false
+                return CallRecord(
+                    id: callSid,
                     callerPhone: dict["caller_phone"] as? String ?? "",
                     callerName: dict["caller_name"] as? String ?? "",
                     timestamp: Date(timeIntervalSince1970: dict["timestamp"] as? Double ?? 0),
@@ -444,11 +444,31 @@ class APIClient {
                     outcome: dict["outcome"] as? String ?? "unknown",
                     transcript: dict["transcript"] as? String ?? "",
                     voicemailURL: dict["voicemail_url"] as? String,
-                    callbackNumber: dict["callback_number"] as? String
+                    callbackNumber: dict["callback_number"] as? String,
+                    readOnServer: serverRead
                 )
             }
+            // Seed local read state from server so unread badges are correct after reinstall
+            await MainActor.run {
+                for r in records where r.readOnServer {
+                    AppState.shared.readCallIds.insert(r.id)
+                }
+            }
+            return records
         }
         return []
+    }
+
+    func markCallsRead(_ callSids: [String]) async {
+        guard !callSids.isEmpty else { return }
+        let url = URL(string: "\(baseURL)/api/calls/mark-read")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        authorize(&request)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["call_sids": callSids])
+        _ = try? await retryRequest(request)
     }
 
     // MARK: - Contractor PATCH

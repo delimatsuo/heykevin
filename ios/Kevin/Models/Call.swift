@@ -11,6 +11,7 @@ struct CallRecord: Identifiable {
     let transcript: String
     let voicemailURL: String?
     let callbackNumber: String?
+    let readOnServer: Bool  // persisted read state from Firestore
 
     /// Whether the caller left a message (has transcript with caller speech beyond the initial exchange).
     var hasMessage: Bool {

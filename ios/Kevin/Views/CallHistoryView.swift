@@ -72,8 +72,10 @@ struct CallHistoryView: View {
                 if calls.contains(where: { appState.isCallUnread($0) }) {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button(String(localized: "Mark All Read")) {
-                            calls.forEach { appState.markCallAsRead($0.id) }
+                            let unread = calls.filter { appState.isCallUnread($0) }.map { $0.id }
+                            unread.forEach { appState.markCallAsRead($0) }
                             appState.updateUnreadCount(calls: calls)
+                            Task { await APIClient.shared.markCallsRead(unread) }
                         }
                         .font(.subheadline)
                     }
@@ -287,7 +289,10 @@ struct CallDetailView: View {
         .listStyle(.insetGrouped)
         .navigationTitle(String(localized: "Call Details"))
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { appState.markCallAsRead(call.id) }
+        .onAppear {
+            appState.markCallAsRead(call.id)
+            Task { await APIClient.shared.markCallsRead([call.id]) }
+        }
     }
 
     private var callerInitials: String {

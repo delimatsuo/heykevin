@@ -26,6 +26,9 @@ from app.api.integrations import router as integrations_router
 from app.api.forwarding import router as forwarding_router
 from app.api.subscription import router as subscription_router
 from app.webhooks.appstore import router as appstore_router
+from app.api.admin import router as admin_router
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # Initialize logging
 setup_logging(settings.log_level)
@@ -65,6 +68,13 @@ app.include_router(integrations_router)
 app.include_router(forwarding_router)
 app.include_router(subscription_router)
 app.include_router(appstore_router)
+app.include_router(admin_router)
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/admin")
+async def admin_page():
+    return FileResponse("app/static/admin.html")
 
 
 @app.get("/health")

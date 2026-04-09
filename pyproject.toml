@@ -24,6 +24,7 @@ dependencies = [
     "PyJWT[crypto]==2.10.1",
     "cryptography>=42.0.0",
     "httpx[http2]==0.28.1",
+    "aiofiles>=23.0.0",
 ]
 
 [project.optional-dependencies]

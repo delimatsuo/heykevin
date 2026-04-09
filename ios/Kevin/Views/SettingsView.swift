@@ -40,33 +40,33 @@ struct SettingsView: View {
                             .foregroundStyle(subscriptionStatusColor)
                     }
 
-                    if !appState.isSubscriptionActive {
-                        Button {
-                            showPaywall = true
-                        } label: {
-                            HStack {
-                                Text("Subscribe to Kevin AI")
-                                    .foregroundStyle(.blue)
-                                Spacer()
-                                Image(systemName: "arrow.right.circle.fill")
-                                    .foregroundStyle(.blue)
-                            }
+                    Button {
+                        showPaywall = true
+                    } label: {
+                        HStack {
+                            Text(appState.subscriptionStatus == "trial" ? String(localized: "View Plans") : String(localized: "Subscribe to Kevin AI"))
+                                .foregroundStyle(.blue)
+                            Spacer()
+                            Image(systemName: "arrow.right.circle.fill")
+                                .foregroundStyle(.blue)
                         }
                     }
 
-                    Button {
-                        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
-                            UIApplication.shared.open(url)
+                    if appState.subscriptionStatus == "active" {
+                        Button {
+                            if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                                UIApplication.shared.open(url)
+                            }
+                        } label: {
+                            HStack {
+                                Text(String(localized: "Manage Subscription"))
+                                Spacer()
+                                Image(systemName: "arrow.up.right.square")
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
-                    } label: {
-                        HStack {
-                            Text("Manage Subscription")
-                            Spacer()
-                            Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(.tertiary)
-                        }
+                        .foregroundStyle(.primary)
                     }
-                    .foregroundStyle(.primary)
                 } header: {
                     Text("Subscription")
                 }

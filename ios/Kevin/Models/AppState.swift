@@ -75,7 +75,19 @@ class AppState: ObservableObject {
     }
 
     @Published var kevinNumber: String = UserDefaults.standard.string(forKey: "kevinNumber") ?? "" {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.kevinNumber, forKey: "kevinNumber") } }
+        didSet {
+            DispatchQueue.main.async { UserDefaults.standard.set(self.kevinNumber, forKey: "kevinNumber") }
+            // New number means forwarding needs to be re-activated
+            if !kevinNumber.isEmpty {
+                let stored = UserDefaults.standard.string(forKey: "forwardingActivatedFor") ?? ""
+                if stored != kevinNumber {
+                    DispatchQueue.main.async { UserDefaults.standard.set(false, forKey: "forwardingActivated") }
+                }
+            }
+        }
+    }
+    @Published var forwardingActivated: Bool = UserDefaults.standard.bool(forKey: "forwardingActivated") {
+        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.forwardingActivated, forKey: "forwardingActivated") } }
     }
     @Published var appleUserId: String = migrateToKeychain("appleUserId") {
         didSet {

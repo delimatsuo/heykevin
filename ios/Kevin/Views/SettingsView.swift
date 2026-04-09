@@ -562,7 +562,7 @@ struct SettingsView: View {
         let numberOK = !appState.kevinNumber.isEmpty
         let pushOK = pushPermission == .authorized || pushPermission == .provisional
         let subOK = appState.subscriptionStatus == "trial" || appState.subscriptionStatus == "active"
-        let allGood = numberOK && pushOK && subOK
+        let allGood = numberOK && pushOK && subOK && appState.forwardingActivated
 
         return Section {
             if allGood {
@@ -592,22 +592,28 @@ struct SettingsView: View {
                 }
             }
 
-            // Call forwarding — we can't verify carrier state, just guide the user
-            HStack {
+            // Call forwarding — track activation locally (carrier state not queryable)
+            HStack(spacing: 12) {
+                Image(systemName: appState.forwardingActivated ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(appState.forwardingActivated ? Color.green : Color.orange)
+                    .font(.title3)
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Call Forwarding")
                         .font(.subheadline)
-                    Text("Missed calls must route to Kevin")
+                    Text(appState.forwardingActivated ? "Activated" : "Missed calls must route to Kevin")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(appState.forwardingActivated ? Color.secondary : Color.orange)
                 }
                 Spacer()
                 Button {
                     if !appState.kevinNumber.isEmpty {
+                        UserDefaults.standard.set(appState.kevinNumber, forKey: "forwardingActivatedFor")
+                        appState.forwardingActivated = true
                         dialCode("*61*\(dialNumber)%23")
                     }
                 } label: {
-                    Text("Activate")
+                    Text(appState.forwardingActivated ? "Re-activate" : "Activate")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : Color.blue)
                         .padding(.horizontal, 10)

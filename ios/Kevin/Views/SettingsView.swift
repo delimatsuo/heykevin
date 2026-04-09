@@ -267,35 +267,15 @@ struct SettingsView: View {
                     }
                 }
 
-                // MARK: - Contact Screening
+                // MARK: - Call Screening
 
                 Section {
-                    Toggle(String(localized: "Known contacts ring through"), isOn: $appState.ringThroughContacts)
-                        .onChange(of: appState.ringThroughContacts) { _, newValue in
-                            Task {
-                                isSaving = true
-                                saveError = ""
-                                await updateRingThrough(newValue)
-                                isSaving = false
-                            }
-                        }
-
                     Toggle(String(localized: "Block spam with disconnect tone"), isOn: $appState.sitToneEnabled)
                         .onChange(of: appState.sitToneEnabled) { _, newValue in
                             Task {
                                 isSaving = true
                                 saveError = ""
                                 await updateSitToneEnabled(newValue)
-                                isSaving = false
-                            }
-                        }
-
-                    Toggle(String(localized: "Auto-reply text to callers"), isOn: $appState.autoReplySms)
-                        .onChange(of: appState.autoReplySms) { _, newValue in
-                            Task {
-                                isSaving = true
-                                saveError = ""
-                                await updateContractorSetting("auto_reply_sms", newValue)
                                 isSaving = false
                             }
                         }

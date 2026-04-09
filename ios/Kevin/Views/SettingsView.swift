@@ -26,7 +26,7 @@ struct SettingsView: View {
     @State private var businessHoursEnd = Calendar.current.date(from: DateComponents(hour: 17, minute: 0)) ?? Date()
 
     private var kevinNumber: String {
-        appState.kevinNumber.isEmpty ? "16504222677" : appState.kevinNumber
+        appState.kevinNumber
     }
 
     var body: some View {
@@ -427,8 +427,14 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Call Forwarding"))
                 } footer: {
-                    Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. Verizon users: use *71 to activate and *73 to deactivate instead."))
+                    if appState.kevinNumber.isEmpty {
+                        Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. Verizon users: use *71 to activate and *73 to deactivate instead."))
+                    }
                 }
+                .disabled(appState.kevinNumber.isEmpty)
 
                 // MARK: - Account
 

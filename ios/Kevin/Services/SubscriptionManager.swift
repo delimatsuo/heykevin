@@ -81,7 +81,7 @@ class SubscriptionManager: ObservableObject {
             let signedOffer = await APIClient.shared.signSubscriptionOffer(
                 productId: product.id,
                 offerId: offerID,
-                applicationUsername: contractorId
+                applicationUsername: AppState.shared.contractorId
             )
             if let offer = signedOffer,
                let keyID = offer["keyIdentifier"] as? String,

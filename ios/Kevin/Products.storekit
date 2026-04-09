@@ -1,136 +1,136 @@
 {
-  "identifier" : "4fe6e29d-aeb9-4da8-9719-972292d3ced6",
-  "nonConsumableProducts" : [],
-  "nonRenewingSubscriptions" : [],
-  "products" : [],
-  "settings" : {
-    "_failTransactionsEnabled" : false,
-    "_interruptedPurchasesEnabled" : false,
-    "_locale" : "en_US",
-    "_renewalRate" : 1,
-    "_storeKitVersion" : 2,
-    "_subscriptionRenewalEnabled" : true,
-    "_timeRate" : "MONTHLY_RENEWAL_EVERY_30_SECONDS"
+  "identifier": "4fe6e29d-aeb9-4da8-9719-972292d3ced6",
+  "nonConsumableProducts": [],
+  "nonRenewingSubscriptions": [],
+  "products": [],
+  "settings": {
+    "_failTransactionsEnabled": false,
+    "_interruptedPurchasesEnabled": false,
+    "_locale": "en_US",
+    "_renewalRate": 1,
+    "_storeKitVersion": 2,
+    "_subscriptionRenewalEnabled": true,
+    "_timeRate": "MONTHLY_RENEWAL_EVERY_30_SECONDS"
   },
-  "subscriptionGroups" : [
+  "subscriptionGroups": [
     {
-      "id" : "bfbff896-50cc-4b58-b346-429918859ba9",
-      "localizations" : [],
-      "name" : "Kevin AI",
-      "subscriptions" : [
+      "id": "bfbff896-50cc-4b58-b346-429918859ba9",
+      "localizations": [],
+      "name": "Kevin AI",
+      "subscriptions": [
         {
-          "adHocOffers" : [],
-          "codeOffers" : [],
-          "displayPrice" : "9.99",
-          "familyShareable" : false,
-          "groupNumber" : 1,
-          "internalID" : "48d530a8-4472-4180-92e4-175b6f9787c8",
-          "introductoryOffer" : {
-            "duration" : 2,
-            "durationUnit" : "WEEK",
-            "mode" : "FREE_TRIAL",
-            "numberOfPeriods" : 1
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "9.99",
+          "familyShareable": false,
+          "groupNumber": 1,
+          "internalID": "48d530a8-4472-4180-92e4-175b6f9787c8",
+          "introductoryOffer": {
+            "duration": 2,
+            "durationUnit": "WEEK",
+            "mode": "FREE_TRIAL",
+            "numberOfPeriods": 1
           },
-          "localizations" : [
+          "localizations": [
             {
-              "description" : "AI call screening for individuals. Known contacts ring through, unknown callers are screened.",
-              "displayName" : "Personal",
-              "locale" : "en_US"
+              "description": "AI call screening for individuals. Known contacts ring through, unknown callers are screened.",
+              "displayName": "Personal",
+              "locale": "en_US"
             }
           ],
-          "productID" : "com.kevin.callscreen.personal.monthly",
-          "promotionalOffers" : [
+          "productID": "com.kevin.callscreen.personal.monthly",
+          "promotionalOffers": [
             {
-              "duration" : 1,
-              "durationUnit" : "MONTH",
-              "mode" : "PAY_AS_YOU_GO",
-              "numberOfPeriods" : 3,
-              "offerID" : "founding_member_75off",
-              "price" : "2.49"
+              "duration": 1,
+              "durationUnit": "MONTH",
+              "mode": "PAY_AS_YOU_GO",
+              "numberOfPeriods": 3,
+              "offerID": "founding_member_75off_personal",
+              "price": "2.49"
             }
           ],
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Personal Monthly",
-          "subscriptionGroupID" : "bfbff896-50cc-4b58-b346-429918859ba9",
-          "type" : "RecurringSubscription"
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Personal Monthly",
+          "subscriptionGroupID": "bfbff896-50cc-4b58-b346-429918859ba9",
+          "type": "RecurringSubscription"
         },
         {
-          "adHocOffers" : [],
-          "codeOffers" : [],
-          "displayPrice" : "49.99",
-          "familyShareable" : false,
-          "groupNumber" : 2,
-          "internalID" : "0d31107b-87ab-4e2b-b61d-9ec10f6cc421",
-          "introductoryOffer" : {
-            "duration" : 2,
-            "durationUnit" : "WEEK",
-            "mode" : "FREE_TRIAL",
-            "numberOfPeriods" : 1
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "49.99",
+          "familyShareable": false,
+          "groupNumber": 2,
+          "internalID": "0d31107b-87ab-4e2b-b61d-9ec10f6cc421",
+          "introductoryOffer": {
+            "duration": 2,
+            "durationUnit": "WEEK",
+            "mode": "FREE_TRIAL",
+            "numberOfPeriods": 1
           },
-          "localizations" : [
+          "localizations": [
             {
-              "description" : "AI call screening for businesses. Includes business hours, after-hours routing, and knowledge base.",
-              "displayName" : "Business",
-              "locale" : "en_US"
+              "description": "AI call screening for businesses. Includes business hours, after-hours routing, and knowledge base.",
+              "displayName": "Business",
+              "locale": "en_US"
             }
           ],
-          "productID" : "com.kevin.callscreen.business.monthly",
-          "promotionalOffers" : [
+          "productID": "com.kevin.callscreen.business.monthly",
+          "promotionalOffers": [
             {
-              "duration" : 1,
-              "durationUnit" : "MONTH",
-              "mode" : "PAY_AS_YOU_GO",
-              "numberOfPeriods" : 3,
-              "offerID" : "founding_member_75off",
-              "price" : "12.49"
+              "duration": 1,
+              "durationUnit": "MONTH",
+              "mode": "PAY_AS_YOU_GO",
+              "numberOfPeriods": 3,
+              "offerID": "founding_member_75off_business",
+              "price": "12.49"
             }
           ],
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Business Monthly",
-          "subscriptionGroupID" : "bfbff896-50cc-4b58-b346-429918859ba9",
-          "type" : "RecurringSubscription"
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Business Monthly",
+          "subscriptionGroupID": "bfbff896-50cc-4b58-b346-429918859ba9",
+          "type": "RecurringSubscription"
         },
         {
-          "adHocOffers" : [],
-          "codeOffers" : [],
-          "displayPrice" : "79.99",
-          "familyShareable" : false,
-          "groupNumber" : 3,
-          "internalID" : "bedeb746-3fd5-40e8-a011-d105abb2a2ed",
-          "introductoryOffer" : {
-            "duration" : 2,
-            "durationUnit" : "WEEK",
-            "mode" : "FREE_TRIAL",
-            "numberOfPeriods" : 1
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "79.99",
+          "familyShareable": false,
+          "groupNumber": 3,
+          "internalID": "bedeb746-3fd5-40e8-a011-d105abb2a2ed",
+          "introductoryOffer": {
+            "duration": 2,
+            "durationUnit": "WEEK",
+            "mode": "FREE_TRIAL",
+            "numberOfPeriods": 1
           },
-          "localizations" : [
+          "localizations": [
             {
-              "description" : "AI call screening with Jobber, Google Calendar, and AI price estimates.",
-              "displayName" : "Business Pro",
-              "locale" : "en_US"
+              "description": "AI call screening with Jobber, Google Calendar, and AI price estimates.",
+              "displayName": "Business Pro",
+              "locale": "en_US"
             }
           ],
-          "productID" : "com.kevin.callscreen.businesspro.monthly",
-          "promotionalOffers" : [
+          "productID": "com.kevin.callscreen.businesspro.monthly",
+          "promotionalOffers": [
             {
-              "duration" : 1,
-              "durationUnit" : "MONTH",
-              "mode" : "PAY_AS_YOU_GO",
-              "numberOfPeriods" : 3,
-              "offerID" : "founding_member_75off",
-              "price" : "19.99"
+              "duration": 1,
+              "durationUnit": "MONTH",
+              "mode": "PAY_AS_YOU_GO",
+              "numberOfPeriods": 3,
+              "offerID": "founding_member_75off",
+              "price": "19.99"
             }
           ],
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Business Pro Monthly",
-          "subscriptionGroupID" : "bfbff896-50cc-4b58-b346-429918859ba9",
-          "type" : "RecurringSubscription"
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Business Pro Monthly",
+          "subscriptionGroupID": "bfbff896-50cc-4b58-b346-429918859ba9",
+          "type": "RecurringSubscription"
         }
       ]
     }
   ],
-  "version" : {
-    "formatVersion" : "2.0",
-    "storeKitVersion" : "2"
+  "version": {
+    "formatVersion": "2.0",
+    "storeKitVersion": "2"
   }
 }

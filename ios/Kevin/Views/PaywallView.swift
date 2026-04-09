@@ -172,7 +172,7 @@ struct PaywallView: View {
             purchaseError = nil
             Task {
                 do {
-                    let offerID = isPromoEligible ? "founding_member_75off" : nil
+                    let offerID = isPromoEligible ? promoOfferID(for: product.id) : nil
                     let purchased = try await subscriptionManager.purchase(product, offerID: offerID)
                     if purchased {
                         isPurchasing = false
@@ -230,6 +230,17 @@ struct PaywallView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Helpers
+
+    private func promoOfferID(for productID: String) -> String {
+        switch productID {
+        case "com.kevin.callscreen.personal.monthly":    return "founding_member_75off_personal"
+        case "com.kevin.callscreen.business.monthly":   return "founding_member_75off_business"
+        case "com.kevin.callscreen.businesspro.monthly": return "founding_member_75off"
+        default: return "founding_member_75off"
+        }
     }
 
     // MARK: - Load Data

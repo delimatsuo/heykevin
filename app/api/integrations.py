@@ -64,15 +64,10 @@ def _success_page(service_name: str) -> str:
         }}
         h1 {{ font-size: 24px; margin-bottom: 12px; }}
         p {{ font-size: 16px; opacity: 0.85; line-height: 1.5; margin-bottom: 32px; }}
-        .btn {{
-            display: inline-block;
-            background: white;
-            color: #764ba2;
-            padding: 14px 32px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 16px;
+        .hint {{
+            font-size: 14px;
+            opacity: 0.7;
+            margin-top: 8px;
         }}
     </style>
 </head>
@@ -80,8 +75,8 @@ def _success_page(service_name: str) -> str:
     <div class="card">
         <div class="check">&#10003;</div>
         <h1>{service_name} Connected</h1>
-        <p>Your {service_name} account is now linked to Hey Kevin. You can close this page and return to the app.</p>
-        <a href="javascript:window.close()" class="btn">Close</a>
+        <p>Your {service_name} account is now linked to Hey Kevin.</p>
+        <p class="hint">You can close this page and go back to the app.</p>
     </div>
 </body>
 </html>"""

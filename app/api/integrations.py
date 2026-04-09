@@ -2,6 +2,7 @@
 
 import secrets
 import time
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from fastapi.responses import HTMLResponse
@@ -111,13 +112,12 @@ async def jobber_connect(contractor_id: str = Query(...), request: Request = Non
         "expires_at": time.time() + 600,
     })
 
-    authorize_url = (
-        f"{JOBBER_AUTH_URL}"
-        f"?client_id={settings.jobber_client_id}"
-        f"&redirect_uri={JOBBER_REDIRECT_URI}"
-        f"&response_type=code"
-        f"&state={state}"
-    )
+    authorize_url = JOBBER_AUTH_URL + "?" + urlencode({
+        "client_id": settings.jobber_client_id,
+        "redirect_uri": JOBBER_REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    })
 
     return {"authorize_url": authorize_url}
 
@@ -270,16 +270,15 @@ async def google_calendar_connect(contractor_id: str = Query(...), request: Requ
         "expires_at": time.time() + 600,
     })
 
-    authorize_url = (
-        f"{GOOGLE_AUTH_URL}"
-        f"?client_id={settings.google_calendar_client_id}"
-        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
-        f"&response_type=code"
-        f"&scope={GOOGLE_CALENDAR_SCOPE}"
-        f"&access_type=offline"
-        f"&prompt=consent"
-        f"&state={state}"
-    )
+    authorize_url = GOOGLE_AUTH_URL + "?" + urlencode({
+        "client_id": settings.google_calendar_client_id,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_CALENDAR_SCOPE,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    })
 
     return {"authorize_url": authorize_url}
 

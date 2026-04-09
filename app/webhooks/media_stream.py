@@ -381,6 +381,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 on_urgency_detected=on_urgency_detected,
                 call_sid=call_sid,
                 contractor_config=contractor_config_loaded,
+                caller_phone=active_call.caller_phone if active_call else "",
             )
             logger.info(f"Using ElevenLabs pipeline for call {call_sid}")
         started = await pipeline.start()

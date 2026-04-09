@@ -231,6 +231,7 @@ class VoicePipeline:
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
         contractor_config: Optional[dict] = None,
+        caller_phone: str = "",
     ):
         self.on_audio_out = on_audio_out
         self.on_transcript = on_transcript
@@ -239,6 +240,7 @@ class VoicePipeline:
         self.on_urgency_detected = on_urgency_detected  # callback for emergency escalation
         self._call_sid = call_sid
         self._contractor_config = contractor_config or {}
+        self._caller_phone = caller_phone
 
         # Check if after business hours (only applies to business mode)
         mode = self._contractor_config.get("mode", "business")
@@ -305,6 +307,10 @@ class VoicePipeline:
             return False
 
         self._connected = True
+
+        # Proactive Jobber caller lookup — inject CRM context before first response
+        if self._has_jobber() and self._caller_phone:
+            asyncio.create_task(self._prefetch_jobber_context())
 
         # Start RTDB command polling loop
         if self._call_sid:
@@ -779,6 +785,48 @@ class VoicePipeline:
             },
         },
     ]
+
+    async def _prefetch_jobber_context(self):
+        """Look up caller in Jobber and prepend CRM context to system prompt.
+
+        Runs in background during call setup — must complete within 3s or skip.
+        """
+        try:
+            from app.services.jobber import lookup_customer
+            token = self._get_jobber_token()
+            customer = await asyncio.wait_for(
+                lookup_customer(token, self._caller_phone),
+                timeout=3.0,
+            )
+            if not customer:
+                return
+
+            name = customer.get("name") or f"{customer.get('firstName', '')} {customer.get('lastName', '')}".strip()
+            address = customer.get("billingAddress", {})
+            addr_str = ", ".join(filter(None, [
+                address.get("street", ""),
+                address.get("city", ""),
+                address.get("province", ""),
+            ])) if address else ""
+
+            context_lines = [f"\nCRM CONTEXT (from Jobber): Caller is a known customer."]
+            if name:
+                context_lines.append(f"Name: {name}")
+            if addr_str:
+                context_lines.append(f"Address: {addr_str}")
+            context_lines.append(
+                "Use this info — greet them by name if appropriate, skip asking for their name and address."
+            )
+            crm_context = "\n".join(context_lines)
+
+            # Prepend to system prompt before first caller speech
+            self._system_prompt = self._system_prompt + crm_context
+            logger.info(f"Jobber CRM context injected for caller {self._caller_phone[:6]}***")
+
+        except asyncio.TimeoutError:
+            logger.debug("Jobber caller lookup timed out — proceeding without CRM context")
+        except Exception as e:
+            logger.warning(f"Jobber prefetch failed (non-critical): {e}")
 
     def _has_jobber(self) -> bool:
         """Check if the contractor has Jobber connected."""

@@ -326,6 +326,7 @@ struct SettingsView: View {
 
                 if !appState.isPersonalMode {
                     Section {
+                        // Jobber row
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(String(localized: "Jobber"))
@@ -335,15 +336,31 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Text(String(localized: "Coming Soon"))
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.orange.opacity(0.15))
-                                .clipShape(Capsule())
+                            if appState.jobberConnected {
+                                Button(role: .destructive) {
+                                    Task { await disconnectJobber() }
+                                } label: {
+                                    Text(String(localized: "Disconnect"))
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderless)
+                            } else {
+                                Button {
+                                    Task { await connectJobber() }
+                                } label: {
+                                    Text(String(localized: "Connect"))
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.blue)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color.blue.opacity(0.12))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
 
+                        // Google Calendar row
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(String(localized: "Google Calendar"))
@@ -353,18 +370,33 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Text(String(localized: "Coming Soon"))
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.orange.opacity(0.15))
-                                .clipShape(Capsule())
+                            if appState.googleCalendarConnected {
+                                Button(role: .destructive) {
+                                    Task { await disconnectGoogleCalendar() }
+                                } label: {
+                                    Text(String(localized: "Disconnect"))
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderless)
+                            } else {
+                                Button {
+                                    Task { await connectGoogleCalendar() }
+                                } label: {
+                                    Text(String(localized: "Connect"))
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.blue)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color.blue.opacity(0.12))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                     } header: {
                         Text(String(localized: "Integrations"))
                     } footer: {
-                        Text(String(localized: "Integrations with Jobber and Google Calendar are under review and will be available soon."))
+                        Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar to check availability and book appointments."))
                     }
                 }
 

@@ -318,4 +318,17 @@ async def handle_appstore_notification(payload: dict) -> bool:
         })
         logger.info(f"Subscription expired/cancelled: {contractor_id} type={notification_type}")
 
+        # Send push so the user knows their trial/subscription ended
+        try:
+            from app.services.push_notification import send_regular_push, get_device_token
+            device_token = await get_device_token(contractor_id=contractor_id)
+            if device_token:
+                await send_regular_push(
+                    device_token=device_token,
+                    title="Your Kevin subscription has ended",
+                    body="Subscribe to keep Kevin screening your calls.",
+                )
+        except Exception as push_err:
+            logger.warning(f"Expiry push failed (non-critical): {push_err}")
+
     return True

@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 
 COLLECTION = "calls"
 
-# Call records older than 7 days are eligible for cleanup
-RETENTION_DAYS = 7
+# Call records older than 90 days are eligible for cleanup
+RETENTION_DAYS = 90
 
 
 async def save_call(call_sid: str, data: dict):
@@ -55,7 +55,7 @@ async def get_call_history(e164_phone: str, limit: int = 10) -> list[dict]:
         return []
 
 
-async def get_calls_for_contractor(contractor_id: str, limit: int = 50) -> list[dict]:
+async def get_calls_for_contractor(contractor_id: str, limit: int = 100) -> list[dict]:
     """Get recent calls for a specific contractor, within retention window."""
     try:
         db = get_firestore_client()

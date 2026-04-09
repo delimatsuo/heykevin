@@ -321,24 +321,6 @@ struct SettingsView: View {
                 }
                 .disabled(isSaving)
 
-                // MARK: - Language
-
-                Section {
-                    Picker(String(localized: "Language"), selection: $appState.kevinLanguage) {
-                        Text(String(localized: "English only")).tag("en")
-                        Text(String(localized: "Auto-detect (English + Spanish)")).tag("auto")
-                    }
-                    .onChange(of: appState.kevinLanguage) { _, newValue in
-                        Task {
-                            await updateContractorSetting("language", newValue)
-                        }
-                    }
-                } header: {
-                    Text(String(localized: "Language"))
-                } footer: {
-                    Text(String(localized: "Auto-detect lets Kevin switch to Spanish when a caller speaks Spanish."))
-                }
-
                 // MARK: - Integrations
 
                 if !appState.isPersonalMode {

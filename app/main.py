@@ -215,9 +215,9 @@ async def _expired_contractor_cleanup():
                 # Send final SMS before releasing the number
                 if owner_phone:
                     final_sms = (
-                        "Kevin AI: Your call forwarding has been disabled after 14 days "
-                        "of inactivity. To reactivate, reinstall Kevin AI. "
-                        "If you need help, visit kevinai.app."
+                        "Kevin AI: Your Kevin number has been released after 14 days. "
+                        "To stop forwarding calls to the old number, dial ##61# "
+                        "(Verizon: dial *73). To reactivate, reinstall Kevin AI."
                     )
                     await send_sms(owner_phone, final_sms, from_number=twilio_number)
 

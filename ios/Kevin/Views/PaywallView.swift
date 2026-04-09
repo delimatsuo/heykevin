@@ -188,8 +188,8 @@ struct PaywallView: View {
 
     private var cancelForwardingButton: some View {
         Button {
-            // Open phone dialer with carrier code to cancel unconditional forwarding
-            if let url = URL(string: "tel:%2321%23") {
+            // ##61# = cancel no-answer forwarding (GSM standard). Verizon: *73
+            if let url = URL(string: "tel:%23%2361%23") {
                 UIApplication.shared.open(url)
             }
         } label: {

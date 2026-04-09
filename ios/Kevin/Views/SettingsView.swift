@@ -9,6 +9,7 @@ private func debugLog(_ message: String) {
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var showPaywall = false
+    @State private var showDeleteAccountAlert = false
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -371,13 +372,14 @@ struct SettingsView: View {
 
                 Section {
                     Button {
-                        dialCode("*21*\(dialNumber)%23")
+                        // *61* = forward on no answer (same as onboarding)
+                        dialCode("*61*\(dialNumber)%23")
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(String(localized: "Activate Kevin"))
                                     .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Forward all calls to Kevin"))
+                                Text(String(localized: "Forward missed calls to Kevin"))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -388,7 +390,8 @@ struct SettingsView: View {
                     }
 
                     Button(role: .destructive) {
-                        dialCode("%2321%23")
+                        // ##61# = cancel no-answer forwarding (GSM standard)
+                        dialCode("%23%2361%23")
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -406,7 +409,27 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Call Forwarding"))
                 } footer: {
-                    Text(String(localized: "Tapping a button opens your phone dialer with a carrier code. Tap Call to confirm. To verify status, dial *#21# from your keypad."))
+                    Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. Verizon users: use *71 to activate and *73 to deactivate instead."))
+                }
+
+                // MARK: - Account
+
+                Section {
+                    Button(role: .destructive) {
+                        showDeleteAccountAlert = true
+                    } label: {
+                        Text(String(localized: "Delete Account"))
+                    }
+                } footer: {
+                    Text(String(localized: "Releases your Kevin number and deletes all data. You will need to disable call forwarding manually."))
+                }
+                .alert(String(localized: "Delete Account"), isPresented: $showDeleteAccountAlert) {
+                    Button(String(localized: "Delete"), role: .destructive) {
+                        Task { await deleteAccount() }
+                    }
+                    Button(String(localized: "Cancel"), role: .cancel) {}
+                } message: {
+                    Text(String(localized: "This will permanently delete your Kevin account and release your Kevin number. Make sure to deactivate call forwarding first."))
                 }
 
                 // MARK: - Legal
@@ -728,6 +751,28 @@ struct SettingsView: View {
             importMessage = String(localized: "Failed to connect")
         }
         isImporting = false
+    }
+
+    private func deleteAccount() async {
+        guard !appState.contractorId.isEmpty else { return }
+        do {
+            let encodedId = appState.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? appState.contractorId
+            let url = URL(string: "\(appState.backendURL)/api/contractors/\(encodedId)")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.timeoutInterval = 15
+            APIClient.shared.authorize(&request)
+            let (_, _) = try await URLSession.shared.data(for: request)
+        } catch {
+            debugLog("Delete account failed: \(error)")
+        }
+        // Clear local state regardless of server response
+        await MainActor.run {
+            appState.contractorId = ""
+            appState.kevinNumber = ""
+            appState.isOnboarded = false
+            APIClient.shared.contractorToken = ""
+        }
     }
 }
 

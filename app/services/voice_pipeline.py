@@ -1160,9 +1160,9 @@ class VoicePipeline:
             pass  # Non-critical, will retry next check
 
     async def _unavailable_timer(self):
-        """After 45 seconds, tell the caller Deli is unavailable."""
+        """After 30 seconds, tell the caller the owner is unavailable."""
         try:
-            await asyncio.sleep(45)
+            await asyncio.sleep(30)
             if not self._connected or self._unavailable_said:
                 return
 

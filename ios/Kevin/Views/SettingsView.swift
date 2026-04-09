@@ -613,12 +613,12 @@ struct SettingsView: View {
                         dialCode("*61*\(dialNumber)%23")
                     }
                 } label: {
-                    Text(appState.forwardingActivated ? "Re-activate" : "Activate")
+                    Text(appState.forwardingActivated ? "Re-activate" : "Unverified")
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : Color.blue)
+                        .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Color.blue.opacity(appState.kevinNumber.isEmpty ? 0.05 : 0.12))
+                        .background((appState.forwardingActivated ? Color.blue : Color.orange).opacity(appState.kevinNumber.isEmpty ? 0.05 : 0.15))
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.borderless)

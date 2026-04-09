@@ -50,6 +50,11 @@ struct ContentView: View {
         }) {
             InCallView()
         }
+        // Force paywall when trial expires — cannot be dismissed without subscribing
+        .fullScreenCover(isPresented: .constant(appState.subscriptionStatus == "expired")) {
+            PaywallView(canDismiss: false)
+                .environmentObject(appState)
+        }
     }
 }
 

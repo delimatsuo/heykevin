@@ -586,7 +586,7 @@ struct OnboardingView: View {
             Button {
                 showPaywall = true
             } label: {
-                Text(String(localized: "Start Free Trial"))
+                Text(String(localized: "View Plans"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
@@ -596,7 +596,7 @@ struct OnboardingView: View {
             .sheet(isPresented: $showPaywall, onDismiss: {
                 appState.isOnboarded = true
             }) {
-                PaywallView()
+                PaywallView(canDismiss: true)
                     .environmentObject(appState)
             }
         }

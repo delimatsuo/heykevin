@@ -2,6 +2,9 @@ import SwiftUI
 import StoreKit
 
 struct PaywallView: View {
+    /// When false (trial expired), the paywall cannot be dismissed without subscribing.
+    var canDismiss: Bool = true
+
     @EnvironmentObject var appState: AppState
     @ObservedObject private var subscriptionManager = SubscriptionManager.shared
     @Environment(\.dismiss) var dismiss
@@ -65,6 +68,15 @@ struct PaywallView: View {
                         purchaseButton
                     }
 
+                    // Skip — only available during trial, not when expired
+                    if canDismiss && appState.subscriptionStatus == "trial" {
+                        Button(String(localized: "Continue without subscribing")) {
+                            dismiss()
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+
                     // Cancel Forwarding
                     cancelForwardingButton
 
@@ -93,16 +105,19 @@ struct PaywallView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Kevin AI")
+            .navigationTitle("Hey Kevin")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+                if canDismiss {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(String(localized: "Done")) { dismiss() }
+                    }
                 }
             }
             .task {
                 await loadData()
             }
+            .interactiveDismissDisabled(!canDismiss)
         }
     }
 
@@ -191,7 +206,7 @@ struct PaywallView: View {
                     .padding(.vertical, 16)
             } else {
                 let product = subscriptionManager.products.first(where: { $0.id == (selectedProductID ?? subscriptionManager.products.first?.id ?? "") })
-                Text(product != nil ? "Start Free Trial — \(product!.displayPrice)/mo" : "Start Free Trial")
+                Text(product != nil ? String(localized: "Try Free — then \(product!.displayPrice)/mo") : String(localized: "Try Free — then subscribe"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)

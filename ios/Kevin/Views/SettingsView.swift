@@ -72,7 +72,7 @@ struct SettingsView: View {
                     Text("Subscription")
                 }
                 .sheet(isPresented: $showPaywall) {
-                    PaywallView()
+                    PaywallView(canDismiss: true)
                         .environmentObject(appState)
                 }
 

@@ -9,15 +9,18 @@ struct CallHistoryView: View {
     var body: some View {
         NavigationStack {
             List {
-                // Known contacts toggle — most important setting, lives here
+                // Screen all calls toggle — inverted from ringThroughContacts backend field
                 Section {
-                    Toggle(isOn: $appState.ringThroughContacts) {
+                    Toggle(isOn: Binding(
+                        get: { !appState.ringThroughContacts },
+                        set: { appState.ringThroughContacts = !$0 }
+                    )) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(String(localized: "Send contacts to Kevin"))
+                            Text(String(localized: "Screen all calls"))
                                 .font(.subheadline.weight(.medium))
-                            Text(appState.ringThroughContacts
-                                 ? String(localized: "Contacts ring your phone directly")
-                                 : String(localized: "Kevin screens all calls"))
+                            Text(!appState.ringThroughContacts
+                                 ? String(localized: "Kevin screens everyone, including contacts")
+                                 : String(localized: "Contacts bypass Kevin and ring directly"))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

@@ -166,6 +166,9 @@ class AppState: ObservableObject {
         unreadCallCount = calls.filter { isCallUnread($0) }.count
     }
 
+    // Re-auth flag — set to true when server returns 401 (token expired/invalid)
+    @Published var needsReauth: Bool = false
+
     // Integrations
     @Published var jobberConnected: Bool = UserDefaults.standard.bool(forKey: "jobberConnected") {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.jobberConnected, forKey: "jobberConnected") } }

@@ -55,6 +55,18 @@ struct ContentView: View {
             PaywallView(canDismiss: false)
                 .environmentObject(appState)
         }
+        // Re-auth alert when token is invalid (e.g. app reinstalled, Keychain cleared)
+        .alert("Session Expired", isPresented: $appState.needsReauth) {
+            Button("Sign In Again") {
+                appState.needsReauth = false
+                appState.isOnboarded = false
+            }
+            Button("Later", role: .cancel) {
+                appState.needsReauth = false
+            }
+        } message: {
+            Text("Your session has expired. Sign in again to continue.")
+        }
     }
 }
 

@@ -9,6 +9,30 @@ struct CallHistoryView: View {
     var body: some View {
         NavigationStack {
             List {
+                // Known contacts toggle — most important setting, lives here
+                Section {
+                    Toggle(isOn: $appState.ringThroughContacts) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "Send contacts to Kevin"))
+                                .font(.subheadline.weight(.medium))
+                            Text(appState.ringThroughContacts
+                                 ? String(localized: "Contacts ring your phone directly")
+                                 : String(localized: "Kevin screens all calls"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .onChange(of: appState.ringThroughContacts) { _, newValue in
+                        Task {
+                            guard !appState.contractorId.isEmpty else { return }
+                            _ = try? await APIClient.shared.patchContractor(
+                                appState.contractorId,
+                                body: ["ring_through_contacts": newValue]
+                            )
+                        }
+                    }
+                }
+
                 if !errorMessage.isEmpty {
                     Section {
                         HStack {

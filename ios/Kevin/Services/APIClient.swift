@@ -56,19 +56,25 @@ class APIClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
 
-    /// Retry wrapper — only retries on 5xx server errors, not network failures
+    /// Retry wrapper — only retries on 5xx server errors, not network failures.
+    /// On 401, signals AppState to show re-auth (token expired/invalid).
     private func retryRequest(_ request: URLRequest, maxRetries: Int = 1) async throws -> (Data, URLResponse) {
         var lastError: Error?
         for attempt in 0...maxRetries {
             do {
                 let (data, response) = try await session.data(for: request)
-                if let http = response as? HTTPURLResponse, http.statusCode >= 500 && attempt < maxRetries {
-                    try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(attempt))) * 1_000_000_000)
-                    continue
+                if let http = response as? HTTPURLResponse {
+                    if http.statusCode == 401 {
+                        await MainActor.run { AppState.shared.needsReauth = true }
+                        return (data, response)
+                    }
+                    if http.statusCode >= 500 && attempt < maxRetries {
+                        try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(attempt))) * 1_000_000_000)
+                        continue
+                    }
                 }
                 return (data, response)
             } catch let error as URLError where error.code == .timedOut || error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
-                // Don't retry network-level failures — they won't resolve with a retry
                 throw error
             } catch {
                 lastError = error

@@ -8,6 +8,7 @@ private func debugLog(_ message: String) {
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showPaywall = false
     @State private var showDeleteAccountAlert = false
     @State private var showAboutDebug = false
@@ -539,6 +540,14 @@ struct SettingsView: View {
                 await loadKnowledge()
                 await checkJobberStatus()
                 await checkGoogleCalendarStatus()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    Task {
+                        await checkJobberStatus()
+                        await checkGoogleCalendarStatus()
+                    }
+                }
             }
         }
     }

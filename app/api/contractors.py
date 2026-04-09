@@ -239,6 +239,19 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
     updates = {k: v for k, v in body.dict().items() if v is not None and k not in PROTECTED_FIELDS}
     if not updates:
         return {"status": "no changes"}
+
+    # Tier enforcement: Personal subscribers cannot switch to Business mode.
+    # Business subscribers can freely switch to Personal (downgrade usage is fine).
+    if updates.get("mode") in ("business", "businessPro"):
+        contractor = await get_contractor(contractor_id)
+        tier = (contractor or {}).get("subscription_tier", "none")
+        if tier not in ("business", "businessPro"):
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=403,
+                detail="Business mode requires a Business subscription. Please upgrade your plan."
+            )
+
     await update_contractor(contractor_id, updates)
     return {"status": "ok"}
 

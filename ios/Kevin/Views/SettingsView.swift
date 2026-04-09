@@ -103,15 +103,20 @@ struct SettingsView: View {
                         }
 
                         Button {
-                            showModeChangeAlert = true
+                            // Personal subscribers can't switch to Business — show paywall
+                            if appState.isPersonalMode && appState.subscriptionTier == "personal" {
+                                showPaywall = true
+                            } else {
+                                showModeChangeAlert = true
+                            }
                         } label: {
                             HStack {
                                 Text(String(localized: "Mode"))
                                 Spacer()
                                 Text(appState.isPersonalMode ? String(localized: "Personal Assistant") : String(localized: "Business Assistant"))
                                     .foregroundStyle(appState.isPersonalMode ? .purple : .blue)
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(.tertiary)
+                                Image(systemName: appState.isPersonalMode && appState.subscriptionTier == "personal" ? "arrow.up.circle" : "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(appState.isPersonalMode && appState.subscriptionTier == "personal" ? Color.blue : Color.secondary)
                                     .font(.caption)
                             }
                         }

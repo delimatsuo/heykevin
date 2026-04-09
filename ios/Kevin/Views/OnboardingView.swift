@@ -245,6 +245,11 @@ struct OnboardingView: View {
                 .buttonStyle(.plain)
 
                 Button {
+                    // Personal subscribers cannot use Business mode
+                    if appState.subscriptionTier == "personal" {
+                        showPaywall = true
+                        return
+                    }
                     selectedMode = "business"
                     step = .businessInfo
                 } label: {

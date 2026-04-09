@@ -14,6 +14,7 @@ struct OnboardingView: View {
     @State private var contactsSynced = 0
     @State private var acceptedTerms = false
     @State private var phoneNumber = ""
+    @State private var isVerizon = false
     @State private var showPaywall = false
 
     enum OnboardingStep {
@@ -448,7 +449,8 @@ struct OnboardingView: View {
             VStack(spacing: 12) {
                 // Step 1: Clear existing forwarding
                 Button {
-                    if let url = URL(string: "tel:%23%2321%23") {
+                    let code = isVerizon ? "tel:*73" : "tel:%23%2321%23"
+                    if let url = URL(string: code) {
                         UIApplication.shared.open(url)
                     }
                 } label: {
@@ -472,7 +474,8 @@ struct OnboardingView: View {
                 // Step 2: Set Kevin forwarding
                 Button {
                     let number = kevinNumber.filter { $0.isNumber }
-                    if let url = URL(string: "tel:*61*\(number)%23") {
+                    let code = isVerizon ? "tel:*71\(number)" : "tel:*61*\(number)%23"
+                    if let url = URL(string: code) {
                         UIApplication.shared.open(url)
                     }
                 } label: {
@@ -521,6 +524,25 @@ struct OnboardingView: View {
             Text(String(localized: "Your Kevin number: \(kevinNumber)"))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
+
+            if !isVerizon {
+                Button {
+                    isVerizon = true
+                } label: {
+                    Text(String(localized: "Verizon customer? Tap here"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .underline()
+                }
+            } else {
+                Button {
+                    isVerizon = false
+                } label: {
+                    Text(String(localized: "✓ Using Verizon codes — tap to switch back"))
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+            }
 
             Spacer()
 

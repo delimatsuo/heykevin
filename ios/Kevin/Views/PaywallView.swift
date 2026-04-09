@@ -246,7 +246,7 @@ private struct TierCard: View {
         case "com.kevin.callscreen.personal.monthly": return "Personal"
         case "com.kevin.callscreen.business.monthly": return "Business"
         case "com.kevin.callscreen.businesspro.monthly": return "Business Pro"
-        default: return product.localizedTitle
+        default: return product.displayName
         }
     }
 
@@ -276,7 +276,7 @@ private struct TierCard: View {
     private var promoPrice: String {
         let price = product.price
         let discounted = (price / 4).rounded(toPlaces: 2)
-        return "$\(String(format: "%.2f", discounted))"
+        return "$\(String(format: "%.2f", NSDecimalNumber(decimal: discounted).doubleValue))"
     }
 
     var body: some View {

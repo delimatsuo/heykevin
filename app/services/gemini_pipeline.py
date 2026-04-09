@@ -541,18 +541,24 @@ class GeminiPipeline:
             owner_name = self._contractor_config.get("owner_name", settings.user_name)
             pronoun = self._contractor_config.get("pronoun", "he")
 
-            # Send instruction to Gemini to deliver the unavailability message
-            await self._ws.send(json.dumps({
-                "client_content": {
-                    "turns": [{"role": "user", "parts": [{"text": (
-                        f"Tell the caller that {owner_name} is not available right now. "
-                        f"Offer to take a message and make sure {pronoun} gets it. "
-                        f"Be warm and apologetic."
-                    )}]}],
-                    "turn_complete": True,
-                }
-            }))
-            logger.info("Gemini: unavailability message triggered")
+            if not self._ws:
+                logger.warning("unavailable_timer: Gemini WS not open")
+                return
+            try:
+                await self._ws.send(json.dumps({
+                    "client_content": {
+                        "turns": [{"role": "user", "parts": [{"text": (
+                            f"Tell the caller that {owner_name} is not available right now. "
+                            f"Offer to take a message and make sure {pronoun} gets it. "
+                            f"Be warm and apologetic."
+                        )}]}],
+                        "turn_complete": True,
+                    }
+                }))
+                logger.info("Gemini: unavailability message triggered (30s timer)")
+            except Exception as e:
+                logger.error(f"Failed to send unavailability to Gemini: {e}")
+                self._unavailable_said = False  # allow retry
         except asyncio.CancelledError:
             pass
 
@@ -583,16 +589,24 @@ class GeminiPipeline:
                 if cmd_type == "take_message" and not self._unavailable_said:
                     if self._unavailable_task:
                         self._unavailable_task.cancel()
-                    # Trigger unavailability immediately
-                    self._unavailable_said = True
-                    await self._ws.send(json.dumps({
-                        "client_content": {
-                            "turns": [{"role": "user", "parts": [{"text": (
-                                "The owner has declined the call. Tell the caller they are unavailable "
-                                "and offer to take a message. Be warm and apologetic."
-                            )}]}],
-                            "turn_complete": True,
-                        }
-                    }))
-        except Exception:
-            pass
+                    if not self._ws:
+                        logger.warning("take_message: Gemini WS not open — cannot inject")
+                        return
+                    owner_name = self._contractor_config.get("owner_name", settings.user_name)
+                    try:
+                        await self._ws.send(json.dumps({
+                            "client_content": {
+                                "turns": [{"role": "user", "parts": [{"text": (
+                                    f"The owner ({owner_name}) has declined the call. "
+                                    "Tell the caller they are unavailable and offer to take a message. "
+                                    "Be warm and apologetic."
+                                )}]}],
+                                "turn_complete": True,
+                            }
+                        }))
+                        self._unavailable_said = True
+                        logger.info(f"take_message injected into Gemini for {self._call_sid[:8]}")
+                    except Exception as e:
+                        logger.error(f"Failed to inject take_message into Gemini: {e}")
+        except Exception as e:
+            logger.warning(f"Command check error: {e}")

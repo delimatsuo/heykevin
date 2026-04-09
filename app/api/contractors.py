@@ -19,6 +19,9 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/contractors", dependencies=[Depends(verify_api_token)])
 
+# Unauthenticated router — endpoints that must work even with an invalid/missing token
+public_router = APIRouter(prefix="/api/contractors")
+
 # Fields that must never be returned in API responses
 _SENSITIVE_KEYS = frozenset({
     "api_token_hash",
@@ -138,7 +141,7 @@ async def api_list_contractors(request: Request):
     return {"contractors": [_redact_contractor(c) for c in contractors]}
 
 
-@router.get("/lookup-by-apple-id")
+@public_router.get("/lookup-by-apple-id")
 async def api_lookup_by_apple_id(request: Request, apple_user_id: str = ""):
     """Find a contractor by their Apple User ID (used during onboarding/login).
 

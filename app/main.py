@@ -14,6 +14,7 @@ from app.middleware.auth import verify_api_token
 from app.utils.logging import setup_logging, get_logger, redact_phone
 from app.webhooks.twilio_incoming import router as twilio_router
 from app.webhooks.media_stream import router as media_stream_router
+from app.api.contractors import public_router as contractors_public_router
 from app.api.contacts import router as contacts_router
 from app.api.calls import router as calls_router
 from app.api.knowledge import router as knowledge_router
@@ -56,6 +57,7 @@ app.add_middleware(
 # Webhook routes
 app.include_router(twilio_router)
 app.include_router(media_stream_router)
+app.include_router(contractors_public_router)
 app.include_router(contacts_router)
 app.include_router(calls_router)
 app.include_router(knowledge_router)

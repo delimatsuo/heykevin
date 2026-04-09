@@ -52,7 +52,7 @@ class APIClient {
     /// Add auth header using contractor token from Keychain
     func authorize(_ request: inout URLRequest) {
         let token = contractorToken
-        guard !tokef tn.isEmpty else { return }
+        guard !token.isEmpty else { return }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 private func debugLog(_ message: String) {
     #if DEBUG
@@ -22,6 +23,8 @@ struct SettingsView: View {
     @State private var isSaving = false
     @State private var saveError = ""
     @State private var knowledgeLengthWarning = ""
+    @State private var pushPermission: UNAuthorizationStatus = .notDetermined
+    @State private var isProvisioningNumber = false
     @State private var businessHoursStart = Calendar.current.date(from: DateComponents(hour: 8, minute: 0)) ?? Date()
     @State private var businessHoursEnd = Calendar.current.date(from: DateComponents(hour: 17, minute: 0)) ?? Date()
 
@@ -32,6 +35,10 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // MARK: - Setup Status
+
+                setupStatusSection
+
                 // MARK: - Subscription Status
 
                 Section {
@@ -531,12 +538,14 @@ struct SettingsView: View {
                 await loadKnowledge()
                 await checkJobberStatus()
                 await checkGoogleCalendarStatus()
+                await refreshPushPermission()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     Task {
                         await checkJobberStatus()
                         await checkGoogleCalendarStatus()
+                        await refreshPushPermission()
                     }
                 }
             }
@@ -545,6 +554,123 @@ struct SettingsView: View {
 
     private var formattedKevinNumber: String {
         PhoneFormatter.format(kevinNumber)
+    }
+
+    // MARK: - Setup Status
+
+    private var setupStatusSection: some View {
+        let numberOK = !appState.kevinNumber.isEmpty
+        let pushOK = pushPermission == .authorized || pushPermission == .provisional
+        let subOK = appState.subscriptionStatus == "trial" || appState.subscriptionStatus == "active"
+        let allGood = numberOK && pushOK && subOK
+
+        return Section {
+            if allGood {
+                Label("Kevin is set up and ready", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.subheadline.weight(.medium))
+            }
+
+            // Kevin number
+            SetupRow(
+                title: "Kevin Number",
+                ok: numberOK,
+                okLabel: formattedKevinNumber,
+                failLabel: "No number assigned"
+            ) {
+                if isProvisioningNumber { return }
+                isProvisioningNumber = true
+                Task {
+                    await provisionNumberFromSettings()
+                    isProvisioningNumber = false
+                }
+            } actionLabel: {
+                if isProvisioningNumber {
+                    AnyView(ProgressView().scaleEffect(0.8))
+                } else {
+                    AnyView(Text("Get Number").font(.caption.weight(.medium)).foregroundStyle(.blue))
+                }
+            }
+
+            // Call forwarding — we can't verify carrier state, just guide the user
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Call Forwarding")
+                        .font(.subheadline)
+                    Text("Missed calls must route to Kevin")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    if !appState.kevinNumber.isEmpty {
+                        dialCode("*61*\(dialNumber)%23")
+                    }
+                } label: {
+                    Text("Activate")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : Color.blue)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.blue.opacity(appState.kevinNumber.isEmpty ? 0.05 : 0.12))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.borderless)
+                .disabled(appState.kevinNumber.isEmpty)
+            }
+
+            // Push notifications
+            SetupRow(
+                title: "Push Notifications",
+                ok: pushOK,
+                okLabel: "Enabled",
+                failLabel: pushPermission == .denied ? "Blocked — tap to enable" : "Not enabled"
+            ) {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            } actionLabel: {
+                AnyView(Text("Open Settings").font(.caption.weight(.medium)).foregroundStyle(.blue))
+            }
+
+            // Subscription
+            SetupRow(
+                title: "Subscription",
+                ok: subOK,
+                okLabel: appState.subscriptionStatus == "trial" ? "Free trial" : "Active",
+                failLabel: "Expired"
+            ) {
+                showPaywall = true
+            } actionLabel: {
+                AnyView(Text("Subscribe").font(.caption.weight(.medium)).foregroundStyle(.blue))
+            }
+
+        } header: {
+            Text("Setup Status")
+        }
+    }
+
+    private func refreshPushPermission() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        await MainActor.run { pushPermission = settings.authorizationStatus }
+    }
+
+    private func provisionNumberFromSettings() async {
+        guard !appState.contractorId.isEmpty else { return }
+        do {
+            let url = URL(string: "\(APIClient.shared.baseURL)/api/contractors/\(appState.contractorId)/provision-number")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            APIClient.shared.authorize(&request)
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let number = json["phone_number"] as? String, !number.isEmpty {
+                await MainActor.run { appState.kevinNumber = number }
+            }
+        } catch {
+            debugLog("Provision from settings failed: \(error)")
+        }
     }
 
     private var dialNumber: String {
@@ -1041,3 +1167,39 @@ San Jose, Santa Clara, Campbell
 
 import AVFoundation
 import Speech
+
+// MARK: - SetupRow
+
+private struct SetupRow<ActionLabel: View>: View {
+    let title: String
+    let ok: Bool
+    let okLabel: String
+    let failLabel: String
+    let action: () -> Void
+    @ViewBuilder let actionLabel: () -> ActionLabel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .foregroundStyle(ok ? .green : .orange)
+                .font(.title3)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                Text(ok ? okLabel : failLabel)
+                    .font(.caption)
+                    .foregroundStyle(ok ? Color.secondary : Color.orange)
+            }
+
+            Spacer()
+
+            if !ok {
+                Button(action: action) {
+                    actionLabel()
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+}

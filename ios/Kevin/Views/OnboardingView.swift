@@ -667,9 +667,19 @@ struct OnboardingView: View {
             if !name.isEmpty { appState.userName = name }
             if !biz.isEmpty { appState.businessName = biz }
             appState.mode = (mode == "personal") ? "personal" : "business"
-            if !number.isEmpty { appState.kevinNumber = number }
-            appState.isOnboarded = true
             if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
+        }
+
+        // If account has no Kevin number, provision one before completing restore
+        if number.isEmpty {
+            await MainActor.run { step = .provisioning }
+            await provision(mode: (mode == "personal") ? "personal" : "business")
+            return
+        }
+
+        await MainActor.run {
+            appState.kevinNumber = number
+            appState.isOnboarded = true
         }
 
         // Sync contacts in background

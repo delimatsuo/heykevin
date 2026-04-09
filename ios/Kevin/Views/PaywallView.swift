@@ -30,9 +30,25 @@ struct PaywallView: View {
                     }
 
                     // Tier cards
-                    if subscriptionManager.products.isEmpty {
-                        ProgressView("Loading plans...")
+                    if subscriptionManager.isLoading {
+                        ProgressView(String(localized: "Loading plans..."))
                             .padding(.vertical, 40)
+                    } else if subscriptionManager.products.isEmpty {
+                        VStack(spacing: 12) {
+                            Text(String(localized: "Could not load plans."))
+                                .foregroundStyle(.secondary)
+                            if let err = subscriptionManager.fetchError {
+                                Text(err)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal)
+                            }
+                            Button(String(localized: "Try Again")) {
+                                Task { await loadData() }
+                            }
+                        }
+                        .padding(.vertical, 40)
                     } else {
                         ForEach(subscriptionManager.products, id: \.id) { product in
                             TierCard(
@@ -219,17 +235,18 @@ struct PaywallView: View {
     // MARK: - Load Data
 
     private func loadData() async {
-        // Fetch products if not already loaded
-        if subscriptionManager.products.isEmpty {
-            await subscriptionManager.fetchProducts()
-        }
+        await subscriptionManager.fetchProducts()
         selectedProductID = subscriptionManager.products.first?.id
 
-        // Check promo eligibility
-        isCheckingPromo = true
-        let eligible = await APIClient.shared.checkPromoEligibility(contractorId: appState.contractorId)
-        isPromoEligible = eligible
-        isCheckingPromo = false
+        // Check promo eligibility in parallel with product fetch result
+        if !appState.contractorId.isEmpty {
+            isCheckingPromo = true
+            let eligible = await APIClient.shared.checkPromoEligibility(contractorId: appState.contractorId)
+            isPromoEligible = eligible
+            isCheckingPromo = false
+        } else {
+            isCheckingPromo = false
+        }
     }
 }
 

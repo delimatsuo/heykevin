@@ -25,6 +25,7 @@ class SubscriptionManager: ObservableObject {
     @Published var products: [Product] = []
     @Published var isLoading = false
     @Published var purchaseError: String? = nil
+    @Published var fetchError: String? = nil
 
     // MARK: - Internal State
 
@@ -48,11 +49,16 @@ class SubscriptionManager: ObservableObject {
 
     func fetchProducts() async {
         isLoading = true
+        fetchError = nil
         defer { isLoading = false }
         do {
             let fetched = try await Product.products(for: SubscriptionManager.productIDs)
+            if fetched.isEmpty {
+                fetchError = "No products returned. Check StoreKit configuration is enabled in scheme (Edit Scheme → Run → Options → StoreKit Configuration)."
+            }
             products = fetched.sorted { $0.price < $1.price }
         } catch {
+            fetchError = error.localizedDescription
             print("SubscriptionManager: fetchProducts failed: \(error)")
         }
     }

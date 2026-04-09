@@ -428,7 +428,9 @@ class APIClient {
            let callsArray = json["calls"] as? [[String: Any]] {
             return callsArray.compactMap { dict in
                 CallRecord(
-                    id: dict["call_sid"] as? String ?? UUID().uuidString,
+                    // Use call_sid as stable ID. Fall back to timestamp+phone so
+                    // read state persists across fetches (UUID() would break this).
+                    id: dict["call_sid"] as? String ?? "\(dict["timestamp"] as? Double ?? 0)-\(dict["caller_phone"] as? String ?? "")",
                     callerPhone: dict["caller_phone"] as? String ?? "",
                     callerName: dict["caller_name"] as? String ?? "",
                     timestamp: Date(timeIntervalSince1970: dict["timestamp"] as? Double ?? 0),

@@ -41,6 +41,17 @@ struct CallHistoryView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle(String(localized: "Recents"))
+            .toolbar {
+                if calls.contains(where: { appState.isCallUnread($0) }) {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(String(localized: "Mark All Read")) {
+                            calls.forEach { appState.markCallAsRead($0.id) }
+                            appState.updateUnreadCount(calls: calls)
+                        }
+                        .font(.subheadline)
+                    }
+                }
+            }
             .refreshable { await loadCalls() }
             .task { await loadCalls() }
         }

@@ -573,38 +573,10 @@ struct OnboardingView: View {
     // MARK: - Done
 
     private var doneStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.green)
-
-            Text(String(localized: "You're All Set!"))
-                .font(.title.bold())
-
-            Text(String(localized: "Kevin is ready to answer your calls."))
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Button {
-                showPaywall = true
-            } label: {
-                Text(String(localized: "View Plans"))
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-            }
-            .buttonStyle(.borderedProminent)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .sheet(isPresented: $showPaywall, onDismiss: {
-                appState.isOnboarded = true
-            }) {
-                PaywallView(canDismiss: true)
-                    .environmentObject(appState)
-            }
-        }
+        // Skip the intermediate "You're All Set" screen.
+        // Go straight to PaywallView as the final onboarding step.
+        PaywallView(canDismiss: true, isOnboarding: true)
+            .environmentObject(appState)
     }
 
     // MARK: - Logic

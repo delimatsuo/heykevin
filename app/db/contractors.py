@@ -177,7 +177,7 @@ async def create_contractor(data: dict) -> str:
     trial_start = data.setdefault("trial_start", time.time())
     data.setdefault("subscription_status", "trial")
     data.setdefault("subscription_tier", "none")
-    data.setdefault("subscription_expires", trial_start + 14 * 86400)
+    data.setdefault("subscription_expires", trial_start + 3 * 86400)  # 3-day grace; real trial is Apple's 2-week intro offer
     data.setdefault("deleted_app_detected_at", None)
     data.setdefault("subscription_uuid", str(_uuid.uuid4()))
     loop = asyncio.get_event_loop()

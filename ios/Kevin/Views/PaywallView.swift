@@ -4,6 +4,8 @@ import StoreKit
 struct PaywallView: View {
     /// When false (trial expired), the paywall cannot be dismissed without subscribing.
     var canDismiss: Bool = true
+    /// When true, shown as the final onboarding step — skip link says "Maybe later"
+    var isOnboarding: Bool = false
 
     @EnvironmentObject var appState: AppState
     @ObservedObject private var subscriptionManager = SubscriptionManager.shared
@@ -68,9 +70,14 @@ struct PaywallView: View {
                         purchaseButton
                     }
 
-                    // Skip — only available during trial, not when expired
+                    // Skip — only during active trial/grace period
                     if canDismiss && appState.subscriptionStatus == "trial" {
-                        Button(String(localized: "Continue without subscribing")) {
+                        Button(isOnboarding
+                               ? String(localized: "Maybe later")
+                               : String(localized: "Continue without subscribing")) {
+                            if isOnboarding {
+                                appState.isOnboarded = true
+                            }
                             dismiss()
                         }
                         .font(.subheadline)
@@ -138,10 +145,12 @@ struct PaywallView: View {
                     .foregroundStyle(.white)
             }
 
-            Text("Upgrade Kevin AI")
+            Text(isOnboarding ? "Start Your Free Trial" : "Hey Kevin")
                 .font(.title2.bold())
 
-            Text("AI call screening that learns your business.\n14-day free trial included.")
+            Text(isOnboarding
+                 ? "Try Hey Kevin free for 2 weeks.\nCancel anytime before your trial ends."
+                 : "AI call screening that learns your business.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -191,6 +200,9 @@ struct PaywallView: View {
                     let purchased = try await subscriptionManager.purchase(product, offerID: offerID)
                     if purchased {
                         isPurchasing = false
+                        if isOnboarding {
+                            appState.isOnboarded = true
+                        }
                         dismiss()
                         return
                     }
@@ -206,7 +218,10 @@ struct PaywallView: View {
                     .padding(.vertical, 16)
             } else {
                 let product = subscriptionManager.products.first(where: { $0.id == (selectedProductID ?? subscriptionManager.products.first?.id ?? "") })
-                Text(product != nil ? String(localized: "Try Free — then \(product!.displayPrice)/mo") : String(localized: "Try Free — then subscribe"))
+                let buttonLabel = isOnboarding
+                    ? (product != nil ? "Start 2-Week Free Trial — then \(product!.displayPrice)/mo" : "Start Free Trial")
+                    : (product != nil ? "Try Free — then \(product!.displayPrice)/mo" : "Subscribe")
+                Text(String(localized: String.LocalizationValue(buttonLabel)))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)

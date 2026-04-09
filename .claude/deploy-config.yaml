@@ -14,7 +14,7 @@ project:
 environments:
   staging:
     branch: staging
-    url: pending
+    url: https://kevin-api-staging-752910912062.us-central1.run.app
     cloud_run_service: kevin-api-staging
     gcp_project_id: kevin-491315
     health_check: /health

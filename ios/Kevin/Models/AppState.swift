@@ -8,7 +8,15 @@ enum AppTab {
 class AppState: ObservableObject {
     static let shared = AppState()
 
-    let backendURL = "https://kevin-api-752910912062.us-central1.run.app"
+    let backendURL: String = {
+        if let url = Bundle.main.infoDictionary?["BackendURL"] as? String, !url.isEmpty {
+            return url
+        }
+        #if DEBUG
+        assertionFailure("BackendURL not set in Info.plist — check build configuration")
+        #endif
+        return "https://kevin-api-752910912062.us-central1.run.app"
+    }()
 
     // One-time migration from UserDefaults to Keychain for existing users
     private static func migrateToKeychain(_ key: String, keychainKey: String? = nil) -> String {

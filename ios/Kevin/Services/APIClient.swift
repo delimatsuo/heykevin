@@ -16,7 +16,8 @@ struct ActiveCallInfo {
 class APIClient {
     static let shared = APIClient()
 
-    let baseURL = "https://kevin-api-752910912062.us-central1.run.app"
+    let baseURL = Bundle.main.infoDictionary?["BackendURL"] as? String
+        ?? "https://kevin-api-752910912062.us-central1.run.app"
 
     /// Per-contractor API token stored securely in Keychain
     /// Migrates from UserDefaults on first access for existing users

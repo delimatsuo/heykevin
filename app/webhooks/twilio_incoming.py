@@ -576,8 +576,7 @@ async def _post_routing_tasks(
             call_record["contractor_id"] = contractor_id
         await save_call(call_sid, call_record)
 
-        # Push notification is sent by media_stream.py when the voice pipeline starts
-        # (avoids duplicate push — only one "Incoming Call" notification)
+        # Push notification is sent after save_active_call below (has contractor_id, fires before transcription)
 
         # Save active call state to RTDB
         if route == Route.AI_SCREENING:
@@ -598,6 +597,22 @@ async def _post_routing_tasks(
                     ws_token=ws_token,
                 )
                 await save_active_call(active_call)
+
+                # Send push notification now that RTDB is saved and contractor_id is known
+                if contractor_id:
+                    from app.services.push_notification import send_regular_push, get_device_token
+                    _push_token = await get_device_token(contractor_id=contractor_id)
+                    if _push_token:
+                        await send_regular_push(
+                            device_token=_push_token,
+                            title="Incoming Call",
+                            body=f"Kevin is screening a call from {caller_name or caller_phone}",
+                            call_sid=call_sid,
+                            caller_phone=caller_phone,
+                            caller_name=caller_name,
+                        )
+                    else:
+                        logger.warning(f"No push token for contractor {contractor_id} — notification not sent")
 
                 # Run Twilio Lookup in background (too slow for sync webhook path)
                 # Include CNAM if caller is unknown and contractor has it enabled

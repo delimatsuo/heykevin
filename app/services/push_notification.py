@@ -361,7 +361,7 @@ async def get_device_token(token_type: str = "push", contractor_id: str = "") ->
             data = doc.to_dict()
             if token_type == "voip":
                 return data.get("voip_token", "")
-            return data.get("push_token", "") or data.get("voip_token", "")
+            return data.get("push_token", "")
     except Exception as e:
         logger.error(f"Failed to get device token: {e}", exc_info=True)
     return None

@@ -10,7 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config import settings
 from app.services.voice_pipeline import VoicePipeline
 from app.db.cache import get_active_call, update_active_call, _init_firebase, ACTIVE_CALLS_PATH
-from app.services.push_notification import send_regular_push, get_device_token
+from app.services.push_notification import get_device_token
 from app.utils.logging import get_logger, redact_phone
 
 logger = get_logger(__name__)
@@ -189,7 +189,6 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     stream_sid = None
     pipeline = None
     transcript_lines = []
-    push_sent = False
     last_rtdb_update = 0.0
 
     # Retry active call lookup — RTDB write from twilio_incoming may still be in-flight
@@ -266,7 +265,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     async def on_transcript(speaker: str, text: str):
         """Transcript update — both Kevin and Caller sides."""
-        nonlocal push_sent, last_rtdb_update
+        nonlocal last_rtdb_update
 
         transcript_lines.append(f"{speaker}: {text}")
 
@@ -285,24 +284,6 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 "transcript_buffer": transcript_text,
             }))
             task.add_done_callback(_log_task_exception)
-
-        # Send ONE push notification when the call starts
-        if not push_sent:
-            push_sent = True
-            _cid = contractor_config_loaded.get("contractor_id", "")
-            device_token = await get_device_token(contractor_id=_cid)
-            if device_token:
-                caller_phone = active_call.caller_phone if active_call else call_sid
-                caller_name = active_call.caller_name if active_call else ""
-                task = asyncio.create_task(send_regular_push(
-                    device_token=device_token,
-                    title="Incoming Call",
-                    body=f"Kevin is screening a call from {caller_name or caller_phone}",
-                    call_sid=call_sid,
-                    caller_phone=caller_phone,
-                    caller_name=caller_name,
-                ))
-                task.add_done_callback(_log_task_exception)
 
     _urgency_push_count = 0
 

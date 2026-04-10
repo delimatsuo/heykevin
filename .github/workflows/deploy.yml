@@ -105,7 +105,10 @@ jobs:
       - name: Health check
         run: |
           sleep 15
-          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
-            "https://kevin-api-752910912062.us-central1.run.app/health" || echo "000")
-          echo "Production health: HTTP $STATUS"
+          PROD_URL=$(gcloud run services describe $PRODUCTION_SERVICE \
+            --project $GCP_PROJECT_ID \
+            --region $GCP_REGION \
+            --format='value(status.url)')
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$PROD_URL/health" || echo "000")
+          echo "Production health: HTTP $STATUS at $PROD_URL"
           [ "$STATUS" = "200" ] || exit 1

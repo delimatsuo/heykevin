@@ -14,6 +14,12 @@ packages:
     url: https://github.com/twilio/twilio-voice-ios
     from: "6.11.0"
 
+# Build configurations: Debug → staging backend, Staging → staging backend (TestFlight), Release → production
+configs:
+  Debug: debug
+  Staging: release
+  Release: release
+
 targets:
   Kevin:
     type: application
@@ -35,15 +41,27 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false
         ENABLE_PREVIEWS: false
+        BACKEND_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
       configs:
+        Staging:
+          SWIFT_OPTIMIZATION_LEVEL: -O
+          ENABLE_DEBUG_DYLIB: false
+          BACKEND_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
         Release:
           SWIFT_OPTIMIZATION_LEVEL: -O
           ENABLE_DEBUG_DYLIB: false
+          BACKEND_URL: https://kevin-api-752910912062.us-central1.run.app
     dependencies:
       - package: TwilioVoice
     scheme:
       testTargets: []
       storeKitConfiguration: Kevin/Products.storekit
+      buildConfigs:
+        run: Debug
+        test: Debug
+        profile: Staging
+        analyze: Staging
+        archive: Release
     entitlements:
       path: Kevin/Kevin.entitlements
       properties:
@@ -65,3 +83,4 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UILaunchScreen: {}
+        BackendURL: $(BACKEND_URL)

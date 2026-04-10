@@ -14,7 +14,9 @@ struct PaywallView: View {
     @State private var isPromoEligible = false
     @State private var isCheckingPromo = true
     @State private var isPurchasing = false
+    @State private var isRestoring = false
     @State private var purchaseError: String?
+    @State private var restoreMessage: String?
     @State private var selectedProductID: String?
 
     var body: some View {
@@ -88,13 +90,43 @@ struct PaywallView: View {
                     cancelForwardingButton
 
                     // Restore Purchases
-                    Button("Restore Purchases") {
+                    Button {
                         Task {
+                            isRestoring = true
+                            restoreMessage = nil
+                            purchaseError = nil
+                            let statusBefore = appState.subscriptionStatus
                             await subscriptionManager.restorePurchases()
+                            isRestoring = false
+                            if appState.subscriptionStatus == "active" || appState.subscriptionStatus == "trial" {
+                                if statusBefore != appState.subscriptionStatus {
+                                    dismiss()
+                                } else {
+                                    restoreMessage = "Subscription restored."
+                                }
+                            } else if let err = subscriptionManager.purchaseError, !err.isEmpty {
+                                purchaseError = err
+                            } else {
+                                restoreMessage = "No active subscription found for this Apple ID."
+                            }
+                        }
+                    } label: {
+                        if isRestoring {
+                            ProgressView().scaleEffect(0.8)
+                        } else {
+                            Text("Restore Purchases")
                         }
                     }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .disabled(isRestoring)
+
+                    if let msg = restoreMessage {
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
 
                     if let error = purchaseError {
                         Text(error)
@@ -207,7 +239,13 @@ struct PaywallView: View {
                         return
                     }
                 } catch {
-                    purchaseError = error.localizedDescription
+                    // If promo offer was rejected, fall back to regular price automatically
+                    if isPromoEligible {
+                        isPromoEligible = false
+                        purchaseError = "Promo offer unavailable for your account — plans now shown at regular price. Tap the button again to subscribe."
+                    } else {
+                        purchaseError = error.localizedDescription
+                    }
                 }
                 isPurchasing = false
             }

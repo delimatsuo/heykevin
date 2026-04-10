@@ -9,6 +9,7 @@ struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var callManager = CallManager.shared
     @Environment(\.scenePhase) var scenePhase
+    @State private var showForcedPaywall = false
 
     var body: some View {
         TabView(selection: $appState.selectedTab) {
@@ -51,9 +52,19 @@ struct ContentView: View {
             InCallView()
         }
         // Force paywall when trial expires — cannot be dismissed without subscribing
-        .fullScreenCover(isPresented: .constant(appState.subscriptionStatus == "expired")) {
+        .fullScreenCover(isPresented: $showForcedPaywall) {
             PaywallView(canDismiss: false)
                 .environmentObject(appState)
+        }
+        .onAppear {
+            showForcedPaywall = appState.subscriptionStatus == "expired"
+        }
+        .onChange(of: appState.subscriptionStatus) {
+            if appState.subscriptionStatus == "expired" {
+                showForcedPaywall = true
+            } else {
+                showForcedPaywall = false
+            }
         }
         // Re-auth alert when token is invalid (e.g. app reinstalled, Keychain cleared)
         .alert("Session Expired", isPresented: $appState.needsReauth) {

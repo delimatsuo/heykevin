@@ -1,4 +1,4 @@
 /* Permission dialog strings - Spanish */
-"NSContactsUsageDescription" = "Kevin necesita acceso a tus contactos para agregar números VIP que suenen directamente sin filtrado.";
+"NSContactsUsageDescription" = "Hey Kevin sube tus contactos a nuestro servidor seguro para que Kevin pueda reconocer a quienes te llaman por nombre y dejar pasar directamente a los contactos de confianza sin filtrado por IA. Tus contactos se usan solo para este propósito, nunca se comparten ni se venden, y se eliminan si quitas tu cuenta.";
 "NSMicrophoneUsageDescription" = "Kevin necesita acceso al micrófono para conectarte con las personas que llaman y grabar entrenamiento de voz.";
 "NSSpeechRecognitionUsageDescription" = "Kevin usa reconocimiento de voz para aprender sobre tu negocio a partir de tu voz.";

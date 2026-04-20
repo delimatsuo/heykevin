@@ -76,7 +76,7 @@ targets:
           - voip
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
-        NSContactsUsageDescription: "Kevin needs access to your contacts to add VIP numbers that ring through without screening."
+        NSContactsUsageDescription: "Hey Kevin uploads your contacts to our secure server so Kevin can recognize your callers by name and ring trusted contacts through directly without AI screening. Contacts are used only for this purpose, are never shared or sold, and are deleted if you remove your account."
         NSMicrophoneUsageDescription: "Kevin needs microphone access to connect you with callers and record voice training."
         NSSpeechRecognitionUsageDescription: "Kevin uses speech recognition to learn about your business from your voice."
         ITSAppUsesNonExemptEncryption: false

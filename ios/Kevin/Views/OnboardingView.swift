@@ -286,46 +286,95 @@ struct OnboardingView: View {
     // MARK: - Contacts Permission
 
     private var contactsPermissionStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: 20) {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.blue)
+                    .padding(.top, 24)
 
-            Image(systemName: "person.crop.circle.badge.checkmark")
-                .font(.system(size: 56))
-                .foregroundStyle(.blue)
+                Text(String(localized: "Recognize Your Contacts"))
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
 
-            Text(String(localized: "Recognize Your Contacts"))
-                .font(.title.bold())
+                Text(String(localized: "To recognize callers by name and let trusted contacts ring through without AI screening, Hey Kevin needs to upload your contacts to our secure server."))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
 
-            Text(String(localized: "Kevin can recognize callers in your contacts so their calls ring through without screening."))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            Spacer()
-
-            Button {
-                Task {
-                    let granted = await ContactSyncManager.shared.requestAccess()
-                    if granted {
-                        // Sync will happen after provisioning when contractorId is available
-                    }
-                    step = .provisioning
-                    await provision(mode: "business")
+                VStack(alignment: .leading, spacing: 14) {
+                    disclosureRow(icon: "lock.shield.fill", color: .blue,
+                                  title: String(localized: "Uploaded securely"),
+                                  body: String(localized: "Sent over an encrypted connection and stored on servers only you can access with your account."))
+                    disclosureRow(icon: "person.2.fill", color: .green,
+                                  title: String(localized: "Used only to identify your callers"),
+                                  body: String(localized: "We match incoming caller numbers against your contacts so known callers can ring through directly."))
+                    disclosureRow(icon: "hand.raised.fill", color: .purple,
+                                  title: String(localized: "Never shared or sold"),
+                                  body: String(localized: "Your contacts are never used for advertising, shared with third parties, or sold."))
+                    disclosureRow(icon: "trash.fill", color: .red,
+                                  title: String(localized: "Deleted with your account"),
+                                  body: String(localized: "Remove your account and your contacts are permanently deleted from our servers."))
                 }
-            } label: {
-                Text(String(localized: "Allow Contact Access"))
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-            }
-            .buttonStyle(.borderedProminent)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+                .padding()
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal)
 
-            Button(String(localized: "Skip")) {
-                step = .provisioning
-                Task { await provision(mode: "business") }
+                HStack(spacing: 12) {
+                    Link(String(localized: "Privacy Policy"),
+                         destination: URL(string: "https://heykevin.one/privacy")!)
+                        .font(.caption)
+                    Link(String(localized: "Terms of Use"),
+                         destination: URL(string: "https://heykevin.one/terms")!)
+                        .font(.caption)
+                }
+
+                Button {
+                    Task {
+                        let granted = await ContactSyncManager.shared.requestAccess()
+                        if granted {
+                            appState.contactsUploadConsent = true
+                        }
+                        step = .provisioning
+                        await provision(mode: selectedMode)
+                    }
+                } label: {
+                    Text(String(localized: "Allow & Upload Contacts"))
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                }
+                .buttonStyle(.borderedProminent)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal)
+
+                Button(String(localized: "Not now")) {
+                    appState.contactsUploadConsent = false
+                    step = .provisioning
+                    Task { await provision(mode: selectedMode) }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 24)
             }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func disclosureRow(icon: String, color: Color, title: String, body: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .font(.title3)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.bold())
+                Text(body)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -344,16 +393,11 @@ struct OnboardingView: View {
                 .textContentType(.name)
                 .padding(.vertical)
 
-            Text(String(localized: "Kevin will sync your iPhone contacts so known callers ring through automatically."))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
             Spacer()
 
             Button {
-                step = .provisioning
-                Task { await provision(mode: "personal") }
+                selectedMode = "personal"
+                step = .contactsPermission
             } label: {
                 Text(String(localized: "Continue"))
                     .font(.headline)
@@ -682,8 +726,10 @@ struct OnboardingView: View {
             appState.isOnboarded = true
         }
 
-        // Sync contacts in background
-        _ = await ContactSyncManager.shared.syncContacts(contractorId: appState.contractorId)
+        // Sync contacts in background only if user has previously consented to upload
+        if appState.contactsUploadConsent {
+            _ = await ContactSyncManager.shared.syncContacts(contractorId: appState.contractorId)
+        }
     }
 
     private func restoreOrContinue() async {
@@ -784,17 +830,12 @@ struct OnboardingView: View {
             }
         }
 
-        // Sync contacts
-        if isPersonal {
-            let granted = await ContactSyncManager.shared.requestAccess()
-            if granted {
-                let syncResult = await ContactSyncManager.shared.syncContacts(contractorId: contractorId)
-                if case .success(let synced, _) = syncResult {
-                    contactsSynced = synced
-                }
+        // Sync contacts only if the user gave explicit upload consent
+        if appState.contactsUploadConsent {
+            let syncResult = await ContactSyncManager.shared.syncContacts(contractorId: contractorId)
+            if case .success(let synced, _) = syncResult {
+                contactsSynced = synced
             }
-        } else {
-            _ = await ContactSyncManager.shared.syncContacts(contractorId: contractorId)
         }
 
         // Clear identity token after successful provisioning

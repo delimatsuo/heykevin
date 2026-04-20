@@ -74,8 +74,9 @@ struct KevinApp: App {
                     appState.checkForActiveCall()
                 }
 
-                // Sync contacts at most once per hour
+                // Sync contacts at most once per hour — only if user has consented
                 if !appState.contractorId.isEmpty,
+                   appState.contactsUploadConsent,
                    Date().timeIntervalSince(lastSyncTime) > 3600 {
                     lastSyncTime = Date()
                     Task {

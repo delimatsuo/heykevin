@@ -19,6 +19,16 @@ struct PaywallView: View {
     @State private var restoreMessage: String?
     @State private var selectedProductID: String?
 
+    /// The founding-member 75% off promo is only shown to users who have already
+    /// completed an Apple introductory offer (i.e. trial ended / subscription expired).
+    /// Per Apple rules, promotional offers are not available to users who are still
+    /// in their introductory offer period, and advertising them alongside the free
+    /// trial was the source of the 2.1(b) rejection.
+    private var canShowFoundingMemberPromo: Bool {
+        guard isPromoEligible, !isCheckingPromo else { return false }
+        return appState.subscriptionStatus == "expired" || appState.subscriptionStatus == "cancelled"
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -31,8 +41,8 @@ struct PaywallView: View {
                         expiredBanner
                     }
 
-                    // Promo badge
-                    if isPromoEligible && !isCheckingPromo {
+                    // Founding-member promo banner — only for expired/cancelled users
+                    if canShowFoundingMemberPromo {
                         promoBadge
                     }
 
@@ -60,7 +70,7 @@ struct PaywallView: View {
                         ForEach(subscriptionManager.products, id: \.id) { product in
                             TierCard(
                                 product: product,
-                                isPromoEligible: isPromoEligible,
+                                showFoundingMemberPromo: canShowFoundingMemberPromo,
                                 isSelected: selectedProductID == product.id,
                                 onSelect: { selectedProductID = product.id }
                             )
@@ -136,11 +146,22 @@ struct PaywallView: View {
                     }
 
                     // Legal footnote
-                    Text("Subscriptions auto-renew unless cancelled at least 24 hours before period end. Manage in App Store Settings.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                    VStack(spacing: 6) {
+                        Text("All plans are auto-renewing monthly subscriptions. New subscribers receive a 2-week free trial — you will not be charged until the trial ends. Payment is charged to your Apple ID at the end of the free trial (or at confirmation of purchase if no trial applies). Subscriptions automatically renew unless cancelled at least 24 hours before the end of the current period. Manage or cancel in Settings > Apple ID > Subscriptions.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+
+                        HStack(spacing: 16) {
+                            Link("Privacy Policy", destination: URL(string: "https://heykevin.one/privacy")!)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Link("Terms of Use", destination: URL(string: "https://heykevin.one/terms")!)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.horizontal)
                 }
                 .padding()
             }
@@ -177,11 +198,11 @@ struct PaywallView: View {
                     .foregroundStyle(.white)
             }
 
-            Text(isOnboarding ? "Start Your Free Trial" : "Hey Kevin")
+            Text(isOnboarding ? "Choose Your Plan" : "Hey Kevin")
                 .font(.title2.bold())
 
             Text(isOnboarding
-                 ? "Try Hey Kevin free for 2 weeks.\nCancel anytime before your trial ends."
+                 ? "Start with a 2-week free trial.\nCancel anytime before it ends — no charge."
                  : "AI call screening that learns your business.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -228,7 +249,10 @@ struct PaywallView: View {
             purchaseError = nil
             Task {
                 do {
-                    let offerID = isPromoEligible ? promoOfferID(for: product.id) : nil
+                    // Only attach the promo offer for users who have already completed an
+                    // intro offer (expired/cancelled). Users in trial or new users go
+                    // through the standard StoreKit introductory offer (2-week free trial).
+                    let offerID = canShowFoundingMemberPromo ? promoOfferID(for: product.id) : nil
                     let purchased = try await subscriptionManager.purchase(product, offerID: offerID)
                     if purchased {
                         isPurchasing = false
@@ -240,7 +264,7 @@ struct PaywallView: View {
                     }
                 } catch {
                     // If promo offer was rejected, fall back to regular price automatically
-                    if isPromoEligible {
+                    if canShowFoundingMemberPromo {
                         isPromoEligible = false
                         purchaseError = "Promo offer unavailable for your account — plans now shown at regular price. Tap the button again to subscribe."
                     } else {
@@ -256,10 +280,7 @@ struct PaywallView: View {
                     .padding(.vertical, 16)
             } else {
                 let product = subscriptionManager.products.first(where: { $0.id == (selectedProductID ?? subscriptionManager.products.first?.id ?? "") })
-                let buttonLabel = isOnboarding
-                    ? (product != nil ? "Start 2-Week Free Trial — then \(product!.displayPrice)/mo" : "Start Free Trial")
-                    : (product != nil ? "Try Free — then \(product!.displayPrice)/mo" : "Subscribe")
-                Text(String(localized: String.LocalizationValue(buttonLabel)))
+                Text(purchaseButtonTitle(for: product))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
@@ -268,6 +289,33 @@ struct PaywallView: View {
         .buttonStyle(.borderedProminent)
         .disabled(isPurchasing || subscriptionManager.products.isEmpty)
         .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func purchaseButtonTitle(for product: Product?) -> String {
+        guard let product else { return String(localized: "Subscribe") }
+        let price = product.displayPrice
+
+        // Expired/cancelled user eligible for founding-member promo: apply the
+        // 75%-off-for-3-months promotional offer at purchase time.
+        if canShowFoundingMemberPromo {
+            let discounted = (product.price / 4).rounded(toPlaces: 2)
+            let discountedStr = "$\(String(format: "%.2f", NSDecimalNumber(decimal: discounted).doubleValue))"
+            return String(
+                format: String(localized: "Subscribe — %1$@/mo for 3 months, then %2$@/mo"),
+                discountedStr, price
+            )
+        }
+
+        // Trial / new users: Apple's configured introductory offer (2-week free
+        // trial) is presented by StoreKit at purchase confirmation.
+        if appState.subscriptionStatus == "trial" || appState.subscriptionStatus.isEmpty || isOnboarding {
+            return String(
+                format: String(localized: "Try Free for 2 Weeks — then %@/mo"),
+                price
+            )
+        }
+
+        return String(format: String(localized: "Subscribe — %@/mo"), price)
     }
 
     private var cancelForwardingButton: some View {
@@ -333,7 +381,7 @@ struct PaywallView: View {
 
 private struct TierCard: View {
     let product: Product
-    let isPromoEligible: Bool
+    let showFoundingMemberPromo: Bool
     let isSelected: Bool
     let onSelect: () -> Void
 
@@ -383,7 +431,7 @@ private struct TierCard: View {
                         Text(tierName)
                             .font(.headline)
                         HStack(spacing: 6) {
-                            if isPromoEligible {
+                            if showFoundingMemberPromo {
                                 Text(product.displayPrice)
                                     .font(.subheadline)
                                     .strikethrough()

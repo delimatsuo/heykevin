@@ -1,4 +1,4 @@
 /* Permission dialog strings - Brazilian Portuguese */
-"NSContactsUsageDescription" = "Kevin precisa acessar seus contatos para adicionar números VIP que tocam diretamente sem triagem.";
+"NSContactsUsageDescription" = "O Hey Kevin envia seus contatos para nosso servidor seguro para que o Kevin possa reconhecer quem está ligando pelo nome e deixar contatos confiáveis tocarem diretamente sem triagem. Seus contatos são usados apenas para esse fim, nunca são compartilhados nem vendidos, e são excluídos se você remover sua conta.";
 "NSMicrophoneUsageDescription" = "Kevin precisa de acesso ao microfone para conectar você com quem liga e gravar treinamento de voz.";
 "NSSpeechRecognitionUsageDescription" = "Kevin usa reconhecimento de fala para aprender sobre seu negócio pela sua voz.";

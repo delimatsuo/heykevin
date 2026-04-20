@@ -144,6 +144,11 @@ class AppState: ObservableObject {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.ringThroughContacts, forKey: "ringThroughContacts") } }
     }
 
+    // Explicit consent to upload contacts to the server. Separate from iOS contacts permission.
+    @Published var contactsUploadConsent: Bool = UserDefaults.standard.bool(forKey: "contactsUploadConsent") {
+        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.contactsUploadConsent, forKey: "contactsUploadConsent") } }
+    }
+
     @Published var sitToneEnabled: Bool = UserDefaults.standard.object(forKey: "sitToneEnabled") as? Bool ?? false {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.sitToneEnabled, forKey: "sitToneEnabled") } }
     }

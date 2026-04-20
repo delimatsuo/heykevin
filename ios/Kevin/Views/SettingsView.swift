@@ -131,6 +131,7 @@ struct SettingsView: View {
 
                         Button {
                             Task {
+                                appState.contactsUploadConsent = true
                                 let result = await ContactSyncManager.shared.syncContacts(
                                     contractorId: appState.contractorId
                                 )

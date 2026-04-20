@@ -397,9 +397,23 @@ struct SettingsView: View {
                 // MARK: - Call Forwarding
 
                 Section {
+                    Toggle(isOn: $appState.isVerizonCarrier) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "I'm a Verizon customer"))
+                                .font(.subheadline.weight(.medium))
+                            Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     Button {
-                        // *61* = forward on no answer (same as onboarding)
-                        dialCode("*61*\(dialNumber)%23")
+                        // Activate — match the code by carrier.
+                        // Verizon: *71<number> (no-answer forward). GSM: *61*<number># (no-answer forward).
+                        let code = appState.isVerizonCarrier
+                            ? "*71\(dialNumber)"
+                            : "*61*\(dialNumber)%23"
+                        dialCode(code)
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -416,8 +430,10 @@ struct SettingsView: View {
                     }
 
                     Button(role: .destructive) {
-                        // ##61# = cancel no-answer forwarding (GSM standard)
-                        dialCode("%23%2361%23")
+                        // Deactivate — must match the activate code exactly.
+                        // Verizon: *73 (cancels forwarding). GSM: ##61# (cancels no-answer).
+                        let code = appState.isVerizonCarrier ? "*73" : "%23%2361%23"
+                        dialCode(code)
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -432,6 +448,27 @@ struct SettingsView: View {
                                 .foregroundStyle(.red)
                         }
                     }
+
+                    Button(role: .destructive) {
+                        // ##002# clears every forwarding type (unconditional, busy,
+                        // no-answer, not-reachable) on GSM networks. Useful when
+                        // prior forwarding from another source is still active.
+                        dialCode("%23%23002%23")
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(String(localized: "Clear All Forwarding"))
+                                    .font(.subheadline.weight(.medium))
+                                Text(String(localized: "Nuclear option — clears every forwarding type at once"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "exclamationmark.octagon")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .disabled(appState.isVerizonCarrier)
                 } header: {
                     Text(String(localized: "Call Forwarding"))
                 } footer: {
@@ -439,7 +476,7 @@ struct SettingsView: View {
                         Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
                             .foregroundStyle(.orange)
                     } else {
-                        Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. Verizon users: use *71 to activate and *73 to deactivate instead."))
+                        Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used."))
                     }
                 }
                 .disabled(appState.kevinNumber.isEmpty)

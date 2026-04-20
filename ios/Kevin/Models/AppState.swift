@@ -149,6 +149,12 @@ class AppState: ObservableObject {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.contactsUploadConsent, forKey: "contactsUploadConsent") } }
     }
 
+    // Carrier type for forwarding codes. Verizon uses *71/*73; everyone else uses GSM codes.
+    // Set during onboarding forwarding step; editable from Settings.
+    @Published var isVerizonCarrier: Bool = UserDefaults.standard.bool(forKey: "isVerizonCarrier") {
+        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.isVerizonCarrier, forKey: "isVerizonCarrier") } }
+    }
+
     @Published var sitToneEnabled: Bool = UserDefaults.standard.object(forKey: "sitToneEnabled") as? Bool ?? false {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.sitToneEnabled, forKey: "sitToneEnabled") } }
     }

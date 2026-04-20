@@ -14,7 +14,7 @@ struct OnboardingView: View {
     @State private var contactsSynced = 0
     @State private var acceptedTerms = false
     @State private var phoneNumber = ""
-    @State private var isVerizon = false
+    @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var showPaywall = false
 
     enum OnboardingStep {
@@ -577,6 +577,7 @@ struct OnboardingView: View {
             if !isVerizon {
                 Button {
                     isVerizon = true
+                    appState.isVerizonCarrier = true
                 } label: {
                     Text(String(localized: "Verizon customer? Tap here"))
                         .font(.caption)
@@ -586,6 +587,7 @@ struct OnboardingView: View {
             } else {
                 Button {
                     isVerizon = false
+                    appState.isVerizonCarrier = false
                 } label: {
                     Text(String(localized: "✓ Using Verizon codes — tap to switch back"))
                         .font(.caption)

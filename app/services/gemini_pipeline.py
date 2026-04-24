@@ -333,8 +333,13 @@ class GeminiPipeline:
 
         except asyncio.CancelledError:
             pass
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Gemini WebSocket closed")
+        except websockets.exceptions.ConnectionClosed as e:
+            # rcvd_then_sent: True = peer (Gemini) closed first, False = we closed first, None = abnormal
+            peer_initiated = getattr(e, "rcvd_then_sent", None)
+            logger.warning(
+                f"Gemini WebSocket closed: code={e.code} reason={e.reason!r} "
+                f"peer_initiated={peer_initiated}"
+            )
             # Attempt one reconnect
             if self._connected:
                 logger.info("Attempting Gemini reconnection...")

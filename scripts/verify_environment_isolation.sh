@@ -32,7 +32,7 @@ required_cloud_run_env() {
   env_names="$(gcloud run services describe "${service}" \
     --project "${PROJECT_ID}" \
     --region "${REGION}" \
-    --format='value(spec.template.spec.containers[0].env[].name)' || true)"
+    --format=json | jq -r '.spec.template.spec.containers[0].env[].name' || true)"
 
   if [[ -z "${env_names}" ]]; then
     echo "  ERROR: Could not read ${service}. Check gcloud auth/IAM." >&2

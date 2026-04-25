@@ -69,6 +69,7 @@ jobs:
 
       - name: Check staging isolation variables
         run: |
+          test -n "${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_RUNTIME_SERVICE_ACCOUNT" && exit 1)
           test -n "${{ vars.FIRESTORE_PROJECT_ID }}" || (echo "Missing staging FIRESTORE_PROJECT_ID" && exit 1)
           test "${{ vars.FIRESTORE_PROJECT_ID }}" != "$GCP_PROJECT_ID" || (echo "Staging must not use production Firestore project" && exit 1)
           test -n "${{ vars.FIREBASE_DATABASE_URL }}" || (echo "Missing staging FIREBASE_DATABASE_URL" && exit 1)
@@ -84,6 +85,7 @@ jobs:
             --project $GCP_PROJECT_ID \
             --region $GCP_REGION \
             --allow-unauthenticated \
+            --service-account ${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }} \
             --update-env-vars ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=${{ vars.FIRESTORE_PROJECT_ID }},FIREBASE_DATABASE_URL=${{ vars.FIREBASE_DATABASE_URL }},APNS_SANDBOX=${{ vars.APNS_SANDBOX || 'false' }},PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }} \
             --tag staging
 
@@ -123,6 +125,10 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Check production runtime variables
+        run: |
+          test -n "${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+
       - name: Deploy to Cloud Run (Production)
         run: |
           gcloud run deploy $PRODUCTION_SERVICE \
@@ -130,6 +136,7 @@ jobs:
             --project $GCP_PROJECT_ID \
             --region $GCP_REGION \
             --allow-unauthenticated \
+            --service-account ${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }} \
             --update-env-vars ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=$PRODUCTION_URL,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}
 
       - name: Health check

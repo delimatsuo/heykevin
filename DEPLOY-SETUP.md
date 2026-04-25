@@ -109,6 +109,8 @@ Add these variables to both environments:
 - [ ] `WIF_PROVIDER` = `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider`
 - [ ] `WIF_STAGING_SERVICE_ACCOUNT` = staging-only deployer service account
 - [ ] `WIF_PRODUCTION_SERVICE_ACCOUNT` = production-only deployer service account
+- [ ] `STAGING_RUNTIME_SERVICE_ACCOUNT` = staging Cloud Run runtime service account
+- [ ] `PRODUCTION_RUNTIME_SERVICE_ACCOUNT` = production Cloud Run runtime service account
 - [ ] `PRODUCTION_TWILIO_ACCOUNT_SID` = production Twilio Account SID, used by runtime safety checks
 
 Add these variables to the `staging` environment:
@@ -159,6 +161,7 @@ gcloud run deploy kevin-api-staging \
   --project kevin-491315 \
   --region us-central1 \
   --allow-unauthenticated \
+  --service-account STAGING_RUNTIME_SERVICE_ACCOUNT \
   --update-env-vars ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=YOUR_STAGING_PROJECT,FIREBASE_DATABASE_URL=YOUR_STAGING_RTDB_URL,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=YOUR_PROD_TWILIO_ACCOUNT_SID
 
 # Deploy to production after staging has been tested
@@ -168,5 +171,6 @@ gcloud run deploy kevin-api \
   --project kevin-491315 \
   --region us-central1 \
   --allow-unauthenticated \
+  --service-account PRODUCTION_RUNTIME_SERVICE_ACCOUNT \
   --update-env-vars ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=kevin-491315,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=YOUR_PROD_TWILIO_ACCOUNT_SID
 ```

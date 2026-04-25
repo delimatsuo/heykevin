@@ -49,6 +49,17 @@ required_cloud_run_env() {
   return "${missing}"
 }
 
+cloud_run_env_value() {
+  local service="$1"
+  local name="$2"
+
+  gcloud run services describe "${service}" \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}" \
+    --format=json \
+    | jq -r --arg name "${name}" '.spec.template.spec.containers[0].env[] | select(.name == $name) | .value // empty'
+}
+
 echo "== GitHub auth =="
 gh auth status
 
@@ -105,6 +116,33 @@ required_cloud_run_env "${PRODUCTION_SERVICE}" \
   FIREBASE_DATABASE_URL \
   APNS_SANDBOX \
   PRODUCTION_TWILIO_ACCOUNT_SID
+
+echo
+echo "== Cloud Run isolation values =="
+staging_firestore_project="$(cloud_run_env_value "${STAGING_SERVICE}" FIRESTORE_PROJECT_ID)"
+staging_database_url="$(cloud_run_env_value "${STAGING_SERVICE}" FIREBASE_DATABASE_URL)"
+staging_twilio_sid="$(cloud_run_env_value "${STAGING_SERVICE}" TWILIO_ACCOUNT_SID)"
+production_twilio_sid="$(cloud_run_env_value "${PRODUCTION_SERVICE}" PRODUCTION_TWILIO_ACCOUNT_SID)"
+
+if [[ -z "${staging_firestore_project}" || "${staging_firestore_project}" == "${PROJECT_ID}" ]]; then
+  echo "  ERROR: staging FIRESTORE_PROJECT_ID must be set and must not be production" >&2
+  exit 1
+fi
+
+if [[ -z "${staging_database_url}" || "${staging_database_url}" == *"${PROJECT_ID}-rtdb"* ]]; then
+  echo "  ERROR: staging FIREBASE_DATABASE_URL must be set and must not be production" >&2
+  exit 1
+fi
+
+if [[ -z "${staging_twilio_sid}" || -z "${production_twilio_sid}" ]]; then
+  echo "  ERROR: staging and production Twilio Account SIDs must both be configured" >&2
+  exit 1
+fi
+
+if [[ "${staging_twilio_sid}" == "${production_twilio_sid}" ]]; then
+  echo "  ERROR: staging TWILIO_ACCOUNT_SID matches production Twilio" >&2
+  exit 1
+fi
 
 echo
 echo "Environment isolation checks completed."

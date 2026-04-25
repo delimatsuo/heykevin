@@ -122,7 +122,11 @@ echo "== Cloud Run isolation values =="
 staging_firestore_project="$(cloud_run_env_value "${STAGING_SERVICE}" FIRESTORE_PROJECT_ID)"
 staging_database_url="$(cloud_run_env_value "${STAGING_SERVICE}" FIREBASE_DATABASE_URL)"
 staging_twilio_sid="$(cloud_run_env_value "${STAGING_SERVICE}" TWILIO_ACCOUNT_SID)"
+staging_twilio_phone="$(cloud_run_env_value "${STAGING_SERVICE}" TWILIO_PHONE_NUMBER)"
+staging_dial_in_number="$(cloud_run_env_value "${STAGING_SERVICE}" DIAL_IN_NUMBER)"
+staging_dial_in_numbers="$(cloud_run_env_value "${STAGING_SERVICE}" DIAL_IN_NUMBERS)"
 production_twilio_sid="$(cloud_run_env_value "${PRODUCTION_SERVICE}" PRODUCTION_TWILIO_ACCOUNT_SID)"
+production_twilio_phone="$(cloud_run_env_value "${PRODUCTION_SERVICE}" TWILIO_PHONE_NUMBER)"
 
 if [[ -z "${staging_firestore_project}" || "${staging_firestore_project}" == "${PROJECT_ID}" ]]; then
   echo "  ERROR: staging FIRESTORE_PROJECT_ID must be set and must not be production" >&2
@@ -141,6 +145,21 @@ fi
 
 if [[ "${staging_twilio_sid}" == "${production_twilio_sid}" ]]; then
   echo "  ERROR: staging TWILIO_ACCOUNT_SID matches production Twilio" >&2
+  exit 1
+fi
+
+if [[ -n "${production_twilio_phone}" && "${staging_twilio_phone}" == "${production_twilio_phone}" ]]; then
+  echo "  ERROR: staging TWILIO_PHONE_NUMBER matches production Twilio phone number" >&2
+  exit 1
+fi
+
+if [[ -n "${production_twilio_phone}" && "${staging_dial_in_number}" == "${production_twilio_phone}" ]]; then
+  echo "  ERROR: staging DIAL_IN_NUMBER matches production Twilio phone number" >&2
+  exit 1
+fi
+
+if [[ -n "${production_twilio_phone}" && "${staging_dial_in_numbers}" == *"${production_twilio_phone}"* ]]; then
+  echo "  ERROR: staging DIAL_IN_NUMBERS contains production Twilio phone number" >&2
   exit 1
 fi
 

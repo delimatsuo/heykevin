@@ -13,6 +13,8 @@ required_gh_vars=(
   WIF_PRODUCTION_SERVICE_ACCOUNT
   STAGING_RUNTIME_SERVICE_ACCOUNT
   PRODUCTION_RUNTIME_SERVICE_ACCOUNT
+  STAGING_BUILD_SERVICE_ACCOUNT
+  PRODUCTION_BUILD_SERVICE_ACCOUNT
   PRODUCTION_TWILIO_ACCOUNT_SID
 )
 
@@ -76,7 +78,7 @@ echo
 echo "== GitHub environment variables =="
 for env_name in staging production; do
   echo "Checking ${env_name}"
-  vars="$(gh api "repos/${REPO}/environments/${env_name}/variables" --jq '.variables[].name' || true)"
+  vars="$(gh api "repos/${REPO}/environments/${env_name}/variables?per_page=100" --jq '.variables[].name' || true)"
   if [[ -z "${vars}" ]]; then
     echo "  ERROR: Could not read ${env_name} variables. Check gh auth/repo permissions." >&2
     exit 1

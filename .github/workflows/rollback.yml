@@ -20,6 +20,10 @@ on:
         description: 'Cloud Run revision (e.g. kevin-api-00150-abc) or git tag (e.g. staging-2026-04-08-pre-abc1234)'
         required: true
         type: string
+      confirm_production:
+        description: 'For production rollbacks, type production'
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -39,11 +43,16 @@ jobs:
         with:
           fetch-tags: true
 
+      - name: Confirm production rollback
+        if: inputs.environment == 'production'
+        run: |
+          test "${{ inputs.confirm_production }}" = "production" || (echo "Type production in confirm_production to rollback production" && exit 1)
+
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          service_account: ${{ inputs.environment == 'production' && vars.WIF_PRODUCTION_SERVICE_ACCOUNT || vars.WIF_STAGING_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -70,11 +79,29 @@ jobs:
         run: |
           echo "Redeploying from git tag: ${{ inputs.revision_or_tag }}"
           git checkout ${{ inputs.revision_or_tag }}
+          if [ "${{ inputs.environment }}" = "staging" ]; then
+            test -n "${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+            test -n "${{ vars.FIRESTORE_PROJECT_ID }}" || (echo "Missing staging FIRESTORE_PROJECT_ID" && exit 1)
+            test "${{ vars.FIRESTORE_PROJECT_ID }}" != "$GCP_PROJECT_ID" || (echo "Staging must not use production Firestore project" && exit 1)
+            test -n "${{ vars.FIREBASE_DATABASE_URL }}" || (echo "Missing staging FIREBASE_DATABASE_URL" && exit 1)
+            case "${{ vars.FIREBASE_DATABASE_URL }}" in
+              *kevin-491315-rtdb*) echo "Staging must not use production RTDB" && exit 1 ;;
+            esac
+            test -n "${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}" || (echo "Missing staging PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
+            RUNTIME_SERVICE_ACCOUNT="${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}"
+            ENV_VARS="ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=${{ vars.FIRESTORE_PROJECT_ID }},FIREBASE_DATABASE_URL=${{ vars.FIREBASE_DATABASE_URL }},APNS_SANDBOX=${{ vars.APNS_SANDBOX || 'false' }},PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}"
+          else
+            test -n "${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+            RUNTIME_SERVICE_ACCOUNT="${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}"
+            ENV_VARS="ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}"
+          fi
           gcloud run deploy $SERVICE \
             --source . \
             --project $GCP_PROJECT_ID \
             --region $GCP_REGION \
-            --allow-unauthenticated
+            --allow-unauthenticated \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --update-env-vars "$ENV_VARS"
 
       - name: Health check after rollback
         run: |

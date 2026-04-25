@@ -31,7 +31,8 @@ ci_cd:
   rollback_workflow: .github/workflows/rollback.yml
   auth_method: workload-identity-federation
   wif_provider: projects/752910912062/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-  wif_service_account: github-actions@kevin-491315.iam.gserviceaccount.com
+  staging_wif_service_account: github-actions-staging@kevin-491315.iam.gserviceaccount.com
+  production_wif_service_account: github-actions-production@kevin-491315.iam.gserviceaccount.com
 
 reviewer:
   tech_stack: Python 3.12, FastAPI, Cloud Run, Firestore, Firebase, Twilio, iOS Swift/SwiftUI, StoreKit 2

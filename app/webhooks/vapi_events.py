@@ -94,7 +94,7 @@ RULES:
         "maxDurationSeconds": 300,
         "endCallFunctionEnabled": True,
         "forwardingPhoneNumber": get_dial_in_number("US"),  # Vapi is US-only legacy
-        "serverUrl": "https://kevin-api-752910912062.us-central1.run.app/webhooks/vapi/events"
+        "serverUrl": f"{settings.cloud_run_url}/webhooks/vapi/events"
         + (f"?contractor_id={contractor_id}" if contractor_id else ""),
     }
 

@@ -16,8 +16,21 @@ struct ActiveCallInfo {
 class APIClient {
     static let shared = APIClient()
 
-    let baseURL = Bundle.main.infoDictionary?["BackendURL"] as? String
-        ?? "https://kevin-api-752910912062.us-central1.run.app"
+    let baseURL: String = {
+        guard let url = Bundle.main.infoDictionary?["BackendURL"] as? String,
+              !url.isEmpty,
+              !url.contains("$(") else {
+            fatalError("BackendURL not set in Info.plist. Check the active build configuration.")
+        }
+
+        #if DEBUG || STAGING
+        if url == "https://kevin-api-752910912062.us-central1.run.app" {
+            fatalError("Non-production build is configured to use the production backend.")
+        }
+        #endif
+
+        return url
+    }()
 
     /// Per-contractor API token stored securely in Keychain
     /// Migrates from UserDefaults on first access for existing users

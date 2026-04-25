@@ -81,6 +81,7 @@ jobs:
           git checkout ${{ inputs.revision_or_tag }}
           if [ "${{ inputs.environment }}" = "staging" ]; then
             test -n "${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+            test -n "${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_BUILD_SERVICE_ACCOUNT" && exit 1)
             test -n "${{ vars.FIRESTORE_PROJECT_ID }}" || (echo "Missing staging FIRESTORE_PROJECT_ID" && exit 1)
             test "${{ vars.FIRESTORE_PROJECT_ID }}" != "$GCP_PROJECT_ID" || (echo "Staging must not use production Firestore project" && exit 1)
             test -n "${{ vars.FIREBASE_DATABASE_URL }}" || (echo "Missing staging FIREBASE_DATABASE_URL" && exit 1)
@@ -89,10 +90,13 @@ jobs:
             esac
             test -n "${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}" || (echo "Missing staging PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
             RUNTIME_SERVICE_ACCOUNT="${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}"
+            BUILD_SERVICE_ACCOUNT="${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }}"
             ENV_VARS="ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=${{ vars.FIRESTORE_PROJECT_ID }},FIREBASE_DATABASE_URL=${{ vars.FIREBASE_DATABASE_URL }},APNS_SANDBOX=${{ vars.APNS_SANDBOX || 'false' }},PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}"
           else
             test -n "${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+            test -n "${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_BUILD_SERVICE_ACCOUNT" && exit 1)
             RUNTIME_SERVICE_ACCOUNT="${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}"
+            BUILD_SERVICE_ACCOUNT="${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}"
             ENV_VARS="ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}"
           fi
           gcloud run deploy $SERVICE \
@@ -101,6 +105,7 @@ jobs:
             --region $GCP_REGION \
             --allow-unauthenticated \
             --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --build-service-account "$BUILD_SERVICE_ACCOUNT" \
             --update-env-vars "$ENV_VARS"
 
       - name: Health check after rollback

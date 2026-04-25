@@ -14,7 +14,7 @@ packages:
     url: https://github.com/twilio/twilio-voice-ios
     from: "6.11.0"
 
-# Build configurations: Debug → staging backend, Staging → staging backend (TestFlight), Release → production
+# Build configurations: Debug → staging backend, Staging → staging backend, Release → production
 configs:
   Debug: debug
   Staging: release
@@ -41,27 +41,26 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false
         ENABLE_PREVIEWS: false
+        APP_ENV: staging
         BACKEND_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
       configs:
+        Debug:
+          APP_ENV: staging
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG STAGING
+          BACKEND_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
         Staging:
           SWIFT_OPTIMIZATION_LEVEL: -O
           ENABLE_DEBUG_DYLIB: false
+          APP_ENV: staging
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: STAGING
           BACKEND_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
         Release:
           SWIFT_OPTIMIZATION_LEVEL: -O
           ENABLE_DEBUG_DYLIB: false
+          APP_ENV: production
           BACKEND_URL: https://kevin-api-752910912062.us-central1.run.app
     dependencies:
       - package: TwilioVoice
-    scheme:
-      testTargets: []
-      storeKitConfiguration: Kevin/Products.storekit
-      buildConfigs:
-        run: Debug
-        test: Debug
-        profile: Staging
-        analyze: Staging
-        archive: Release
     entitlements:
       path: Kevin/Kevin.entitlements
       properties:
@@ -84,3 +83,38 @@ targets:
           - UIInterfaceOrientationPortrait
         UILaunchScreen: {}
         BackendURL: $(BACKEND_URL)
+        AppEnvironment: $(APP_ENV)
+
+schemes:
+  Kevin:
+    build:
+      targets:
+        Kevin: all
+    run:
+      config: Debug
+      storeKitConfiguration: Kevin/Products.storekit
+    test:
+      config: Debug
+      targets: []
+    profile:
+      config: Staging
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+  Kevin Staging:
+    build:
+      targets:
+        Kevin: all
+    run:
+      config: Staging
+      storeKitConfiguration: Kevin/Products.storekit
+    test:
+      config: Staging
+      targets: []
+    profile:
+      config: Staging
+    analyze:
+      config: Staging
+    archive:
+      config: Staging

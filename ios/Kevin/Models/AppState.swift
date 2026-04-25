@@ -9,13 +9,19 @@ class AppState: ObservableObject {
     static let shared = AppState()
 
     let backendURL: String = {
-        if let url = Bundle.main.infoDictionary?["BackendURL"] as? String, !url.isEmpty {
-            return url
+        guard let url = Bundle.main.infoDictionary?["BackendURL"] as? String,
+              !url.isEmpty,
+              !url.contains("$(") else {
+            fatalError("BackendURL not set in Info.plist. Check the active build configuration.")
         }
-        #if DEBUG
-        assertionFailure("BackendURL not set in Info.plist — check build configuration")
+
+        #if DEBUG || STAGING
+        if url == "https://kevin-api-752910912062.us-central1.run.app" {
+            fatalError("Non-production build is configured to use the production backend.")
+        }
         #endif
-        return "https://kevin-api-752910912062.us-central1.run.app"
+
+        return url
     }()
 
     // One-time migration from UserDefaults to Keychain for existing users

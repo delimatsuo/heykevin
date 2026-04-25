@@ -5,11 +5,17 @@ import os
 from pydantic_settings import BaseSettings
 
 
+PRODUCTION_GCP_PROJECT_ID = "kevin-491315"
+PRODUCTION_CLOUD_RUN_URL = "https://kevin-api-752910912062.us-central1.run.app"
+PRODUCTION_FIREBASE_DATABASE_URL = "https://kevin-491315-rtdb.firebaseio.com"
+
+
 class Settings(BaseSettings):
     # Twilio
     twilio_account_sid: str
     twilio_auth_token: str
     twilio_phone_number: str
+    production_twilio_account_sid: str = ""
 
     # Vapi (deprecated — kept for backward compat)
     vapi_api_key: str = ""
@@ -72,11 +78,18 @@ class Settings(BaseSettings):
     appstore_environment: str = "sandbox"  # "sandbox" or "production"
 
     # Cloud Run URL (for WebSocket URL generation)
-    cloud_run_url: str = "https://kevin-api-752910912062.us-central1.run.app"
+    cloud_run_url: str = PRODUCTION_CLOUD_RUN_URL
+
+    # Firebase / Firestore
+    # Production may rely on Cloud Run ADC. Staging/development must set an
+    # explicit non-production project and RTDB URL to avoid touching live data.
+    firestore_project_id: str = ""
+    firebase_database_url: str = PRODUCTION_FIREBASE_DATABASE_URL
 
     # App
     environment: str = "development"
     apns_sandbox: bool = True  # Use APNs sandbox endpoint; set to false for App Store builds
+    allow_production_resources_in_non_production: bool = False
     log_level: str = "INFO"
     port: int = 8080
 
@@ -88,6 +101,49 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def validate_runtime_safety() -> None:
+    """Fail fast when an environment is pointed at the wrong runtime resources."""
+    env = (settings.environment or "").strip().lower()
+    errors: list[str] = []
+
+    if env not in {"development", "staging", "production", "test"}:
+        errors.append("ENVIRONMENT must be one of development, staging, production, or test")
+
+    if env == "production":
+        if settings.appstore_environment != "production":
+            errors.append("APPSTORE_ENVIRONMENT must be production when ENVIRONMENT=production")
+        if settings.apns_sandbox:
+            errors.append("APNS_SANDBOX must be false when ENVIRONMENT=production")
+        if "staging" in settings.cloud_run_url:
+            errors.append("CLOUD_RUN_URL must not point at staging when ENVIRONMENT=production")
+        if settings.firestore_project_id and settings.firestore_project_id != PRODUCTION_GCP_PROJECT_ID:
+            errors.append("FIRESTORE_PROJECT_ID must be the production project when ENVIRONMENT=production")
+        if (
+            settings.production_twilio_account_sid
+            and settings.twilio_account_sid != settings.production_twilio_account_sid
+        ):
+            errors.append("TWILIO_ACCOUNT_SID must be the production account when ENVIRONMENT=production")
+
+    if env in {"development", "staging"} and not settings.allow_production_resources_in_non_production:
+        if settings.appstore_environment == "production":
+            errors.append("APPSTORE_ENVIRONMENT must not be production outside ENVIRONMENT=production")
+        if settings.cloud_run_url == PRODUCTION_CLOUD_RUN_URL:
+            errors.append("CLOUD_RUN_URL must not be the production URL outside ENVIRONMENT=production")
+        if not settings.firestore_project_id:
+            errors.append("FIRESTORE_PROJECT_ID is required outside production")
+        elif settings.firestore_project_id == PRODUCTION_GCP_PROJECT_ID:
+            errors.append("FIRESTORE_PROJECT_ID must not be the production project outside production")
+        if settings.firebase_database_url == PRODUCTION_FIREBASE_DATABASE_URL:
+            errors.append("FIREBASE_DATABASE_URL must not be the production RTDB outside production")
+        if not settings.production_twilio_account_sid:
+            errors.append("PRODUCTION_TWILIO_ACCOUNT_SID is required outside production")
+        elif settings.twilio_account_sid == settings.production_twilio_account_sid:
+            errors.append("TWILIO_ACCOUNT_SID must not be the production account outside production")
+
+    if errors:
+        raise RuntimeError("Unsafe runtime configuration: " + "; ".join(errors))
 
 import json as _json
 from typing import Optional as _Optional

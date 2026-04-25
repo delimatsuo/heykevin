@@ -9,7 +9,7 @@ import asyncio
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
+from app.config import settings, validate_runtime_safety
 from app.middleware.auth import verify_api_token
 from app.utils.logging import setup_logging, get_logger, redact_phone
 from app.webhooks.twilio_incoming import router as twilio_router
@@ -252,6 +252,8 @@ async def startup():
     missing = [k for k in required if not getattr(settings, k, None)]
     if missing:
         raise RuntimeError(f"Missing required config: {', '.join(missing)}")
+
+    validate_runtime_safety()
 
     # Warn loudly if vapi_webhook_secret is not set in production
     if not settings.vapi_webhook_secret and settings.environment != "development":

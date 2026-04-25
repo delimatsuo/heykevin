@@ -32,7 +32,7 @@ def _init_firebase():
         _app = firebase_admin.get_app()
     except ValueError:
         _app = firebase_admin.initialize_app(None, {
-            "databaseURL": "https://kevin-491315-rtdb.firebaseio.com",
+            "databaseURL": settings.firebase_database_url,
         })
 
 

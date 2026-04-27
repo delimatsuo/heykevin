@@ -14,7 +14,7 @@ import websockets
 
 from app.config import settings
 from app.services.entitlements import effective_mode
-from app.services.voice_pipeline import build_system_prompt
+from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
 
@@ -62,6 +62,11 @@ class GeminiPipeline:
         "burning smell", "smell burning", "electrical panel", "electric panel",
         "breaker tripped", "tripped breaker",
     }
+    CALLER_SILENCE_PROMPT_SECONDS = 10
+    CALLER_SILENCE_HANGUP_SECONDS = 10
+    CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
+    CALLER_SILENCE_GOODBYE_SECONDS = 3
+    OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -96,6 +101,12 @@ class GeminiPipeline:
         self._urgency_detected = False
         self._exchange_count = 0
         self._last_speech_time = time.time()
+        self._last_caller_speech_time = 0.0
+        self._last_kevin_speech_time = 0.0
+        self._caller_silence_prompted_at = None
+        self._waiting_for_owner_availability = False
+        self._owner_availability_wait_started_at = 0.0
+        self._assistant_instruction_pending = False
         self._silence_check_task = None
         self._unavailable_task = None
         self._unavailable_said = False
@@ -303,6 +314,7 @@ class GeminiPipeline:
                     input_text = self._extract_transcript(data, "input")
                 if input_text:
                     self._caller_transcript_buf.append(input_text)
+                    self._mark_caller_activity()
 
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
                 if model_turn.get("parts") and self._caller_transcript_buf:
@@ -311,14 +323,24 @@ class GeminiPipeline:
                 # Handle turn completion — Kevin finished speaking
                 if server_content.get("turnComplete"):
                     self._is_speaking = False
+                    self._assistant_instruction_pending = False
                     # Flush Kevin's buffered transcript as one message
                     if self._kevin_transcript_buf:
                         full_text = "".join(self._kevin_transcript_buf)
                         self._kevin_transcript_buf.clear()
                         self._transcript_lines.append(f"Kevin: {full_text}")
                         await self.on_transcript("Kevin", full_text)
-                        self._last_speech_time = time.time()
+                        prompt_started = self._caller_silence_prompted_at
+                        self._mark_kevin_activity()
+                        if (
+                            prompt_started is not None
+                            and "are you still there" in full_text.lower()
+                            and self._last_caller_speech_time <= prompt_started
+                        ):
+                            self._caller_silence_prompted_at = time.time()
                         self._exchange_count += 1
+                        if is_owner_availability_hold(full_text):
+                            self._start_owner_availability_wait()
 
                         # Goodbye detection
                         if any(p in full_text.lower() for p in self.GOODBYE_PHRASES):
@@ -327,10 +349,6 @@ class GeminiPipeline:
                             if self.on_call_complete:
                                 await self.on_call_complete()
                             return
-
-                        # Start unavailability timer after 3 exchanges
-                        if self._exchange_count >= 3 and not self._unavailable_task:
-                            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
 
                 # Handle tool calls
                 tool_call = data.get("toolCall", {})
@@ -384,7 +402,7 @@ class GeminiPipeline:
             return
         self._transcript_lines.append(f"Caller: {full_text}")
         await self.on_transcript("Caller", full_text)
-        self._last_speech_time = time.time()
+        self._mark_caller_activity()
 
         # Urgency detection
         if not self._urgency_detected and self.on_urgency_detected:
@@ -519,39 +537,121 @@ class GeminiPipeline:
 
     # --- Timers and Background Tasks ---
 
+    def _mark_caller_activity(self):
+        now = time.time()
+        self._last_speech_time = now
+        self._last_caller_speech_time = now
+        self._caller_silence_prompted_at = None
+
+    def _mark_kevin_activity(self):
+        now = time.time()
+        self._last_speech_time = now
+        self._last_kevin_speech_time = now
+
+    def _start_owner_availability_wait(self):
+        now = time.time()
+        self._waiting_for_owner_availability = True
+        self._owner_availability_wait_started_at = now
+        self._caller_silence_prompted_at = None
+        if self._unavailable_task and not self._unavailable_task.done():
+            self._unavailable_task.cancel()
+        self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+        logger.info(f"Gemini owner availability hold started for {self._call_sid[:8]}")
+
+    def _finish_owner_availability_wait(self):
+        self._waiting_for_owner_availability = False
+        self._owner_availability_wait_started_at = 0.0
+        self._caller_silence_prompted_at = None
+
+    def _waiting_on_caller(self) -> bool:
+        waiting = (
+            self._last_kevin_speech_time > 0
+            and self._last_kevin_speech_time >= self._last_caller_speech_time
+            and not self._is_speaking
+            and not self._assistant_instruction_pending
+        )
+        if (
+            waiting
+            and self._waiting_for_owner_availability
+            and self._last_caller_speech_time <= self._owner_availability_wait_started_at
+        ):
+            return False
+        return waiting
+
+    async def _send_client_instruction(self, text: str):
+        if not self._ws or not self._connected:
+            return
+        self._assistant_instruction_pending = True
+        try:
+            await self._ws.send(json.dumps({
+                "client_content": {
+                    "turns": [{"role": "user", "parts": [{"text": text}]}],
+                    "turn_complete": True,
+                }
+            }))
+        except Exception:
+            self._assistant_instruction_pending = False
+            raise
+
     async def _silence_check_loop(self):
-        """End call after 2 minutes of silence."""
-        SILENCE_TIMEOUT = 120
+        """Prompt once after caller silence, then end the call if silence continues."""
         try:
             while self._connected:
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.CALLER_SILENCE_CHECK_INTERVAL_SECONDS)
                 if not self._connected:
                     break
-                elapsed = time.time() - self._last_speech_time
-                if elapsed > SILENCE_TIMEOUT:
-                    logger.info(f"Silence timeout ({elapsed:.0f}s) — ending call")
-                    # Ask Gemini to say goodbye
-                    if self._ws and self._connected:
-                        await self._ws.send(json.dumps({
-                            "client_content": {
-                                "turns": [{"role": "user", "parts": [{"text": "The line has gone quiet. Say goodbye and end the call."}]}],
-                                "turn_complete": True,
-                            }
-                        }))
-                        await asyncio.sleep(3)
-                    if self.on_call_complete:
-                        await self.on_call_complete()
+                if not self._waiting_on_caller():
+                    continue
+
+                now = time.time()
+                if self._caller_silence_prompted_at is None:
+                    elapsed = now - self._last_kevin_speech_time
+                    if elapsed >= self.CALLER_SILENCE_PROMPT_SECONDS:
+                        await self._prompt_for_caller_silence()
+                    continue
+
+                elapsed_since_prompt = now - self._caller_silence_prompted_at
+                if elapsed_since_prompt >= self.CALLER_SILENCE_HANGUP_SECONDS:
+                    await self._hangup_for_caller_silence()
                     break
         except asyncio.CancelledError:
             pass
 
+    async def _prompt_for_caller_silence(self):
+        if (
+            not self._ws
+            or not self._connected
+            or not self._waiting_on_caller()
+            or self._caller_silence_prompted_at is not None
+        ):
+            return
+        self._caller_silence_prompted_at = time.time()
+        await self._send_client_instruction(
+            "The caller has been silent. Ask exactly: 'Are you still there?' "
+            "Do not say anything else."
+        )
+        logger.info(f"Gemini silence prompt injected for {self._call_sid[:8]}")
+
+    async def _hangup_for_caller_silence(self):
+        if not self._ws or not self._connected or not self._waiting_on_caller():
+            return
+        logger.info(f"Caller silence timeout for call {self._call_sid} — ending call")
+        await self._send_client_instruction(
+            "The caller stayed silent. Say exactly: \"I'm going to hang up for now. "
+            "Please call back when you're ready. Goodbye.\""
+        )
+        await asyncio.sleep(self.CALLER_SILENCE_GOODBYE_SECONDS)
+        if self.on_call_complete:
+            await self.on_call_complete()
+
     async def _unavailable_timer(self):
         """After 30 seconds, tell the caller the owner is unavailable."""
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
             if not self._connected or self._unavailable_said:
                 return
             self._unavailable_said = True
+            self._finish_owner_availability_wait()
 
             owner_name = self._contractor_config.get("owner_name", settings.user_name)
             pronoun = self._contractor_config.get("pronoun", "he")
@@ -560,20 +660,16 @@ class GeminiPipeline:
                 logger.warning("unavailable_timer: Gemini WS not open")
                 return
             try:
-                await self._ws.send(json.dumps({
-                    "client_content": {
-                        "turns": [{"role": "user", "parts": [{"text": (
-                            f"Tell the caller that {owner_name} is not available right now. "
-                            f"Offer to take a message and make sure {pronoun} gets it. "
-                            f"Be warm and apologetic."
-                        )}]}],
-                        "turn_complete": True,
-                    }
-                }))
+                await self._send_client_instruction(
+                    f"Tell the caller that {owner_name} is not available right now. "
+                    f"Offer to take a message and make sure {pronoun} gets it. "
+                    f"Be warm and apologetic."
+                )
                 logger.info("Gemini: unavailability message triggered (30s timer)")
             except Exception as e:
                 logger.error(f"Failed to send unavailability to Gemini: {e}")
                 self._unavailable_said = False  # allow retry
+                self._assistant_instruction_pending = False
         except asyncio.CancelledError:
             pass
 
@@ -609,19 +705,16 @@ class GeminiPipeline:
                         return
                     owner_name = self._contractor_config.get("owner_name", settings.user_name)
                     try:
-                        await self._ws.send(json.dumps({
-                            "client_content": {
-                                "turns": [{"role": "user", "parts": [{"text": (
-                                    f"The owner ({owner_name}) has declined the call. "
-                                    "Tell the caller they are unavailable and offer to take a message. "
-                                    "Be warm and apologetic."
-                                )}]}],
-                                "turn_complete": True,
-                            }
-                        }))
+                        self._finish_owner_availability_wait()
+                        await self._send_client_instruction(
+                            f"The owner ({owner_name}) has declined the call. "
+                            "Tell the caller they are unavailable and offer to take a message. "
+                            "Be warm and apologetic."
+                        )
                         self._unavailable_said = True
                         logger.info(f"take_message injected into Gemini for {self._call_sid[:8]}")
                     except Exception as e:
                         logger.error(f"Failed to inject take_message into Gemini: {e}")
+                        self._assistant_instruction_pending = False
         except Exception as e:
             logger.warning(f"Command check error: {e}")

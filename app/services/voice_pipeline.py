@@ -70,6 +70,37 @@ def _format_service_names_for_prompt(services: list) -> str:
     return ", ".join(names)
 
 
+def is_owner_availability_hold(text: str) -> bool:
+    """Return True when Kevin has told the caller he is trying the owner."""
+    normalized = f" {text.lower()} "
+    if "not available" in normalized or "unavailable" in normalized:
+        return False
+
+    hold_markers = (
+        "let me see if",
+        "let me check if",
+        "i'm going to try",
+        "i will try",
+        "i'll try",
+        "let me try",
+        "one moment",
+        "please hold",
+        "hold on",
+    )
+    owner_markers = (
+        "available",
+        "reach",
+        "get ahold",
+        "get a hold",
+        "connect you",
+        "transfer you",
+        "try",
+    )
+    return any(marker in normalized for marker in hold_markers) and any(
+        marker in normalized for marker in owner_markers
+    )
+
+
 def build_system_prompt(config: Optional[dict] = None, after_hours: bool = False) -> str:
     """Build Kevin's system prompt dynamically from contractor config.
 
@@ -99,6 +130,12 @@ FLOW:
 6. If the caller is ALREADY leaving a message (giving you details, name, callback number), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 7. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
 8. Once you have their name, message, and callback number, confirm and wrap up: "I'll pass this along to {owner_name}. Have a great day!"
+
+RECEPTIONIST OPERATING POLICY:
+- If you say you are checking whether {owner_name} is available, stop talking. The system will wait briefly and then tell the caller whether {owner_name} is unavailable.
+- If the system says {owner_name} is unavailable or the owner declines, apologize, offer to take a message, collect any missing callback details, and only close after the caller has left the message.
+- If the caller goes quiet while you are waiting for their answer, the system may ask if they are still there and hang up if they remain silent. Do not contradict that behavior.
+- If the caller already started leaving a message, listen and collect it. Do not ask permission for a message they are already giving.
 
 RULES:
 - ONE or two short sentences per response.
@@ -205,6 +242,16 @@ PHASE 4 — MESSAGE:
 17. If you don't have their callback number, ask for it.
 18. Once you have their name, details, and callback number, confirm and wrap up: "I'll send this to {first_name}. Have a good day."
 
+RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
+- New service request: identify caller, issue, address if relevant, urgency, and callback number. Ask one or two issue-specific follow-up questions only after deciding the request is in scope.
+- Out-of-scope request: be honest that {business_name} may not be the right company, avoid diagnosing another trade's work, still offer to pass a concise message to {first_name}.
+- Safety emergency: give only immediate safety guidance, collect callback/location, and try to reach {first_name} if the issue is relevant to this business. For out-of-scope danger, tell them to contact emergency services or the right licensed trade.
+- After-hours request: take a message unless there is a relevant safety emergency. Do not pretend {first_name} is available after hours.
+- Owner handoff: if you tell the caller you are trying {first_name}, stop speaking. The system will wait about 30 seconds. If {first_name} does not answer or declines, return to the caller, say {first_name} is unavailable, then continue taking the message.
+- Message taking: collect the actual message, name, callback number, and any useful details. If the caller already gave those, confirm and close; do not ask again.
+- Media follow-up: for in-scope visual problems, offer that Kevin can text a link after the call for a photo or short video. Do not claim live media review during the call.
+- Silent caller: if the caller stops responding after you ask a question or offer to take a message, the system may ask "Are you still there?" and then end the call if silence continues.
+
 RULES:
 - Be warm, friendly, and professional. You represent {business_name}.
 - ONE or two short sentences per response. Never more.
@@ -271,6 +318,11 @@ class VoicePipeline:
         "burning smell", "smell burning", "electrical panel", "electric panel",
         "breaker tripped", "tripped breaker",
     }
+    CALLER_SILENCE_PROMPT_SECONDS = 10
+    CALLER_SILENCE_HANGUP_SECONDS = 10
+    CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
+    CALLER_SILENCE_GOODBYE_SECONDS = 1
+    OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
 
     def __init__(
         self,
@@ -322,7 +374,7 @@ class VoicePipeline:
         # Serialization: only one Claude→TTS cycle at a time
         self._response_lock = asyncio.Lock()
 
-        # 45-second unavailability timer
+        # Owner availability timer, started only when Kevin says he is trying the owner.
         self._unavailable_task = None
         self._unavailable_said = False
 
@@ -335,6 +387,11 @@ class VoicePipeline:
 
         # Silence timeout: track last speech activity
         self._last_speech_time = time.time()
+        self._last_caller_speech_time = 0.0
+        self._last_kevin_speech_time = 0.0
+        self._caller_silence_prompted_at = None
+        self._waiting_for_owner_availability = False
+        self._owner_availability_wait_started_at = 0.0
         self._silence_check_task = None
 
         # Persistent HTTP client — reuse TCP/TLS connections across API calls
@@ -445,6 +502,7 @@ class VoicePipeline:
             if self._unavailable_said:
                 return
             self._unavailable_said = True
+            self._finish_owner_availability_wait()
 
             owner_name = self._contractor_config.get("owner_name", settings.user_name)
             pronoun = self._contractor_config.get("pronoun", "he")
@@ -595,6 +653,9 @@ class VoicePipeline:
                 is_final = data.get("is_final", False)
                 speech_final = data.get("speech_final", False)
 
+                if transcript:
+                    self._mark_caller_activity()
+
                 # Skip interim results (not final) — we only use finals
                 if not is_final:
                     continue
@@ -610,9 +671,6 @@ class VoicePipeline:
                     continue
 
                 logger.info(f"STT [final, speech_final={speech_final}]: {transcript}")
-
-                # Update silence timeout — caller spoke
-                self._last_speech_time = time.time()
 
                 # Language detection: check on first final transcript, lock after detection
                 # Only detect if contractor has language set to "auto"
@@ -711,7 +769,7 @@ class VoicePipeline:
                 # Fire callback non-blocking
                 asyncio.create_task(self.on_urgency_detected(transcript))
 
-                # Cancel the 45-second unavailability timer (give contractor time to respond)
+                # Cancel the owner availability timer (give contractor time to respond)
                 if self._unavailable_task and not self._unavailable_task.done():
                     self._unavailable_task.cancel()
                     self._unavailable_task = None
@@ -1136,6 +1194,8 @@ class VoicePipeline:
                 logger.info(f"Kevin: {kevin_text}")
                 await self.on_transcript("Kevin", kevin_text)
                 await self._speak(kevin_text)
+                if is_owner_availability_hold(kevin_text):
+                    self._start_owner_availability_wait()
 
                 # Detect goodbye — hang up the call after Kevin's closing line
                 goodbye_phrases = ["have a great day", "have a good day", "have a nice day", "goodbye", "take care"]
@@ -1146,38 +1206,110 @@ class VoicePipeline:
                         await self.on_call_complete()
                     return
 
-                # Start 45-second unavailability timer after Kevin has caller info
-                assistant_count = sum(1 for m in self._conversation if m["role"] == "assistant")
-                if assistant_count >= 3 and not self._unavailable_task:
-                    self._unavailable_task = asyncio.create_task(self._unavailable_timer())
-
                 break  # done — got a text response
 
         except Exception as e:
             logger.error(f"Claude error: {e}")
 
+    def _start_owner_availability_wait(self):
+        now = time.time()
+        self._waiting_for_owner_availability = True
+        self._owner_availability_wait_started_at = now
+        self._caller_silence_prompted_at = None
+        if self._unavailable_task and not self._unavailable_task.done():
+            self._unavailable_task.cancel()
+        self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+        logger.info(f"Owner availability hold started for call {self._call_sid}")
+
+    def _finish_owner_availability_wait(self):
+        self._waiting_for_owner_availability = False
+        self._owner_availability_wait_started_at = 0.0
+        self._caller_silence_prompted_at = None
+
+    def _mark_caller_activity(self):
+        now = time.time()
+        self._last_speech_time = now
+        self._last_caller_speech_time = now
+        self._caller_silence_prompted_at = None
+
+    def _mark_kevin_activity(self):
+        now = time.time()
+        self._last_speech_time = now
+        self._last_kevin_speech_time = now
+
+    def _waiting_on_caller(self, require_unlocked: bool = True) -> bool:
+        waiting = (
+            self._last_kevin_speech_time > 0
+            and self._last_kevin_speech_time >= self._last_caller_speech_time
+            and not self._is_speaking
+        )
+        if (
+            waiting
+            and self._waiting_for_owner_availability
+            and self._last_caller_speech_time <= self._owner_availability_wait_started_at
+        ):
+            return False
+        if require_unlocked:
+            waiting = waiting and not self._response_lock.locked()
+        return waiting
+
     async def _silence_check_loop(self):
-        """Check every 30 seconds if the line has gone silent for 2+ minutes."""
-        SILENCE_TIMEOUT = 120  # 2 minutes
+        """Prompt once after caller silence, then end the call if silence continues."""
         try:
             while self._connected:
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.CALLER_SILENCE_CHECK_INTERVAL_SECONDS)
                 if not self._connected:
                     break
-                elapsed = time.time() - self._last_speech_time
-                if elapsed > SILENCE_TIMEOUT:
-                    logger.info(f"Silence timeout ({elapsed:.0f}s) reached for call {self._call_sid} — ending call")
-                    async with self._response_lock:
-                        msg = "It seems like the line has gone quiet. I'll go ahead and hang up now. Goodbye."
-                        self._conversation.append({"role": "assistant", "content": msg})
-                        await self.on_transcript("Kevin", msg)
-                        await self._speak(msg)
-                    if self.on_call_complete:
-                        await asyncio.sleep(1)
-                        await self.on_call_complete()
+                if not self._waiting_on_caller():
+                    continue
+
+                now = time.time()
+                if self._caller_silence_prompted_at is None:
+                    elapsed = now - self._last_kevin_speech_time
+                    if elapsed >= self.CALLER_SILENCE_PROMPT_SECONDS:
+                        await self._prompt_for_caller_silence()
+                    continue
+
+                elapsed_since_prompt = now - self._caller_silence_prompted_at
+                if elapsed_since_prompt >= self.CALLER_SILENCE_HANGUP_SECONDS:
+                    await self._hangup_for_caller_silence()
                     break
         except asyncio.CancelledError:
             pass
+
+    async def _prompt_for_caller_silence(self):
+        async with self._response_lock:
+            if (
+                not self._waiting_on_caller(require_unlocked=False)
+                or self._caller_silence_prompted_at is not None
+            ):
+                return
+            prompt_started = time.time()
+            self._caller_silence_prompted_at = prompt_started
+            msg = "Are you still there?"
+            self._conversation.append({"role": "assistant", "content": msg})
+            await self.on_transcript("Kevin", msg)
+            await self._speak(msg)
+            if self._last_caller_speech_time > prompt_started:
+                self._caller_silence_prompted_at = None
+            else:
+                self._caller_silence_prompted_at = time.time()
+
+    async def _hangup_for_caller_silence(self):
+        async with self._response_lock:
+            if (
+                not self._waiting_on_caller(require_unlocked=False)
+                or self._caller_silence_prompted_at is None
+            ):
+                return
+            msg = "I'm going to hang up for now. Please call back when you're ready. Goodbye."
+            logger.info(f"Caller silence timeout for call {self._call_sid} — ending call")
+            self._conversation.append({"role": "assistant", "content": msg})
+            await self.on_transcript("Kevin", msg)
+            await self._speak(msg)
+        if self.on_call_complete:
+            await asyncio.sleep(self.CALLER_SILENCE_GOODBYE_SECONDS)
+            await self.on_call_complete()
 
     async def _command_check_loop(self):
         """Poll RTDB for commands every 2 seconds."""
@@ -1205,7 +1337,7 @@ class VoicePipeline:
                 await loop.run_in_executor(None, ref.delete)
                 cmd_type = command.get("type", "")
                 if cmd_type == "take_message" and not self._unavailable_said:
-                    # Cancel the 45-second timer if running
+                    # Cancel the owner availability timer if running
                     if self._unavailable_task:
                         self._unavailable_task.cancel()
                     asyncio.create_task(self._unavailable_now())
@@ -1215,7 +1347,7 @@ class VoicePipeline:
     async def _unavailable_timer(self):
         """After 30 seconds, tell the caller the owner is unavailable."""
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
             if not self._connected or self._unavailable_said:
                 return
 
@@ -1223,6 +1355,7 @@ class VoicePipeline:
                 if self._unavailable_said:
                     return
                 self._unavailable_said = True
+                self._finish_owner_availability_wait()
 
                 owner_name = self._contractor_config.get("owner_name", settings.user_name)
                 pronoun = self._contractor_config.get("pronoun", "he")
@@ -1300,7 +1433,7 @@ class VoicePipeline:
                     await asyncio.sleep(min(chunk_duration, 0.5))
 
                 # Update silence timeout — Kevin spoke
-                self._last_speech_time = time.time()
+                self._mark_kevin_activity()
             else:
                 logger.error(f"ElevenLabs error: {response.status_code} {response.text[:100]}")
 

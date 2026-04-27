@@ -297,7 +297,7 @@ class APIClient {
 
     // MARK: - Contractor Onboarding
 
-    func createContractor(ownerName: String, businessName: String, serviceType: String, ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "") async -> [String: Any]? {
+    func createContractor(ownerName: String, businessName: String, serviceType: String, mode: String = "business", ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "") async -> [String: Any]? {
         do {
             let url = URL(string: "\(baseURL)/api/contractors")!
             var request = URLRequest(url: url)
@@ -308,6 +308,7 @@ class APIClient {
                 "business_name": businessName,
                 "owner_name": ownerName,
                 "service_type": serviceType,
+                "mode": mode,
                 "owner_phone": ownerPhone,
             ]
             if !appleUserId.isEmpty {

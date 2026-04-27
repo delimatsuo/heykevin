@@ -45,6 +45,28 @@ def _get_appstore_url() -> str:
     return APPSTORE_SANDBOX_URL
 
 
+def _get_transaction_lookup_urls() -> list[str]:
+    """Return App Store Server API bases to try for transaction lookup.
+
+    Apple's guidance is production first when the transaction environment is
+    unknown, then sandbox only for TransactionIdNotFoundError. Staging stays
+    sandbox-only to avoid accidentally touching production App Store data.
+    """
+    if settings.appstore_environment == "production":
+        return [APPSTORE_PRODUCTION_URL, APPSTORE_SANDBOX_URL]
+    return [APPSTORE_SANDBOX_URL]
+
+
+def _is_transaction_not_found(response: httpx.Response) -> bool:
+    if response.status_code != 404:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return str(body.get("errorCode", "")) == "4040010"
+
+
 def _get_appstore_jwt() -> str:
     """Generate a JWT for App Store Server API authentication."""
     key_content = settings.appstore_private_key
@@ -114,18 +136,40 @@ async def verify_transaction(transaction_id: str) -> Optional[dict]:
         logger.warning("App Store API not configured — skipping verification")
         return None
 
-    url = f"{_get_appstore_url()}/inApps/v1/transactions/{transaction_id}"
     try:
         token = _get_appstore_jwt()
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
-            )
-        if response.status_code == 200:
-            return _extract_transaction_info(response.json())
-        logger.error(f"App Store transaction lookup failed: {response.status_code} {response.text[:200]}")
+            lookup_urls = _get_transaction_lookup_urls()
+            for index, base_url in enumerate(lookup_urls):
+                url = f"{base_url}/inApps/v1/transactions/{transaction_id}"
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10.0,
+                )
+                if response.status_code == 200:
+                    return _extract_transaction_info(response.json())
+
+                should_try_sandbox = (
+                    index == 0
+                    and len(lookup_urls) > 1
+                    and base_url == APPSTORE_PRODUCTION_URL
+                    and _is_transaction_not_found(response)
+                )
+                if should_try_sandbox:
+                    logger.info(
+                        "Production App Store transaction lookup returned 4040010; retrying sandbox for %s",
+                        transaction_id,
+                    )
+                    continue
+
+                logger.error(
+                    "App Store transaction lookup failed at %s: %s %s",
+                    "production" if base_url == APPSTORE_PRODUCTION_URL else "sandbox",
+                    response.status_code,
+                    response.text[:200],
+                )
+                return None
         return None
     except Exception as e:
         logger.error(f"App Store API error: {e}", exc_info=True)

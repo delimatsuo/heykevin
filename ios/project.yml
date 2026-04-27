@@ -36,7 +36,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen
         SWIFT_EMIT_LOC_STRINGS: true
         MARKETING_VERSION: "1.2.2"
-        CURRENT_PROJECT_VERSION: "13"
+        CURRENT_PROJECT_VERSION: "14"
         DEVELOPMENT_TEAM: 3FLG8W6B95
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false

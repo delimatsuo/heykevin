@@ -262,6 +262,9 @@ struct PaywallView: View {
                         dismiss()
                         return
                     }
+                    if let err = subscriptionManager.purchaseError, !err.isEmpty {
+                        purchaseError = err
+                    }
                 } catch {
                     // If promo offer was rejected, fall back to regular price automatically
                     if canShowFoundingMemberPromo {

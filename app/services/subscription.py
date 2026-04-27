@@ -69,6 +69,42 @@ def _get_appstore_jwt() -> str:
     )
 
 
+def _decode_jws_payload(signed_payload: str) -> Optional[dict]:
+    """Decode the payload section of an Apple signed JWS."""
+    parts = signed_payload.split(".")
+    if len(parts) != 3:
+        logger.error("Invalid App Store JWS format")
+        return None
+
+    try:
+        padded_payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded_payload))
+    except Exception as e:
+        logger.error(f"Failed to decode App Store JWS payload: {e}", exc_info=True)
+        return None
+
+
+def _extract_transaction_info(response_body: dict) -> Optional[dict]:
+    """Normalize Apple's transaction lookup response to decoded transaction info."""
+    signed_transaction = response_body.get("signedTransactionInfo")
+    if signed_transaction:
+        transaction_info = _decode_jws_payload(signed_transaction)
+        if not transaction_info:
+            return None
+        bundle_id = transaction_info.get("bundleId", "")
+        if bundle_id and bundle_id != settings.appstore_bundle_id:
+            logger.error(f"App Store transaction bundle ID mismatch: {bundle_id}")
+            return None
+        return transaction_info
+
+    # Unit tests and older internal callers may already pass decoded transaction info.
+    if response_body.get("productId") or response_body.get("appAccountToken"):
+        return response_body
+
+    logger.error("App Store transaction response missing signedTransactionInfo")
+    return None
+
+
 async def verify_transaction(transaction_id: str) -> Optional[dict]:
     """Verify a transaction with Apple's App Store Server API.
 
@@ -88,7 +124,7 @@ async def verify_transaction(transaction_id: str) -> Optional[dict]:
                 timeout=10.0,
             )
         if response.status_code == 200:
-            return response.json()
+            return _extract_transaction_info(response.json())
         logger.error(f"App Store transaction lookup failed: {response.status_code} {response.text[:200]}")
         return None
     except Exception as e:
@@ -264,16 +300,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
     signed_transaction = renewal_info.get("signedTransactionInfo", "")
 
     # Decode the signed JWTs from Apple (trust after signature verified upstream)
-    transaction_info = {}
-    if signed_transaction:
-        try:
-            # Decode without verification — Apple signature already verified at webhook layer
-            parts = signed_transaction.split(".")
-            if len(parts) == 3:
-                padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
-                transaction_info = json.loads(base64.urlsafe_b64decode(padded))
-        except Exception as e:
-            logger.error(f"Failed to decode transaction JWT: {e}")
+    transaction_info = _decode_jws_payload(signed_transaction) if signed_transaction else {}
 
     # Look up contractor by app account token (= subscription_uuid stored at purchase)
     app_account_token = transaction_info.get("appAccountToken", "")

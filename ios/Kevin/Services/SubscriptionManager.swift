@@ -33,6 +33,23 @@ class SubscriptionManager: ObservableObject {
 
     private init() {}
 
+    enum SubscriptionError: LocalizedError {
+        case missingContractor
+        case missingSubscriptionUUID
+        case serverVerificationFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .missingContractor:
+                return "Set up your Kevin account before subscribing."
+            case .missingSubscriptionUUID:
+                return "Kevin could not prepare your account for purchase. Please try again."
+            case .serverVerificationFailed:
+                return "Purchase completed, but Kevin could not verify it yet. Tap Restore Purchases to retry."
+            }
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Start listening for transaction updates. Call once at app launch.
@@ -71,16 +88,12 @@ class SubscriptionManager: ObservableObject {
 
         var purchaseOptions: Set<Product.PurchaseOption> = []
 
-        // Set the subscription UUID as appAccountToken for server-side ownership verification
-        let subscriptionUUID = AppState.shared.subscriptionUUID
-        if let uuid = UUID(uuidString: subscriptionUUID) {
-            purchaseOptions.insert(.appAccountToken(uuid))
-        } else {
-            // subscriptionUUID not yet loaded — generate and store a temporary one
-            let tempUUID = UUID()
-            AppState.shared.subscriptionUUID = tempUUID.uuidString
-            purchaseOptions.insert(.appAccountToken(tempUUID))
+        // Set the server-issued subscription UUID as appAccountToken for ownership verification.
+        guard let subscriptionUUID = await loadServerSubscriptionUUID() else {
+            purchaseError = SubscriptionError.missingSubscriptionUUID.localizedDescription
+            throw SubscriptionError.missingSubscriptionUUID
         }
+        purchaseOptions.insert(.appAccountToken(subscriptionUUID))
 
         // Attach promotional offer if provided
         if let offerID = offerID {
@@ -113,9 +126,13 @@ class SubscriptionManager: ObservableObject {
         switch result {
         case .success(let verificationResult):
             let transaction = try checkVerified(verificationResult)
-            await verifyWithServer(transactionID: String(transaction.id))
-            await transaction.finish()
-            return true
+            let verified = await verifyWithServer(transactionID: String(transaction.id), requireActiveStatus: true)
+            if verified {
+                await transaction.finish()
+                return true
+            }
+            purchaseError = SubscriptionError.serverVerificationFailed.localizedDescription
+            return false
 
         case .userCancelled:
             return false
@@ -132,6 +149,7 @@ class SubscriptionManager: ObservableObject {
 
     func restorePurchases() async {
         do {
+            purchaseError = nil
             try await AppStore.sync()
             await verifyCurrentEntitlements()
         } catch {
@@ -149,27 +167,58 @@ class SubscriptionManager: ObservableObject {
         }
     }
 
-    private func verifyWithServer(transactionID: String) async {
+    @discardableResult
+    private func verifyWithServer(transactionID: String, requireActiveStatus: Bool = false) async -> Bool {
         let success = await APIClient.shared.verifySubscription(transactionId: transactionID)
+        guard success else { return false }
+
+        var serverStatus = ""
         if success {
             // Refresh subscription state from backend after successful verification
             let contractorId = AppState.shared.contractorId
-            guard !contractorId.isEmpty else { return }
+            guard !contractorId.isEmpty else { return false }
             if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
                 let status = profile["subscription_status"] as? String ?? ""
                 let tier = profile["subscription_tier"] as? String ?? ""
                 if !status.isEmpty { AppState.shared.subscriptionStatus = status }
                 if !tier.isEmpty { AppState.shared.subscriptionTier = tier }
+                serverStatus = status
             }
         }
+
+        if requireActiveStatus {
+            return serverStatus == "active"
+        }
+        return true
     }
 
     // MARK: - Transaction Updates
 
     private func handleTransactionUpdate(_ verificationResult: VerificationResult<Transaction>) async {
         guard let transaction = try? checkVerified(verificationResult) else { return }
-        await verifyWithServer(transactionID: String(transaction.id))
-        await transaction.finish()
+        let verified = await verifyWithServer(transactionID: String(transaction.id))
+        if verified {
+            await transaction.finish()
+        }
+    }
+
+    private func loadServerSubscriptionUUID() async -> UUID? {
+        let contractorId = AppState.shared.contractorId
+        guard !contractorId.isEmpty else {
+            purchaseError = SubscriptionError.missingContractor.localizedDescription
+            return nil
+        }
+
+        // Always prefer Firestore's UUID. Older app builds could cache a local
+        // temporary UUID, which would make Apple's appAccountToken fail ownership checks.
+        guard let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
+              let subscriptionUUID = profile["subscription_uuid"] as? String,
+              let uuid = UUID(uuidString: subscriptionUUID) else {
+            return nil
+        }
+
+        AppState.shared.subscriptionUUID = subscriptionUUID
+        return uuid
     }
 
     // MARK: - Helpers

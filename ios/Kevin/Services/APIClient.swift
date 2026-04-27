@@ -641,10 +641,17 @@ class APIClient {
                 "contractor_id": contractorId,
             ])
             authorize(&request)
-            let (_, response) = try await retryRequest(request)
-            let ok = (response as? HTTPURLResponse)?.statusCode == 200
-            if !ok { debugLog("Verify subscription returned non-200") }
-            return ok
+            let (data, response) = try await retryRequest(request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                debugLog("Verify subscription returned non-200")
+                return false
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["status"] as? String == "ok" else {
+                debugLog("Verify subscription returned error response")
+                return false
+            }
+            return true
         } catch {
             debugLog("Verify subscription failed: \(error.localizedDescription)")
             return false

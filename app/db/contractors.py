@@ -18,6 +18,7 @@ PROTECTED_FIELDS = frozenset({
     "subscription_status",
     "subscription_expires",
     "trial_start",
+    "twilio_number",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
 })
@@ -287,6 +288,19 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     For EU/BR countries, creates a regulatory bundle first using the contractor's
     business address. Returns the provisioned phone number (E.164 format).
     """
+    contractor = await get_contractor(contractor_id)
+    if not contractor:
+        raise Exception("Contractor not found")
+
+    existing_number = contractor.get("twilio_number", "")
+    if existing_number:
+        logger.info(
+            "Contractor %s already has Twilio number %s; skipping provisioning",
+            contractor_id,
+            redact_phone(existing_number),
+        )
+        return existing_number
+
     from twilio.rest import Client
     from app.config import settings
 
@@ -299,9 +313,6 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     # For regulatory countries, create a bundle first
     bundle_sid = None
     if country_code in REGULATORY_COUNTRIES:
-        contractor = await get_contractor(contractor_id)
-        if not contractor:
-            raise Exception("Contractor not found")
         business_address = contractor.get("business_address", "")
         business_city = contractor.get("business_city", "")
         business_name = contractor.get("business_name", "")

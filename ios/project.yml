@@ -35,8 +35,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen
         SWIFT_EMIT_LOC_STRINGS: true
-        MARKETING_VERSION: "1.2.1"
-        CURRENT_PROJECT_VERSION: "11"
+        MARKETING_VERSION: "1.2.2"
+        CURRENT_PROJECT_VERSION: "13"
         DEVELOPMENT_TEAM: 3FLG8W6B95
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false
@@ -70,6 +70,8 @@ targets:
     info:
       path: Kevin/Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIBackgroundModes:
           - remote-notification
           - voip

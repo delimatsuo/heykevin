@@ -1,6 +1,13 @@
 """Contractor mode persistence and subscription guardrails."""
 
+import os
 from types import SimpleNamespace
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15005550006")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
+os.environ.setdefault("USER_PHONE", "+15555550123")
 
 import pytest
 from fastapi import HTTPException

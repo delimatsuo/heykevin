@@ -21,7 +21,8 @@ def generate_vcard(contractor: dict) -> str:
     phone = contractor.get("twilio_number", "")
     service = contractor.get("service_type", "")
 
-    label = f"{name} - {service}".strip(" -") if service and service != "general" else name
+    meaningful_service = service and service not in {"general", "personal", "business", "kevin"}
+    label = f"{name} - {service}".strip(" -") if meaningful_service else name
 
     # Escape special vCard characters
     label = label.replace(",", "\\,").replace(";", "\\;")

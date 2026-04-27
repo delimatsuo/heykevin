@@ -11,7 +11,7 @@ from app.config import settings
 from app.middleware.auth import verify_api_token, require_contractor_access
 from app.db.contractors import (
     get_contractor, create_contractor, update_contractor, list_contractors,
-    deactivate_contractor, release_twilio_number, PROTECTED_FIELDS,
+    deactivate_contractor, ensure_subscription_uuid, release_twilio_number, PROTECTED_FIELDS,
 )
 from app.services.entitlements import has_business_entitlement, with_entitlement_flags
 from app.utils.logging import get_logger, redact_phone
@@ -160,9 +160,10 @@ async def api_lookup_by_apple_id(request: Request, apple_user_id: str = ""):
         # Issue a fresh API token for the client (this is the login flow)
         from app.middleware.auth import generate_contractor_token
         contractor_id = contractor["contractor_id"]
+        subscription_uuid = await ensure_subscription_uuid(contractor_id, contractor)
         raw_token, token_hash = generate_contractor_token(contractor_id)
         await update_contractor(contractor_id, {"api_token_hash": token_hash})
-        return {"contractor_id": contractor_id, "api_token": raw_token}
+        return {"contractor_id": contractor_id, "api_token": raw_token, "subscription_uuid": subscription_uuid}
     return {"error": "Not found"}, 404
 
 
@@ -178,9 +179,17 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
             logger.info(f"Returning existing contractor {existing['contractor_id']} for phone {redact_phone(body.owner_phone)}")
             # Issue a fresh API token for the existing contractor
             from app.middleware.auth import generate_contractor_token
-            raw_token, token_hash = generate_contractor_token(existing["contractor_id"])
-            await update_contractor(existing["contractor_id"], {"api_token_hash": token_hash})
-            return {"status": "ok", "contractor_id": existing["contractor_id"], "existing": True, "api_token": raw_token}
+            contractor_id = existing["contractor_id"]
+            subscription_uuid = await ensure_subscription_uuid(contractor_id, existing)
+            raw_token, token_hash = generate_contractor_token(contractor_id)
+            await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            return {
+                "status": "ok",
+                "contractor_id": contractor_id,
+                "existing": True,
+                "api_token": raw_token,
+                "subscription_uuid": subscription_uuid,
+            }
 
     data = body.dict()
     if data.get("mode") in ("business", "businessPro"):
@@ -213,6 +222,9 @@ async def api_get_contractor(contractor_id: str, request: Request):
     contractor = await get_contractor(contractor_id)
     if not contractor:
         return {"error": "Not found"}, 404
+    subscription_uuid = await ensure_subscription_uuid(contractor_id, contractor)
+    if subscription_uuid:
+        contractor["subscription_uuid"] = subscription_uuid
     return _redact_contractor(contractor)
 
 

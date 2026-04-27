@@ -215,6 +215,15 @@ async def api_provision_number(contractor_id: str, request: Request):
     contractor = await get_contractor(contractor_id)
     if not contractor:
         return {"status": "error", "message": "Contractor not found"}
+    existing_number = contractor.get("twilio_number", "")
+    if existing_number:
+        logger.info(
+            "Provision-number request for %s reused existing number %s",
+            contractor_id,
+            redact_phone(existing_number),
+        )
+        return {"status": "ok", "phone_number": existing_number, "existing": True}
+
     country_code = contractor.get("country_code", "US")
 
     if country_code in REGULATORY_COUNTRIES:

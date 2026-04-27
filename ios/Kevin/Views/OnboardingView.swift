@@ -813,20 +813,27 @@ struct OnboardingView: View {
 
         appState.mode = mode
 
-        // Check if contractor already has a Twilio number
+        // Check if contractor already has a Twilio number. During mode changes,
+        // keep the current Kevin number even if the profile fetch is transiently stale.
         if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
            let existingNumber = profile["twilio_number"] as? String,
            !existingNumber.isEmpty {
             // Reuse existing number
             kevinNumber = existingNumber
             appState.kevinNumber = kevinNumber
+        } else if !appState.kevinNumber.isEmpty {
+            kevinNumber = appState.kevinNumber
         } else {
             // Provision new Twilio number
-            if let provResult = await APIClient.shared.provisionNumber(contractorId: contractorId) {
-                kevinNumber = provResult["phone_number"] as? String ?? ""
+            let provResult = await APIClient.shared.provisionNumber(contractorId: contractorId)
+            if provResult?["status"] as? String == "ok",
+               let phoneNumber = provResult?["phone_number"] as? String,
+               !phoneNumber.isEmpty {
+                kevinNumber = phoneNumber
                 appState.kevinNumber = kevinNumber
             } else {
-                errorMessage = String(localized: "Failed to provision number. Please try again.")
+                let message = provResult?["message"] as? String
+                errorMessage = message ?? String(localized: "Failed to provision number. Please try again.")
                 isLoading = false
                 return
             }

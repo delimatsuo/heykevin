@@ -170,7 +170,12 @@ struct PaywallView: View {
             .toolbar {
                 if canDismiss {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button(String(localized: "Done")) { dismiss() }
+                        Button(String(localized: "Done")) {
+                            if isOnboarding {
+                                appState.isOnboarded = true
+                            }
+                            dismiss()
+                        }
                     }
                 }
             }

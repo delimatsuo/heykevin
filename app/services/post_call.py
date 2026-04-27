@@ -9,6 +9,7 @@ import asyncio
 import time
 
 from app.services.job_card import extract_job_card
+from app.services.entitlements import effective_mode
 from app.services.sms import send_sms, send_mms
 from app.db.jobs import save_job
 from app.config import settings
@@ -48,7 +49,7 @@ async def process_post_call(
 ):
     """Full post-call pipeline: extract -> save -> notify contractor + caller."""
     contractor = contractor or {}
-    mode = contractor.get("mode", "business")
+    mode = contractor.get("effective_mode") or effective_mode(contractor)
 
     # Treat legacy "kevin" mode as "business"
     if mode not in ("personal",):

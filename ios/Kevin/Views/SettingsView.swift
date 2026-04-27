@@ -110,20 +110,15 @@ struct SettingsView: View {
                         }
 
                         Button {
-                            // Personal subscribers can't switch to Business — show paywall
-                            if appState.isPersonalMode && appState.subscriptionTier == "personal" {
-                                showPaywall = true
-                            } else {
-                                showModeChangeAlert = true
-                            }
+                            showModeChangeAlert = true
                         } label: {
                             HStack {
                                 Text(String(localized: "Mode"))
                                 Spacer()
                                 Text(appState.isPersonalMode ? String(localized: "Personal Assistant") : String(localized: "Business Assistant"))
                                     .foregroundStyle(appState.isPersonalMode ? .purple : .blue)
-                                Image(systemName: appState.isPersonalMode && appState.subscriptionTier == "personal" ? "arrow.up.circle" : "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(appState.isPersonalMode && appState.subscriptionTier == "personal" ? Color.blue : Color.secondary)
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(Color.secondary)
                                     .font(.caption)
                             }
                         }
@@ -770,7 +765,7 @@ struct SettingsView: View {
             let name = contractor["owner_name"] as? String ?? ""
             let biz = contractor["business_name"] as? String ?? ""
             let svc = contractor["service_type"] as? String ?? ""
-            let mode = contractor["mode"] as? String ?? "business"
+            let mode = contractor["effective_mode"] as? String ?? contractor["mode"] as? String ?? "personal"
             let ringThrough = contractor["ring_through_contacts"] as? Bool ?? true
             await MainActor.run {
                 if !name.isEmpty { appState.userName = name }
@@ -980,6 +975,20 @@ struct SettingsView: View {
 
 // MARK: - Knowledge Editor
 
+private enum KnowledgeVoiceMode: String, CaseIterable, Identifiable {
+    case add
+    case replace
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .add: return String(localized: "Add")
+        case .replace: return String(localized: "Replace")
+        }
+    }
+}
+
 struct KnowledgeEditorView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var appState: AppState
@@ -990,6 +999,10 @@ struct KnowledgeEditorView: View {
     @State private var isTranscribing = false
     @State private var recordingURL: URL?
     @State private var knowledgeLengthWarning = ""
+    @State private var voiceMode: KnowledgeVoiceMode = .add
+    @State private var pendingKnowledge = ""
+    @State private var showKnowledgeDraft = false
+    @State private var showClearKnowledge = false
 
     private let placeholder = """
 ## Services
@@ -1048,6 +1061,15 @@ San Jose, Santa Clara, Campbell
                 .padding(.horizontal)
                 .padding(.top, 8)
 
+                Picker(String(localized: "Voice Update Mode"), selection: $voiceMode) {
+                    ForEach(KnowledgeVoiceMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.top, 8)
+
                 // Text editor
                 ZStack(alignment: .topLeading) {
                     TextEditor(text: $knowledgeText)
@@ -1088,6 +1110,16 @@ San Jose, Santa Clara, Campbell
                     .padding(.horizontal)
                     .padding(.top, 4)
                     .padding(.bottom, 8)
+
+                if !knowledgeText.isEmpty {
+                    Button(role: .destructive) {
+                        showClearKnowledge = true
+                    } label: {
+                        Label(String(localized: "Clear Business Knowledge"), systemImage: "trash")
+                    }
+                    .font(.subheadline)
+                    .padding(.bottom, 12)
+                }
             }
             .onChange(of: knowledgeText) { _, newValue in
                 if newValue.count > 10_000 {
@@ -1097,7 +1129,7 @@ San Jose, Santa Clara, Campbell
                     knowledgeLengthWarning = ""
                 }
             }
-            .navigationTitle(String(localized: "Services & Pricing"))
+            .navigationTitle(String(localized: "Business Knowledge"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -1109,6 +1141,42 @@ San Jose, Santa Clara, Campbell
                     }
                     .fontWeight(.semibold)
                     .disabled(isSaving || knowledgeText.isEmpty)
+                }
+            }
+            .confirmationDialog(
+                String(localized: "Clear all business knowledge?"),
+                isPresented: $showClearKnowledge,
+                titleVisibility: .visible
+            ) {
+                Button(String(localized: "Clear All"), role: .destructive) {
+                    knowledgeText = ""
+                }
+                Button(String(localized: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(String(localized: "This clears the knowledge Kevin uses to answer business questions. It is not saved until you tap Save."))
+            }
+            .sheet(isPresented: $showKnowledgeDraft) {
+                NavigationStack {
+                    TextEditor(text: $pendingKnowledge)
+                        .font(.system(.subheadline, design: .monospaced))
+                        .padding()
+                        .navigationTitle(String(localized: "Review Changes"))
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                Button(String(localized: "Discard")) {
+                                    showKnowledgeDraft = false
+                                }
+                            }
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button(String(localized: "Apply")) {
+                                    knowledgeText = pendingKnowledge
+                                    showKnowledgeDraft = false
+                                }
+                                .fontWeight(.semibold)
+                                .disabled(pendingKnowledge.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }
                 }
             }
         }
@@ -1157,13 +1225,20 @@ San Jose, Santa Clara, Campbell
                 // Send text to Claude for structuring into knowledge doc
                 if let knowledge = await APIClient.shared.structureKnowledge(
                     contractorId: appState.contractorId,
-                    rawText: transcript
+                    rawText: transcript,
+                    existingKnowledge: knowledgeText,
+                    mode: voiceMode.rawValue
                 ) {
                     await MainActor.run {
-                        if knowledgeText.isEmpty {
-                            knowledgeText = knowledge
+                        let trimmed = knowledge.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            knowledgeLengthWarning = String(localized: "No business details were detected in that recording.")
+                        } else if voiceMode == .replace || knowledgeText.isEmpty {
+                            pendingKnowledge = trimmed
+                            showKnowledgeDraft = true
                         } else {
-                            knowledgeText += "\n\n" + knowledge
+                            pendingKnowledge = knowledgeText + "\n\n" + trimmed
+                            showKnowledgeDraft = true
                         }
                     }
                 }

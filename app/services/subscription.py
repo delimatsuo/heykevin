@@ -127,6 +127,40 @@ def _extract_transaction_info(response_body: dict) -> Optional[dict]:
     return None
 
 
+def _active_subscription_expires_ts(transaction_info: dict) -> Optional[float]:
+    """Return a future expiry timestamp for an active transaction, else None."""
+    if transaction_info.get("revocationDate") or transaction_info.get("revokedDate"):
+        logger.warning(
+            "Rejecting revoked App Store transaction: product=%s revocationDate=%s",
+            transaction_info.get("productId", ""),
+            transaction_info.get("revocationDate") or transaction_info.get("revokedDate"),
+        )
+        return None
+
+    try:
+        expires_ms = float(transaction_info.get("expiresDate") or 0)
+    except (TypeError, ValueError):
+        expires_ms = 0
+
+    if expires_ms <= 0:
+        logger.warning(
+            "Rejecting App Store subscription transaction without expiresDate: product=%s",
+            transaction_info.get("productId", ""),
+        )
+        return None
+
+    expires_ts = expires_ms / 1000.0
+    if expires_ts <= time.time():
+        logger.warning(
+            "Rejecting expired App Store transaction: product=%s expires=%s",
+            transaction_info.get("productId", ""),
+            expires_ts,
+        )
+        return None
+
+    return expires_ts
+
+
 async def verify_transaction(transaction_id: str) -> Optional[dict]:
     """Verify a transaction with Apple's App Store Server API.
 
@@ -223,8 +257,9 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
         logger.error(f"appAccountToken mismatch: expected subscription_uuid={expected_uuid!r}, got {app_account_token!r}")
         return False
 
-    expires_ms = transaction_info.get("expiresDate", 0)
-    expires_ts = expires_ms / 1000.0 if expires_ms else time.time() + 30 * 86400
+    expires_ts = _active_subscription_expires_ts(transaction_info)
+    if not expires_ts:
+        return False
 
     await update_contractor(contractor_id, {
         "subscription_tier": tier,
@@ -373,15 +408,17 @@ async def handle_appstore_notification(payload: dict) -> bool:
     if notification_type in ("DID_RENEW", "SUBSCRIBED"):
         product_id = transaction_info.get("productId", "")
         tier = PRODUCT_TO_TIER.get(product_id, "")
-        expires_ms = transaction_info.get("expiresDate", 0)
-        expires_ts = expires_ms / 1000.0 if expires_ms else time.time() + 30 * 86400
-        if tier:
+        expires_ts = _active_subscription_expires_ts(transaction_info)
+        if tier and expires_ts:
             await update_contractor(contractor_id, {
                 "subscription_tier": tier,
                 "subscription_status": "active",
                 "subscription_expires": expires_ts,
             })
             logger.info(f"Subscription renewed: {contractor_id} → {tier}")
+        else:
+            logger.warning(f"Rejected active subscription notification: {contractor_id} product={product_id}")
+            return False
 
     elif notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE"):
         await update_contractor(contractor_id, {

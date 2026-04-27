@@ -132,6 +132,7 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
     monkeypatch.setattr(contractors_db, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
     updated = await subscription.update_subscription_from_transaction(
         "contractor-1",
@@ -151,6 +152,86 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
             "subscription_expires": 1770000000.0,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_update_subscription_rejects_expired_transaction(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "subscription_uuid": "subscription-uuid",
+        }
+
+    async def fail_update(*args, **kwargs):
+        raise AssertionError("expired transaction must not activate subscription")
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
+
+    updated = await subscription.update_subscription_from_transaction(
+        "contractor-1",
+        {
+            "productId": "com.kevin.callscreen.businesspro.monthly",
+            "appAccountToken": "subscription-uuid",
+            "expiresDate": 1600000000000,
+        },
+    )
+
+    assert updated is False
+
+
+@pytest.mark.asyncio
+async def test_update_subscription_rejects_revoked_transaction(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "subscription_uuid": "subscription-uuid",
+        }
+
+    async def fail_update(*args, **kwargs):
+        raise AssertionError("revoked transaction must not activate subscription")
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
+
+    updated = await subscription.update_subscription_from_transaction(
+        "contractor-1",
+        {
+            "productId": "com.kevin.callscreen.businesspro.monthly",
+            "appAccountToken": "subscription-uuid",
+            "expiresDate": 1770000000000,
+            "revocationDate": 1705000000000,
+        },
+    )
+
+    assert updated is False
+
+
+@pytest.mark.asyncio
+async def test_update_subscription_rejects_missing_expiry(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "subscription_uuid": "subscription-uuid",
+        }
+
+    async def fail_update(*args, **kwargs):
+        raise AssertionError("transaction without expiry must not activate subscription")
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+
+    updated = await subscription.update_subscription_from_transaction(
+        "contractor-1",
+        {
+            "productId": "com.kevin.callscreen.businesspro.monthly",
+            "appAccountToken": "subscription-uuid",
+        },
+    )
+
+    assert updated is False
 
 
 @pytest.mark.asyncio

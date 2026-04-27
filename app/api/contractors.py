@@ -50,6 +50,7 @@ class ContractorCreate(BaseModel):
     owner_phone: str = Field(default="", max_length=20)
     apple_user_id: str = Field(default="", max_length=100)
     service_type: str = Field(default="general", max_length=50)
+    mode: str = Field(default="business", max_length=20)
     service_area_zips: list = []
     service_fee_cents: int = 0
     after_hours_fee_cents: int = 0
@@ -244,11 +245,13 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
         return {"status": "no changes"}
 
     # Tier enforcement: Personal subscribers cannot switch to Business mode.
-    # Business subscribers can freely switch to Personal (downgrade usage is fine).
+    # Trial and Business subscribers can use Business mode; Business subscribers
+    # can freely switch to Personal (downgrade usage is fine).
     if updates.get("mode") in ("business", "businessPro"):
         contractor = await get_contractor(contractor_id)
         tier = (contractor or {}).get("subscription_tier", "none")
-        if tier not in ("business", "businessPro"):
+        status = (contractor or {}).get("subscription_status", "")
+        if status != "trial" and tier not in ("business", "businessPro"):
             from fastapi import HTTPException
             raise HTTPException(
                 status_code=403,

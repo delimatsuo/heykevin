@@ -777,6 +777,7 @@ struct OnboardingView: View {
                 ownerName: ownerName,
                 businessName: bizName,
                 serviceType: svcType,
+                mode: mode,
                 ownerPhone: phoneNumber,
                 appleUserId: appState.appleUserId,
                 appleIdentityToken: appState.appleIdentityToken
@@ -792,20 +793,52 @@ struct OnboardingView: View {
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
+
+            // If the create endpoint restored an existing account by phone,
+            // persist the selected mode/profile before continuing.
+            if result?["existing"] as? Bool == true {
+                let updateBody: [String: Any] = [
+                    "owner_name": ownerName,
+                    "business_name": bizName,
+                    "mode": mode,
+                ]
+                do {
+                    let updated = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
+                    if !updated {
+                        errorMessage = mode == "business"
+                            ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+                            : String(localized: "Failed to update profile. Please try again.")
+                        isLoading = false
+                        return
+                    }
+                } catch {
+                    errorMessage = String(localized: "Failed to update profile. Please try again.")
+                    isLoading = false
+                    return
+                }
+                appState.userName = ownerName
+                appState.businessName = bizName
+            }
         } else {
             // Existing contractor — update profile info
-            _ = await APIClient.shared.updateContractorMode(contractorId: contractorId, mode: mode)
             let updateBody: [String: Any] = [
                 "owner_name": ownerName,
                 "business_name": bizName,
                 "mode": mode,
             ]
             do {
-                _ = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
+                let updated = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
+                if !updated {
+                    errorMessage = mode == "business"
+                        ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+                        : String(localized: "Failed to update profile. Please try again.")
+                    isLoading = false
+                    return
+                }
             } catch {
-                #if DEBUG
-                print("Update profile info failed: \(error)")
-                #endif
+                errorMessage = String(localized: "Failed to update profile. Please try again.")
+                isLoading = false
+                return
             }
             appState.userName = ownerName
             appState.businessName = bizName

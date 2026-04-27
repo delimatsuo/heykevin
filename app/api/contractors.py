@@ -266,10 +266,9 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
     if updates.get("mode") in ("business", "businessPro"):
         contractor = await get_contractor(contractor_id)
         if not has_business_entitlement(contractor):
-            from fastapi import HTTPException
             raise HTTPException(
                 status_code=403,
-                detail="Business mode requires an active Business subscription or trial. Please upgrade your plan."
+                detail="Business mode requires an active Business subscription. Please upgrade your plan."
             )
 
     await update_contractor(contractor_id, updates)

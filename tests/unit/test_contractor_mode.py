@@ -13,6 +13,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import contractors as contractors_api
+from app.services.entitlements import effective_mode, has_business_entitlement
 
 
 def _admin_request():
@@ -49,14 +50,89 @@ async def test_create_contractor_persists_selected_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trial_user_can_switch_to_business_mode(monkeypatch):
+async def test_create_contractor_does_not_activate_business_without_entitlement(monkeypatch):
+    captured = {}
+
+    async def fake_create_contractor(data):
+        captured.update(data)
+        return "contractor-1"
+
+    async def fake_update_contractor(contractor_id, updates):
+        return True
+
+    monkeypatch.setattr(contractors_api, "create_contractor", fake_create_contractor)
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+
+    response = await contractors_api.api_create_contractor(
+        contractors_api.ContractorCreate(
+            business_name="Deli Plumbing",
+            owner_name="Deli",
+            service_type="plumbing",
+            mode="business",
+        ),
+        _admin_request(),
+    )
+
+    assert response["status"] == "ok"
+    assert captured["mode"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_trial_user_without_business_tier_cannot_switch_to_business_mode(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "subscription_status": "trial",
+            "subscription_tier": "none",
+        }
+
+    async def fail_update_contractor(*args, **kwargs):
+        raise AssertionError("non-business trial users must not be switched to business")
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_api, "update_contractor", fail_update_contractor)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await contractors_api.api_update_contractor(
+            "contractor-1",
+            contractors_api.ContractorUpdate(mode="business"),
+            _admin_request(),
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+def test_business_runtime_falls_back_to_personal_without_business_tier():
+    contractor = {
+        "mode": "business",
+        "subscription_status": "trial",
+        "subscription_tier": "none",
+    }
+
+    assert not has_business_entitlement(contractor)
+    assert effective_mode(contractor) == "personal"
+
+
+def test_business_runtime_allowed_with_business_tier():
+    contractor = {
+        "mode": "business",
+        "subscription_status": "active",
+        "subscription_tier": "business",
+    }
+
+    assert has_business_entitlement(contractor)
+    assert effective_mode(contractor) == "business"
+
+
+@pytest.mark.asyncio
+async def test_trial_user_with_business_tier_can_switch_to_business_mode(monkeypatch):
     updates_seen = {}
 
     async def fake_get_contractor(contractor_id):
         return {
             "contractor_id": contractor_id,
             "subscription_status": "trial",
-            "subscription_tier": "none",
+            "subscription_tier": "business",
         }
 
     async def fake_update_contractor(contractor_id, updates):

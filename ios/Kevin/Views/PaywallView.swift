@@ -6,6 +6,12 @@ struct PaywallView: View {
     var canDismiss: Bool = true
     /// When true, shown as the final onboarding step — skip link says "Maybe later"
     var isOnboarding: Bool = false
+    /// Optional plan to preselect when the paywall opens from an upgrade path.
+    var preferredProductID: String? = nil
+    /// Called after a purchase has been verified by the server.
+    var onSubscribed: (() -> Void)? = nil
+    /// Whether trial/grace users should see the non-purchase skip link.
+    var showsTrialSkip: Bool = true
 
     @EnvironmentObject var appState: AppState
     @ObservedObject private var subscriptionManager = SubscriptionManager.shared
@@ -83,7 +89,7 @@ struct PaywallView: View {
                     }
 
                     // Skip — only during active trial/grace period
-                    if canDismiss && appState.subscriptionStatus == "trial" {
+                    if canDismiss && showsTrialSkip && appState.subscriptionStatus == "trial" {
                         Button(isOnboarding
                                ? String(localized: "Maybe later")
                                : String(localized: "Continue without subscribing")) {
@@ -261,11 +267,15 @@ struct PaywallView: View {
                     let purchased = try await subscriptionManager.purchase(product, offerID: offerID)
                     if purchased {
                         isPurchasing = false
+                        onSubscribed?()
                         if isOnboarding {
                             appState.isOnboarded = true
                         }
                         dismiss()
                         return
+                    }
+                    if let err = subscriptionManager.purchaseError, !err.isEmpty {
+                        purchaseError = err
                     }
                 } catch {
                     // If promo offer was rejected, fall back to regular price automatically
@@ -372,7 +382,8 @@ struct PaywallView: View {
 
     private func loadData() async {
         await subscriptionManager.fetchProducts()
-        selectedProductID = subscriptionManager.products.first?.id
+        selectedProductID = subscriptionManager.products.first(where: { $0.id == preferredProductID })?.id
+            ?? subscriptionManager.products.first?.id
 
         // Check promo eligibility in parallel with product fetch result
         if !appState.contractorId.isEmpty {

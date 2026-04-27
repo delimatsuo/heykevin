@@ -192,107 +192,175 @@ struct CallRow: View {
 
 struct CallDetailView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.openURL) private var openURL
     let call: CallRecord
 
     var body: some View {
-        List {
-            // Caller info
-            Section {
-                HStack {
-                    ZStack {
-                        Circle()
-                            .fill(Color(.systemGray4))
-                            .frame(width: 56, height: 56)
-                        if !callerInitials.isEmpty {
-                            Text(callerInitials)
-                                .font(.title3.weight(.medium))
-                                .foregroundStyle(.white)
-                        } else {
-                            Image(systemName: "phone.fill")
-                                .font(.title3)
-                                .foregroundStyle(.white)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(call.callerName.isEmpty ? formattedPhone : call.callerName)
-                            .font(.title3.weight(.semibold))
-                        if !call.callerName.isEmpty {
-                            Text(formattedPhone)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.leading, 8)
-                }
-                .listRowBackground(Color.clear)
+        ScrollView {
+            VStack(spacing: 18) {
+                callerHeader
+                primaryActions
+                callSummary
+                transcriptSection
             }
-
-            // Call details
-            Section(String(localized: "Details")) {
-                HStack {
-                    Text(String(localized: "Date"))
-                    Spacer()
-                    Text(call.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    Text(String(localized: "Action"))
-                    Spacer()
-                    Label(outcomeText, systemImage: outcomeIcon)
-                        .foregroundStyle(outcomeColor)
-                }
-
-                if call.trustScore > 0 {
-                    HStack {
-                        Text(String(localized: "Trust Score"))
-                        Spacer()
-                        Text("\(call.trustScore)/100")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            // Transcript
-            if !call.transcript.isEmpty {
-                Section(String(localized: "Transcript")) {
-                    let lines = call.transcript.components(separatedBy: "\n").filter { !$0.isEmpty }
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        TranscriptRow(line: line)
-                    }
-                }
-            }
-
-            // Actions — prefer callback number if the caller gave one
-            Section {
-                let callbackPhone = call.callbackNumber ?? call.callerPhone
-                Button {
-                    let digits = callbackPhone.filter { $0.isNumber }
-                    if let url = URL(string: "tel://\(digits)") {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    Label(String(localized: "Call Back \(PhoneFormatter.format(callbackPhone))"), systemImage: "phone.fill")
-                }
-
-                Button {
-                    let digits = callbackPhone.filter { $0.isNumber }
-                    if let url = URL(string: "sms:\(digits)") {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    Label(String(localized: "Send Text"), systemImage: "message.fill")
-                }
-            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 32)
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle(String(localized: "Call Details"))
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle(String(localized: "Details"))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             appState.markCallAsRead(call.id)
             Task { await APIClient.shared.markCallsRead([call.id]) }
         }
+    }
+
+    private var callerHeader: some View {
+        VStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [outcomeColor.opacity(0.22), Color(.tertiarySystemFill)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 84, height: 84)
+                if !callerInitials.isEmpty {
+                    Text(callerInitials)
+                        .font(.title.weight(.semibold))
+                        .foregroundStyle(.primary)
+                } else {
+                    Image(systemName: "phone.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+            }
+
+            VStack(spacing: 5) {
+                Text(displayName)
+                    .font(.title2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
+
+                Link(formattedPhone, destination: phoneURL(for: call.callerPhone))
+                    .font(.body)
+                    .foregroundStyle(.tint)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    StatusPill(title: outcomeText, systemImage: outcomeIcon, color: outcomeColor)
+                    if call.trustScore > 0 {
+                        StatusPill(title: "\(call.trustScore)/100", systemImage: "checkmark.shield.fill", color: trustColor)
+                    }
+                }
+
+                VStack(spacing: 8) {
+                    StatusPill(title: outcomeText, systemImage: outcomeIcon, color: outcomeColor)
+                    if call.trustScore > 0 {
+                        StatusPill(title: "\(call.trustScore)/100", systemImage: "checkmark.shield.fill", color: trustColor)
+                    }
+                }
+            }
+
+            Text(call.timestamp.formatted(date: .abbreviated, time: .shortened))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 6)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var primaryActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: true)
+                actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
+            }
+
+            VStack(spacing: 10) {
+                actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: true)
+                actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
+            }
+        }
+    }
+
+    private var callSummary: some View {
+        CallDetailSection(title: String(localized: "Call"), systemImage: "phone.badge.waveform") {
+            DetailRow(
+                title: String(localized: "Outcome"),
+                value: outcomeText,
+                systemImage: outcomeIcon,
+                tint: outcomeColor
+            )
+            Divider()
+            DetailRow(
+                title: String(localized: "Time"),
+                value: call.timestamp.formatted(date: .abbreviated, time: .shortened),
+                systemImage: "calendar",
+                tint: .secondary
+            )
+            if call.trustScore > 0 {
+                Divider()
+                DetailRow(
+                    title: String(localized: "Trust"),
+                    value: trustLabel,
+                    systemImage: "checkmark.shield.fill",
+                    tint: trustColor
+                )
+            }
+            if let callbackNumber = call.callbackNumber, callbackNumber != call.callerPhone {
+                Divider()
+                DetailRow(
+                    title: String(localized: "Callback"),
+                    value: PhoneFormatter.format(callbackNumber),
+                    systemImage: "phone.arrow.up.right.fill",
+                    tint: .blue
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptSection: some View {
+        if !transcriptLines.isEmpty {
+            CallDetailSection(title: String(localized: "Conversation"), systemImage: "text.bubble") {
+                VStack(spacing: 12) {
+                    ForEach(Array(transcriptLines.enumerated()), id: \.offset) { _, line in
+                        TranscriptRow(line: line)
+                    }
+                }
+            }
+        }
+    }
+
+    private func actionButton(title: String, systemImage: String, destination: URL, isPrimary: Bool) -> some View {
+        Button {
+            openURL(destination)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isPrimary ? .white : .primary)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isPrimary ? Color.accentColor : Color(.secondarySystemGroupedBackground))
+        }
+        .overlay {
+            if !isPrimary {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color(.separator), lineWidth: 0.5)
+            }
+        }
+        .accessibilityLabel(title)
     }
 
     private var callerInitials: String {
@@ -305,8 +373,23 @@ struct CallDetailView: View {
         return String(name.prefix(2)).uppercased()
     }
 
+    private var displayName: String {
+        call.callerName.isEmpty ? formattedPhone : call.callerName
+    }
+
     private var formattedPhone: String {
         PhoneFormatter.format(call.callerPhone)
+    }
+
+    private var callbackPhone: String {
+        call.callbackNumber ?? call.callerPhone
+    }
+
+    private var transcriptLines: [String] {
+        call.transcript
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private var outcomeText: String {
@@ -337,6 +420,107 @@ struct CallDetailView: View {
         case "spam", "blocked": return .red
         default: return .secondary
         }
+    }
+
+    private var trustLabel: String {
+        switch call.trustScore {
+        case 85...100: return String(localized: "Trusted \(call.trustScore)/100")
+        case 45..<85: return String(localized: "Review \(call.trustScore)/100")
+        default: return String(localized: "Unknown \(call.trustScore)/100")
+        }
+    }
+
+    private var trustColor: Color {
+        switch call.trustScore {
+        case 85...100: return .green
+        case 45..<85: return .orange
+        default: return .secondary
+        }
+    }
+
+    private func phoneURL(for phone: String) -> URL {
+        let digits = phone.filter { $0.isNumber || $0 == "+" }
+        return URL(string: "tel://\(digits)")!
+    }
+
+    private func messageURL(for phone: String) -> URL {
+        let digits = phone.filter { $0.isNumber || $0 == "+" }
+        return URL(string: "sms:\(digits)")!
+    }
+}
+
+private struct CallDetailSection<Content: View>: View {
+    let title: String
+    let systemImage: String
+    private let content: Content
+
+    init(title: String, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 0) {
+                content
+            }
+            .padding(14)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color(.separator), lineWidth: 0.5)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct StatusPill: View {
+    let title: String
+    let systemImage: String
+    let color: Color
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(color.opacity(0.12), in: Capsule())
+            .accessibilityElement(children: .combine)
+    }
+}
+
+private struct DetailRow: View {
+    let title: String
+    let value: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.body)
+                .foregroundStyle(tint)
+                .frame(width: 24)
+
+            Text(title)
+                .font(.body)
+
+            Spacer(minLength: 16)
+
+            Text(value)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 9)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -377,14 +561,70 @@ struct TranscriptRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if !speaker.isEmpty {
-                Text(speaker)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(speaker == "Kevin" ? .blue : .secondary)
+        HStack(alignment: .bottom, spacing: 8) {
+            if isKevin {
+                Spacer(minLength: 36)
             }
-            Text(linkedText)
-                .font(.subheadline)
+
+            if isCaller {
+                speakerAvatar
+            }
+
+            VStack(alignment: isKevin ? .trailing : .leading, spacing: 4) {
+                if !speaker.isEmpty {
+                    Text(speaker)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(linkedText)
+                    .font(.body)
+                    .foregroundStyle(isKevin ? .white : .primary)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .background(
+                        isKevin ? Color.accentColor : Color(.tertiarySystemGroupedBackground),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
+            }
+            .frame(maxWidth: 290, alignment: isKevin ? .trailing : .leading)
+
+            if isKevin {
+                speakerAvatar
+            }
+
+            if !isKevin {
+                Spacer(minLength: 36)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: isKevin ? .trailing : .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var isKevin: Bool {
+        speaker == "Kevin"
+    }
+
+    private var isCaller: Bool {
+        speaker == "Caller"
+    }
+
+    private var speakerAvatar: some View {
+        ZStack {
+            Circle()
+                .fill(isKevin ? Color.accentColor.opacity(0.16) : Color(.tertiarySystemFill))
+                .frame(width: 30, height: 30)
+
+            if isKevin {
+                Image(systemName: "phone.bubble.left.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

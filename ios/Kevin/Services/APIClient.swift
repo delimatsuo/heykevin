@@ -407,7 +407,7 @@ class APIClient {
         return nil
     }
 
-    func structureKnowledge(contractorId: String, rawText: String) async -> String? {
+    func structureKnowledge(contractorId: String, rawText: String, existingKnowledge: String = "", mode: String = "add") async -> String? {
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/structure-knowledge")!
@@ -415,7 +415,11 @@ class APIClient {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 30
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["raw_text": rawText])
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "raw_text": rawText,
+                "existing_knowledge": existingKnowledge,
+                "mode": mode,
+            ])
             authorize(&request)
 
             let (data, response) = try await session.data(for: request)
@@ -642,10 +646,17 @@ class APIClient {
                 "contractor_id": contractorId,
             ])
             authorize(&request)
-            let (_, response) = try await retryRequest(request)
-            let ok = (response as? HTTPURLResponse)?.statusCode == 200
-            if !ok { debugLog("Verify subscription returned non-200") }
-            return ok
+            let (data, response) = try await retryRequest(request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                debugLog("Verify subscription returned non-200")
+                return false
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["status"] as? String == "ok" else {
+                debugLog("Verify subscription returned error response")
+                return false
+            }
+            return true
         } catch {
             debugLog("Verify subscription failed: \(error.localizedDescription)")
             return false

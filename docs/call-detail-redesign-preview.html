@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kevin Call Detail Redesign</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: #f2f2f7;
+      --surface: #ffffff;
+      --surface-2: #f7f7fb;
+      --text: #111114;
+      --secondary: #6c6c70;
+      --tertiary: #8e8e93;
+      --separator: rgba(60, 60, 67, 0.2);
+      --blue: #007aff;
+      --green: #34c759;
+      --orange: #ff9f0a;
+      --shadow: rgba(0, 0, 0, 0.18);
+      --phone-shell: #101114;
+      --safe-bottom: 18px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #000000;
+        --surface: #1c1c1e;
+        --surface-2: #2c2c2e;
+        --text: #f5f5f7;
+        --secondary: #aeaeb2;
+        --tertiary: #8e8e93;
+        --separator: rgba(84, 84, 88, 0.64);
+        --shadow: rgba(0, 0, 0, 0.5);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at 50% 0%, rgba(0, 122, 255, 0.14), transparent 34%),
+        var(--page);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    .stage {
+      display: grid;
+      grid-template-columns: minmax(320px, 393px) minmax(260px, 360px);
+      gap: 28px;
+      align-items: center;
+      width: min(100%, 860px);
+    }
+
+    .phone {
+      width: min(393px, calc(100vw - 48px));
+      aspect-ratio: 393 / 852;
+      background: var(--page);
+      border: 10px solid var(--phone-shell);
+      border-radius: 48px;
+      overflow: hidden;
+      box-shadow: 0 24px 72px var(--shadow);
+      position: relative;
+    }
+
+    .screen {
+      height: 100%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--page);
+    }
+
+    .status-bar {
+      height: 45px;
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      padding: 0 23px 8px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .status-icons {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--text);
+    }
+
+    .signal {
+      display: grid;
+      grid-template-columns: repeat(4, 4px);
+      gap: 3px;
+      align-items: end;
+      height: 15px;
+    }
+
+    .signal span {
+      width: 4px;
+      border-radius: 2px;
+      background: currentColor;
+      opacity: 0.95;
+    }
+
+    .signal span:nth-child(1) { height: 6px; }
+    .signal span:nth-child(2) { height: 9px; }
+    .signal span:nth-child(3) { height: 12px; }
+    .signal span:nth-child(4) { height: 15px; opacity: 0.35; }
+
+    .wifi {
+      width: 19px;
+      height: 13px;
+      border: 3px solid currentColor;
+      border-bottom: 0;
+      border-radius: 18px 18px 0 0;
+      position: relative;
+      transform: scaleX(1.2);
+    }
+
+    .wifi::after {
+      content: "";
+      position: absolute;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      left: 50%;
+      bottom: -5px;
+      transform: translateX(-50%);
+    }
+
+    .battery {
+      height: 18px;
+      min-width: 31px;
+      padding: 1px 4px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--text), transparent 10%);
+      color: var(--page);
+      font-size: 13px;
+      line-height: 16px;
+      font-weight: 800;
+    }
+
+    .nav {
+      height: 52px;
+      display: grid;
+      grid-template-columns: 48px 1fr 48px;
+      align-items: center;
+      padding: 0 12px;
+    }
+
+    .nav-title {
+      text-align: center;
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .icon-button {
+      width: 36px;
+      height: 36px;
+      border: 0;
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      background: transparent;
+      color: var(--blue);
+    }
+
+    .content {
+      flex: 1;
+      overflow: hidden;
+      padding: 6px 20px 0;
+    }
+
+    .scroll {
+      height: 100%;
+      overflow-y: auto;
+      padding-bottom: 132px;
+      scrollbar-width: none;
+    }
+
+    .scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .caller {
+      display: grid;
+      justify-items: center;
+      gap: 11px;
+      padding-top: 3px;
+      padding-bottom: 17px;
+    }
+
+    .avatar {
+      width: 84px;
+      height: 84px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(52, 199, 89, 0.26), var(--surface-2));
+      font-size: 30px;
+      font-weight: 700;
+    }
+
+    .caller-name {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.1;
+      font-weight: 700;
+    }
+
+    .phone-link {
+      color: var(--blue);
+      font-size: 17px;
+      text-decoration: none;
+    }
+
+    .pills {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 0 11px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .pill.green {
+      color: var(--green);
+      background: rgba(52, 199, 89, 0.13);
+    }
+
+    .pill.blue {
+      color: var(--blue);
+      background: rgba(0, 122, 255, 0.13);
+    }
+
+    .timestamp {
+      color: var(--secondary);
+      font-size: 15px;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .action {
+      min-height: 48px;
+      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: 0.5px solid var(--separator);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .action.primary {
+      border-color: transparent;
+      background: var(--blue);
+      color: #ffffff;
+    }
+
+    .section {
+      margin-bottom: 18px;
+    }
+
+    .section-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--secondary);
+      font-size: 15px;
+      font-weight: 700;
+      margin: 0 0 10px;
+    }
+
+    .card {
+      border-radius: 8px;
+      background: var(--surface);
+      border: 0.5px solid var(--separator);
+      overflow: hidden;
+    }
+
+    .row {
+      min-height: 48px;
+      display: grid;
+      grid-template-columns: 26px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 14px;
+      font-size: 16px;
+    }
+
+    .row + .row {
+      border-top: 0.5px solid var(--separator);
+    }
+
+    .row-value {
+      color: var(--secondary);
+      text-align: right;
+      max-width: 175px;
+    }
+
+    .conversation {
+      padding: 14px;
+      display: grid;
+      gap: 13px;
+    }
+
+    .message {
+      display: flex;
+      align-items: end;
+      gap: 8px;
+    }
+
+    .message.kevin {
+      justify-content: flex-end;
+      padding-left: 42px;
+    }
+
+    .message.caller {
+      justify-content: flex-start;
+      padding-right: 42px;
+    }
+
+    .mini-avatar {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      background: var(--surface-2);
+      color: var(--secondary);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .mini-avatar.kevin-icon {
+      background: rgba(0, 122, 255, 0.13);
+      color: var(--blue);
+    }
+
+    .bubble-wrap {
+      display: grid;
+      gap: 4px;
+      max-width: 248px;
+    }
+
+    .message.kevin .bubble-wrap {
+      justify-items: end;
+    }
+
+    .speaker {
+      color: var(--secondary);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .bubble {
+      padding: 10px 13px;
+      border-radius: 18px;
+      font-size: 16px;
+      line-height: 1.32;
+    }
+
+    .message.kevin .bubble {
+      background: var(--blue);
+      color: #ffffff;
+    }
+
+    .message.caller .bubble {
+      background: var(--surface-2);
+      color: var(--text);
+    }
+
+    .bubble a {
+      color: inherit;
+      font-weight: 600;
+    }
+
+    .tabbar {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      bottom: calc(var(--safe-bottom) + 10px);
+      height: 70px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      align-items: center;
+      padding: 7px;
+      border-radius: 34px;
+      background: color-mix(in srgb, var(--surface), transparent 8%);
+      border: 0.5px solid var(--separator);
+      box-shadow: 0 10px 28px var(--shadow);
+      backdrop-filter: blur(24px);
+    }
+
+    .tab {
+      height: 56px;
+      display: grid;
+      place-items: center;
+      gap: 2px;
+      border-radius: 28px;
+      color: var(--secondary);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .tab svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    .tab.active {
+      background: var(--surface-2);
+      color: var(--blue);
+    }
+
+    .notes {
+      display: grid;
+      gap: 16px;
+      align-content: center;
+    }
+
+    .notes h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .notes p {
+      margin: 0;
+      color: var(--secondary);
+      font-size: 17px;
+      line-height: 1.45;
+    }
+
+    .principles {
+      display: grid;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .principle {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      align-items: start;
+      color: var(--secondary);
+      font-size: 15px;
+      line-height: 1.35;
+    }
+
+    .principle svg {
+      color: var(--blue);
+      margin-top: 1px;
+    }
+
+    svg {
+      width: 20px;
+      height: 20px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .fill-icon {
+      fill: currentColor;
+      stroke: none;
+    }
+
+    .green-text { color: var(--green); }
+    .blue-text { color: var(--blue); }
+    .secondary-text { color: var(--secondary); }
+
+    @media (max-width: 760px) {
+      body {
+        padding: 14px;
+      }
+
+      .stage {
+        grid-template-columns: 1fr;
+        justify-items: center;
+      }
+
+      .notes {
+        order: -1;
+        width: min(100%, 393px);
+      }
+
+      .notes h1 {
+        font-size: 28px;
+      }
+
+      .notes p,
+      .principles {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="stage">
+    <section class="phone" aria-label="Kevin call details redesign preview">
+      <div class="screen">
+        <div class="status-bar">
+          <div>2:11</div>
+          <div class="status-icons" aria-hidden="true">
+            <div class="signal"><span></span><span></span><span></span><span></span></div>
+            <div class="wifi"></div>
+            <div class="battery">74</div>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Navigation">
+          <button class="icon-button" aria-label="Back">
+            <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"></path></svg>
+          </button>
+          <div class="nav-title">Details</div>
+          <span></span>
+        </nav>
+
+        <div class="content">
+          <div class="scroll">
+            <header class="caller">
+              <div class="avatar">BR</div>
+              <h2 class="caller-name">Brian</h2>
+              <a class="phone-link" href="tel:6506918667">(650) 691-8667</a>
+              <div class="pills" aria-label="Call status">
+                <span class="pill blue">
+                  <svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.61a2 2 0 0 1-.45 2.11L8 9.69a16 16 0 0 0 6.31 6.31l1.25-1.25a2 2 0 0 1 2.11-.45c.84.27 1.71.47 2.61.59A2 2 0 0 1 22 16.92z"></path></svg>
+                  Screened
+                </span>
+                <span class="pill green">
+                  <svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"></path><path d="M9 12l2 2 4-4"></path></svg>
+                  100/100
+                </span>
+              </div>
+              <div class="timestamp">Apr 24, 4:41 PM</div>
+            </header>
+
+            <div class="actions">
+              <a class="action primary" href="tel:6502967171">
+                <svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.61a2 2 0 0 1-.45 2.11L8 9.69a16 16 0 0 0 6.31 6.31l1.25-1.25a2 2 0 0 1 2.11-.45c.84.27 1.71.47 2.61.59A2 2 0 0 1 22 16.92z"></path></svg>
+                Call Back
+              </a>
+              <a class="action" href="sms:6502967171">
+                <svg viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path></svg>
+                Message
+              </a>
+            </div>
+
+            <section class="section" aria-labelledby="call-heading">
+              <h3 id="call-heading" class="section-title">
+                <svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.61a2 2 0 0 1-.45 2.11L8 9.69a16 16 0 0 0 6.31 6.31l1.25-1.25a2 2 0 0 1 2.11-.45c.84.27 1.71.47 2.61.59A2 2 0 0 1 22 16.92z"></path></svg>
+                Call
+              </h3>
+              <div class="card">
+                <div class="row">
+                  <svg class="blue-text" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"></path></svg>
+                  <span>Outcome</span>
+                  <span class="row-value">Screened</span>
+                </div>
+                <div class="row">
+                  <svg class="secondary-text" viewBox="0 0 24 24"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M3 10h18"></path></svg>
+                  <span>Time</span>
+                  <span class="row-value">Apr 24, 4:41 PM</span>
+                </div>
+                <div class="row">
+                  <svg class="green-text" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"></path><path d="M9 12l2 2 4-4"></path></svg>
+                  <span>Trust</span>
+                  <span class="row-value">Trusted 100/100</span>
+                </div>
+                <div class="row">
+                  <svg class="blue-text" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.61a2 2 0 0 1-.45 2.11L8 9.69a16 16 0 0 0 6.31 6.31l1.25-1.25a2 2 0 0 1 2.11-.45c.84.27 1.71.47 2.61.59A2 2 0 0 1 22 16.92z"></path><path d="M15 6h6v6"></path></svg>
+                  <span>Callback</span>
+                  <span class="row-value">(650) 296-7171</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="section" aria-labelledby="conversation-heading">
+              <h3 id="conversation-heading" class="section-title">
+                <svg viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path></svg>
+                Conversation
+              </h3>
+              <div class="card conversation">
+                <div class="message kevin">
+                  <div class="bubble-wrap">
+                    <span class="speaker">Kevin</span>
+                    <div class="bubble">Hi, thanks for calling Deli&apos;s office. This is Kevin. How can I help you?</div>
+                  </div>
+                  <div class="mini-avatar kevin-icon">K</div>
+                </div>
+
+                <div class="message caller">
+                  <div class="mini-avatar">BR</div>
+                  <div class="bubble-wrap">
+                    <span class="speaker">Caller</span>
+                    <div class="bubble">Hi. Can I leave a message?</div>
+                  </div>
+                </div>
+
+                <div class="message kevin">
+                  <div class="bubble-wrap">
+                    <span class="speaker">Kevin</span>
+                    <div class="bubble">Of course, go ahead.</div>
+                  </div>
+                  <div class="mini-avatar kevin-icon">K</div>
+                </div>
+
+                <div class="message caller">
+                  <div class="mini-avatar">BR</div>
+                  <div class="bubble-wrap">
+                    <span class="speaker">Caller</span>
+                    <div class="bubble">Tell Deli to call Brian. It&apos;s <a href="tel:6502967171">(650) 296-7171</a>.</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="tabbar" aria-label="Tabs">
+          <div class="tab">
+            <svg viewBox="0 0 24 24"><path d="M4 12v4"></path><path d="M8 8v12"></path><path d="M12 4v16"></path><path d="M16 8v12"></path><path d="M20 12v4"></path></svg>
+            <span>Live</span>
+          </div>
+          <div class="tab active">
+            <svg viewBox="0 0 24 24"><path d="M12 6v6l4 2"></path><circle cx="12" cy="12" r="9"></circle></svg>
+            <span>Recents</span>
+          </div>
+          <div class="tab">
+            <svg viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 3.9l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15.4 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 .6 1c.32.26.72.4 1.1.4H21a2 2 0 1 1 0 4h-.09c-.38 0-.78.14-1.1.4a1.65 1.65 0 0 0-.41.2z"></path></svg>
+            <span>Settings</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="notes" aria-label="Design notes">
+      <h1>Call details, redesigned for iOS</h1>
+      <p>A native-feeling detail view with clearer hierarchy, tappable actions near the top, and transcript bubbles that read like a conversation without copying Messages exactly.</p>
+      <div class="principles">
+        <div class="principle">
+          <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"></path></svg>
+          <span>Uses system typography, semantic colors, SF Symbol-style icons, and Dynamic Type-friendly spacing.</span>
+        </div>
+        <div class="principle">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+          <span>Places the primary decision first: call back or send a message to the detected callback number.</span>
+        </div>
+        <div class="principle">
+          <svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"></path></svg>
+          <span>Keeps trust and screening state visible without making the screen feel like an analytics dashboard.</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

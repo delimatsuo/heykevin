@@ -145,6 +145,14 @@ class AppState: ObservableObject {
     }
 
     var isPersonalMode: Bool { mode == "personal" }
+    var hasBusinessEntitlement: Bool {
+        (subscriptionStatus == "trial" || subscriptionStatus == "active")
+            && (subscriptionTier == "business" || subscriptionTier == "businessPro")
+    }
+    var hasBusinessProEntitlement: Bool {
+        (subscriptionStatus == "trial" || subscriptionStatus == "active")
+            && subscriptionTier == "businessPro"
+    }
 
     @Published var ringThroughContacts: Bool = UserDefaults.standard.object(forKey: "ringThroughContacts") as? Bool ?? true {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.ringThroughContacts, forKey: "ringThroughContacts") } }

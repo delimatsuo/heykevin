@@ -16,6 +16,9 @@ struct OnboardingView: View {
     @State private var phoneNumber = ""
     @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var showPaywall = false
+    @State private var didPrepareInitialStep = false
+
+    private let businessProductID = "com.kevin.callscreen.business.monthly"
 
     enum OnboardingStep {
         case welcome, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
@@ -50,6 +53,21 @@ struct OnboardingView: View {
                 }
             }
             .padding()
+        }
+        .task {
+            await prepareInitialStep()
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(
+                canDismiss: true,
+                isOnboarding: false,
+                preferredProductID: businessProductID,
+                onSubscribed: {
+                    Task { await activateBusinessAfterPurchase() }
+                },
+                showsTrialSkip: false
+            )
+            .environmentObject(appState)
         }
     }
 
@@ -245,11 +263,6 @@ struct OnboardingView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    // Personal subscribers cannot use Business mode
-                    if appState.subscriptionTier == "personal" {
-                        showPaywall = true
-                        return
-                    }
                     selectedMode = "business"
                     step = .businessInfo
                 } label: {
@@ -434,9 +447,21 @@ struct OnboardingView: View {
             Spacer()
 
             Button {
-                step = .contactsPermission
+                selectedMode = "business"
+                if appState.hasBusinessEntitlement {
+                    step = .contactsPermission
+                } else {
+                    Task {
+                        let prepared = await prepareBusinessDraftProfile()
+                        if prepared {
+                            showPaywall = true
+                        }
+                    }
+                }
             } label: {
-                Text(String(localized: "Continue"))
+                Text(appState.hasBusinessEntitlement
+                     ? String(localized: "Continue")
+                     : String(localized: "Start Business Trial"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
@@ -627,6 +652,59 @@ struct OnboardingView: View {
 
     // MARK: - Logic
 
+    @MainActor
+    private func prepareInitialStep() async {
+        guard !didPrepareInitialStep else { return }
+        didPrepareInitialStep = true
+
+        guard appState.pendingModeChange else { return }
+
+        // Mode changes are launched from Settings for an existing, authenticated
+        // account. Do not ask for Sign in with Apple again just to patch mode.
+        guard !appState.contractorId.isEmpty else {
+            appState.pendingModeChange = false
+            return
+        }
+
+        appState.pendingModeChange = false
+        ownerName = appState.userName
+        businessName = appState.businessName
+        if !appState.serviceType.isEmpty {
+            serviceType = appState.serviceType
+        }
+        selectedMode = appState.mode == "personal" ? "business" : "personal"
+        kevinNumber = appState.kevinNumber
+        step = .modeSelect
+
+        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
+            let name = profile["owner_name"] as? String ?? ""
+            let biz = profile["business_name"] as? String ?? ""
+            let svc = profile["service_type"] as? String ?? ""
+            let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? appState.mode
+            let number = profile["twilio_number"] as? String ?? ""
+
+            if !name.isEmpty {
+                ownerName = name
+                appState.userName = name
+            }
+            if !biz.isEmpty {
+                businessName = biz
+                appState.businessName = biz
+            }
+            if !svc.isEmpty {
+                serviceType = svc
+                appState.serviceType = svc
+            }
+            let normalizedMode = mode == "personal" ? "personal" : "business"
+            appState.mode = normalizedMode
+            selectedMode = normalizedMode == "personal" ? "business" : "personal"
+            if !number.isEmpty {
+                kevinNumber = number
+                appState.kevinNumber = number
+            }
+        }
+    }
+
     private func handleSignIn(_ result: Result<ASAuthorization, Error>) {
         switch result {
         case .success(let auth):
@@ -705,7 +783,7 @@ struct OnboardingView: View {
     private func restoreFromProfile(_ profile: [String: Any]) async {
         let name = profile["owner_name"] as? String ?? ""
         let biz = profile["business_name"] as? String ?? ""
-        let mode = profile["mode"] as? String ?? "business"
+        let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? "personal"
         let number = profile["twilio_number"] as? String ?? ""
         let subUUID = profile["subscription_uuid"] as? String ?? ""
 
@@ -846,20 +924,27 @@ struct OnboardingView: View {
 
         appState.mode = mode
 
-        // Check if contractor already has a Twilio number
+        // Check if contractor already has a Twilio number. During mode changes,
+        // keep the current Kevin number even if the profile fetch is transiently stale.
         if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
            let existingNumber = profile["twilio_number"] as? String,
            !existingNumber.isEmpty {
             // Reuse existing number
             kevinNumber = existingNumber
             appState.kevinNumber = kevinNumber
+        } else if !appState.kevinNumber.isEmpty {
+            kevinNumber = appState.kevinNumber
         } else {
             // Provision new Twilio number
-            if let provResult = await APIClient.shared.provisionNumber(contractorId: contractorId) {
-                kevinNumber = provResult["phone_number"] as? String ?? ""
+            let provResult = await APIClient.shared.provisionNumber(contractorId: contractorId)
+            if provResult?["status"] as? String == "ok",
+               let phoneNumber = provResult?["phone_number"] as? String,
+               !phoneNumber.isEmpty {
+                kevinNumber = phoneNumber
                 appState.kevinNumber = kevinNumber
             } else {
-                errorMessage = String(localized: "Failed to provision number. Please try again.")
+                let message = provResult?["message"] as? String
+                errorMessage = message ?? String(localized: "Failed to provision number. Please try again.")
                 isLoading = false
                 return
             }
@@ -888,8 +973,115 @@ struct OnboardingView: View {
         isLoading = false
     }
 
+    @MainActor
+    private func prepareBusinessDraftProfile() async -> Bool {
+        isLoading = true
+        errorMessage = ""
+        defer { isLoading = false }
+
+        if appState.contractorId.isEmpty {
+            let result = await APIClient.shared.createContractor(
+                ownerName: ownerName,
+                businessName: businessName,
+                serviceType: serviceType,
+                mode: "personal",
+                ownerPhone: phoneNumber,
+                appleUserId: appState.appleUserId,
+                appleIdentityToken: appState.appleIdentityToken
+            )
+            guard let contractorId = result?["contractor_id"] as? String, !contractorId.isEmpty else {
+                errorMessage = String(localized: "Failed to prepare your business profile. Please try again.")
+                return false
+            }
+            appState.contractorId = contractorId
+            if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
+                APIClient.shared.contractorToken = apiToken
+            }
+            do {
+                let updated = try await APIClient.shared.patchContractor(contractorId, body: [
+                    "owner_name": ownerName,
+                    "business_name": businessName,
+                    "service_type": serviceType,
+                ])
+                if !updated {
+                    errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                    return false
+                }
+            } catch {
+                errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                return false
+            }
+        } else {
+            do {
+                let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: [
+                    "owner_name": ownerName,
+                    "business_name": businessName,
+                    "service_type": serviceType,
+                ])
+                if !updated {
+                    errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                    return false
+                }
+            } catch {
+                errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                return false
+            }
+        }
+
+        appState.userName = ownerName
+        appState.businessName = businessName
+        appState.serviceType = serviceType
+
+        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
+            let subUUID = profile["subscription_uuid"] as? String ?? ""
+            if !subUUID.isEmpty {
+                appState.subscriptionUUID = subUUID
+            }
+        }
+
+        return true
+    }
+
+    @MainActor
+    private func activateBusinessAfterPurchase() async {
+        guard appState.hasBusinessEntitlement else {
+            errorMessage = String(localized: "Business purchase is still being verified. Tap Restore Purchases or try again.")
+            return
+        }
+        guard !appState.contractorId.isEmpty else {
+            errorMessage = String(localized: "Set up your Kevin account before activating Business mode.")
+            return
+        }
+
+        do {
+            let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: [
+                "owner_name": ownerName,
+                "business_name": businessName,
+                "service_type": serviceType,
+                "mode": "business",
+            ])
+            if updated {
+                selectedMode = "business"
+                appState.mode = "business"
+                appState.userName = ownerName
+                appState.businessName = businessName
+                appState.serviceType = serviceType
+                showPaywall = false
+                step = .contactsPermission
+            } else {
+                errorMessage = String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+            }
+        } catch {
+            errorMessage = String(localized: "Failed to activate Business mode. Please try again.")
+        }
+    }
+
     private func completeOnboarding() {
-        // Note: isOnboarded is set after paywall is dismissed (in doneStep sheet onDismiss)
-        step = .done
+        if appState.subscriptionStatus == "active" {
+            appState.isOnboarded = true
+        } else {
+            // Note: isOnboarded is set after paywall is dismissed (in doneStep sheet onDismiss)
+            step = .done
+        }
     }
 }

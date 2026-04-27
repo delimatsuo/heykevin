@@ -19,6 +19,7 @@ import httpx
 import websockets
 
 from app.config import settings
+from app.services.entitlements import effective_mode
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -70,7 +71,7 @@ def build_system_prompt(config: Optional[dict] = None, after_hours: bool = False
     config = config or {}
     owner_name = config.get("owner_name", settings.user_name)
     pronoun = config.get("pronoun", "he")
-    mode = config.get("mode", "business")
+    mode = config.get("effective_mode") or effective_mode(config)
 
     # Personal mode — simple personal assistant
     if mode == "personal":
@@ -244,7 +245,7 @@ class VoicePipeline:
         self._caller_phone = caller_phone
 
         # Check if after business hours (only applies to business mode)
-        mode = self._contractor_config.get("mode", "business")
+        mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
         if mode == "personal":
             self._after_hours = False  # Personal mode has no business hours
         else:
@@ -320,14 +321,18 @@ class VoicePipeline:
         # Start silence timeout check loop
         self._silence_check_task = asyncio.create_task(self._silence_check_loop())
 
+        mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
         business_name = self._contractor_config.get(
             "business_name",
             f"{self._contractor_config.get('owner_name', settings.user_name)}'s office"
         )
+        owner_name = self._contractor_config.get("owner_name", settings.user_name)
         user_language = self._contractor_config.get("user_language", "en")
 
         # Choose greeting based on business hours
-        if self._after_hours:
+        if mode == "personal":
+            greeting = f"Hi, this is Kevin, {owner_name.split()[0]}'s assistant. How can I help?"
+        elif self._after_hours:
             hours_start = self._contractor_config.get("business_hours_start", "8:00")
             hours_end = self._contractor_config.get("business_hours_end", "5:00")
             greeting = (

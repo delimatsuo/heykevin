@@ -203,9 +203,10 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         _contractor_id = getattr(active_call, 'contractor_id', '') or ''
         if _contractor_id:
             from app.db.contractors import get_contractor
+            from app.services.entitlements import with_entitlement_flags
             contractor_data = await get_contractor(_contractor_id)
             if contractor_data:
-                contractor_config_loaded = contractor_data
+                contractor_config_loaded = with_entitlement_flags(contractor_data)
         # Pass known caller name
         if active_call.caller_name:
             contractor_config_loaded["known_caller_name"] = active_call.caller_name

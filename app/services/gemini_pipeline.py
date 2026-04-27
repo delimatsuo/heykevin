@@ -13,6 +13,7 @@ from typing import Callable, Awaitable, Optional
 import websockets
 
 from app.config import settings
+from app.services.entitlements import effective_mode
 from app.services.voice_pipeline import build_system_prompt
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
@@ -106,7 +107,7 @@ class GeminiPipeline:
         self._caller_transcript_buf: list[str] = []
 
         # Build system prompt from contractor config (reuse existing logic)
-        mode = self._contractor_config.get("mode", "business")
+        mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
         if mode == "personal":
             self._after_hours = False
         else:
@@ -182,8 +183,15 @@ class GeminiPipeline:
                 "business_name",
                 f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
             )
+            owner_name = self._contractor_config.get("owner_name", settings.user_name)
+            mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
 
-            if self._after_hours:
+            if mode == "personal":
+                greeting_prompt = (
+                    f"Greet the caller now. Say: 'Hi, this is Kevin, "
+                    f"{owner_name.split()[0]}'s assistant. How can I help?'"
+                )
+            elif self._after_hours:
                 hours_start = self._contractor_config.get("business_hours_start", "8:00")
                 hours_end = self._contractor_config.get("business_hours_end", "5:00")
                 greeting_prompt = (

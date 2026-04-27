@@ -59,6 +59,8 @@ class GeminiPipeline:
         "emergency", "flood", "flooding", "fire", "gas leak", "pipe burst",
         "no water", "sewage", "sparking", "smoke", "hospital", "accident",
         "burst pipe", "water everywhere", "electrical fire", "carbon monoxide",
+        "burning smell", "smell burning", "electrical panel", "electric panel",
+        "breaker tripped", "tripped breaker",
     }
 
     GOODBYE_PHRASES = [

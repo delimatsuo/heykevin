@@ -18,6 +18,8 @@ struct OnboardingView: View {
     @State private var showPaywall = false
     @State private var didPrepareInitialStep = false
 
+    private let businessProductID = "com.kevin.callscreen.business.monthly"
+
     enum OnboardingStep {
         case welcome, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
     }
@@ -54,6 +56,18 @@ struct OnboardingView: View {
         }
         .task {
             await prepareInitialStep()
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(
+                canDismiss: true,
+                isOnboarding: false,
+                preferredProductID: businessProductID,
+                onSubscribed: {
+                    Task { await activateBusinessAfterPurchase() }
+                },
+                showsTrialSkip: false
+            )
+            .environmentObject(appState)
         }
     }
 
@@ -249,11 +263,6 @@ struct OnboardingView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    // Personal subscribers cannot use Business mode
-                    if appState.subscriptionTier == "personal" {
-                        showPaywall = true
-                        return
-                    }
                     selectedMode = "business"
                     step = .businessInfo
                 } label: {
@@ -438,9 +447,21 @@ struct OnboardingView: View {
             Spacer()
 
             Button {
-                step = .contactsPermission
+                selectedMode = "business"
+                if appState.hasBusinessEntitlement {
+                    step = .contactsPermission
+                } else {
+                    Task {
+                        let prepared = await prepareBusinessDraftProfile()
+                        if prepared {
+                            showPaywall = true
+                        }
+                    }
+                }
             } label: {
-                Text(String(localized: "Continue"))
+                Text(appState.hasBusinessEntitlement
+                     ? String(localized: "Continue")
+                     : String(localized: "Start Business Trial"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
@@ -659,7 +680,7 @@ struct OnboardingView: View {
             let name = profile["owner_name"] as? String ?? ""
             let biz = profile["business_name"] as? String ?? ""
             let svc = profile["service_type"] as? String ?? ""
-            let mode = profile["mode"] as? String ?? appState.mode
+            let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? appState.mode
             let number = profile["twilio_number"] as? String ?? ""
 
             if !name.isEmpty {
@@ -762,7 +783,7 @@ struct OnboardingView: View {
     private func restoreFromProfile(_ profile: [String: Any]) async {
         let name = profile["owner_name"] as? String ?? ""
         let biz = profile["business_name"] as? String ?? ""
-        let mode = profile["mode"] as? String ?? "business"
+        let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? "personal"
         let number = profile["twilio_number"] as? String ?? ""
         let subUUID = profile["subscription_uuid"] as? String ?? ""
 
@@ -952,8 +973,115 @@ struct OnboardingView: View {
         isLoading = false
     }
 
+    @MainActor
+    private func prepareBusinessDraftProfile() async -> Bool {
+        isLoading = true
+        errorMessage = ""
+        defer { isLoading = false }
+
+        if appState.contractorId.isEmpty {
+            let result = await APIClient.shared.createContractor(
+                ownerName: ownerName,
+                businessName: businessName,
+                serviceType: serviceType,
+                mode: "personal",
+                ownerPhone: phoneNumber,
+                appleUserId: appState.appleUserId,
+                appleIdentityToken: appState.appleIdentityToken
+            )
+            guard let contractorId = result?["contractor_id"] as? String, !contractorId.isEmpty else {
+                errorMessage = String(localized: "Failed to prepare your business profile. Please try again.")
+                return false
+            }
+            appState.contractorId = contractorId
+            if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
+                APIClient.shared.contractorToken = apiToken
+            }
+            do {
+                let updated = try await APIClient.shared.patchContractor(contractorId, body: [
+                    "owner_name": ownerName,
+                    "business_name": businessName,
+                    "service_type": serviceType,
+                ])
+                if !updated {
+                    errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                    return false
+                }
+            } catch {
+                errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                return false
+            }
+        } else {
+            do {
+                let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: [
+                    "owner_name": ownerName,
+                    "business_name": businessName,
+                    "service_type": serviceType,
+                ])
+                if !updated {
+                    errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                    return false
+                }
+            } catch {
+                errorMessage = String(localized: "Failed to save your business profile. Please try again.")
+                return false
+            }
+        }
+
+        appState.userName = ownerName
+        appState.businessName = businessName
+        appState.serviceType = serviceType
+
+        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
+            let subUUID = profile["subscription_uuid"] as? String ?? ""
+            if !subUUID.isEmpty {
+                appState.subscriptionUUID = subUUID
+            }
+        }
+
+        return true
+    }
+
+    @MainActor
+    private func activateBusinessAfterPurchase() async {
+        guard appState.hasBusinessEntitlement else {
+            errorMessage = String(localized: "Business purchase is still being verified. Tap Restore Purchases or try again.")
+            return
+        }
+        guard !appState.contractorId.isEmpty else {
+            errorMessage = String(localized: "Set up your Kevin account before activating Business mode.")
+            return
+        }
+
+        do {
+            let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: [
+                "owner_name": ownerName,
+                "business_name": businessName,
+                "service_type": serviceType,
+                "mode": "business",
+            ])
+            if updated {
+                selectedMode = "business"
+                appState.mode = "business"
+                appState.userName = ownerName
+                appState.businessName = businessName
+                appState.serviceType = serviceType
+                showPaywall = false
+                step = .contactsPermission
+            } else {
+                errorMessage = String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+            }
+        } catch {
+            errorMessage = String(localized: "Failed to activate Business mode. Please try again.")
+        }
+    }
+
     private func completeOnboarding() {
-        // Note: isOnboarded is set after paywall is dismissed (in doneStep sheet onDismiss)
-        step = .done
+        if appState.subscriptionStatus == "active" {
+            appState.isOnboarded = true
+        } else {
+            // Note: isOnboarded is set after paywall is dismissed (in doneStep sheet onDismiss)
+            step = .done
+        }
     }
 }

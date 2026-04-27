@@ -407,7 +407,7 @@ class APIClient {
         return nil
     }
 
-    func structureKnowledge(contractorId: String, rawText: String) async -> String? {
+    func structureKnowledge(contractorId: String, rawText: String, existingKnowledge: String = "", mode: String = "add") async -> String? {
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/structure-knowledge")!
@@ -415,7 +415,11 @@ class APIClient {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 30
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["raw_text": rawText])
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "raw_text": rawText,
+                "existing_knowledge": existingKnowledge,
+                "mode": mode,
+            ])
             authorize(&request)
 
             let (data, response) = try await session.data(for: request)

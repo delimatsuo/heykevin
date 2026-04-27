@@ -16,6 +16,7 @@ struct OnboardingView: View {
     @State private var phoneNumber = ""
     @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var showPaywall = false
+    @State private var didPrepareInitialStep = false
 
     enum OnboardingStep {
         case welcome, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
@@ -50,6 +51,9 @@ struct OnboardingView: View {
                 }
             }
             .padding()
+        }
+        .task {
+            await prepareInitialStep()
         }
     }
 
@@ -626,6 +630,59 @@ struct OnboardingView: View {
     }
 
     // MARK: - Logic
+
+    @MainActor
+    private func prepareInitialStep() async {
+        guard !didPrepareInitialStep else { return }
+        didPrepareInitialStep = true
+
+        guard appState.pendingModeChange else { return }
+
+        // Mode changes are launched from Settings for an existing, authenticated
+        // account. Do not ask for Sign in with Apple again just to patch mode.
+        guard !appState.contractorId.isEmpty else {
+            appState.pendingModeChange = false
+            return
+        }
+
+        appState.pendingModeChange = false
+        ownerName = appState.userName
+        businessName = appState.businessName
+        if !appState.serviceType.isEmpty {
+            serviceType = appState.serviceType
+        }
+        selectedMode = appState.mode == "personal" ? "business" : "personal"
+        kevinNumber = appState.kevinNumber
+        step = .modeSelect
+
+        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
+            let name = profile["owner_name"] as? String ?? ""
+            let biz = profile["business_name"] as? String ?? ""
+            let svc = profile["service_type"] as? String ?? ""
+            let mode = profile["mode"] as? String ?? appState.mode
+            let number = profile["twilio_number"] as? String ?? ""
+
+            if !name.isEmpty {
+                ownerName = name
+                appState.userName = name
+            }
+            if !biz.isEmpty {
+                businessName = biz
+                appState.businessName = biz
+            }
+            if !svc.isEmpty {
+                serviceType = svc
+                appState.serviceType = svc
+            }
+            let normalizedMode = mode == "personal" ? "personal" : "business"
+            appState.mode = normalizedMode
+            selectedMode = normalizedMode == "personal" ? "business" : "personal"
+            if !number.isEmpty {
+                kevinNumber = number
+                appState.kevinNumber = number
+            }
+        }
+    }
 
     private func handleSignIn(_ result: Result<ASAuthorization, Error>) {
         switch result {

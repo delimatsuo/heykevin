@@ -5,6 +5,7 @@ import secrets
 import time
 import uuid as _uuid
 from typing import Optional
+from google.cloud.firestore_v1.base_query import FieldFilter
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
 
@@ -63,7 +64,7 @@ async def get_contractor_by_twilio_number(twilio_number: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("twilio_number", "==", twilio_number).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("twilio_number", "==", twilio_number)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -80,7 +81,7 @@ async def get_contractor_by_apple_user_id(apple_user_id: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("apple_user_id", "==", apple_user_id).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("apple_user_id", "==", apple_user_id)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -97,7 +98,7 @@ async def get_contractor_by_api_token(token_hash: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("api_token_hash", "==", token_hash).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("api_token_hash", "==", token_hash)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -121,7 +122,7 @@ async def get_contractor_by_owner_phone(owner_phone: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("owner_phone", "==", normalized).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("owner_phone", "==", normalized)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()

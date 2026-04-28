@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger
@@ -44,7 +45,7 @@ async def get_call_history(e164_phone: str, limit: int = 10) -> list[dict]:
         db = get_firestore_client()
         docs = (
             db.collection(COLLECTION)
-            .where("caller_phone", "==", e164_phone)
+            .where(filter=FieldFilter("caller_phone", "==", e164_phone))
             .order_by("timestamp", direction=firestore.Query.DESCENDING)
             .limit(limit)
             .stream()
@@ -62,8 +63,8 @@ async def get_calls_for_contractor(contractor_id: str, limit: int = 100) -> list
         cutoff = time.time() - (RETENTION_DAYS * 86400)
         docs = (
             db.collection(COLLECTION)
-            .where("contractor_id", "==", contractor_id)
-            .where("timestamp", ">=", cutoff)
+            .where(filter=FieldFilter("contractor_id", "==", contractor_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff))
             .order_by("timestamp", direction=firestore.Query.DESCENDING)
             .limit(limit)
             .stream()
@@ -81,7 +82,7 @@ async def cleanup_old_calls() -> int:
         cutoff = time.time() - (RETENTION_DAYS * 86400)
         docs = (
             db.collection(COLLECTION)
-            .where("timestamp", "<", cutoff)
+            .where(filter=FieldFilter("timestamp", "<", cutoff))
             .limit(500)
             .stream()
         )

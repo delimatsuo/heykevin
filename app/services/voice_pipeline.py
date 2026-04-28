@@ -905,9 +905,8 @@ class VoicePipeline:
         """
         try:
             from app.services.jobber import lookup_customer
-            token = self._get_jobber_token()
             customer = await asyncio.wait_for(
-                lookup_customer(token, self._caller_phone),
+                lookup_customer(self._contractor_config, self._caller_phone),
                 timeout=3.0,
             )
             if not customer:
@@ -1002,14 +1001,13 @@ class VoicePipeline:
         # --- Jobber tools ---
         from app.services.jobber import lookup_customer, get_available_slots, create_job
 
-        token = self._get_jobber_token()
-        if not token:
+        if not self._get_jobber_token():
             return json.dumps({"error": "No scheduling integration connected."})
 
         try:
             if tool_name == "check_customer":
                 customer = await asyncio.wait_for(
-                    lookup_customer(token, tool_input.get("phone", "")),
+                    lookup_customer(self._contractor_config, tool_input.get("phone", "")),
                     timeout=3.0,
                 )
                 if customer:
@@ -1024,14 +1022,14 @@ class VoicePipeline:
             elif tool_name == "check_availability":
                 days = min(tool_input.get("days_ahead", 7), 14)
                 slots = await asyncio.wait_for(
-                    get_available_slots(token, days),
+                    get_available_slots(self._contractor_config, days),
                     timeout=3.0,
                 )
                 return json.dumps({"booked_slots": slots, "days_checked": days})
 
             elif tool_name == "book_appointment":
                 job_id = await asyncio.wait_for(
-                    create_job(token, tool_input),
+                    create_job(self._contractor_config, tool_input),
                     timeout=3.0,
                 )
                 if job_id:

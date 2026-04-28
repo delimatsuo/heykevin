@@ -74,3 +74,7 @@ async def test_contractor_patch_cannot_change_twilio_number(monkeypatch):
         "contractor_id": "contractor-1",
         "updates": {"mode": "personal"},
     }
+
+
+def test_subscription_uuid_is_server_protected():
+    assert "subscription_uuid" in contractors_db.PROTECTED_FIELDS

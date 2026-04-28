@@ -5,6 +5,7 @@ import secrets
 import time
 import uuid as _uuid
 from typing import Optional
+from google.cloud.firestore_v1.base_query import FieldFilter
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
 
@@ -18,6 +19,7 @@ PROTECTED_FIELDS = frozenset({
     "subscription_status",
     "subscription_expires",
     "trial_start",
+    "subscription_uuid",
     "twilio_number",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
@@ -62,7 +64,7 @@ async def get_contractor_by_twilio_number(twilio_number: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("twilio_number", "==", twilio_number).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("twilio_number", "==", twilio_number)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -79,7 +81,7 @@ async def get_contractor_by_apple_user_id(apple_user_id: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("apple_user_id", "==", apple_user_id).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("apple_user_id", "==", apple_user_id)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -96,7 +98,7 @@ async def get_contractor_by_api_token(token_hash: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("api_token_hash", "==", token_hash).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("api_token_hash", "==", token_hash)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -120,7 +122,7 @@ async def get_contractor_by_owner_phone(owner_phone: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
     docs = await loop.run_in_executor(
         None,
-        lambda: list(db.collection(COLLECTION).where("owner_phone", "==", normalized).where("active", "==", True).limit(1).stream())
+        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("owner_phone", "==", normalized)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
     if docs:
         data = docs[0].to_dict()
@@ -142,6 +144,44 @@ async def get_contractor(contractor_id: str) -> Optional[dict]:
         data["contractor_id"] = doc.id
         return data
     return None
+
+
+def _is_valid_uuid(value: str) -> bool:
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+async def ensure_subscription_uuid(contractor_id: str, contractor: Optional[dict] = None) -> Optional[str]:
+    """Ensure legacy contractor documents have a StoreKit appAccountToken UUID."""
+    existing = (contractor or {}).get("subscription_uuid", "")
+    if _is_valid_uuid(existing):
+        return existing
+
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+
+    def _ensure() -> Optional[str]:
+        doc = doc_ref.get()
+        if not doc.exists:
+            return None
+
+        data = doc.to_dict() or {}
+        current = data.get("subscription_uuid", "")
+        if _is_valid_uuid(current):
+            return current
+
+        generated = str(_uuid.uuid4())
+        doc_ref.update({"subscription_uuid": generated})
+        return generated
+
+    ensured = await loop.run_in_executor(None, _ensure)
+    if ensured:
+        logger.info(f"Backfilled subscription_uuid for contractor {contractor_id}")
+    return ensured
 
 
 async def get_contractor_by_pin(pin: str) -> Optional[dict]:

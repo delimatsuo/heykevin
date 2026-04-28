@@ -31,6 +31,7 @@ URGENCY_ICONS = {
 # Call type headers
 CALL_TYPE_HEADERS = {
     "service_request": "NEW LEAD",
+    "out_of_scope": "OUT OF SCOPE REQUEST",
     "personal": "PERSONAL CALL",
     "business": "BUSINESS CALL",
     "spam": "SPAM",
@@ -154,7 +155,7 @@ async def _process_business(
     job_data = None
     for attempt in range(2):
         try:
-            job_data = await extract_job_card(transcript_text, caller_phone)
+            job_data = await extract_job_card(transcript_text, caller_phone, contractor=contractor)
             break
         except Exception as e:
             if attempt == 0:
@@ -505,14 +506,13 @@ async def _create_jobber_job(contractor: dict, job_data: dict):
     """Best-effort: create a job card in Jobber after a service-request call."""
     try:
         from app.services.jobber import lookup_customer, create_job
-        token = contractor["jobber_access_token"]
         caller_phone = job_data.get("caller_phone", "")
 
         # Look up existing client so we can attach job to their record
         client_id = None
         if caller_phone:
             customer = await asyncio.wait_for(
-                lookup_customer(token, caller_phone),
+                lookup_customer(contractor, caller_phone),
                 timeout=3.0,
             )
             if customer:
@@ -529,10 +529,10 @@ async def _create_jobber_job(contractor: dict, job_data: dict):
             instructions_parts.append(f"Phone: {caller_phone}")
         if address:
             instructions_parts.append(f"Address: {address}")
-        instructions_parts.append(f"Screened by Kevin AI")
+        instructions_parts.append("Screened by Kevin AI")
 
         job_id = await asyncio.wait_for(
-            create_job(token, {
+            create_job(contractor, {
                 "title": issue[:100],
                 "instructions": "\n".join(instructions_parts),
                 "client_id": client_id,

@@ -45,6 +45,28 @@ def _get_appstore_url() -> str:
     return APPSTORE_SANDBOX_URL
 
 
+def _get_transaction_lookup_urls() -> list[str]:
+    """Return App Store Server API bases to try for transaction lookup.
+
+    Apple's guidance is production first when the transaction environment is
+    unknown, then sandbox only for TransactionIdNotFoundError. Staging stays
+    sandbox-only to avoid accidentally touching production App Store data.
+    """
+    if settings.appstore_environment == "production":
+        return [APPSTORE_PRODUCTION_URL, APPSTORE_SANDBOX_URL]
+    return [APPSTORE_SANDBOX_URL]
+
+
+def _is_transaction_not_found(response: httpx.Response) -> bool:
+    if response.status_code != 404:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return str(body.get("errorCode", "")) == "4040010"
+
+
 def _get_appstore_jwt() -> str:
     """Generate a JWT for App Store Server API authentication."""
     key_content = settings.appstore_private_key
@@ -105,6 +127,40 @@ def _extract_transaction_info(response_body: dict) -> Optional[dict]:
     return None
 
 
+def _active_subscription_expires_ts(transaction_info: dict) -> Optional[float]:
+    """Return a future expiry timestamp for an active transaction, else None."""
+    if transaction_info.get("revocationDate") or transaction_info.get("revokedDate"):
+        logger.warning(
+            "Rejecting revoked App Store transaction: product=%s revocationDate=%s",
+            transaction_info.get("productId", ""),
+            transaction_info.get("revocationDate") or transaction_info.get("revokedDate"),
+        )
+        return None
+
+    try:
+        expires_ms = float(transaction_info.get("expiresDate") or 0)
+    except (TypeError, ValueError):
+        expires_ms = 0
+
+    if expires_ms <= 0:
+        logger.warning(
+            "Rejecting App Store subscription transaction without expiresDate: product=%s",
+            transaction_info.get("productId", ""),
+        )
+        return None
+
+    expires_ts = expires_ms / 1000.0
+    if expires_ts <= time.time():
+        logger.warning(
+            "Rejecting expired App Store transaction: product=%s expires=%s",
+            transaction_info.get("productId", ""),
+            expires_ts,
+        )
+        return None
+
+    return expires_ts
+
+
 async def verify_transaction(transaction_id: str) -> Optional[dict]:
     """Verify a transaction with Apple's App Store Server API.
 
@@ -114,18 +170,40 @@ async def verify_transaction(transaction_id: str) -> Optional[dict]:
         logger.warning("App Store API not configured — skipping verification")
         return None
 
-    url = f"{_get_appstore_url()}/inApps/v1/transactions/{transaction_id}"
     try:
         token = _get_appstore_jwt()
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
-            )
-        if response.status_code == 200:
-            return _extract_transaction_info(response.json())
-        logger.error(f"App Store transaction lookup failed: {response.status_code} {response.text[:200]}")
+            lookup_urls = _get_transaction_lookup_urls()
+            for index, base_url in enumerate(lookup_urls):
+                url = f"{base_url}/inApps/v1/transactions/{transaction_id}"
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10.0,
+                )
+                if response.status_code == 200:
+                    return _extract_transaction_info(response.json())
+
+                should_try_sandbox = (
+                    index == 0
+                    and len(lookup_urls) > 1
+                    and base_url == APPSTORE_PRODUCTION_URL
+                    and _is_transaction_not_found(response)
+                )
+                if should_try_sandbox:
+                    logger.info(
+                        "Production App Store transaction lookup returned 4040010; retrying sandbox for %s",
+                        transaction_id,
+                    )
+                    continue
+
+                logger.error(
+                    "App Store transaction lookup failed at %s: %s %s",
+                    "production" if base_url == APPSTORE_PRODUCTION_URL else "sandbox",
+                    response.status_code,
+                    response.text[:200],
+                )
+                return None
         return None
     except Exception as e:
         logger.error(f"App Store API error: {e}", exc_info=True)
@@ -179,8 +257,9 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
         logger.error(f"appAccountToken mismatch: expected subscription_uuid={expected_uuid!r}, got {app_account_token!r}")
         return False
 
-    expires_ms = transaction_info.get("expiresDate", 0)
-    expires_ts = expires_ms / 1000.0 if expires_ms else time.time() + 30 * 86400
+    expires_ts = _active_subscription_expires_ts(transaction_info)
+    if not expires_ts:
+        return False
 
     await update_contractor(contractor_id, {
         "subscription_tier": tier,
@@ -329,15 +408,17 @@ async def handle_appstore_notification(payload: dict) -> bool:
     if notification_type in ("DID_RENEW", "SUBSCRIBED"):
         product_id = transaction_info.get("productId", "")
         tier = PRODUCT_TO_TIER.get(product_id, "")
-        expires_ms = transaction_info.get("expiresDate", 0)
-        expires_ts = expires_ms / 1000.0 if expires_ms else time.time() + 30 * 86400
-        if tier:
+        expires_ts = _active_subscription_expires_ts(transaction_info)
+        if tier and expires_ts:
             await update_contractor(contractor_id, {
                 "subscription_tier": tier,
                 "subscription_status": "active",
                 "subscription_expires": expires_ts,
             })
             logger.info(f"Subscription renewed: {contractor_id} → {tier}")
+        else:
+            logger.warning(f"Rejected active subscription notification: {contractor_id} product={product_id}")
+            return False
 
     elif notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE"):
         await update_contractor(contractor_id, {

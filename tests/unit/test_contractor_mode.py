@@ -78,6 +78,29 @@ async def test_create_contractor_does_not_activate_business_without_entitlement(
 
 
 @pytest.mark.asyncio
+async def test_get_contractor_backfills_missing_subscription_uuid(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "owner_name": "Deli",
+            "subscription_status": "trial",
+            "subscription_tier": "none",
+        }
+
+    async def fake_ensure_subscription_uuid(contractor_id, contractor):
+        assert contractor_id == "contractor-1"
+        assert "subscription_uuid" not in contractor
+        return "11111111-1111-4111-8111-111111111111"
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_subscription_uuid)
+
+    response = await contractors_api.api_get_contractor("contractor-1", _admin_request())
+
+    assert response["subscription_uuid"] == "11111111-1111-4111-8111-111111111111"
+
+
+@pytest.mark.asyncio
 async def test_trial_user_without_business_tier_cannot_switch_to_business_mode(monkeypatch):
     async def fake_get_contractor(contractor_id):
         return {

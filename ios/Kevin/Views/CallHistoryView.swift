@@ -106,46 +106,70 @@ struct CallRow: View {
     var isUnread: Bool = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            if isUnread {
-                Circle()
-                    .fill(.blue)
-                    .frame(width: 10, height: 10)
-            }
+        HStack(alignment: .center, spacing: HKSpace.md) {
+            HKAvatar(name: call.callerName, phone: call.callerPhone, size: 40)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayName)
-                    .font(.body)
-                    .fontWeight(isUnread ? .semibold : .regular)
-                    .foregroundStyle(call.outcome == "spam" ? .red : .primary)
+                    .font(.system(size: 15, weight: isUnread ? .bold : .medium))
+                    .foregroundStyle(call.outcome == "spam" ? Color.hkRed : Color.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .monospacedDigit()
 
-                Text(formattedPhone)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if seemsUrgent {
+                        Text("URGENT")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.6)
+                            .foregroundStyle(.hkRed)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.hkRed.opacity(0.10), in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    Text(summaryLine)
+                        .font(.system(size: 13))
+                        .foregroundStyle(isUnread ? Color.primary : Color.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
 
-            Spacer()
+            Spacer(minLength: 6)
 
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 5) {
                 Text(Self.timeLabel(for: call.timestamp))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: isUnread ? .semibold : .regular))
+                    .foregroundStyle(isUnread ? Color.hkBlue : Color.secondary)
+                    .monospacedDigit()
 
-                Label(outcomeText, systemImage: outcomeIcon)
-                    .font(.caption2)
-                    .foregroundStyle(outcomeColor)
+                if isUnread {
+                    Circle()
+                        .fill(Color.hkBlue)
+                        .frame(width: 8, height: 8)
+                }
             }
+            .frame(minWidth: 44, alignment: .trailing)
         }
+        .padding(.vertical, 4)
     }
 
     static func timeLabel(for date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) {
-            return date.formatted(date: .omitted, time: .shortened) // "10:51 AM"
+            let minutes = Int(Date().timeIntervalSince(date) / 60)
+            if minutes < 1 { return String(localized: "now") }
+            if minutes < 60 { return String(localized: "\(minutes)m ago") }
+            return date.formatted(date: .omitted, time: .shortened)
         } else if calendar.isDateInYesterday(date) {
-            return String(localized: "Yesterday")
+            return String(localized: "Yest.")
         } else {
-            return date.formatted(.dateTime.month(.abbreviated).day()) // "Apr 6"
+            let weekday = date.formatted(.dateTime.weekday(.abbreviated))
+            // If within last 6 days show weekday, otherwise the month + day
+            if let days = calendar.dateComponents([.day], from: date, to: Date()).day, days < 7 {
+                return weekday
+            }
+            return date.formatted(.dateTime.month(.abbreviated).day())
         }
     }
 
@@ -157,34 +181,42 @@ struct CallRow: View {
         PhoneFormatter.format(call.callerPhone)
     }
 
-    private var outcomeText: String {
+    /// Kevin's one-line summary: pick the most substantive caller utterance, or
+    /// fall back to a status-style label when there's nothing to summarize.
+    private var summaryLine: String {
+        if call.outcome == "spam" || call.outcome == "blocked" {
+            return String(localized: "Robocall, Kevin hung up.")
+        }
+        let callerLines = call.transcript
+            .components(separatedBy: "\n")
+            .compactMap { line -> String? in
+                guard line.hasPrefix("Caller:") else { return nil }
+                let body = line.dropFirst("Caller:".count).trimmingCharacters(in: .whitespaces)
+                return body.isEmpty ? nil : body
+            }
+        if let longest = callerLines.max(by: { $0.count < $1.count }), longest.count > 12 {
+            return longest
+        }
+        if let first = callerLines.first { return first }
+        return outcomeFallback
+    }
+
+    private var outcomeFallback: String {
         switch call.outcome {
-        case "picked_up": return String(localized: "Answered")
-        case "voicemail": return String(localized: "Voicemail")
-        case "ignored", "declined": return String(localized: "Ignored")
-        case "spam", "blocked": return String(localized: "Blocked")
-        default: return String(localized: "Screened")
+        case "picked_up":           return String(localized: "Answered.")
+        case "voicemail":           return String(localized: "Left a voicemail.")
+        case "ignored", "declined": return String(localized: "You ignored. Kevin took a message.")
+        default:                    return String(localized: "Kevin screened the call.")
         }
     }
 
-    private var outcomeIcon: String {
-        switch call.outcome {
-        case "picked_up": return "phone.fill"
-        case "voicemail": return "recordingtape"
-        case "ignored", "declined": return "phone.arrow.down.left"
-        case "spam", "blocked": return "hand.raised.fill"
-        default: return "phone.badge.checkmark"
-        }
-    }
-
-    private var outcomeColor: Color {
-        switch call.outcome {
-        case "picked_up": return .green
-        case "voicemail": return .blue
-        case "ignored", "declined": return .orange
-        case "spam", "blocked": return .red
-        default: return .secondary
-        }
+    /// Heuristic urgency flag for the badge — until backend supplies one explicitly.
+    private var seemsUrgent: Bool {
+        guard call.outcome != "spam", call.outcome != "blocked" else { return false }
+        let urgentTokens = ["urgent", "emergency", "right away", "asap", "leak", "leaking",
+                            "flood", "flooding", "fire", "burst", "broken", "no heat", "no hot water"]
+        let lowercased = call.transcript.lowercased()
+        return urgentTokens.contains { lowercased.contains($0) }
     }
 }
 

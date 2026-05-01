@@ -13,6 +13,23 @@ struct ActiveCallInfo {
     let transcript: String
 }
 
+/// Errors specific to the unauthenticated bootstrap calls (lookup-by-apple-id,
+/// create contractor). These run before we have a contractor API token and
+/// authenticate solely with the Apple identity token, which expires after
+/// roughly 10 minutes. The backend returns 401 when the token is missing,
+/// expired, or invalid.
+enum BootstrapAuthError: Error, LocalizedError {
+    /// The backend rejected the Apple identity token (HTTP 401).
+    case unauthenticated
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthenticated:
+            return String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
+        }
+    }
+}
+
 class APIClient {
     static let shared = APIClient()
 
@@ -270,7 +287,14 @@ class APIClient {
 
     // MARK: - Account Lookup
 
-    func findContractorByAppleId(appleUserId: String, appleIdentityToken: String = "") async -> [String: Any]? {
+    /// Look up an existing contractor by Apple User ID.
+    ///
+    /// The backend strictly verifies the Apple identity token. Throws
+    /// ``BootstrapAuthError/unauthenticated`` on HTTP 401 so the caller can
+    /// re-prompt for a fresh Sign-in with Apple credential and retry. Returns
+    /// `nil` on any other non-2xx response or transport failure to preserve
+    /// the original "soft fail and continue onboarding" behaviour.
+    func findContractorByAppleId(appleUserId: String, appleIdentityToken: String = "") async throws -> [String: Any]? {
         do {
             var components = URLComponents(string: "\(baseURL)/api/contractors/lookup-by-apple-id")!
             components.queryItems = [
@@ -286,9 +310,16 @@ class APIClient {
             authorize(&request)
 
             let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 401 {
+                    throw BootstrapAuthError.unauthenticated
+                }
+                if http.statusCode == 200 {
+                    return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                }
             }
+        } catch let error as BootstrapAuthError {
+            throw error
         } catch {
             debugLog("Lookup by Apple ID failed: \(error.localizedDescription)")
         }
@@ -297,7 +328,13 @@ class APIClient {
 
     // MARK: - Contractor Onboarding
 
-    func createContractor(ownerName: String, businessName: String, serviceType: String, mode: String = "business", ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "") async -> [String: Any]? {
+    /// Create (or restore-by-phone) a contractor account during onboarding.
+    ///
+    /// The backend strictly verifies the Apple identity token. Throws
+    /// ``BootstrapAuthError/unauthenticated`` on HTTP 401 so the caller can
+    /// re-prompt for a fresh Sign-in with Apple credential and retry. Returns
+    /// `nil` on any other non-2xx response or transport failure.
+    func createContractor(ownerName: String, businessName: String, serviceType: String, mode: String = "business", ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "") async throws -> [String: Any]? {
         do {
             let url = URL(string: "\(baseURL)/api/contractors")!
             var request = URLRequest(url: url)
@@ -321,9 +358,16 @@ class APIClient {
             authorize(&request)
 
             let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 401 {
+                    throw BootstrapAuthError.unauthenticated
+                }
+                if http.statusCode == 200 {
+                    return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                }
             }
+        } catch let error as BootstrapAuthError {
+            throw error
         } catch {
             debugLog("Create contractor failed: \(error.localizedDescription)")
         }

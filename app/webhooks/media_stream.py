@@ -28,8 +28,14 @@ def _log_task_exception(task: asyncio.Task):
 TRANSCRIPT_THROTTLE = 1.0
 
 
-async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid: str):
-    """Extract caller name/business from transcript and save to contacts."""
+async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid: str, contractor_id: str = ""):
+    """Extract caller name/business from transcript and save to contacts.
+
+    F-14: writes go to ``contractors/{contractor_id}/caller_contacts/{phone_key}``
+    via ``app.db.contacts.upsert_caller_contact`` so callers' names don't leak
+    across tenants. ``contractor_id`` is required for writes; if it's empty we
+    log and skip rather than fall back to the legacy global collection.
+    """
     if not transcript_lines or not caller_phone:
         return
     try:
@@ -70,59 +76,58 @@ async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid
                 issue_summary = extracted.get("issue_summary", "")
 
                 if caller_name or business_name:
-                    # Save to contacts collection
-                    from app.db.firestore_client import get_firestore_client
-                    import asyncio as aio
-                    import time as time_mod
-                    db = get_firestore_client()
-                    loop = aio.get_event_loop()
-
-                    # Use phone as document ID (normalized)
-                    phone_key = caller_phone.replace("+", "").replace("-", "").replace(" ", "")
-                    doc_ref = db.collection("caller_contacts").document(phone_key)
-
-                    # Get existing contact (might have user edits we don't want to overwrite)
-                    existing = await loop.run_in_executor(None, doc_ref.get)
-
-                    if existing.exists:
-                        existing_data = existing.to_dict()
-                        # Only update fields that are empty in existing record
-                        updates = {"last_call_at": time_mod.time(), "last_call_sid": call_sid}
-                        if caller_name and not existing_data.get("caller_name"):
-                            updates["caller_name"] = caller_name
-                        if business_name and not existing_data.get("business_name"):
-                            updates["business_name"] = business_name
-                        if issue_summary:
-                            # Append to call history
-                            history = existing_data.get("call_history", [])
-                            history.append({
-                                "date": time_mod.time(),
-                                "call_sid": call_sid,
-                                "summary": issue_summary,
-                            })
-                            # Keep last 20 entries
-                            updates["call_history"] = history[-20:]
-                        await loop.run_in_executor(None, doc_ref.update, updates)
+                    # Save to per-contractor caller_contacts subcollection (F-14).
+                    # Skip with a warning when contractor_id isn't known — better
+                    # to drop the record than to write a tenant-leaking global doc.
+                    if not contractor_id:
+                        logger.warning(
+                            "Post-call extract has no contractor_id; skipping caller_contact upsert "
+                            f"({redact_phone(caller_phone)})"
+                        )
                     else:
-                        # Create new contact
-                        new_contact = {
-                            "caller_name": caller_name,
-                            "business_name": business_name,
-                            "phone": caller_phone,
-                            "created_at": time_mod.time(),
-                            "last_call_at": time_mod.time(),
-                            "last_call_sid": call_sid,
-                            "notes": "",
-                            "tags": [],
-                            "call_history": [{
-                                "date": time_mod.time(),
-                                "call_sid": call_sid,
-                                "summary": issue_summary,
-                            }] if issue_summary else [],
-                        }
-                        await loop.run_in_executor(None, doc_ref.set, new_contact)
+                        from app.db.contacts import (
+                            get_caller_contact as _get_caller_contact,
+                            upsert_caller_contact as _upsert_caller_contact,
+                        )
+                        import time as time_mod
 
-                    logger.info(f"Contact saved: {caller_name[:1] if caller_name else ''}*** ({redact_phone(caller_phone)})")
+                        existing_data = await _get_caller_contact(contractor_id, caller_phone) or {}
+                        now = time_mod.time()
+
+                        if existing_data:
+                            updates: dict = {"last_call_at": now, "last_call_sid": call_sid}
+                            if caller_name and not existing_data.get("caller_name"):
+                                updates["caller_name"] = caller_name
+                            if business_name and not existing_data.get("business_name"):
+                                updates["business_name"] = business_name
+                            if issue_summary:
+                                history = list(existing_data.get("call_history", []))
+                                history.append({
+                                    "date": now,
+                                    "call_sid": call_sid,
+                                    "summary": issue_summary,
+                                })
+                                updates["call_history"] = history[-20:]
+                            await _upsert_caller_contact(contractor_id, caller_phone, updates, merge=True)
+                        else:
+                            new_contact = {
+                                "caller_name": caller_name,
+                                "business_name": business_name,
+                                "phone": caller_phone,
+                                "created_at": now,
+                                "last_call_at": now,
+                                "last_call_sid": call_sid,
+                                "notes": "",
+                                "tags": [],
+                                "call_history": [{
+                                    "date": now,
+                                    "call_sid": call_sid,
+                                    "summary": issue_summary,
+                                }] if issue_summary else [],
+                            }
+                            await _upsert_caller_contact(contractor_id, caller_phone, new_contact, merge=False)
+
+                        logger.info(f"Contact saved: {caller_name[:1] if caller_name else ''}*** ({redact_phone(caller_phone)})")
 
                     # Also update RTDB active call with the name (for the iOS app to display)
                     if caller_name:
@@ -299,16 +304,25 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
         # Send VoIP push to ring the contractor's phone
         from app.services.push_notification import send_voip_push, send_urgent_push, get_device_token
+        from app.services.conference_registry import (
+            new_conference_name,
+            register_conference,
+        )
+
         voip_token = await get_device_token(token_type="voip", contractor_id=_cid)
         if voip_token:
             caller_phone = active_call.caller_phone if active_call else ""
             caller_name = active_call.caller_name if active_call else ""
+            # F-07/F-13: opaque random conference name (was f"urgent_{call_sid}").
+            urgent_conf = new_conference_name("urgent")
+            if _cid:
+                await register_conference(urgent_conf, _cid, call_sid)
             await send_voip_push(
                 device_token=voip_token,
                 caller_phone=caller_phone,
                 caller_name=f"URGENT: {caller_name or caller_phone}",
                 call_sid=call_sid,
-                conference_name=f"urgent_{call_sid}",
+                conference_name=urgent_conf,
             )
 
         # Also send critical push notification with context
@@ -450,6 +464,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 transcript_lines=list(transcript_lines),
                 caller_phone=active_call.caller_phone if active_call else "",
                 call_sid=call_sid,
+                contractor_id=contractor_config_loaded.get("contractor_id", "") or _contractor_id or "",
             ))
             task.add_done_callback(_log_task_exception)
 

@@ -5,8 +5,17 @@ Contacts are stored as subcollections under each contractor:
 
 For backward compatibility, if no contractor_id is provided,
 falls back to the legacy global 'contacts' collection.
+
+Caller-contact records (auto-extracted name/business/issue summary from a
+prior screening transcript) live in a separate collection. F-14 moves these
+from the global ``caller_contacts/{phone}`` layout to a per-contractor
+subcollection ``contractors/{contractor_id}/caller_contacts/{phone_key}`` so
+one tenant's extracted call data cannot bleed into another tenant's caller
+display. Helpers below are the single source of truth for read/write so
+webhook code does not have to assemble the path.
 """
 
+import asyncio
 from typing import Optional
 
 from app.db.firestore_client import get_firestore_client
@@ -16,6 +25,27 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 LEGACY_COLLECTION = "contacts"
+CALLER_CONTACTS_SUBCOLLECTION = "caller_contacts"
+LEGACY_CALLER_CONTACTS_COLLECTION = "caller_contacts"
+
+
+def caller_contact_key(e164_or_raw_phone: str) -> str:
+    """Deterministic document key for a caller phone.
+
+    Mirrors the historical ``phone.replace("+","").replace("-","").replace(" ","")``
+    convention so the migration script and live readers/writers agree on doc
+    IDs. We deliberately keep the digits-only form rather than a SHA hash to
+    keep migrations introspectable; the data is per-contractor scoped now so
+    the doc id is no longer global PII material on its own.
+    """
+    return (
+        (e164_or_raw_phone or "")
+        .replace("+", "")
+        .replace("-", "")
+        .replace(" ", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
 
 
 def _contacts_ref(db, contractor_id: str = ""):
@@ -141,3 +171,114 @@ async def bulk_sync_contacts(
     except Exception as e:
         logger.error(f"Bulk contact sync failed: {e}", exc_info=True)
         return {"synced": 0, "removed": 0, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Caller-contact (auto-extracted) helpers — F-14 per-tenant scope.
+# ---------------------------------------------------------------------------
+
+
+def _caller_contact_doc(db, contractor_id: str, phone_key: str):
+    """Return the per-contractor caller_contacts doc reference."""
+    return (
+        db.collection("contractors")
+        .document(contractor_id)
+        .collection(CALLER_CONTACTS_SUBCOLLECTION)
+        .document(phone_key)
+    )
+
+
+async def get_caller_contact(contractor_id: str, phone: str) -> Optional[dict]:
+    """Read a caller-contact record scoped to a contractor.
+
+    Falls back to the legacy global ``caller_contacts`` collection while the
+    one-shot migration in ``scripts/migrate_caller_contacts.py`` is being run.
+    Returns None on miss or on Firestore failure (caller treats missing data
+    as "unknown caller").
+    """
+    if not contractor_id or not phone:
+        return None
+    try:
+        db = get_firestore_client()
+        phone_key = caller_contact_key(phone)
+        loop = asyncio.get_event_loop()
+        doc = await loop.run_in_executor(
+            None, lambda: _caller_contact_doc(db, contractor_id, phone_key).get()
+        )
+        if doc.exists:
+            return doc.to_dict()
+        # Backward-compat: read-through to legacy global doc until migration runs.
+        legacy = await loop.run_in_executor(
+            None,
+            lambda: db.collection(LEGACY_CALLER_CONTACTS_COLLECTION)
+            .document(phone_key)
+            .get(),
+        )
+        if legacy.exists:
+            return legacy.to_dict()
+    except Exception as e:  # noqa: BLE001 — caller handles "unknown caller" sentinel.
+        logger.warning("caller_contacts: lookup failed contractor=%s err=%s", contractor_id, e)
+    return None
+
+
+async def upsert_caller_contact(
+    contractor_id: str,
+    phone: str,
+    data: dict,
+    *,
+    merge: bool = True,
+) -> bool:
+    """Write a caller-contact record under the contractor's subcollection.
+
+    Returns True on success, False on misconfiguration or Firestore failure.
+    """
+    if not contractor_id or not phone:
+        logger.warning(
+            "caller_contacts: refusing to write without contractor_id+phone "
+            "(F-14 per-tenant scope)"
+        )
+        return False
+    try:
+        db = get_firestore_client()
+        phone_key = caller_contact_key(phone)
+        loop = asyncio.get_event_loop()
+        ref = _caller_contact_doc(db, contractor_id, phone_key)
+        await loop.run_in_executor(None, lambda: ref.set(dict(data), merge=merge))
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "caller_contacts: upsert failed contractor=%s err=%s",
+            contractor_id,
+            e,
+            exc_info=True,
+        )
+        return False
+
+
+async def update_caller_contact(contractor_id: str, phone: str, updates: dict) -> bool:
+    """Apply a Firestore .update() to the caller-contact doc (creates if absent)."""
+    if not contractor_id or not phone:
+        return False
+    try:
+        db = get_firestore_client()
+        phone_key = caller_contact_key(phone)
+        loop = asyncio.get_event_loop()
+        ref = _caller_contact_doc(db, contractor_id, phone_key)
+
+        def _do_update():
+            snap = ref.get()
+            if snap.exists:
+                ref.update(dict(updates))
+            else:
+                ref.set(dict(updates), merge=True)
+
+        await loop.run_in_executor(None, _do_update)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "caller_contacts: update failed contractor=%s err=%s",
+            contractor_id,
+            e,
+            exc_info=True,
+        )
+        return False

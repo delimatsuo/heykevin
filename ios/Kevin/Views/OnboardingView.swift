@@ -28,31 +28,35 @@ struct OnboardingView: View {
 
     var body: some View {
         NavigationStack {
-            VStack {
-                switch step {
-                case .welcome:
-                    welcomeStep
-                case .signIn:
-                    signInStep
-                case .phoneEntry:
-                    phoneEntryStep
-                case .modeSelect:
-                    modeSelectStep
-                case .businessInfo:
-                    businessInfoStep
-                case .contactsPermission:
-                    contactsPermissionStep
-                case .personalInfo:
-                    personalInfoStep
-                case .provisioning:
-                    provisioningStep
-                case .forwarding:
-                    forwardingStep
-                case .done:
-                    doneStep
+            ZStack {
+                Color(.systemGroupedBackground)
+                    .ignoresSafeArea()
+                VStack {
+                    switch step {
+                    case .welcome:
+                        welcomeStep
+                    case .signIn:
+                        signInStep
+                    case .phoneEntry:
+                        phoneEntryStep
+                    case .modeSelect:
+                        modeSelectStep
+                    case .businessInfo:
+                        businessInfoStep
+                    case .contactsPermission:
+                        contactsPermissionStep
+                    case .personalInfo:
+                        personalInfoStep
+                    case .provisioning:
+                        provisioningStep
+                    case .forwarding:
+                        forwardingStep
+                    case .done:
+                        doneStep
+                    }
                 }
+                .padding()
             }
-            .padding()
         }
         .task {
             await prepareInitialStep()
@@ -74,45 +78,95 @@ struct OnboardingView: View {
     // MARK: - Welcome
 
     private var welcomeStep: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 0) {
             Spacer()
 
+            KevinMark(size: 96)
+                .padding(.bottom, HKSpace.xxl)
+
+            VStack(spacing: HKSpace.md) {
+                (Text(String(localized: "Hey, I'm "))
+                    + Text("Kevin").foregroundColor(.hkBlue)
+                    + Text("."))
+                    .font(.system(size: 34, weight: .bold))
+                    .tracking(-0.7)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+
+                Text(String(localized: "I answer your calls, screen them in real time, and text you who's calling and why."))
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+                    .padding(.horizontal, HKSpace.md)
+            }
+
+            Spacer()
+
+            VStack(alignment: .leading, spacing: HKSpace.md) {
+                welcomeFeature(
+                    icon: "waveform",
+                    title: String(localized: "Live transcripts as the call happens"),
+                    sub: String(localized: "Read who's calling and why before you decide to pick up.")
+                )
+                welcomeFeature(
+                    icon: "shield.lefthalf.filled",
+                    title: String(localized: "Robocalls handled silently"),
+                    sub: String(localized: "Kevin filters spam so your phone only rings for real leads.")
+                )
+                welcomeFeature(
+                    icon: "person.crop.circle.badge.checkmark",
+                    title: String(localized: "Contacts ring through"),
+                    sub: String(localized: "People you know skip Kevin and reach you directly.")
+                )
+            }
+            .padding(.horizontal, HKSpace.sm)
+
+            Spacer()
+
+            VStack(spacing: HKSpace.sm) {
+                Button {
+                    step = .signIn
+                } label: {
+                    Text(String(localized: "Get started"))
+                }
+                .buttonStyle(HKDarkPrimaryButtonStyle())
+
+                Button {
+                    step = .signIn
+                } label: {
+                    Text(String(localized: "Already a member? Sign in"))
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.bottom, HKSpace.sm)
+    }
+
+    @ViewBuilder
+    private func welcomeFeature(icon: String, title: String, sub: String) -> some View {
+        HStack(alignment: .top, spacing: HKSpace.md) {
             ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.blue, .purple, .pink],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 100, height: 100)
-                Text("K")
-                    .font(.system(size: 48, weight: .bold))
-                    .foregroundStyle(.white)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.hkBlue.opacity(0.10))
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.hkBlue)
             }
-
-            Text(String(localized: "Hey Kevin"))
-                .font(.largeTitle.bold())
-
-            Text(String(localized: "Your AI phone assistant.\nNever miss an important call again."))
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            Spacer()
-
-            Button {
-                step = .signIn
-            } label: {
-                Text(String(localized: "Get Started"))
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.primary)
+                Text(sub)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(1)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            Spacer(minLength: 0)
         }
     }
 
@@ -226,74 +280,144 @@ struct OnboardingView: View {
     // MARK: - Mode Selection
 
     private var modeSelectStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        VStack(spacing: 0) {
+            HKProgressBar(current: 2, total: 5)
+                .padding(.bottom, HKSpace.xl)
 
-            Text(String(localized: "How will you use Kevin?"))
-                .font(.title.bold())
+            VStack(spacing: HKSpace.lg) {
+                KevinMark(size: 64)
 
-            VStack(spacing: 16) {
-                Button {
-                    selectedMode = "personal"
-                    step = .personalInfo
-                } label: {
-                    HStack(spacing: 16) {
-                        Image(systemName: "person.fill")
-                            .font(.title2)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(.purple.opacity(0.2)))
-                            .foregroundStyle(.purple)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(String(localized: "Personal Assistant"))
-                                .font(.headline)
-                            Text(String(localized: "Screen unknown callers. Known contacts ring through."))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if selectedMode == "personal" {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.purple)
-                        }
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                VStack(spacing: 6) {
+                    Text(String(localized: "How do you want\nKevin to work?"))
+                        .font(.system(size: 28, weight: .bold))
+                        .tracking(-0.6)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+
+                    Text(String(localized: "Pick the role you need. You can change this later, or run both on separate numbers."))
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .padding(.horizontal, HKSpace.sm)
                 }
-                .buttonStyle(.plain)
+            }
+            .padding(.bottom, HKSpace.lg)
 
-                Button {
-                    selectedMode = "business"
-                    step = .businessInfo
-                } label: {
-                    HStack(spacing: 16) {
-                        Image(systemName: "briefcase.fill")
-                            .font(.title2)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(.blue.opacity(0.2)))
-                            .foregroundStyle(.blue)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(String(localized: "Business Assistant"))
-                                .font(.headline)
-                            Text(String(localized: "Answer calls for your business, take messages, give estimates."))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if selectedMode == "business" {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.blue)
-                        }
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-                .buttonStyle(.plain)
+            VStack(spacing: HKSpace.md) {
+                modeCard(
+                    mode: "personal",
+                    title: String(localized: "Personal"),
+                    price: "$9.99",
+                    desc: String(localized: "Screen unknown callers. Saved contacts ring through to you."),
+                    tags: [
+                        String(localized: "Block robocalls"),
+                        String(localized: "Live transcripts"),
+                        String(localized: "Text replies"),
+                    ]
+                )
+
+                modeCard(
+                    mode: "business",
+                    title: String(localized: "Business"),
+                    price: "$49.99",
+                    desc: String(localized: "A full receptionist. Smart intake, business hours, and a knowledge base for FAQs."),
+                    tags: [
+                        String(localized: "Smart intake"),
+                        String(localized: "Business hours"),
+                        String(localized: "After-hours mode"),
+                        String(localized: "Knowledge base"),
+                    ]
+                )
             }
 
             Spacer()
+
+            VStack(spacing: HKSpace.xs) {
+                Button {
+                    if selectedMode == "personal" {
+                        step = .personalInfo
+                    } else {
+                        step = .businessInfo
+                    }
+                } label: {
+                    Text(selectedMode == "personal"
+                         ? String(localized: "Continue with Personal")
+                         : String(localized: "Continue with Business"))
+                }
+                .buttonStyle(HKDarkPrimaryButtonStyle())
+
+                Text(String(localized: "14-day free trial. Cancel anytime."))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func modeCard(mode: String, title: String, price: String, desc: String, tags: [String]) -> some View {
+        let selected = selectedMode == mode
+        Button {
+            selectedMode = mode
+        } label: {
+            VStack(alignment: .leading, spacing: HKSpace.sm) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title)
+                        .font(.system(size: 18, weight: .bold))
+                        .tracking(-0.3)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text(price)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Text(String(localized: "/mo"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text(desc)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                FlowLayout(spacing: 6, lineSpacing: 6) {
+                    ForEach(tags, id: \.self) { tag in
+                        Text(tag)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(selected ? Color.hkBlue : Color.secondary)
+                            .padding(.horizontal, HKSpace.sm)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(selected ? Color.hkBlue.opacity(0.10) : Color(.systemGray6))
+                            )
+                    }
+                }
+                .padding(.top, 2)
+            }
+            .padding(HKSpace.lg)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(selected ? Color.hkBlue.opacity(0.05) : Color(.secondarySystemGroupedBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(selected ? Color.hkBlue : Color(.systemGray5), lineWidth: selected ? 1.5 : 1)
+            )
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(selected ? Color.hkBlue : Color(.systemGray3))
+                    .padding(HKSpace.md)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Contacts Permission
@@ -644,9 +768,13 @@ struct OnboardingView: View {
     // MARK: - Done
 
     private var doneStep: some View {
-        // Skip the intermediate "You're All Set" screen.
-        // Go straight to PaywallView as the final onboarding step.
-        PaywallView(canDismiss: true, isOnboarding: true)
+        // Final onboarding step. canDismiss=false enforces the subscription
+        // decision: the user must complete the StoreKit purchase (which grants
+        // Apple's 2-week introductory free trial) or tap Restore Purchases.
+        // No "Maybe later" or "Done" bypass — we don't want users skipping
+        // payment entry and silently churning when the server-side trial
+        // expires 14 days later.
+        PaywallView(canDismiss: false, isOnboarding: true)
             .environmentObject(appState)
     }
 
@@ -759,10 +887,18 @@ struct OnboardingView: View {
             }
         }
 
-        // 2. Look up by Apple User ID on backend
+        // 2. Look up by Apple User ID on backend. Retries with a refreshed
+        //    Apple identity token if the first call returns 401 (token expired).
         if !appState.appleUserId.isEmpty {
-            if let result = await APIClient.shared.findContractorByAppleId(appleUserId: appState.appleUserId, appleIdentityToken: appState.appleIdentityToken) {
-                if let contractorId = result["contractor_id"] as? String {
+            let lookup = await callWithFreshAppleTokenOnAuthFailure { [appState] in
+                try await APIClient.shared.findContractorByAppleId(
+                    appleUserId: appState.appleUserId,
+                    appleIdentityToken: appState.appleIdentityToken
+                )
+            }
+            switch lookup {
+            case .success(let result):
+                if let result = result, let contractorId = result["contractor_id"] as? String {
                     appState.contractorId = contractorId
                     // Save API token returned by lookup (login flow)
                     if let apiToken = result["api_token"] as? String, !apiToken.isEmpty {
@@ -773,6 +909,9 @@ struct OnboardingView: View {
                         return
                     }
                 }
+            case .authFailed:
+                await handleBootstrapAuthFailure()
+                return
             }
         }
 
@@ -813,34 +952,63 @@ struct OnboardingView: View {
     }
 
     private func restoreOrContinue() async {
-        // Try to find existing contractor via phone number
-        let result = await APIClient.shared.createContractor(
-            ownerName: ownerName,
-            businessName: "",
-            serviceType: "general",
-            ownerPhone: phoneNumber,
-            appleUserId: appState.appleUserId,
-            appleIdentityToken: appState.appleIdentityToken
-        )
+        // Try to find existing contractor via phone number. Auto-refreshes the
+        // Apple identity token and retries on 401 (token expired in flight).
+        let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber, ownerName] in
+            try await APIClient.shared.createContractor(
+                ownerName: ownerName,
+                businessName: "",
+                serviceType: "general",
+                ownerPhone: phoneNumber,
+                appleUserId: appState.appleUserId,
+                appleIdentityToken: appState.appleIdentityToken
+            )
+        }
 
-        if let contractorId = result?["contractor_id"] as? String,
-           let isExisting = result?["existing"] as? Bool, isExisting {
-            // Existing account found — restore it
-            appState.contractorId = contractorId
-            if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
-                await restoreFromProfile(profile)
+        switch outcome {
+        case .authFailed:
+            await handleBootstrapAuthFailure()
+            return
+        case .success(let result):
+            if let contractorId = result?["contractor_id"] as? String,
+               let isExisting = result?["existing"] as? Bool, isExisting {
+                // Existing account found — restore it
+                appState.contractorId = contractorId
+                if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
+                    await restoreFromProfile(profile)
+                } else {
+                    await MainActor.run { appState.isOnboarded = true }
+                }
             } else {
-                await MainActor.run { appState.isOnboarded = true }
+                // New user — continue with onboarding
+                await MainActor.run { step = .modeSelect }
             }
-        } else {
-            // New user — continue with onboarding
-            await MainActor.run { step = .modeSelect }
         }
     }
 
     private func provision(mode: String) async {
+        // Resolve names: prefer the form-state values (when the user just typed them
+        // during onboarding) but fall back to the values already on appState so we
+        // don't overwrite a restored profile with empty strings, which the backend
+        // rejects as "Failed to update profile."
+        let resolvedOwnerName: String = {
+            let local = ownerName.trimmingCharacters(in: .whitespaces)
+            return local.isEmpty ? appState.userName : local
+        }()
+        let resolvedBusinessName: String = {
+            let local = businessName.trimmingCharacters(in: .whitespaces)
+            return local.isEmpty ? appState.businessName : local
+        }()
+
         let isPersonal = mode == "personal"
-        let bizName = isPersonal ? "\(ownerName)'s phone" : businessName
+        let bizName: String = {
+            if isPersonal {
+                return resolvedOwnerName.isEmpty
+                    ? String(localized: "My Kevin number")
+                    : "\(resolvedOwnerName)'s phone"
+            }
+            return resolvedBusinessName
+        }()
         let svcType = isPersonal ? "personal" : serviceType
 
         isLoading = true
@@ -849,17 +1017,50 @@ struct OnboardingView: View {
         // Reuse existing contractor if we have one, otherwise create new
         var contractorId = appState.contractorId
 
+        // Fast-path: contractor already exists and the profile already has a Kevin
+        // number — skip the patch entirely and finish onboarding. Avoids the round
+        // trip of overwriting restored fields with potentially-stale form values.
+        if !contractorId.isEmpty {
+            if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
+               let existing = profile["twilio_number"] as? String,
+               !existing.isEmpty {
+                kevinNumber = existing
+                appState.kevinNumber = existing
+                if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
+                if !resolvedBusinessName.isEmpty { appState.businessName = resolvedBusinessName }
+                appState.mode = mode
+                if let subUUID = profile["subscription_uuid"] as? String, !subUUID.isEmpty {
+                    appState.subscriptionUUID = subUUID
+                }
+                step = .forwarding
+                isLoading = false
+                return
+            }
+        }
+
         if contractorId.isEmpty {
-            // No existing contractor — create one (with Apple User ID for dedup)
-            let result = await APIClient.shared.createContractor(
-                ownerName: ownerName,
-                businessName: bizName,
-                serviceType: svcType,
-                mode: mode,
-                ownerPhone: phoneNumber,
-                appleUserId: appState.appleUserId,
-                appleIdentityToken: appState.appleIdentityToken
-            )
+            // No existing contractor — create one (with Apple User ID for dedup).
+            // Retries with a refreshed Apple identity token on 401.
+            let createOutcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber] in
+                try await APIClient.shared.createContractor(
+                    ownerName: resolvedOwnerName,
+                    businessName: bizName,
+                    serviceType: svcType,
+                    mode: mode,
+                    ownerPhone: phoneNumber,
+                    appleUserId: appState.appleUserId,
+                    appleIdentityToken: appState.appleIdentityToken
+                )
+            }
+            let result: [String: Any]?
+            switch createOutcome {
+            case .authFailed:
+                isLoading = false
+                await handleBootstrapAuthFailure()
+                return
+            case .success(let value):
+                result = value
+            }
             contractorId = result?["contractor_id"] as? String ?? ""
             if contractorId.isEmpty {
                 errorMessage = String(localized: "Failed to create profile. Please try again.")
@@ -875,11 +1076,9 @@ struct OnboardingView: View {
             // If the create endpoint restored an existing account by phone,
             // persist the selected mode/profile before continuing.
             if result?["existing"] as? Bool == true {
-                let updateBody: [String: Any] = [
-                    "owner_name": ownerName,
-                    "business_name": bizName,
-                    "mode": mode,
-                ]
+                var updateBody: [String: Any] = ["mode": mode]
+                if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
+                if !bizName.isEmpty { updateBody["business_name"] = bizName }
                 do {
                     let updated = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
                     if !updated {
@@ -894,16 +1093,15 @@ struct OnboardingView: View {
                     isLoading = false
                     return
                 }
-                appState.userName = ownerName
-                appState.businessName = bizName
+                if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
+                if !bizName.isEmpty { appState.businessName = bizName }
             }
         } else {
-            // Existing contractor — update profile info
-            let updateBody: [String: Any] = [
-                "owner_name": ownerName,
-                "business_name": bizName,
-                "mode": mode,
-            ]
+            // Existing contractor — update profile info. Only patch fields we have
+            // values for so we don't overwrite restored profile data with empties.
+            var updateBody: [String: Any] = ["mode": mode]
+            if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
+            if !bizName.isEmpty { updateBody["business_name"] = bizName }
             do {
                 let updated = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
                 if !updated {
@@ -918,8 +1116,8 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
-            appState.userName = ownerName
-            appState.businessName = bizName
+            if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
+            if !bizName.isEmpty { appState.businessName = bizName }
         }
 
         appState.mode = mode
@@ -980,15 +1178,25 @@ struct OnboardingView: View {
         defer { isLoading = false }
 
         if appState.contractorId.isEmpty {
-            let result = await APIClient.shared.createContractor(
-                ownerName: ownerName,
-                businessName: businessName,
-                serviceType: serviceType,
-                mode: "personal",
-                ownerPhone: phoneNumber,
-                appleUserId: appState.appleUserId,
-                appleIdentityToken: appState.appleIdentityToken
-            )
+            let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber, ownerName, businessName, serviceType] in
+                try await APIClient.shared.createContractor(
+                    ownerName: ownerName,
+                    businessName: businessName,
+                    serviceType: serviceType,
+                    mode: "personal",
+                    ownerPhone: phoneNumber,
+                    appleUserId: appState.appleUserId,
+                    appleIdentityToken: appState.appleIdentityToken
+                )
+            }
+            let result: [String: Any]?
+            switch outcome {
+            case .authFailed:
+                await handleBootstrapAuthFailure()
+                return false
+            case .success(let value):
+                result = value
+            }
             guard let contractorId = result?["contractor_id"] as? String, !contractorId.isEmpty else {
                 errorMessage = String(localized: "Failed to prepare your business profile. Please try again.")
                 return false
@@ -1083,5 +1291,81 @@ struct OnboardingView: View {
             // Note: isOnboarded is set after paywall is dismissed (in doneStep sheet onDismiss)
             step = .done
         }
+    }
+
+    // MARK: - Apple Identity Token Refresh
+
+    /// Outcome of an unauthenticated bootstrap call wrapped by
+    /// ``callWithFreshAppleTokenOnAuthFailure``.
+    private enum BootstrapCallOutcome<T> {
+        /// The call succeeded (possibly after one or more refresh-and-retry
+        /// attempts). The associated value mirrors the underlying API
+        /// response, so `nil` is still possible for non-401 soft failures.
+        case success(T?)
+        /// Authentication failed even after refreshing the Apple identity
+        /// token. The caller should surface a clear "sign in expired" error
+        /// and route the user back to the sign-in step.
+        case authFailed
+    }
+
+    /// Invoke an unauthenticated bootstrap call (lookup-by-apple-id, create
+    /// contractor). On `BootstrapAuthError.unauthenticated` (HTTP 401), request
+    /// a fresh Apple identity token via ``AppleIdentityRefresher`` and retry,
+    /// up to a total of three attempts. Other errors surface as
+    /// `.success(nil)` to preserve the original soft-fail behaviour.
+    private func callWithFreshAppleTokenOnAuthFailure<T>(
+        maxAttempts: Int = 3,
+        _ body: @escaping () async throws -> T?
+    ) async -> BootstrapCallOutcome<T> {
+        var attempt = 0
+        while attempt < maxAttempts {
+            attempt += 1
+            do {
+                let value = try await body()
+                return .success(value)
+            } catch BootstrapAuthError.unauthenticated {
+                // Token rejected by backend — try to refresh and loop.
+                guard attempt < maxAttempts else { break }
+                let refreshed = await refreshAppleIdentityToken()
+                if !refreshed {
+                    return .authFailed
+                }
+                // Loop and retry with the new token now stored on appState.
+            } catch {
+                // Non-auth failures fall through to the soft-fail contract.
+                return .success(nil)
+            }
+        }
+        return .authFailed
+    }
+
+    /// Drive a fresh Sign-in with Apple credential request and update
+    /// `appState.appleIdentityToken` (and `appState.appleUserId` if it
+    /// changed). Returns `true` on success.
+    @MainActor
+    private func refreshAppleIdentityToken() async -> Bool {
+        do {
+            let result = try await AppleIdentityRefresher.shared.refreshIdentityToken(
+                existingUserId: appState.appleUserId
+            )
+            if !result.appleUserId.isEmpty, result.appleUserId != appState.appleUserId {
+                appState.appleUserId = result.appleUserId
+            }
+            appState.appleIdentityToken = result.identityToken
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Surface a clear error to the user after we've exhausted Apple identity
+    /// token refresh attempts, and route them back to the sign-in step so they
+    /// can re-authenticate manually via `SignInWithAppleButton`.
+    @MainActor
+    private func handleBootstrapAuthFailure() async {
+        errorMessage = String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
+        appState.appleIdentityToken = ""
+        isLoading = false
+        step = .signIn
     }
 }

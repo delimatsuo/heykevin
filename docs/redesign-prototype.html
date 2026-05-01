@@ -1,0 +1,1718 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hey Kevin — UI Redesign Prototype</title>
+  <style>
+    /* ---------- Tokens ---------- */
+    :root {
+      /* Backgrounds, tinted toward Trade Signal Blue (hue 264) */
+      --bg-base:        oklch(97% 0.005 264);
+      --bg-surface:     oklch(94% 0.006 264);
+      --bg-elevated:    oklch(99% 0.003 264);
+      --bg-bar:         oklch(98% 0.005 264 / 0.86);
+
+      /* Text */
+      --text-1:         oklch(16% 0.012 264);
+      --text-2:         oklch(50% 0.012 264);
+      --text-3:         oklch(68% 0.008 264);
+      --text-on-color:  oklch(99% 0 0);
+
+      /* Trade Signal Blue */
+      --blue:           oklch(60% 0.21 264);
+      --blue-strong:    oklch(54% 0.22 264);
+      --blue-soft:      oklch(95% 0.045 264);
+      --blue-tint:      oklch(91% 0.06 264);
+
+      /* Clear Line Green (the go signal) */
+      --green:          oklch(68% 0.20 145);
+      --green-strong:   oklch(60% 0.18 145);
+      --green-soft:     oklch(95% 0.06 145);
+
+      /* Semantic */
+      --orange:         oklch(72% 0.17 62);
+      --orange-soft:    oklch(96% 0.05 62);
+      --red:            oklch(58% 0.22 27);
+      --red-soft:       oklch(96% 0.04 27);
+
+      /* Structure */
+      --border:         oklch(89% 0.008 264);
+      --divider:        oklch(92% 0.006 264);
+
+      /* Type stack */
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", "Inter", system-ui, sans-serif;
+      --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+      /* Spacing — 4pt scale */
+      --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
+      --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+      --sp-8: 32px; --sp-10: 40px; --sp-12: 48px;
+
+      /* Radius */
+      --r-bubble: 18px;
+      --r-btn:    14px;
+      --r-card:   12px;
+      --r-pill:   999px;
+
+      /* Easing */
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-fast: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: var(--font);
+      color: var(--text-1);
+      background:
+        radial-gradient(circle at 20% 0%, oklch(95% 0.025 264) 0%, transparent 45%),
+        radial-gradient(circle at 80% 100%, oklch(96% 0.02 145) 0%, transparent 40%),
+        oklch(98% 0.004 264);
+      background-attachment: fixed;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ---------- Page chrome ---------- */
+    .page {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: var(--sp-8);
+      padding: var(--sp-8) var(--sp-6);
+    }
+
+    .page-header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: var(--sp-3);
+      max-width: 640px;
+      margin: 0 auto;
+      text-align: center;
+    }
+    .page-title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-2);
+      margin: 0;
+    }
+    .page-sub {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      color: var(--text-1);
+      margin: 0;
+    }
+    .page-tag {
+      font-size: 14px;
+      color: var(--text-2);
+      max-width: 40ch;
+      margin: 0;
+    }
+
+    /* Prototype switcher */
+    .switcher {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 4px;
+      padding: 4px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--r-pill);
+      width: fit-content;
+      margin: 0 auto;
+    }
+    .switcher button {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-2);
+      padding: 8px 14px;
+      border-radius: var(--r-pill);
+      cursor: pointer;
+      transition: color 120ms var(--ease-fast), background 120ms var(--ease-fast);
+    }
+    .switcher button:hover { color: var(--text-1); }
+    .switcher button[aria-current="true"] {
+      background: var(--text-1);
+      color: var(--text-on-color);
+    }
+
+    /* Phone stage */
+    .stage {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding-bottom: var(--sp-12);
+    }
+
+    .phone {
+      width: 390px;
+      height: 844px;
+      background: var(--bg-base);
+      border-radius: 56px;
+      box-shadow:
+        0 0 0 12px oklch(15% 0.01 264),
+        0 0 0 13px oklch(28% 0.012 264),
+        0 36px 80px -20px oklch(15% 0.03 264 / 0.45),
+        0 18px 40px -18px oklch(15% 0.03 264 / 0.35);
+      overflow: hidden;
+      position: relative;
+      isolation: isolate;
+    }
+
+    .phone-island {
+      position: absolute;
+      top: 11px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 124px;
+      height: 36px;
+      background: oklch(8% 0 0);
+      border-radius: 999px;
+      z-index: 50;
+    }
+
+    .status-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 50px;
+      padding: 17px 30px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-1);
+      z-index: 40;
+      pointer-events: none;
+    }
+    .status-bar .icons {
+      display: inline-flex;
+      gap: 5px;
+      align-items: center;
+      margin-top: 2px;
+    }
+    .status-bar svg { width: 16px; height: 11px; fill: var(--text-1); }
+
+    /* Screen container */
+    .screen {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      padding-top: 50px;
+    }
+    .screen[data-active="true"] { display: flex; }
+
+    /* ---------- Components ---------- */
+
+    .pulse-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      position: relative;
+    }
+    .pulse-dot::after {
+      content: "";
+      position: absolute;
+      inset: -3px;
+      border-radius: 50%;
+      background: var(--green);
+      opacity: 0.4;
+      animation: pulseRing 1.6s var(--ease-out) infinite;
+    }
+    @keyframes pulseRing {
+      0%   { transform: scale(0.5); opacity: 0.5; }
+      80%, 100% { transform: scale(1.6); opacity: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .pulse-dot::after { animation: none; opacity: 0; }
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot--green  { background: var(--green); }
+    .dot--orange { background: var(--orange); }
+    .dot--blue   { background: var(--blue); }
+
+    /* Buttons */
+    .btn {
+      appearance: none;
+      border: 0;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: background 120ms var(--ease-fast), transform 100ms var(--ease-fast), border-color 120ms var(--ease-fast);
+      user-select: none;
+    }
+    .btn:active { transform: scale(0.985); }
+
+    .btn--cta {
+      width: 100%;
+      min-height: 56px;
+      padding: 16px;
+      background: var(--green);
+      color: var(--text-on-color);
+      font-size: 17px;
+      letter-spacing: -0.01em;
+      border-radius: var(--r-btn);
+    }
+    .btn--cta:hover { background: var(--green-strong); }
+    .btn--cta svg { width: 18px; height: 18px; }
+
+    .btn--secondary {
+      flex: 1;
+      min-height: 48px;
+      padding: 12px 16px;
+      background: transparent;
+      color: var(--blue);
+      font-size: 15px;
+      border: 1px solid oklch(60% 0.21 264 / 0.35);
+      border-radius: var(--r-card);
+    }
+    .btn--secondary svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .btn--secondary:hover {
+      background: oklch(60% 0.21 264 / 0.06);
+      border-color: oklch(60% 0.21 264 / 0.55);
+    }
+    .btn--destructive {
+      flex: 1;
+      min-height: 48px;
+      padding: 12px 16px;
+      background: transparent;
+      color: var(--red);
+      font-size: 15px;
+      border: 1px solid oklch(58% 0.22 27 / 0.35);
+      border-radius: var(--r-card);
+    }
+    .btn--destructive svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .btn--destructive:hover {
+      background: oklch(58% 0.22 27 / 0.06);
+      border-color: oklch(58% 0.22 27 / 0.55);
+    }
+
+    .btn--primary {
+      width: 100%;
+      min-height: 52px;
+      padding: 14px;
+      background: var(--text-1);
+      color: var(--text-on-color);
+      font-size: 16px;
+      border-radius: var(--r-btn);
+    }
+    .btn--primary:hover { background: oklch(22% 0.012 264); }
+
+    .btn--ghost {
+      background: transparent;
+      color: var(--text-2);
+      font-size: 14px;
+      padding: 12px;
+      min-height: 44px;
+    }
+    .btn--ghost:hover { color: var(--text-1); }
+
+    /* ---------- LIVE SCREEN ---------- */
+
+    .live-nav {
+      height: 44px;
+      padding: 0 var(--sp-5);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .live-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--green-strong);
+      letter-spacing: -0.005em;
+    }
+    .live-timer {
+      font-family: var(--font);
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-2);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .caller-strip {
+      padding: 10px var(--sp-5) 14px;
+      display: flex;
+      align-items: center;
+      gap: var(--sp-3);
+      border-bottom: 1px solid var(--divider);
+      flex-shrink: 0;
+      min-width: 0;
+    }
+    .caller-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, oklch(72% 0.13 264), oklch(54% 0.18 264));
+      color: var(--text-on-color);
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      flex-shrink: 0;
+    }
+    .caller-avatar--unknown {
+      background: linear-gradient(135deg, oklch(82% 0.008 264), oklch(64% 0.012 264));
+    }
+    .caller-avatar--unknown svg { width: 22px; height: 22px; fill: var(--text-on-color); }
+
+    .caller-info {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .caller-name {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--text-1);
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-variant-numeric: tabular-nums;
+    }
+    .caller-meta {
+      font-size: 13px;
+      color: var(--text-2);
+      margin-top: 2px;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .caller-meta .sep { color: var(--text-3); margin: 0 4px; }
+
+    .transcript {
+      flex: 1;
+      overflow-y: auto;
+      padding: var(--sp-4) var(--sp-4) var(--sp-2);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scrollbar-width: thin;
+    }
+    .transcript::-webkit-scrollbar { width: 4px; }
+    .transcript::-webkit-scrollbar-thumb {
+      background: oklch(80% 0.01 264 / 0.5);
+      border-radius: 999px;
+    }
+
+    .turn { display: flex; flex-direction: column; }
+    .turn + .turn { margin-top: 12px; }
+
+    .turn-speaker {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin: 0 12px 4px;
+    }
+    .turn--kevin .turn-speaker {
+      color: var(--blue);
+      align-self: flex-end;
+    }
+
+    .bubble {
+      max-width: 78%;
+      padding: 10px 14px;
+      font-size: 15px;
+      line-height: 1.42;
+      border-radius: var(--r-bubble);
+      letter-spacing: -0.005em;
+    }
+    .turn--caller .bubble {
+      background: var(--bg-surface);
+      color: var(--text-1);
+      align-self: flex-start;
+      border-bottom-left-radius: 6px;
+    }
+    .turn--kevin .bubble {
+      background: var(--blue-soft);
+      color: var(--text-1);
+      align-self: flex-end;
+      border-bottom-right-radius: 6px;
+    }
+    .bubble + .bubble {
+      margin-top: 3px;
+      border-top-left-radius: 6px;
+    }
+    .turn--kevin .bubble + .bubble {
+      border-top-left-radius: var(--r-bubble);
+      border-top-right-radius: 6px;
+    }
+
+    .listening {
+      align-self: flex-start;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 8px 12px 0;
+      padding: 8px 12px;
+      background: var(--bg-surface);
+      border-radius: var(--r-bubble);
+      font-size: 13px;
+      color: var(--text-2);
+    }
+    .listening-bars { display: inline-flex; gap: 2px; }
+    .listening-bars span {
+      display: inline-block;
+      width: 3px;
+      height: 12px;
+      background: var(--blue);
+      border-radius: 2px;
+      animation: barPulse 1.2s var(--ease-out) infinite;
+    }
+    .listening-bars span:nth-child(2) { animation-delay: 120ms; }
+    .listening-bars span:nth-child(3) { animation-delay: 240ms; }
+    @keyframes barPulse {
+      0%, 100% { transform: scaleY(0.5); opacity: 0.6; }
+      50%      { transform: scaleY(1);   opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .listening-bars span { animation: none; }
+    }
+
+    /* Action zone */
+    .action-zone {
+      padding: var(--sp-3) var(--sp-4) var(--sp-4);
+      background: var(--bg-bar);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      border-top: 1px solid var(--divider);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .action-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    /* Tab bar */
+    .tab-bar {
+      display: flex;
+      align-items: stretch;
+      justify-content: space-around;
+      padding: 8px 0 22px;
+      background: var(--bg-bar);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      border-top: 1px solid var(--divider);
+      flex-shrink: 0;
+    }
+    .tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-3);
+      cursor: pointer;
+      padding: 6px 0;
+      position: relative;
+    }
+    .tab svg { width: 24px; height: 24px; fill: var(--text-3); }
+    .tab[aria-current="true"] { color: var(--blue); }
+    .tab[aria-current="true"] svg { fill: var(--blue); }
+    .tab-badge {
+      position: absolute;
+      top: 0;
+      right: 28%;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      border-radius: 999px;
+      background: var(--red);
+      color: var(--text-on-color);
+      font-size: 10px;
+      font-weight: 700;
+      display: grid;
+      place-items: center;
+    }
+
+    /* ---------- RECENTS SCREEN ---------- */
+
+    .recents-nav {
+      padding: var(--sp-3) var(--sp-5);
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      flex-shrink: 0;
+      border-bottom: 1px solid var(--divider);
+    }
+    .recents-title {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      margin: 0;
+      color: var(--text-1);
+    }
+    .recents-action {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--blue);
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 8px 0;
+    }
+
+    .toggle-row {
+      padding: var(--sp-3) var(--sp-5);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--sp-4);
+      border-bottom: 1px solid var(--divider);
+      flex-shrink: 0;
+    }
+    .toggle-text { font-size: 14px; }
+    .toggle-text strong { font-weight: 600; }
+    .toggle-text small {
+      display: block;
+      color: var(--text-2);
+      font-size: 12px;
+      margin-top: 1px;
+    }
+    .ios-toggle {
+      width: 51px;
+      height: 31px;
+      border-radius: 999px;
+      background: var(--green);
+      position: relative;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .ios-toggle::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 27px;
+      height: 27px;
+      border-radius: 50%;
+      background: white;
+      box-shadow: 0 2px 4px oklch(15% 0.01 264 / 0.18), 0 0 0 0.5px oklch(15% 0.01 264 / 0.04);
+      transition: right 200ms var(--ease-out);
+    }
+    .ios-toggle[data-on="false"] { background: oklch(85% 0.006 264); }
+    .ios-toggle[data-on="false"]::after { right: 22px; }
+
+    .calls {
+      flex: 1;
+      overflow-y: auto;
+      padding-bottom: 8px;
+    }
+    .calls-section-label {
+      padding: 18px var(--sp-5) 8px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+    .call-row {
+      padding: 12px var(--sp-5);
+      display: grid;
+      grid-template-columns: 40px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      border-bottom: 1px solid var(--divider);
+      cursor: pointer;
+      transition: background 120ms var(--ease-fast);
+    }
+    .call-row:hover { background: var(--bg-surface); }
+    .call-row:last-child { border-bottom: 0; }
+
+    .call-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      color: var(--text-on-color);
+      flex-shrink: 0;
+    }
+    .call-avatar--blue   { background: linear-gradient(135deg, oklch(72% 0.13 264), oklch(54% 0.18 264)); }
+    .call-avatar--green  { background: linear-gradient(135deg, oklch(78% 0.14 145), oklch(58% 0.18 145)); }
+    .call-avatar--orange { background: linear-gradient(135deg, oklch(80% 0.13 62),  oklch(62% 0.16 62));  }
+    .call-avatar--purple { background: linear-gradient(135deg, oklch(72% 0.13 304), oklch(54% 0.18 304)); }
+    .call-avatar--neutral{ background: linear-gradient(135deg, oklch(78% 0.01 264), oklch(60% 0.012 264)); }
+    .call-avatar svg { width: 18px; height: 18px; fill: var(--text-on-color); }
+
+    .call-content { min-width: 0; }
+    .call-name {
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: -0.005em;
+      color: var(--text-1);
+      line-height: 1.3;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .call-row[data-unread="true"] .call-name {
+      font-weight: 700;
+    }
+    .call-summary {
+      font-size: 13px;
+      color: var(--text-2);
+      line-height: 1.35;
+      margin-top: 1px;
+      display: -webkit-box;
+      -webkit-line-clamp: 1;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .call-row[data-unread="true"] .call-summary {
+      color: var(--text-1);
+    }
+
+    .call-meta-col {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .call-time {
+      font-size: 12px;
+      color: var(--text-2);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+    }
+    .call-row[data-unread="true"] .call-time {
+      color: var(--blue);
+      font-weight: 600;
+    }
+    .call-row[data-flag="urgent"] .call-summary::before {
+      content: "URGENT";
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--red);
+      background: var(--red-soft);
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-right: 6px;
+      vertical-align: 1px;
+    }
+
+    .unread-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+    .call-row:not([data-unread="true"]) .unread-dot { display: none; }
+
+    /* ---------- ONBOARDING SCREEN ---------- */
+
+    .onb-shell {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: var(--sp-3) var(--sp-6) var(--sp-6);
+    }
+    .onb-progress {
+      display: flex;
+      gap: 6px;
+      padding: var(--sp-2) 0 var(--sp-6);
+    }
+    .onb-progress span {
+      flex: 1;
+      height: 3px;
+      border-radius: 2px;
+      background: var(--bg-surface);
+    }
+    .onb-progress span[data-on="true"] { background: var(--text-1); }
+
+    .onb-hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: var(--sp-5);
+      padding-top: var(--sp-6);
+      flex: 1;
+    }
+
+    .kevin-mark {
+      width: 92px;
+      height: 92px;
+      border-radius: 28px;
+      background:
+        radial-gradient(circle at 30% 30%, oklch(78% 0.16 264) 0%, transparent 60%),
+        linear-gradient(135deg, var(--blue) 0%, oklch(48% 0.20 264) 100%);
+      display: grid;
+      place-items: center;
+      box-shadow:
+        inset 0 1px 0 oklch(99% 0.04 264 / 0.4),
+        0 18px 36px -12px oklch(54% 0.22 264 / 0.4);
+      position: relative;
+    }
+    .kevin-mark svg { width: 48px; height: 48px; fill: var(--text-on-color); }
+
+    .onb-hello {
+      font-size: 32px;
+      line-height: 1.05;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--text-1);
+      margin: 0;
+    }
+    .onb-hello em {
+      font-style: normal;
+      color: var(--blue);
+    }
+    .onb-blurb {
+      font-size: 16px;
+      line-height: 1.45;
+      color: var(--text-2);
+      max-width: 30ch;
+      margin: 0;
+    }
+
+    .onb-feature-list {
+      list-style: none;
+      padding: 0;
+      margin: var(--sp-2) 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      width: 100%;
+      text-align: left;
+    }
+    .onb-feature-list li {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      align-items: flex-start;
+      font-size: 14px;
+      color: var(--text-1);
+      line-height: 1.4;
+    }
+    .onb-feature-list li small {
+      display: block;
+      color: var(--text-2);
+      font-size: 13px;
+      margin-top: 1px;
+    }
+    .onb-feature-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+    }
+    .onb-feature-icon svg { width: 16px; height: 16px; }
+
+    .onb-foot {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: var(--sp-4);
+    }
+
+    /* Mode selection */
+    .mode-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      width: 100%;
+      margin-top: var(--sp-4);
+    }
+    .mode-card {
+      position: relative;
+      padding: 18px 18px 16px;
+      border-radius: 16px;
+      background: var(--bg-elevated);
+      border: 1.5px solid var(--border);
+      cursor: pointer;
+      transition: border-color 140ms var(--ease-fast), background 140ms var(--ease-fast);
+    }
+    .mode-card:hover { border-color: oklch(60% 0.21 264 / 0.4); }
+    .mode-card[data-selected="true"] {
+      background: var(--blue-soft);
+      border-color: var(--blue);
+    }
+    .mode-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 4px;
+    }
+    .mode-card-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+      color: var(--text-1);
+    }
+    .mode-card-price {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-2);
+      font-variant-numeric: tabular-nums;
+    }
+    .mode-card-price strong {
+      color: var(--text-1);
+      font-size: 15px;
+      letter-spacing: -0.01em;
+    }
+    .mode-card-desc {
+      font-size: 13px;
+      color: var(--text-2);
+      line-height: 1.45;
+    }
+    .mode-card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .mode-card-tag {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-2);
+      padding: 4px 8px;
+      background: var(--bg-surface);
+      border-radius: var(--r-pill);
+      letter-spacing: -0.005em;
+    }
+    .mode-card[data-selected="true"] .mode-card-tag {
+      background: oklch(60% 0.21 264 / 0.1);
+      color: var(--blue-strong);
+    }
+
+    .mode-card-check {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 1.5px solid var(--border);
+      display: grid;
+      place-items: center;
+      transition: border-color 140ms var(--ease-fast), background 140ms var(--ease-fast);
+    }
+    .mode-card[data-selected="true"] .mode-card-check {
+      background: var(--blue);
+      border-color: var(--blue);
+    }
+    .mode-card-check svg {
+      width: 12px;
+      height: 12px;
+      fill: var(--text-on-color);
+      opacity: 0;
+      transition: opacity 140ms var(--ease-fast);
+    }
+    .mode-card[data-selected="true"] .mode-card-check svg { opacity: 1; }
+
+    /* ---------- PAYWALL SCREEN ---------- */
+
+    .pw-shell {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .pw-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 var(--sp-5) var(--sp-5);
+    }
+    .pw-head {
+      padding: var(--sp-3) var(--sp-5) var(--sp-5);
+      text-align: center;
+    }
+    .pw-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px 5px 8px;
+      background: var(--orange-soft);
+      color: var(--orange);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border-radius: var(--r-pill);
+      margin-bottom: 12px;
+    }
+    .pw-title {
+      font-size: 28px;
+      line-height: 1.1;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      color: var(--text-1);
+      margin: 0 0 6px;
+    }
+    .pw-sub {
+      font-size: 14px;
+      color: var(--text-2);
+      margin: 0;
+    }
+
+    .tier-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 4px;
+    }
+    .tier {
+      padding: 16px 18px;
+      border-radius: 16px;
+      background: var(--bg-elevated);
+      border: 1.5px solid var(--border);
+      cursor: pointer;
+      transition: border-color 140ms var(--ease-fast), background 140ms var(--ease-fast);
+      position: relative;
+    }
+    .tier:hover { border-color: oklch(60% 0.21 264 / 0.4); }
+    .tier[data-selected="true"] {
+      background: var(--blue-soft);
+      border-color: var(--blue);
+    }
+    .tier-flag {
+      position: absolute;
+      top: -10px;
+      right: 16px;
+      padding: 3px 10px;
+      background: var(--text-1);
+      color: var(--text-on-color);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border-radius: var(--r-pill);
+    }
+    .tier-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--sp-3);
+    }
+    .tier-name {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+      color: var(--text-1);
+      line-height: 1.2;
+    }
+    .tier-tag {
+      display: block;
+      font-size: 12px;
+      color: var(--text-2);
+      font-weight: 500;
+      margin-top: 2px;
+    }
+    .tier-price {
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .tier-price b {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-1);
+      font-variant-numeric: tabular-nums;
+    }
+    .tier-price small {
+      display: block;
+      font-size: 11px;
+      color: var(--text-2);
+      font-weight: 500;
+      margin-top: 1px;
+    }
+    .tier-price strike {
+      display: block;
+      font-size: 12px;
+      color: var(--text-3);
+      font-weight: 500;
+      text-decoration: line-through;
+    }
+    .tier-features {
+      list-style: none;
+      padding: 0;
+      margin: 12px 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-1);
+    }
+    .tier-features li {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 8px;
+      align-items: flex-start;
+      line-height: 1.45;
+    }
+    .tier-features svg { width: 14px; height: 14px; margin-top: 3px; fill: var(--green); }
+    .tier:not([data-selected="true"]) .tier-features svg { fill: var(--text-3); }
+
+    .pw-foot {
+      padding: var(--sp-3) var(--sp-5) calc(var(--sp-5) + 4px);
+      background: var(--bg-bar);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      border-top: 1px solid var(--divider);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .pw-trust {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      font-size: 11px;
+      color: var(--text-3);
+      padding: var(--sp-2) 0 0;
+    }
+    .pw-trust span { display: inline-flex; align-items: center; gap: 4px; }
+    .pw-trust svg { width: 11px; height: 11px; fill: currentColor; }
+
+    /* Empty state */
+    .empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 40px;
+      text-align: center;
+    }
+    .empty-mark {
+      width: 64px;
+      height: 64px;
+      border-radius: 18px;
+      background: var(--bg-surface);
+      display: grid;
+      place-items: center;
+      color: var(--text-3);
+    }
+    .empty-mark svg { width: 32px; height: 32px; }
+    .empty-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--text-1);
+      margin: 0;
+      letter-spacing: -0.01em;
+    }
+    .empty-body {
+      font-size: 14px;
+      color: var(--text-2);
+      max-width: 28ch;
+      margin: 0;
+      line-height: 1.45;
+    }
+
+    /* Footer */
+    .page-foot {
+      text-align: center;
+      color: var(--text-3);
+      font-size: 12px;
+      padding-bottom: var(--sp-4);
+    }
+    .page-foot a { color: var(--text-2); text-decoration: none; }
+
+    /* Responsive: shrink the phone on tiny screens */
+    @media (max-width: 460px) {
+      .page { padding: 16px 0 0; gap: 18px; }
+      .stage { padding-bottom: 24px; }
+      .phone {
+        width: 100%;
+        height: calc(100vw * 844 / 390);
+        max-height: 90vh;
+        border-radius: 0;
+        box-shadow: none;
+      }
+      .phone-island { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <p class="page-title">Hey Kevin · Redesign</p>
+      <h1 class="page-sub">A dispatch screen, not an app.</h1>
+      <p class="page-tag">Four core surfaces, redesigned around a single contractor decision: pick up or don't.</p>
+      <nav class="switcher" id="switcher" aria-label="Prototype screens">
+        <button data-screen="live" aria-current="true">Live call</button>
+        <button data-screen="recents">Recents</button>
+        <button data-screen="onboarding">Onboarding</button>
+        <button data-screen="paywall">Paywall</button>
+      </nav>
+    </header>
+
+    <main class="stage">
+      <div class="phone">
+        <div class="phone-island"></div>
+
+        <!-- ============ LIVE SCREEN ============ -->
+        <section class="screen" id="screen-live" data-active="true" aria-label="Live call screen">
+          <div class="status-bar">
+            <span>9:41</span>
+            <div class="icons" aria-hidden="true">
+              <svg viewBox="0 0 18 12"><path d="M2 8h2v2H2zm4-2h2v4H6zm4-2h2v6h-2zm4-2h2v8h-2z"/></svg>
+              <svg viewBox="0 0 18 12"><path d="M9 1.5C5.5 1.5 2.6 2.7 0 4.7l1.5 2C3.7 4.9 6.2 4 9 4s5.3.9 7.5 2.7l1.5-2C15.4 2.7 12.5 1.5 9 1.5zm0 4.5C7 6 5 6.6 3.4 7.7l1.5 2C6 9 7.4 8.5 9 8.5s3 .5 4.1 1.2l1.5-2C13 6.6 11 6 9 6zm0 4.5c-1 0-1.9.4-2.6 1L9 13l2.6-2c-.7-.6-1.6-1-2.6-1z"/></svg>
+              <svg viewBox="0 0 24 12"><rect x="0.5" y="1" width="20" height="10" rx="2.5" fill="none" stroke="currentColor"/><rect x="2" y="2.5" width="17" height="7" rx="1.5"/></svg>
+            </div>
+          </div>
+
+          <div class="live-nav">
+            <span class="live-status">
+              <span class="pulse-dot"></span>
+              Live
+            </span>
+            <span class="live-timer">0:42</span>
+          </div>
+
+          <div class="caller-strip">
+            <div class="caller-avatar caller-avatar--unknown" aria-hidden="true">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-3.3 0-6 2.7-6 6h12c0-3.3-2.7-6-6-6z"/></svg>
+            </div>
+            <div class="caller-info">
+              <div class="caller-name">(510) 882-0194</div>
+              <div class="caller-meta">Unknown caller<span class="sep">·</span>Oakland, CA</div>
+            </div>
+          </div>
+
+          <div class="transcript" id="transcript">
+            <div class="turn turn--kevin">
+              <span class="turn-speaker">Kevin</span>
+              <div class="bubble">Hey, this is Kevin answering for Mike's plumbing. What's going on?</div>
+            </div>
+
+            <div class="turn turn--caller">
+              <span class="turn-speaker">Caller</span>
+              <div class="bubble">Yeah hi, I got a water heater that's leaking pretty bad in the garage.</div>
+              <div class="bubble">Floor's getting wet.</div>
+            </div>
+
+            <div class="turn turn--kevin">
+              <span class="turn-speaker">Kevin</span>
+              <div class="bubble">Got it, that sounds urgent. Can I get your name and address so Mike can get out there?</div>
+            </div>
+
+            <div class="turn turn--caller">
+              <span class="turn-speaker">Caller</span>
+              <div class="bubble">Tom Faulkner. 1242 Maple Street, Oakland.</div>
+            </div>
+
+            <div class="turn turn--kevin">
+              <span class="turn-speaker">Kevin</span>
+              <div class="bubble">Thanks Tom. One last thing, is the gas to the heater off, or still on?</div>
+            </div>
+
+            <div class="turn turn--caller">
+              <span class="turn-speaker">Caller</span>
+              <div class="bubble">It's off, I shut it off when I saw the puddle.</div>
+            </div>
+
+            <div class="listening" aria-live="polite">
+              <span class="listening-bars" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </span>
+              Kevin is responding
+            </div>
+          </div>
+
+          <div class="action-zone">
+            <button class="btn btn--cta" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.15 12 19.79 19.79 0 0 1 1.08 3.42 2 2 0 0 1 3.06 1.25h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L7.09 9.17a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16z"/>
+              </svg>
+              Pick up
+            </button>
+            <div class="action-row">
+              <button class="btn btn--secondary" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                Text reply
+              </button>
+              <button class="btn btn--destructive" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M18 6 6 18M6 6l12 12"/>
+                </svg>
+                Ignore
+              </button>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab" aria-current="true">
+              <svg viewBox="0 0 24 24"><path d="M3 12c1.5 0 2 1.5 2 1.5l1-3s.5-3 2-3 2 5 2 5 .5-7 2-7 2 9 2 9 .5-5 2-5 2 4 2 4 .5-1.5 2-1.5h2v-1H3v1z"/></svg>
+              Live
+              <span class="tab-badge">1</span>
+            </div>
+            <div class="tab">
+              <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v4l5-4-5-4z"/></svg>
+              Recents
+            </div>
+            <div class="tab">
+              <svg viewBox="0 0 24 24"><path d="M19.4 13a7.2 7.2 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1L14.8 3h-3.6l-.5 2.6a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.2 7.2 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.7 1.7 1l.5 2.6h3.6l.5-2.6c.6-.3 1.2-.6 1.7-1l2.4 1 2-3.4-2-1.6zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
+              Settings
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ RECENTS SCREEN ============ -->
+        <section class="screen" id="screen-recents" aria-label="Recents screen">
+          <div class="status-bar">
+            <span>9:41</span>
+            <div class="icons" aria-hidden="true">
+              <svg viewBox="0 0 18 12"><path d="M2 8h2v2H2zm4-2h2v4H6zm4-2h2v6h-2zm4-2h2v8h-2z"/></svg>
+              <svg viewBox="0 0 18 12"><path d="M9 1.5C5.5 1.5 2.6 2.7 0 4.7l1.5 2C3.7 4.9 6.2 4 9 4s5.3.9 7.5 2.7l1.5-2C15.4 2.7 12.5 1.5 9 1.5z"/></svg>
+              <svg viewBox="0 0 24 12"><rect x="0.5" y="1" width="20" height="10" rx="2.5" fill="none" stroke="currentColor"/><rect x="2" y="2.5" width="17" height="7" rx="1.5"/></svg>
+            </div>
+          </div>
+
+          <div class="recents-nav">
+            <h1 class="recents-title">Recents</h1>
+            <button class="recents-action" type="button">Mark all read</button>
+          </div>
+
+          <div class="toggle-row">
+            <div class="toggle-text">
+              <strong>Screen all calls</strong>
+              <small>Kevin screens everyone, including saved contacts.</small>
+            </div>
+            <div class="ios-toggle" data-on="true" role="switch" aria-checked="true"></div>
+          </div>
+
+          <div class="calls">
+            <div class="calls-section-label">Today</div>
+
+            <div class="call-row" data-unread="true" data-flag="urgent">
+              <div class="call-avatar call-avatar--blue" aria-hidden="true">TF</div>
+              <div class="call-content">
+                <div class="call-name">Tom Faulkner</div>
+                <div class="call-summary">Water heater leaking, garage flooding. Wants Mike out today.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">2m ago</span>
+                <span class="unread-dot"></span>
+              </div>
+            </div>
+
+            <div class="call-row" data-unread="true">
+              <div class="call-avatar call-avatar--purple" aria-hidden="true">LM</div>
+              <div class="call-content">
+                <div class="call-name">Lisa Martinez</div>
+                <div class="call-summary">Bathroom remodel quote, two full baths. Prefers a Saturday call.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">1h ago</span>
+                <span class="unread-dot"></span>
+              </div>
+            </div>
+
+            <div class="call-row" data-unread="true">
+              <div class="call-avatar call-avatar--green" aria-hidden="true">RH</div>
+              <div class="call-content">
+                <div class="call-name">Riverview HOA</div>
+                <div class="call-summary">Annual maintenance contract renewal. Wants quote by Friday.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">3h ago</span>
+                <span class="unread-dot"></span>
+              </div>
+            </div>
+
+            <div class="calls-section-label">Yesterday</div>
+
+            <div class="call-row">
+              <div class="call-avatar call-avatar--neutral" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-3.3 0-6 2.7-6 6h12c0-3.3-2.7-6-6-6z"/></svg>
+              </div>
+              <div class="call-content">
+                <div class="call-name">Spam likely</div>
+                <div class="call-summary">Robocall, car warranty pitch. Hung up on Kevin's intro.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">Yest.</span>
+              </div>
+            </div>
+
+            <div class="call-row">
+              <div class="call-avatar call-avatar--orange" aria-hidden="true">SA</div>
+              <div class="call-content">
+                <div class="call-name">Steve, Ace Hardware</div>
+                <div class="call-summary">Confirming pickup of order #4421. Open until 6pm.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">Yest.</span>
+              </div>
+            </div>
+
+            <div class="call-row">
+              <div class="call-avatar call-avatar--blue" aria-hidden="true">DK</div>
+              <div class="call-content">
+                <div class="call-name">Diana Kowalski</div>
+                <div class="call-summary">Follow-up on last week's drain cleaning. Working as expected.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">Yest.</span>
+              </div>
+            </div>
+
+            <div class="calls-section-label">Earlier this week</div>
+
+            <div class="call-row">
+              <div class="call-avatar call-avatar--purple" aria-hidden="true">JW</div>
+              <div class="call-content">
+                <div class="call-name">Jen Winters</div>
+                <div class="call-summary">Kitchen sink slow drain. Available evenings, after 5pm only.</div>
+              </div>
+              <div class="call-meta-col">
+                <span class="call-time">Mon</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab">
+              <svg viewBox="0 0 24 24"><path d="M3 12c1.5 0 2 1.5 2 1.5l1-3s.5-3 2-3 2 5 2 5 .5-7 2-7 2 9 2 9 .5-5 2-5 2 4 2 4 .5-1.5 2-1.5h2v-1H3v1z"/></svg>
+              Live
+            </div>
+            <div class="tab" aria-current="true">
+              <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v4l5-4-5-4z"/></svg>
+              Recents
+              <span class="tab-badge">3</span>
+            </div>
+            <div class="tab">
+              <svg viewBox="0 0 24 24"><path d="M19.4 13a7.2 7.2 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1L14.8 3h-3.6l-.5 2.6a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.2 7.2 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.7 1.7 1l.5 2.6h3.6l.5-2.6c.6-.3 1.2-.6 1.7-1l2.4 1 2-3.4-2-1.6zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
+              Settings
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ ONBOARDING SCREEN ============ -->
+        <section class="screen" id="screen-onboarding" aria-label="Onboarding screen">
+          <div class="status-bar">
+            <span>9:41</span>
+            <div class="icons" aria-hidden="true">
+              <svg viewBox="0 0 18 12"><path d="M2 8h2v2H2zm4-2h2v4H6zm4-2h2v6h-2zm4-2h2v8h-2z"/></svg>
+              <svg viewBox="0 0 24 12"><rect x="0.5" y="1" width="20" height="10" rx="2.5" fill="none" stroke="currentColor"/><rect x="2" y="2.5" width="17" height="7" rx="1.5"/></svg>
+            </div>
+          </div>
+
+          <div class="onb-shell">
+            <div class="onb-progress" aria-label="Step 2 of 5">
+              <span data-on="true"></span>
+              <span data-on="true"></span>
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+
+            <div class="onb-hero">
+              <div class="kevin-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.15 12 19.79 19.79 0 0 1 1.08 3.42 2 2 0 0 1 3.06 1.25h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L7.09 9.17a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16z"/>
+                </svg>
+              </div>
+
+              <h1 class="onb-hello">How do you<br>want Kevin to work?</h1>
+              <p class="onb-blurb">Pick the role you need. You can change this later, or run both on separate numbers.</p>
+
+              <div class="mode-stack">
+                <div class="mode-card" data-selected="false" role="button" tabindex="0" data-mode="personal">
+                  <div class="mode-card-check" aria-hidden="true">
+                    <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                  </div>
+                  <div class="mode-card-head">
+                    <div class="mode-card-title">Personal</div>
+                    <div class="mode-card-price"><strong>$9.99</strong>/mo</div>
+                  </div>
+                  <div class="mode-card-desc">Screen unknown callers. Saved contacts ring through to you.</div>
+                  <div class="mode-card-tags">
+                    <span class="mode-card-tag">Block robocalls</span>
+                    <span class="mode-card-tag">Live transcripts</span>
+                    <span class="mode-card-tag">Text replies</span>
+                  </div>
+                </div>
+
+                <div class="mode-card" data-selected="true" role="button" tabindex="0" data-mode="business">
+                  <div class="mode-card-check" aria-hidden="true">
+                    <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                  </div>
+                  <div class="mode-card-head">
+                    <div class="mode-card-title">Business</div>
+                    <div class="mode-card-price"><strong>$49.99</strong>/mo</div>
+                  </div>
+                  <div class="mode-card-desc">A full receptionist. Smart intake, business hours, and a knowledge base for FAQs.</div>
+                  <div class="mode-card-tags">
+                    <span class="mode-card-tag">Smart intake</span>
+                    <span class="mode-card-tag">Business hours</span>
+                    <span class="mode-card-tag">After-hours mode</span>
+                    <span class="mode-card-tag">Knowledge base</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="onb-foot">
+              <button class="btn btn--primary" type="button">Continue with Business</button>
+              <button class="btn btn--ghost" type="button">14-day free trial. Cancel anytime.</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ PAYWALL SCREEN ============ -->
+        <section class="screen" id="screen-paywall" aria-label="Paywall screen">
+          <div class="status-bar">
+            <span>9:41</span>
+            <div class="icons" aria-hidden="true">
+              <svg viewBox="0 0 18 12"><path d="M2 8h2v2H2zm4-2h2v4H6zm4-2h2v6h-2zm4-2h2v8h-2z"/></svg>
+              <svg viewBox="0 0 24 12"><rect x="0.5" y="1" width="20" height="10" rx="2.5" fill="none" stroke="currentColor"/><rect x="2" y="2.5" width="17" height="7" rx="1.5"/></svg>
+            </div>
+          </div>
+
+          <div class="pw-shell">
+            <div class="pw-scroll">
+              <div class="pw-head">
+                <span class="pw-eyebrow">
+                  <span class="dot dot--orange"></span>
+                  Founding member · 312 of 1,000 left
+                </span>
+                <h1 class="pw-title">Stop missing<br>real leads.</h1>
+                <p class="pw-sub">Pick the plan that fits. Cancel anytime, no questions asked.</p>
+              </div>
+
+              <div class="tier-stack">
+                <div class="tier" data-selected="false" role="button" tabindex="0">
+                  <div class="tier-row">
+                    <div>
+                      <div class="tier-name">Personal</div>
+                      <span class="tier-tag">For your personal line</span>
+                    </div>
+                    <div class="tier-price">
+                      <strike>$9.99</strike>
+                      <b>$2.49</b>
+                      <small>per month, first 3 mo</small>
+                    </div>
+                  </div>
+                  <ul class="tier-features">
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Screen unknown callers, contacts ring through
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Live transcripts and call summaries
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Text replies in one tap
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="tier" data-selected="true" role="button" tabindex="0">
+                  <span class="tier-flag">Most popular</span>
+                  <div class="tier-row">
+                    <div>
+                      <div class="tier-name">Business</div>
+                      <span class="tier-tag">A full AI receptionist</span>
+                    </div>
+                    <div class="tier-price">
+                      <strike>$49.99</strike>
+                      <b>$12.49</b>
+                      <small>per month, first 3 mo</small>
+                    </div>
+                  </div>
+                  <ul class="tier-features">
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Everything in Personal
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Smart intake questions for every call
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Business hours and after-hours mode
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Knowledge base for pricing and FAQs
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="tier" data-selected="false" role="button" tabindex="0">
+                  <div class="tier-row">
+                    <div>
+                      <div class="tier-name">Business Pro</div>
+                      <span class="tier-tag">Multi-line, custom routing</span>
+                    </div>
+                    <div class="tier-price">
+                      <strike>$79.99</strike>
+                      <b>$19.99</b>
+                      <small>per month, first 3 mo</small>
+                    </div>
+                  </div>
+                  <ul class="tier-features">
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Everything in Business
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      Up to 3 numbers, separate intakes
+                    </li>
+                    <li>
+                      <svg viewBox="0 0 16 16"><path d="M6.5 11 3 7.5l1.4-1.4L6.5 8.2l5.1-5.1L13 4.5z"/></svg>
+                      CRM forwarding and call tagging
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div class="pw-foot">
+              <button class="btn btn--cta" type="button" style="background: var(--text-1);">
+                Start free trial
+              </button>
+              <button class="btn btn--ghost" type="button">Continue without subscribing</button>
+              <div class="pw-trust">
+                <span>
+                  <svg viewBox="0 0 16 16"><path d="M8 1 2 4v5c0 3.5 2.5 5.7 6 6 3.5-.3 6-2.5 6-6V4z" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                  Cancel anytime
+                </span>
+                <span>·</span>
+                <span>14-day free trial</span>
+                <span>·</span>
+                <span>Restore</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="page-foot">
+      Hey Kevin · UI redesign prototype · iPhone 15 viewport (390 × 844)
+    </footer>
+  </div>
+
+  <script>
+    (() => {
+      const switcher = document.getElementById('switcher');
+      const screens = {
+        live:       document.getElementById('screen-live'),
+        recents:    document.getElementById('screen-recents'),
+        onboarding: document.getElementById('screen-onboarding'),
+        paywall:    document.getElementById('screen-paywall'),
+      };
+
+      switcher.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-screen]');
+        if (!btn) return;
+        const target = btn.dataset.screen;
+        for (const child of switcher.children) child.removeAttribute('aria-current');
+        btn.setAttribute('aria-current', 'true');
+        for (const [name, el] of Object.entries(screens)) {
+          el.dataset.active = String(name === target);
+        }
+      });
+
+      // Tier selection in paywall
+      document.querySelectorAll('#screen-paywall .tier').forEach((tier) => {
+        tier.addEventListener('click', () => {
+          document.querySelectorAll('#screen-paywall .tier')
+            .forEach((t) => t.dataset.selected = 'false');
+          tier.dataset.selected = 'true';
+        });
+      });
+
+      // Mode selection in onboarding
+      document.querySelectorAll('#screen-onboarding .mode-card').forEach((card) => {
+        card.addEventListener('click', () => {
+          document.querySelectorAll('#screen-onboarding .mode-card')
+            .forEach((c) => c.dataset.selected = 'false');
+          card.dataset.selected = 'true';
+          const continueBtn = document.querySelector('#screen-onboarding .btn--primary');
+          if (continueBtn) {
+            const label = card.dataset.mode === 'business' ? 'Business' : 'Personal';
+            continueBtn.textContent = `Continue with ${label}`;
+          }
+        });
+      });
+
+      // Auto-scroll the transcript so the latest turn is visible
+      const transcript = document.getElementById('transcript');
+      if (transcript) {
+        requestAnimationFrame(() => {
+          transcript.scrollTop = transcript.scrollHeight;
+        });
+      }
+
+      // Toggle interaction
+      document.querySelectorAll('.ios-toggle').forEach((t) => {
+        t.addEventListener('click', () => {
+          const on = t.dataset.on === 'true';
+          t.dataset.on = String(!on);
+          t.setAttribute('aria-checked', String(!on));
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

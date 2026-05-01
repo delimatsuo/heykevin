@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-04-30T00:00:00Z",
+  "title": "Design System: Hey Kevin",
+  "extensions": {
+    "colorMeta": {
+      "trade-signal-blue": {
+        "role": "primary",
+        "displayName": "Trade Signal Blue",
+        "canonical": "oklch(60% 0.22 264)",
+        "tonalRamp": ["#001A66", "#003399", "#0055CC", "#006EEF", "#007AFF", "#4DA3FF", "#89BEFF", "#D4ECFF"]
+      },
+      "trade-signal-blue-tint": {
+        "role": "primary-surface",
+        "displayName": "Trade Signal Blue Tint",
+        "canonical": "oklch(60% 0.22 264 / 12%)",
+        "tonalRamp": ["#007AFF08", "#007AFF0F", "#007AFF1A", "#007AFF1F", "#007AFF26", "#007AFF33", "#007AFF4D", "#007AFF66"]
+      },
+      "clear-line-green": {
+        "role": "secondary",
+        "displayName": "Clear Line Green",
+        "canonical": "oklch(74% 0.19 145)",
+        "tonalRamp": ["#003D12", "#005C1A", "#008527", "#00A832", "#20BE4A", "#34C759", "#68D982", "#B8F2C5"]
+      },
+      "clear-line-green-tint": {
+        "role": "secondary-surface",
+        "displayName": "Clear Line Green Tint",
+        "canonical": "oklch(74% 0.19 145 / 10%)",
+        "tonalRamp": ["#34C75908", "#34C7590F", "#34C75919", "#34C75926", "#34C75933", "#34C75940", "#34C75966", "#34C75980"]
+      },
+      "warning-orange": {
+        "role": "tertiary",
+        "displayName": "Warning Orange",
+        "canonical": "oklch(73% 0.17 62)",
+        "tonalRamp": ["#4A2400", "#783800", "#A85200", "#D06800", "#F08200", "#FF9500", "#FFB84D", "#FFE5B0"]
+      },
+      "error-red": {
+        "role": "error",
+        "displayName": "Error Red",
+        "canonical": "oklch(57% 0.24 27)",
+        "tonalRamp": ["#4A0800", "#7A0F00", "#AA1500", "#D42020", "#F02828", "#FF3B30", "#FF7A73", "#FFCCC9"]
+      },
+      "canvas-grey": {
+        "role": "neutral-bg",
+        "displayName": "Canvas Grey",
+        "canonical": "oklch(96% 0.004 264)",
+        "tonalRamp": ["#1C1C1E", "#2C2C2E", "#3A3A3C", "#636366", "#8E8E93", "#C7C7CC", "#E5E5EA", "#F2F2F7"]
+      },
+      "surface-grey": {
+        "role": "neutral-surface",
+        "displayName": "Surface Grey",
+        "canonical": "oklch(92% 0.004 264)",
+        "tonalRamp": ["#1C1C1E", "#3A3A3C", "#636366", "#8E8E93", "#AEAEB2", "#C7C7CC", "#D1D1D6", "#E5E5EA"]
+      },
+      "text-primary": {
+        "role": "neutral-text",
+        "displayName": "Text Primary",
+        "canonical": "oklch(14% 0.003 264)",
+        "tonalRamp": ["#000000", "#0A0A0C", "#141416", "#1C1C1E", "#2C2C2E", "#48484A", "#636366", "#8E8E93"]
+      },
+      "text-secondary": {
+        "role": "neutral-text-secondary",
+        "displayName": "Text Secondary",
+        "canonical": "oklch(58% 0.006 264)",
+        "tonalRamp": ["#1C1C1E", "#3A3A3C", "#48484A", "#636366", "#8E8E93", "#AEAEB2", "#C7C7CC", "#E5E5EA"]
+      }
+    },
+    "typographyMeta": {
+      "title2": { "displayName": "Title 2", "purpose": "Paywall hero text and modal headers. One instance maximum per screen." },
+      "title3": { "displayName": "Title 3", "purpose": "Caller name on live screen, onboarding section headers. Highest level in operational UI." },
+      "headline": { "displayName": "Headline", "purpose": "Tier card names, primary button labels, commit action text." },
+      "body": { "displayName": "Body", "purpose": "General body text. In practice superseded by subheadline in most screens." },
+      "subheadline": { "displayName": "Subheadline", "purpose": "The workhorse: list rows, status text, quick replies, most text read during a call." },
+      "caption": { "displayName": "Caption", "purpose": "Speaker labels in transcript, metadata, footnotes." },
+      "label-mono": { "displayName": "Label Mono", "purpose": "Call timer and phone numbers — monospaced digits prevent layout shift." }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "Default easing for state transitions (button press, tab switch)."
+      },
+      {
+        "name": "ease-out-fast",
+        "value": "cubic-bezier(0, 0, 0.2, 1)",
+        "purpose": "Chat bubble appear, content entrance. Duration 120–150ms max."
+      }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary CTA Button",
+      "kind": "button",
+      "refersTo": "button-cta",
+      "description": "Pick Up, Subscribe, and all irreversible commit actions. One per screen.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.15 12 19.79 19.79 0 0 1 1.08 3.42 2 2 0 0 1 3.06 1.25h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.09 9.17a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 21 16h1z\"/></svg>Pick Up</button>",
+      "css": ".ds-btn-primary { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 52px; padding: 14px 20px; background: #34C759; color: #FFFFFF; font-family: -apple-system, system-ui, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: -0.1px; border: none; border-radius: 14px; cursor: pointer; transition: background 0.12s cubic-bezier(0,0,0.2,1), transform 0.1s cubic-bezier(0,0,0.2,1); } .ds-btn-primary:hover { background: #2AB34D; transform: translateY(-1px); } .ds-btn-primary:focus-visible { outline: 3px solid #34C75966; outline-offset: 2px; } .ds-btn-primary:active { background: #25A345; transform: translateY(0); }"
+    },
+    {
+      "name": "Secondary Bordered Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Text Reply, Restore Purchases, secondary navigation. Paired in HStack with destructive.",
+      "html": "<button class=\"ds-btn-secondary\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/></svg>Text Reply</button>",
+      "css": ".ds-btn-secondary { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 48px; padding: 12px 16px; background: transparent; color: #007AFF; font-family: -apple-system, system-ui, sans-serif; font-size: 15px; font-weight: 400; border: 1px solid #007AFF40; border-radius: 12px; cursor: pointer; transition: background 0.12s ease-out, border-color 0.12s ease-out; } .ds-btn-secondary:hover { background: #007AFF0F; border-color: #007AFF80; } .ds-btn-secondary:focus-visible { outline: 3px solid #007AFF40; outline-offset: 2px; } .ds-btn-secondary:active { background: #007AFF1F; }"
+    },
+    {
+      "name": "Destructive Button",
+      "kind": "button",
+      "refersTo": "button-destructive",
+      "description": "Ignore call, cancel paths. Paired with secondary button in a row. Never filled.",
+      "html": "<button class=\"ds-btn-destructive\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M18 6 6 18M6 6l12 12\"/></svg>Ignore</button>",
+      "css": ".ds-btn-destructive { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 48px; padding: 12px 16px; background: transparent; color: #FF3B30; font-family: -apple-system, system-ui, sans-serif; font-size: 15px; font-weight: 400; border: 1px solid #FF3B3040; border-radius: 12px; cursor: pointer; transition: background 0.12s ease-out; } .ds-btn-destructive:hover { background: #FF3B301A; border-color: #FF3B3066; } .ds-btn-destructive:focus-visible { outline: 3px solid #FF3B3040; outline-offset: 2px; } .ds-btn-destructive:active { background: #FF3B3026; }"
+    },
+    {
+      "name": "Kevin Chat Bubble",
+      "kind": "custom",
+      "refersTo": "chat-bubble-kevin",
+      "description": "Kevin's screening transcript. Right-aligned. Trade Signal Blue tint background.",
+      "html": "<div class=\"ds-chat-wrap ds-chat-wrap--kevin\"><span class=\"ds-chat-speaker ds-chat-speaker--kevin\">Kevin</span><div class=\"ds-chat-bubble ds-chat-bubble--kevin\">Hi there! Who's calling and what can I help you with today?</div></div>",
+      "css": ".ds-chat-wrap { display: flex; flex-direction: column; max-width: 80%; } .ds-chat-wrap--kevin { align-self: flex-end; align-items: flex-end; } .ds-chat-wrap--caller { align-self: flex-start; align-items: flex-start; } .ds-chat-speaker { font-family: -apple-system, system-ui, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; margin-bottom: 3px; padding: 0 4px; } .ds-chat-speaker--kevin { color: #007AFF; } .ds-chat-speaker--caller { color: #8E8E93; } .ds-chat-bubble { font-family: -apple-system, system-ui, sans-serif; font-size: 15px; font-weight: 400; line-height: 1.4; padding: 9px 14px; border-radius: 18px; } .ds-chat-bubble--kevin { background: #007AFF1F; color: #1C1C1E; } .ds-chat-bubble--caller { background: #E5E5EA; color: #1C1C1E; }"
+    },
+    {
+      "name": "Caller Chat Bubble",
+      "kind": "custom",
+      "refersTo": "chat-bubble-caller",
+      "description": "Caller's side of the screening transcript. Left-aligned. Surface Grey background.",
+      "html": "<div class=\"ds-chat-wrap ds-chat-wrap--caller\"><span class=\"ds-chat-speaker ds-chat-speaker--caller\">Caller</span><div class=\"ds-chat-bubble ds-chat-bubble--caller\">Hi, I need a quote for fixing a burst pipe in my basement.</div></div>",
+      "css": ".ds-chat-wrap { display: flex; flex-direction: column; max-width: 80%; } .ds-chat-wrap--caller { align-self: flex-start; align-items: flex-start; } .ds-chat-speaker { font-family: -apple-system, system-ui, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; margin-bottom: 3px; padding: 0 4px; color: #8E8E93; } .ds-chat-bubble--caller { font-family: -apple-system, system-ui, sans-serif; font-size: 15px; font-weight: 400; line-height: 1.4; padding: 9px 14px; border-radius: 18px; background: #E5E5EA; color: #1C1C1E; }"
+    },
+    {
+      "name": "Live Status Indicator",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Paired color dot + label. Green = live/connected, orange = taking a message. Always shows both dot and text.",
+      "html": "<div class=\"ds-status ds-status--live\"><span class=\"ds-status-dot\"></span><span class=\"ds-status-label\">Live</span></div>",
+      "css": ".ds-status { display: inline-flex; align-items: center; gap: 5px; } .ds-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; } .ds-status--live .ds-status-dot { background: #34C759; } .ds-status--message .ds-status-dot { background: #FF9500; } .ds-status-label { font-family: -apple-system, system-ui, sans-serif; font-size: 12px; font-weight: 400; line-height: 1; } .ds-status--live .ds-status-label { color: #34C759; } .ds-status--message .ds-status-label { color: #FF9500; }"
+    },
+    {
+      "name": "Tier Card",
+      "kind": "card",
+      "refersTo": "tier-card",
+      "description": "Subscription plan card. Default grey; selected shows Trade Signal Blue tint.",
+      "html": "<div class=\"ds-tier-card ds-tier-card--selected\"><div class=\"ds-tier-card__header\">Business<span class=\"ds-tier-badge\">Most Popular</span></div><div class=\"ds-tier-card__price\">$49.99<span class=\"ds-tier-card__period\">/mo</span></div><div class=\"ds-tier-card__desc\">Full AI receptionist. Smart intake, business hours, knowledge base.</div></div>",
+      "css": ".ds-tier-card { padding: 16px; border-radius: 12px; background: #F2F2F7; cursor: pointer; transition: background 0.12s ease-out; border: 1.5px solid transparent; } .ds-tier-card--selected { background: #007AFF12; border-color: #007AFF40; } .ds-tier-card__header { display: flex; align-items: center; gap: 8px; font-family: -apple-system, system-ui, sans-serif; font-size: 17px; font-weight: 600; color: #1C1C1E; margin-bottom: 6px; } .ds-tier-badge { font-size: 11px; font-weight: 600; color: #007AFF; background: #007AFF1F; padding: 2px 8px; border-radius: 8px; } .ds-tier-card__price { font-family: -apple-system, system-ui, sans-serif; font-size: 20px; font-weight: 600; color: #1C1C1E; margin-bottom: 4px; } .ds-tier-card__period { font-size: 15px; font-weight: 400; color: #8E8E93; } .ds-tier-card__desc { font-family: -apple-system, system-ui, sans-serif; font-size: 13px; color: #8E8E93; line-height: 1.4; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Dispatch Screen",
+    "overview": "Hey Kevin is a tool for people in the middle of work. A plumber under a sink. An electrician on a ladder. An HVAC tech outside in August heat. The phone buzzes. They look at the screen for one second and decide: real lead or noise? The entire design system exists to make that decision instant.\n\nThis system uses iOS conventions as its foundation, not as its ceiling. Standard navigation, standard list styles, standard tab bars — then deliberate brand moments at the exact points where decisions happen. The call's status is unmissable (a single saturated green dot). The primary action is oversized and deeply colored. Everything else steps back.\n\nWhat this system is not: a consumer companion app with bouncy animations and pastel playfulness. It's a dispatch screen — designed to be read from across the room, operated with a thumb that may have grease on it.",
+    "keyCharacteristics": [
+      "Flat tonal surfaces — no shadows, depth through saturation contrast only",
+      "Two-signal color system: Trade Signal Blue (Kevin, information) and Clear Line Green (live, go)",
+      "SF Pro throughout — no custom fonts; Dynamic Type supported unconditionally",
+      "52pt+ tap targets on all primary and critical actions",
+      "High ambient contrast: readable on a smudged screen in direct sunlight"
+    ],
+    "rules": [
+      {
+        "name": "The Two-Signal Rule",
+        "body": "Blue means Kevin. Green means go. These colors never swap roles, never appear at full saturation in the same element. The rarity of green — appearing only when a live call needs a decision — is what makes the Pick Up button unmissable.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tint Rule",
+        "body": "Signal colors appear at full saturation only on interactive elements and status indicators. Container fills use the 12% tint variant to indicate state without competing with the CTA.",
+        "section": "colors"
+      },
+      {
+        "name": "The Dynamic Type Rule",
+        "body": "Every text element scales with Dynamic Type. No fixed-size text in operational views. A contractor with poor vision may run at Accessibility XL — the screen must reflow correctly.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-by-Default Rule",
+        "body": "If you're reaching for a shadow, use a background tint instead. Shadows imply permanent elevation; tints imply state. Hey Kevin's surfaces change state constantly — tints are the right tool.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use Clear Line Green (#34C759) exclusively for go-signals: Pick Up CTA, active call dot, Connected status.",
+      "Do maintain 52pt minimum tap targets on all interactive elements in the Live screen, Paywall, and Onboarding.",
+      "Do use .subheadline (15pt) as the default text size for operational list rows and status text.",
+      "Do pair every status color with a text label — color alone fails color-blind users and direct sunlight.",
+      "Do express selection and active state through background tints (8–12% opacity signal color).",
+      "Do treat Dynamic Type as a hard requirement — every operational screen must reflow at Accessibility XL.",
+      "Do use .ultraThinMaterial for the action bar only — one structural separator between transcript and action layer."
+    ],
+    "donts": [
+      "Don't use gradient fills or background-clip text gradient effects.",
+      "Don't use glassmorphism, multi-layer blurs, or decorative shadows.",
+      "Don't build anything that feels made for teenagers: bouncy animations, pastel playfulness, emoji-heavy copy, confetti.",
+      "Don't let Trade Signal Blue and Clear Line Green appear at full saturation in the same element.",
+      "Don't use border-left directional stripe accents on list items or cards to indicate state.",
+      "Don't use nested cards.",
+      "Don't make contractors aim — 52pt height and 20pt outer padding minimum for all commit and destructive actions.",
+      "Don't use a smart home concierge aesthetic: premium-soft whites, hairline typography, decorative negative space.",
+      "Don't patronize trades workers with excessive onboarding handholding."
+    ]
+  }
+}

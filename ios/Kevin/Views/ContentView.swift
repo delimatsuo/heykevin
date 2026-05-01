@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// Feature flag: hide "Text reply" until A2P 10DLC carrier registration is approved.
+/// Outbound SMS to US numbers from an unregistered Twilio long-code is silently
+/// dropped at the carrier (Twilio error 30034), so the button promises something
+/// the backend can't yet deliver. Flip this to `true` after A2P registration
+/// clears and ship a new TestFlight/App Store build to re-enable.
+private let kTextReplyEnabled = false
+
 struct TranscriptLine: Identifiable {
     let id = UUID()
     let text: String
@@ -151,88 +158,101 @@ struct LiveCallTab: View {
 
     private var activeCallContent: some View {
         VStack(spacing: 0) {
-            // Caller header
             callerHeader
-                .padding(.top, 8)
-                .padding(.bottom, 16)
 
-            Divider()
-
-            // Transcript — Kevin screening conversation
             transcript
                 .frame(maxHeight: .infinity)
 
-            Divider()
-
-            // Action buttons
             actionButtons
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(.horizontal, HKSpace.lg)
+                .padding(.top, HKSpace.md)
+                .padding(.bottom, HKSpace.lg)
                 .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Color(.systemGray5).opacity(0.7))
+                        .frame(height: 0.5)
+                }
         }
         .background(Color(.systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 7, height: 7)
-                    Text(String(localized: "Live"))
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.green)
+                    if appState.callIgnored {
+                        HKStatusDot(color: .hkOrange)
+                        Text(String(localized: "Taking a message"))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.hkOrange)
+                    } else {
+                        HKPulseDot(color: .hkGreen, size: 7)
+                        Text(String(localized: "Live"))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.hkGreen)
+                    }
                 }
             }
 
             ToolbarItem(placement: .topBarTrailing) {
                 Text(formattedElapsed)
-                    .font(.subheadline.monospacedDigit())
+                    .font(.system(size: 14, weight: .medium))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    // MARK: - Caller Header
+    // MARK: - Caller Strip
+    // Compact horizontal strip. Phone number is the primary identifier when the
+    // caller is not in contacts, matching the iOS Phone app convention.
 
     private var callerHeader: some View {
-        VStack(spacing: 8) {
-            ZStack {
-                Circle()
-                    .fill(Color(.systemGray4))
-                    .frame(width: 64, height: 64)
-
-                if !callerInitials.isEmpty {
-                    Text(callerInitials)
-                        .font(.title2.weight(.medium))
-                        .foregroundStyle(.white)
-                } else {
-                    Image(systemName: "phone.fill")
-                        .font(.title3)
-                        .foregroundStyle(.white)
-                }
-            }
-
-            if !appState.activeCallerName.isEmpty {
-                Text(appState.activeCallerName)
-                    .font(.title3.weight(.semibold))
-
-                Text(formattedPhone)
-                    .font(.subheadline)
+        HStack(spacing: HKSpace.md) {
+            HKAvatar(
+                name: appState.activeCallerName,
+                phone: appState.activeCallerPhone,
+                size: 40
+            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(callerPrimaryIdentifier)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .monospacedDigit()
+                Text(callerSecondaryLine)
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-            } else {
-                Text(formattedPhone)
-                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
             }
-
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(appState.isOnCall ? .green : (appState.callIgnored ? .orange : .green))
-                    .frame(width: 6, height: 6)
-                Text(appState.isOnCall ? String(localized: "Connected") : (appState.callIgnored ? String(localized: "Kevin is taking a message") : String(localized: "Kevin is screening")))
-                    .font(.caption)
-                    .foregroundStyle(appState.isOnCall ? .green : (appState.callIgnored ? .orange : .green))
-            }
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, HKSpace.xl)
+        .padding(.top, 10)
+        .padding(.bottom, 14)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(.systemGray5).opacity(0.7))
+                .frame(height: 0.5)
+        }
+    }
+
+    private var callerPrimaryIdentifier: String {
+        let name = appState.activeCallerName.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { return name }
+        let phone = appState.activeCallerPhone.trimmingCharacters(in: .whitespaces)
+        return phone.isEmpty ? String(localized: "Unknown") : PhoneFormatter.format(phone)
+    }
+
+    private var callerSecondaryLine: String {
+        let hasName = !appState.activeCallerName.isEmpty
+        if hasName {
+            return formattedPhone
+        }
+        if appState.callIgnored {
+            return String(localized: "Kevin is taking a message")
+        }
+        return String(localized: "Unknown caller")
     }
 
     // MARK: - Transcript (Chat Bubbles)
@@ -274,24 +294,18 @@ struct LiveCallTab: View {
     @ViewBuilder
     private var actionButtons: some View {
         if appState.callIgnored {
-            // Call ignored — Kevin is taking a message
-            VStack(spacing: 10) {
-                Button {
-                    appState.clearActiveCall()
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "xmark")
-                        Text(String(localized: "Dismiss"))
-                            .fontWeight(.semibold)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
+            // Call ignored — Kevin is taking a message. Single Dismiss action.
+            Button {
+                appState.clearActiveCall()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(String(localized: "Dismiss"))
                 }
-                .buttonStyle(.bordered)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
             }
+            .buttonStyle(HKSecondaryButtonStyle(tint: .secondary))
         } else {
-            // Screening state — Pick Up / Text Reply / Ignore
             VStack(spacing: 10) {
                 Button {
                     pickUp()
@@ -302,58 +316,63 @@ struct LiveCallTab: View {
                                 .tint(.white)
                         } else {
                             Image(systemName: "phone.fill")
+                                .font(.system(size: 17, weight: .bold))
                         }
-                        Text(String(localized: "Pick Up"))
-                            .fontWeight(.semibold)
+                        Text(String(localized: "Pick up"))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .buttonStyle(HKPrimaryButtonStyle(tint: .hkGreen))
                 .disabled(pickingUp)
 
-                HStack(spacing: 10) {
-                    Button {
-                        showTextReplySheet = true
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "message.fill")
-                            Text(String(localized: "Text Reply"))
+                if kTextReplyEnabled {
+                    HStack(spacing: 10) {
+                        Button {
+                            showTextReplySheet = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "message.fill")
+                                    .font(.system(size: 14))
+                                Text(String(localized: "Text reply"))
+                            }
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .disabled(pickingUp)
+                        .buttonStyle(HKSecondaryButtonStyle(tint: .hkBlue))
+                        .disabled(pickingUp)
 
+                        Button(role: .destructive) {
+                            ignore()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text(String(localized: "Ignore"))
+                            }
+                        }
+                        .buttonStyle(HKDestructiveButtonStyle())
+                        .disabled(pickingUp)
+                    }
+                    .sheet(isPresented: $showTextReplySheet) {
+                        TextReplySheet(
+                            callSid: appState.activeCallSid,
+                            callerPhone: formattedPhone,
+                            sendingReply: $sendingReply,
+                            onSend: { message in
+                                sendTextReply(message)
+                            }
+                        )
+                        .presentationDetents([.medium])
+                    }
+                } else {
                     Button(role: .destructive) {
                         ignore()
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "hand.raised.fill")
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .semibold))
                             Text(String(localized: "Ignore"))
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
                     }
-                    .buttonStyle(.bordered)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .buttonStyle(HKDestructiveButtonStyle())
                     .disabled(pickingUp)
-                }
-                .sheet(isPresented: $showTextReplySheet) {
-                    TextReplySheet(
-                        callSid: appState.activeCallSid,
-                        callerPhone: formattedPhone,
-                        sendingReply: $sendingReply,
-                        onSend: { message in
-                            sendTextReply(message)
-                        }
-                    )
-                    .presentationDetents([.medium])
                 }
             }
         }
@@ -587,6 +606,10 @@ struct ChatBubble: View {
         return ""
     }
 
+    private var speakerLabel: String {
+        speaker.isEmpty ? String(localized: "System") : speaker
+    }
+
     private var text: String {
         if let range = line.range(of: ": ") {
             return String(line[range.upperBound...])
@@ -600,24 +623,34 @@ struct ChatBubble: View {
         HStack(alignment: .bottom, spacing: 8) {
             if isKevin { Spacer(minLength: 48) }
 
-            VStack(alignment: isKevin ? .trailing : .leading, spacing: 3) {
-                Text(speaker.isEmpty ? String(localized: "System") : speaker)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(isKevin ? .blue : .secondary)
+            VStack(alignment: isKevin ? .trailing : .leading, spacing: 4) {
+                Text(speakerLabel.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(isKevin ? Color.hkBlue : Color.secondary)
                     .padding(.horizontal, 4)
 
                 Text(text)
-                    .font(.subheadline)
+                    .font(.system(size: 15))
+                    .lineSpacing(2)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(
                         isKevin
-                            ? Color.blue.opacity(0.12)
-                            : Color(.systemGray5)
+                            ? Color.hkBlue.opacity(0.10)
+                            : Color.hkSurface
                     )
                     .foregroundStyle(.primary)
                     .clipShape(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        UnevenRoundedRectangle(
+                            cornerRadii: .init(
+                                topLeading: HKRadius.bubble,
+                                bottomLeading: isKevin ? HKRadius.bubble : 6,
+                                bottomTrailing: isKevin ? 6 : HKRadius.bubble,
+                                topTrailing: HKRadius.bubble
+                            ),
+                            style: .continuous
+                        )
                     )
             }
 

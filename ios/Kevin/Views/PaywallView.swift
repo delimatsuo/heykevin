@@ -41,15 +41,11 @@ struct PaywallView: View {
                 VStack(spacing: 24) {
                     // Header
                     headerSection
+                        .padding(.top, HKSpace.sm)
 
                     // Trial status banner (if expired)
                     if appState.subscriptionStatus == "expired" {
                         expiredBanner
-                    }
-
-                    // Founding-member promo banner — only for expired/cancelled users
-                    if canShowFoundingMemberPromo {
-                        promoBadge
                     }
 
                     // Tier cards
@@ -115,6 +111,12 @@ struct PaywallView: View {
                             await subscriptionManager.restorePurchases()
                             isRestoring = false
                             if appState.subscriptionStatus == "active" || appState.subscriptionStatus == "trial" {
+                                // During onboarding the paywall is non-dismissible
+                                // (canDismiss=false), so the only way out after a
+                                // successful restore is to mark onboarding complete.
+                                if isOnboarding {
+                                    appState.isOnboarded = true
+                                }
                                 if statusBefore != appState.subscriptionStatus {
                                     dismiss()
                                 } else {
@@ -171,6 +173,7 @@ struct PaywallView: View {
                 }
                 .padding()
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("Hey Kevin")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -195,29 +198,38 @@ struct PaywallView: View {
     // MARK: - Sections
 
     private var headerSection: some View {
-        VStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(
-                        colors: [.blue, .purple, .pink],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 72, height: 72)
-                Text("K")
-                    .font(.system(size: 36, weight: .bold))
-                    .foregroundStyle(.white)
+        VStack(spacing: HKSpace.md) {
+            KevinMark(size: 64)
+                .padding(.bottom, 4)
+
+            if canShowFoundingMemberPromo {
+                HStack(spacing: 6) {
+                    HKStatusDot(color: .hkOrange)
+                    Text(String(localized: "Founding member · limited"))
+                        .font(.system(size: 11, weight: .bold))
+                        .tracking(0.5)
+                        .textCase(.uppercase)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.hkOrange.opacity(0.10), in: Capsule())
+                .foregroundStyle(.hkOrange)
             }
 
-            Text(isOnboarding ? "Choose Your Plan" : "Hey Kevin")
-                .font(.title2.bold())
+            Text(isOnboarding ? String(localized: "Pick the plan\nthat fits.") : String(localized: "Stop missing\nreal leads."))
+                .font(.system(size: 30, weight: .bold))
+                .tracking(-0.6)
+                .multilineTextAlignment(.center)
+                .lineSpacing(1)
 
             Text(isOnboarding
-                 ? "Start with a 2-week free trial.\nCancel anytime before it ends — no charge."
-                 : "AI call screening that learns your business.")
-                .font(.subheadline)
+                 ? String(localized: "14-day free trial. You will not be charged until the trial ends. Cancel anytime.")
+                 : String(localized: "Cancel anytime, no questions asked."))
+                .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .lineSpacing(2)
+                .padding(.horizontal, HKSpace.sm)
         }
     }
 
@@ -290,20 +302,14 @@ struct PaywallView: View {
             }
         } label: {
             if isPurchasing {
-                ProgressView()
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
+                ProgressView().tint(.white)
             } else {
                 let product = subscriptionManager.products.first(where: { $0.id == (selectedProductID ?? subscriptionManager.products.first?.id ?? "") })
                 Text(purchaseButtonTitle(for: product))
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
             }
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(HKDarkPrimaryButtonStyle())
         .disabled(isPurchasing || subscriptionManager.products.isEmpty)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
     private func purchaseButtonTitle(for product: Product?) -> String {
@@ -407,36 +413,52 @@ private struct TierCard: View {
 
     private var tierName: String {
         switch product.id {
-        case "com.kevin.callscreen.personal.monthly": return "Personal"
-        case "com.kevin.callscreen.business.monthly": return "Business"
-        case "com.kevin.callscreen.businesspro.monthly": return "Business Pro"
+        case "com.kevin.callscreen.personal.monthly":    return String(localized: "Personal")
+        case "com.kevin.callscreen.business.monthly":    return String(localized: "Business")
+        case "com.kevin.callscreen.businesspro.monthly": return String(localized: "Business Pro")
         default: return product.displayName
+        }
+    }
+
+    private var tierTagline: String {
+        switch product.id {
+        case "com.kevin.callscreen.personal.monthly":    return String(localized: "For your personal line")
+        case "com.kevin.callscreen.business.monthly":    return String(localized: "A full AI receptionist")
+        case "com.kevin.callscreen.businesspro.monthly": return String(localized: "Multi-line, custom routing")
+        default: return ""
         }
     }
 
     private var tierFeatures: [String] {
         switch product.id {
         case "com.kevin.callscreen.personal.monthly":
-            return ["AI call screening", "Live transcript", "Post-call SMS", "Contact ring-through"]
+            return [
+                String(localized: "Screen unknown callers, contacts ring through"),
+                String(localized: "Live transcripts and call summaries"),
+                String(localized: "Text replies in one tap"),
+            ]
         case "com.kevin.callscreen.business.monthly":
-            return ["Everything in Personal", "Business hours / after-hours", "Business knowledge base"]
+            return [
+                String(localized: "Everything in Personal"),
+                String(localized: "Smart intake questions for every call"),
+                String(localized: "Business hours and after-hours mode"),
+                String(localized: "Knowledge base for pricing and FAQs"),
+            ]
         case "com.kevin.callscreen.businesspro.monthly":
-            return ["Everything in Business", "Jobber integration", "Google Calendar integration", "AI price estimates"]
+            return [
+                String(localized: "Everything in Business"),
+                String(localized: "Jobber + Google Calendar integration"),
+                String(localized: "AI price estimates and call tagging"),
+            ]
         default:
             return []
         }
     }
 
-    private var accentColor: Color {
-        switch product.id {
-        case "com.kevin.callscreen.personal.monthly": return .blue
-        case "com.kevin.callscreen.business.monthly": return .purple
-        case "com.kevin.callscreen.businesspro.monthly": return .orange
-        default: return .blue
-        }
+    private var isRecommended: Bool {
+        product.id == "com.kevin.callscreen.business.monthly"
     }
 
-    // 75% off promotional price
     private var promoPrice: String {
         let price = product.price
         let discounted = (price / 4).rounded(toPlaces: 2)
@@ -445,58 +467,91 @@ private struct TierCard: View {
 
     var body: some View {
         Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: HKSpace.md) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(tierName)
-                            .font(.headline)
-                        HStack(spacing: 6) {
-                            if showFoundingMemberPromo {
-                                Text(product.displayPrice)
-                                    .font(.subheadline)
-                                    .strikethrough()
-                                    .foregroundStyle(.secondary)
-                                Text("\(promoPrice)/mo")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(.green)
-                                Text("for 3 months")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text("\(product.displayPrice)/mo")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                            .font(.system(size: 17, weight: .bold))
+                            .tracking(-0.3)
+                            .foregroundStyle(.primary)
+                        Text(tierTagline)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(isSelected ? accentColor : .secondary)
-                        .font(.title3)
+                    Spacer(minLength: HKSpace.md)
+                    priceColumn
                 }
 
-                Divider()
-
-                ForEach(tierFeatures, id: \.self) { feature in
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(accentColor)
-                            .font(.caption.bold())
-                        Text(feature)
-                            .font(.subheadline)
-                            .foregroundStyle(.primary)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(tierFeatures, id: \.self) { feature in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(isSelected ? Color.hkBlue : Color(.systemGray3))
+                                .frame(width: 14, alignment: .leading)
+                                .padding(.top, 3)
+                            Text(feature)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.primary)
+                                .lineSpacing(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
-            .padding()
-            .background(isSelected ? accentColor.opacity(0.08) : Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(isSelected ? accentColor : Color.clear, lineWidth: 2)
+            .padding(HKSpace.lg)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isSelected ? Color.hkBlue.opacity(0.05) : Color(.secondarySystemGroupedBackground))
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(isSelected ? Color.hkBlue : Color(.systemGray5), lineWidth: isSelected ? 1.5 : 1)
+            )
+            .overlay(alignment: .topTrailing) {
+                if isRecommended {
+                    Text(String(localized: "Most popular").uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.6)
+                        .foregroundStyle(Color(uiColor: .systemBackground))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.primary))
+                        .offset(x: -16, y: -10)
+                }
+            }
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var priceColumn: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            if showFoundingMemberPromo {
+                Text(product.displayPrice)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .strikethrough()
+                Text(promoPrice)
+                    .font(.system(size: 22, weight: .bold))
+                    .tracking(-0.4)
+                    .foregroundStyle(.primary)
+                    .monospacedDigit()
+                Text(String(localized: "per mo, first 3 mo"))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(product.displayPrice)
+                    .font(.system(size: 22, weight: .bold))
+                    .tracking(-0.4)
+                    .foregroundStyle(.primary)
+                    .monospacedDigit()
+                Text(String(localized: "per month"))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

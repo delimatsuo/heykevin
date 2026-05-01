@@ -13,6 +13,11 @@ from app.db.contractors import (
     get_contractor, create_contractor, update_contractor, list_contractors,
     deactivate_contractor, ensure_subscription_uuid, release_twilio_number, PROTECTED_FIELDS,
 )
+from app.services.apple_auth import (
+    AppleAuthError,
+    DEFAULT_AUDIENCE as APPLE_DEFAULT_AUDIENCE,
+    verify_apple_identity_token,
+)
 from app.services.entitlements import has_business_entitlement, with_entitlement_flags
 from app.utils.logging import get_logger, redact_phone
 
@@ -46,11 +51,44 @@ def _require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+async def _enforce_apple_identity(
+    request: Request,
+    apple_user_id: str,
+    apple_identity_token: str,
+) -> None:
+    """Require a valid Apple Sign-In identity token unless the caller is admin.
+
+    The two unauthenticated bootstrap endpoints (``POST /api/contractors`` and
+    ``GET /api/contractors/lookup-by-apple-id``) accept an
+    ``apple_identity_token`` from the iOS client. We must verify it server-side
+    so an attacker who only knows a victim's Apple user ID cannot impersonate
+    them. Admin callers (global bearer token) bypass this check.
+    """
+    if getattr(request.state, "is_admin", False):
+        return
+    # Reject obvious empty inputs with a generic 401 before doing any work.
+    if not apple_user_id or not apple_identity_token:
+        raise HTTPException(status_code=401, detail="Apple authentication required")
+    try:
+        await verify_apple_identity_token(
+            identity_token=apple_identity_token,
+            expected_user_id=apple_user_id,
+            expected_audience=APPLE_DEFAULT_AUDIENCE,
+        )
+    except AppleAuthError:
+        # Generic message — don't leak which step failed.
+        raise HTTPException(status_code=401, detail="Apple authentication required")
+    except Exception as e:
+        logger.error(f"Unexpected error verifying Apple identity token: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail="Apple authentication required")
+
+
 class ContractorCreate(BaseModel):
     business_name: str = Field(max_length=200)
     owner_name: str = Field(max_length=100)
     owner_phone: str = Field(default="", max_length=20)
     apple_user_id: str = Field(default="", max_length=100)
+    apple_identity_token: str = Field(default="", max_length=8192)
     service_type: str = Field(default="general", max_length=50)
     mode: str = Field(default="business", max_length=20)
     service_area_zips: list = []
@@ -147,13 +185,23 @@ async def api_list_contractors(request: Request):
 
 
 @public_router.get("/lookup-by-apple-id")
-async def api_lookup_by_apple_id(request: Request, apple_user_id: str = ""):
+async def api_lookup_by_apple_id(
+    request: Request,
+    apple_user_id: str = "",
+    apple_identity_token: str = "",
+):
     """Find a contractor by their Apple User ID (used during onboarding/login).
 
     Issues a fresh API token so the client can authenticate subsequent requests.
+    Requires a valid Apple Sign-In identity token whose ``sub`` matches the
+    supplied ``apple_user_id``; otherwise returns 401.
     """
     if not apple_user_id:
-        return {"error": "apple_user_id required"}, 400
+        # Generic 401 — don't reveal that the only missing piece was the
+        # Apple user id when the token is also missing.
+        raise HTTPException(status_code=401, detail="Apple authentication required")
+    await _enforce_apple_identity(request, apple_user_id, apple_identity_token)
+
     from app.db.contractors import get_contractor_by_apple_user_id
     contractor = await get_contractor_by_apple_user_id(apple_user_id)
     if contractor:
@@ -169,7 +217,9 @@ async def api_lookup_by_apple_id(request: Request, apple_user_id: str = ""):
 
 @router.post("")
 async def api_create_contractor(body: ContractorCreate, request: Request):
-    # Onboarding endpoint — auth handled by middleware (Apple identity token or admin)
+    # Onboarding endpoint — Apple identity token is verified here. Admin
+    # callers (global bearer token) bypass Apple verification.
+    await _enforce_apple_identity(request, body.apple_user_id, body.apple_identity_token)
 
     # Deduplicate: if owner_phone is provided, check for existing contractor
     if body.owner_phone:
@@ -192,6 +242,8 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
             }
 
     data = body.dict()
+    # Don't persist the raw Apple identity token in Firestore.
+    data.pop("apple_identity_token", None)
     if data.get("mode") in ("business", "businessPro"):
         # Business profile details may be collected before purchase, but the
         # runtime mode is not activated until StoreKit verification grants a
@@ -423,37 +475,159 @@ async def api_update_knowledge(contractor_id: str, body: KnowledgeUpdate, reques
     return {"status": "ok"}
 
 
-def _validate_external_url(url: str) -> bool:
-    """Validate URL is external and safe to fetch. Blocks SSRF attacks."""
+# GCP / cloud metadata IPs explicitly blocked for SSRF defense (F-09).
+# Note `is_link_local` already covers 169.254.0.0/16, but we list the GCP
+# metadata IP separately so the deny is unambiguous in this code path.
+_BLOCKED_LITERAL_IPS = frozenset({
+    "169.254.169.254",  # GCP/AWS/Azure metadata service
+    "100.100.100.200",  # Alibaba metadata
+    "fd00:ec2::254",    # AWS IPv6 metadata
+})
+
+
+def _ip_is_internal(ip: ipaddress._BaseAddress) -> bool:
+    """Return True if ip should never be reachable from a user-supplied URL."""
+    if ip.is_private or ip.is_loopback or ip.is_link_local:
+        return True
+    if ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        return True
+    if str(ip) in _BLOCKED_LITERAL_IPS:
+        return True
+    # Carrier-grade NAT 100.64.0.0/10 (RFC 6598) — not flagged by is_private.
+    if isinstance(ip, ipaddress.IPv4Address) and ipaddress.IPv4Address(
+        "100.64.0.0"
+    ) <= ip <= ipaddress.IPv4Address("100.127.255.255"):
+        return True
+    return False
+
+
+def _resolve_and_validate_url(url: str) -> Optional[tuple[str, str, int, str]]:
+    """Resolve URL hostname once, validate the IP, return (hostname, ip, port, scheme).
+
+    Returns None if the URL is unsafe to fetch. The caller is expected to
+    pass the returned IP to httpx so the same IP is used for connect, closing
+    the DNS-rebinding TOCTOU window described in SECURITY_AUDIT.md F-09
+    (line 36 / `app/api/contractors.py:426-457`).
+    """
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in ('http', 'https'):
-            return False
-        hostname = parsed.hostname or ''
-        # Block known internal hostnames
-        blocked_hosts = {'localhost', '127.0.0.1', '0.0.0.0', 'metadata.google.internal', '169.254.169.254'}
-        if hostname in blocked_hosts:
-            return False
-        # Resolve hostname and check if IP is private/internal
-        try:
-            ip = ipaddress.ip_address(hostname)
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
-                return False
-        except ValueError:
-            # Not a raw IP — resolve DNS
-            # Check both IPv4 and IPv6
-            for family in (socket.AF_INET, socket.AF_INET6):
-                try:
-                    resolved = socket.getaddrinfo(hostname, None, family)
-                    for info in resolved:
-                        addr = info[4][0]
-                        ip = ipaddress.ip_address(addr)
-                        if ip.is_private or ip.is_loopback or ip.is_link_local:
-                            return False
-                except socket.gaierror:
-                    continue
-        return True
     except Exception:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        return None
+    # Reject known-bad hostnames up front (some cannot be resolved publicly).
+    blocked_hosts = {
+        "localhost",
+        "metadata.google.internal",
+        "metadata",
+        "metadata.azure.com",
+        "instance-data",
+    }
+    if hostname in blocked_hosts:
+        return None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    candidate_ips: list[str] = []
+    try:
+        candidate_ips.append(str(ipaddress.ip_address(hostname)))
+    except ValueError:
+        # Hostname — resolve via DNS once. We deliberately resolve only here
+        # and pass the chosen IP to httpx so DNS rebinding cannot swap us
+        # to an internal target between the check and the connect.
+        for family in (socket.AF_INET, socket.AF_INET6):
+            try:
+                resolved = socket.getaddrinfo(hostname, port, family, socket.SOCK_STREAM)
+            except socket.gaierror:
+                continue
+            for info in resolved:
+                addr = info[4][0]
+                # IPv6 addresses can include a zone id (e.g. "fe80::1%eth0").
+                if "%" in addr:
+                    addr = addr.split("%", 1)[0]
+                candidate_ips.append(addr)
+
+    if not candidate_ips:
+        return None
+
+    chosen_ip: Optional[str] = None
+    for raw in candidate_ips:
+        try:
+            ip_obj = ipaddress.ip_address(raw)
+        except ValueError:
+            return None
+        if _ip_is_internal(ip_obj):
+            return None
+        if chosen_ip is None:
+            chosen_ip = raw
+    return (hostname, chosen_ip or candidate_ips[0], port, parsed.scheme)
+
+
+def _validate_external_url(url: str) -> bool:
+    """Validate URL is external and safe to fetch. Kept for backward compat.
+
+    Prefer `_resolve_and_validate_url()` so the caller can pin the resolved
+    IP into the httpx connection (see SECURITY_AUDIT.md F-09, line 36).
+    """
+    return _resolve_and_validate_url(url) is not None
+
+
+class _PinnedResolver:
+    """Context manager that pins `socket.getaddrinfo` to the validated IP.
+
+    Closes the DNS-rebinding TOCTOU window: while the manager is active,
+    any lookup for ``hostname`` returns the IP that was validated up
+    front. Other hostnames are resolved normally so unrelated background
+    tasks (e.g. metric exporters) keep working.
+
+    Reference: SECURITY_AUDIT.md F-09 (line 36 — `app/api/contractors.py:426-457`).
+    """
+
+    def __init__(self, hostname: str, ip: str, port: int):
+        self._hostname = hostname.lower()
+        self._ip = ip
+        self._port = port
+        self._original_getaddrinfo = None
+
+    def _is_ipv6(self) -> bool:
+        try:
+            return isinstance(ipaddress.ip_address(self._ip), ipaddress.IPv6Address)
+        except ValueError:
+            return False
+
+    def __enter__(self):
+        original = socket.getaddrinfo
+        target_host = self._hostname
+        target_ip = self._ip
+        is_v6 = self._is_ipv6()
+
+        def patched_getaddrinfo(host, port, *args, **kwargs):
+            host_norm = (host or "").lower()
+            # Strip IPv6 zone id if present so comparisons match.
+            if host_norm and "%" in host_norm:
+                host_norm = host_norm.split("%", 1)[0]
+            if host_norm == target_host:
+                family = socket.AF_INET6 if is_v6 else socket.AF_INET
+                socktype = socket.SOCK_STREAM
+                proto = socket.IPPROTO_TCP
+                # Re-validate that nothing has rebound the IP we resolved
+                # to a private range. Defense-in-depth.
+                ip_obj = ipaddress.ip_address(target_ip)
+                if _ip_is_internal(ip_obj):
+                    raise socket.gaierror("blocked: rebind to internal IP")
+                sockaddr = (target_ip, port) if not is_v6 else (target_ip, port, 0, 0)
+                return [(family, socktype, proto, "", sockaddr)]
+            return original(host, port, *args, **kwargs)
+
+        self._original_getaddrinfo = original
+        socket.getaddrinfo = patched_getaddrinfo  # type: ignore[assignment]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._original_getaddrinfo is not None:
+            socket.getaddrinfo = self._original_getaddrinfo  # type: ignore[assignment]
         return False
 
 
@@ -464,6 +638,13 @@ async def api_import_website(contractor_id: str, body: ImportWebsiteRequest, req
     Scrapes the URL, sends content to Claude to extract structured
     business info (services, pricing, hours, service area), and saves
     as the contractor's knowledge base.
+
+    SSRF hardening (F-09, SECURITY_AUDIT.md line 36): the hostname is
+    resolved exactly once via `_resolve_and_validate_url`, and during the
+    httpx fetch a `_PinnedResolver` patches `socket.getaddrinfo` so the
+    same IP is used for the actual connect. DNS rebinding cannot redirect
+    us to an internal IP after validation. The TLS SNI / Host header
+    continue to use the original hostname.
     """
     require_contractor_access(request, contractor_id)
     import httpx
@@ -472,19 +653,30 @@ async def api_import_website(contractor_id: str, body: ImportWebsiteRequest, req
     if not url:
         return {"status": "error", "message": "URL required"}
 
-    if not _validate_external_url(url):
+    resolved = _resolve_and_validate_url(url)
+    if resolved is None:
         return {"status": "error", "message": "Invalid or blocked URL"}
 
-    try:
-        # Fetch the webpage (follow_redirects disabled to prevent SSRF via redirects)
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            response = await client.get(url, timeout=15.0, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; KevinBot/1.0)"
-            })
-            if response.status_code != 200:
-                return {"status": "error", "message": f"Could not fetch URL (HTTP {response.status_code})"}
+    hostname, validated_ip, port, _scheme = resolved
 
-            html = response.text[:15000]  # Limit to 15K chars
+    fetch_headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; KevinBot/1.0)",
+    }
+
+    try:
+        # follow_redirects=False prevents SSRF via 3xx redirects to internal IPs.
+        # The pinned resolver guarantees the connect uses the validated IP.
+        with _PinnedResolver(hostname, validated_ip, port):
+            async with httpx.AsyncClient(follow_redirects=False) as client:
+                response = await client.get(
+                    url,
+                    timeout=15.0,
+                    headers=fetch_headers,
+                )
+                if response.status_code != 200:
+                    return {"status": "error", "message": f"Could not fetch URL (HTTP {response.status_code})"}
+
+                html = response.text[:15000]  # Limit to 15K chars
 
         # Extract knowledge via Claude
         async with httpx.AsyncClient() as client:

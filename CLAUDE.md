@@ -244,3 +244,8 @@ Key variables — full list managed via `gcloud run services update`:
 | `APPSTORE_PRIVATE_KEY` | In-App Purchase .p8 key (pipe-separated) |
 | `APPSTORE_ENVIRONMENT` | `sandbox` or `production` |
 | `API_BEARER_TOKEN` | Global admin token |
+| `VCARD_HMAC_SECRET` | Dedicated HMAC key for signing vCard download URLs (F-08). Decoupled from `API_BEARER_TOKEN` so rotating the admin token doesn't break already-shared vCards and a bearer-token leak doesn't allow vCard URL forgery. Required in production; if unset, signing falls back to a value derived from `API_BEARER_TOKEN` and a warning is logged. |
+| `PIN_RATE_LIMIT` | Max dial-in PIN attempts per source key per window (F-15). Default `10`. |
+| `PIN_RATE_WINDOW_SECONDS` | Rolling-window length for `PIN_RATE_LIMIT`, in seconds (F-15). Default `3600` (60 min). |
+| `MAX_UPLOAD_BYTES` | Hard cap on `/api/estimates/{token}/upload` request bodies (F-10). Default `52428800` (50 MiB). The endpoint streams the body and aborts with HTTP 413 the moment the running total exceeds this value, preventing DoS via memory exhaustion. |
+| `TRANSCRIPT_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key applied to call transcripts at rest (F-11). Generate with `python scripts/gen_transcript_key.py`. When unset, transcripts are written in plaintext (legacy mode); reads remain backwards compatible. |

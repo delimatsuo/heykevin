@@ -1,0 +1,54 @@
+# Secrets — must never enter the image.
+.env
+.env.*
+secrets/
+*.p8
+*.pem
+*.key
+*.cer
+*.p12
+
+# Local credentials / IDE state.
+.vscode/
+.idea/
+
+# Python build artifacts.
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# iOS — not part of the backend image.
+ios/
+
+# Docs and tooling that don't need to ship.
+docs/
+.github/
+.git/
+.gitignore
+.worktrees/
+.DS_Store
+
+# Local-only handoff notes and agent transcripts.
+HANDOFF*.md
+HANDOFF-*.md
+.planning/
+.claude/
+
+# App Store automation artifacts.
+scripts/appstore-screenshots/
+scripts/cpp_ids.json
+
+# Frontend prototype not needed in the API image.
+docs/redesign-prototype.html
+
+# Backups and editor swap files.
+*~
+*.swp
+*.swo
+*.bak

@@ -185,15 +185,19 @@ cd ios && xcodegen generate
 # 3. Upload: xcrun altool --upload-app --apiKey HLB7866PG8 --apiIssuer 4b083963-...
 ```
 
-### Branches
-- `main` → auto-deploys to `kevin-api` (production)
-- `staging` → auto-deploys to `kevin-api-staging`
+### Branches and deploy triggers
+Defined in `.github/workflows/deploy.yml`:
+- **PRs to `staging` or `main`** run the `Test` job only. No deploy.
+- **Push to `staging` branch** runs `Test` then `Deploy to Staging` (`kevin-api-staging`).
+- **Push to `main` runs nothing.** Merging a PR to `main` does not deploy. CLAUDE.md previously claimed otherwise; that was wrong.
+- **Production deploys are manual:** `gh workflow run deploy.yml -f target=production --ref main` (or click "Run workflow" in the Actions tab on the `Deploy` workflow with `target=production`). The job refuses to run from any ref other than `main`.
+- Direct `gcloud run deploy kevin-api --source .` from a developer machine also works and was the path used through the pre-launch hardening — but it bypasses CI tests, so prefer the workflow_dispatch path once `staging` is up to date.
 
 ### Environments
 | | Production | Staging |
 |--|--|--|
 | Cloud Run | `kevin-api` | `kevin-api-staging` |
-| URL | `https://kevin-api-752910912062.us-central1.run.app` | pending (created on first staging push) |
+| URL | `https://kevin-api-752910912062.us-central1.run.app` | `https://kevin-api-staging-l63rergg7a-uc.a.run.app` |
 | APNs | production | sandbox |
 | App Store | production | sandbox |
 
@@ -244,3 +248,8 @@ Key variables — full list managed via `gcloud run services update`:
 | `APPSTORE_PRIVATE_KEY` | In-App Purchase .p8 key (pipe-separated) |
 | `APPSTORE_ENVIRONMENT` | `sandbox` or `production` |
 | `API_BEARER_TOKEN` | Global admin token |
+| `VCARD_HMAC_SECRET` | Dedicated HMAC key for signing vCard download URLs (F-08). Decoupled from `API_BEARER_TOKEN` so rotating the admin token doesn't break already-shared vCards and a bearer-token leak doesn't allow vCard URL forgery. Required in production; if unset, signing falls back to a value derived from `API_BEARER_TOKEN` and a warning is logged. |
+| `PIN_RATE_LIMIT` | Max dial-in PIN attempts per source key per window (F-15). Default `10`. |
+| `PIN_RATE_WINDOW_SECONDS` | Rolling-window length for `PIN_RATE_LIMIT`, in seconds (F-15). Default `3600` (60 min). |
+| `MAX_UPLOAD_BYTES` | Hard cap on `/api/estimates/{token}/upload` request bodies (F-10). Default `52428800` (50 MiB). The endpoint streams the body and aborts with HTTP 413 the moment the running total exceeds this value, preventing DoS via memory exhaustion. |
+| `TRANSCRIPT_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key applied to call transcripts at rest (F-11). Generate with `python scripts/gen_transcript_key.py`. When unset, transcripts are written in plaintext (legacy mode); reads remain backwards compatible. |

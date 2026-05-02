@@ -9,6 +9,7 @@ import json
 import time
 import uuid
 import asyncio
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -18,6 +19,32 @@ from app.config import settings
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    """Outcome of an Apple App Store transaction verification.
+
+    Three terminal states:
+
+    - ``ok=True`` and ``transaction`` populated: Apple confirmed a valid receipt.
+      The subscription state described by ``transaction`` should be applied.
+
+    - ``ok=False`` and ``unreachable=False``: Apple replied authoritatively with
+      a non-success state (bundle mismatch, malformed payload, transaction not
+      found in any environment, etc.). This is *not* a successful verification.
+      Caller should reject the request — do not assume entitlement.
+
+    - ``ok=False`` and ``unreachable=True``: Apple was unreachable, returned an
+      unexpected shape, or our request itself failed. The verification could
+      not be completed. The caller MUST fail closed (return 502 / retry); it
+      MUST NOT claim the subscription is verified.
+    """
+
+    ok: bool
+    transaction: Optional[dict] = None
+    unreachable: bool = False
+    reason: str = ""
 
 # App Store Server API endpoints
 APPSTORE_PRODUCTION_URL = "https://api.storekit.itunes.apple.com"
@@ -161,28 +188,73 @@ def _active_subscription_expires_ts(transaction_info: dict) -> Optional[float]:
     return expires_ts
 
 
-async def verify_transaction(transaction_id: str) -> Optional[dict]:
-    """Verify a transaction with Apple's App Store Server API.
+async def verify_transaction_strict(transaction_id: str) -> VerificationResult:
+    """Verify a transaction with Apple's App Store Server API (fail-closed).
 
-    Returns transaction info dict or None on failure.
+    Distinguishes three outcomes:
+    - Apple says the receipt is valid → ``ok=True`` with ``transaction``.
+    - Apple says the receipt is invalid / not found / bundle mismatch → ``ok=False``,
+      ``unreachable=False``. This is an authoritative *negative* answer.
+    - We could not get an authoritative answer (network error, 5xx, unexpected
+      response shape, or App Store API not configured) → ``ok=False``,
+      ``unreachable=True``. Caller MUST NOT treat as success.
+
+    Importantly, we do NOT collapse "Apple unreachable" into "verification
+    failed"; the iOS-facing `/api/subscription/verify` endpoint depends on
+    that distinction so it can return HTTP 502 + Retry-After rather than
+    silently claiming success.
     """
     if not settings.appstore_key_id:
         logger.warning("App Store API not configured — skipping verification")
-        return None
+        return VerificationResult(ok=False, unreachable=True, reason="not_configured")
 
     try:
         token = _get_appstore_jwt()
+    except Exception as e:  # noqa: BLE001
+        logger.error("App Store JWT generation failed: %s", e, exc_info=True)
+        return VerificationResult(ok=False, unreachable=True, reason="jwt_error")
+
+    try:
         async with httpx.AsyncClient() as client:
             lookup_urls = _get_transaction_lookup_urls()
+            last_status: Optional[int] = None
+            last_url: Optional[str] = None
             for index, base_url in enumerate(lookup_urls):
                 url = f"{base_url}/inApps/v1/transactions/{transaction_id}"
-                response = await client.get(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=10.0,
-                )
+                last_url = url
+                try:
+                    response = await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=10.0,
+                    )
+                except httpx.HTTPError as e:
+                    logger.error(
+                        "App Store transaction lookup transport error at %s: %s",
+                        url, e,
+                    )
+                    return VerificationResult(
+                        ok=False, unreachable=True, reason="transport_error"
+                    )
+                last_status = response.status_code
+
                 if response.status_code == 200:
-                    return _extract_transaction_info(response.json())
+                    try:
+                        body = response.json()
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("App Store 200 response not JSON: %s", e)
+                        return VerificationResult(
+                            ok=False, unreachable=True, reason="bad_json"
+                        )
+                    transaction_info = _extract_transaction_info(body)
+                    if transaction_info is None:
+                        # _extract_transaction_info already logged the reason. This
+                        # is an authoritative rejection (bundle mismatch, missing
+                        # signedTransactionInfo) — not a transient failure.
+                        return VerificationResult(
+                            ok=False, unreachable=False, reason="invalid_payload"
+                        )
+                    return VerificationResult(ok=True, transaction=transaction_info)
 
                 should_try_sandbox = (
                     index == 0
@@ -197,17 +269,67 @@ async def verify_transaction(transaction_id: str) -> Optional[dict]:
                     )
                     continue
 
+                # Authoritative not-found: Apple knows the transaction does not exist.
+                if _is_transaction_not_found(response):
+                    return VerificationResult(
+                        ok=False, unreachable=False, reason="not_found"
+                    )
+
+                # 4xx that isn't "not found" is treated as authoritative invalidity
+                # (e.g. bad request) — except 401/403 which suggest *our* credentials
+                # are misconfigured, which is unreachable from the user's POV.
+                if response.status_code in (401, 403):
+                    logger.error(
+                        "App Store auth failure at %s: %s %s",
+                        url,
+                        response.status_code,
+                        response.text[:200],
+                    )
+                    return VerificationResult(
+                        ok=False, unreachable=True, reason="auth_error"
+                    )
+                if 400 <= response.status_code < 500:
+                    logger.error(
+                        "App Store transaction lookup rejected at %s: %s %s",
+                        url,
+                        response.status_code,
+                        response.text[:200],
+                    )
+                    return VerificationResult(
+                        ok=False, unreachable=False, reason="rejected"
+                    )
+
+                # 5xx and anything else is unreachable — Apple's side is unhappy.
                 logger.error(
-                    "App Store transaction lookup failed at %s: %s %s",
-                    "production" if base_url == APPSTORE_PRODUCTION_URL else "sandbox",
+                    "App Store transaction lookup server error at %s: %s %s",
+                    url,
                     response.status_code,
                     response.text[:200],
                 )
-                return None
-        return None
-    except Exception as e:
+                return VerificationResult(
+                    ok=False, unreachable=True, reason="server_error"
+                )
+
+            # Loop exhausted without an authoritative answer.
+            logger.error(
+                "App Store transaction lookup exhausted candidates last_status=%s last_url=%s",
+                last_status, last_url,
+            )
+            return VerificationResult(ok=False, unreachable=True, reason="exhausted")
+    except Exception as e:  # noqa: BLE001
         logger.error(f"App Store API error: {e}", exc_info=True)
-        return None
+        return VerificationResult(ok=False, unreachable=True, reason="exception")
+
+
+async def verify_transaction(transaction_id: str) -> Optional[dict]:
+    """Backward-compatible wrapper. Returns transaction dict on success, else None.
+
+    Note: this collapses "Apple unreachable" and "Apple says invalid" into a
+    single None result and is therefore *not safe* to use for fail-closed
+    decisions. Use ``verify_transaction_strict`` from new code.
+    """
+    result = await verify_transaction_strict(transaction_id)
+    return result.transaction if result.ok else None
 
 
 async def is_transaction_seen(contractor_id: str, transaction_id: str) -> bool:
@@ -232,12 +354,38 @@ async def mark_transaction_seen(contractor_id: str, transaction_id: str):
     )
 
 
+def _resolve_original_transaction_id(transaction_info: dict) -> str:
+    """Extract the stable original_transaction_id, falling back to transaction_id."""
+    original = transaction_info.get("originalTransactionId") or transaction_info.get("original_transaction_id")
+    if original:
+        return str(original)
+    # Fall back to transactionId — in StoreKit 2 these are equal for the very
+    # first transaction in a subscription chain. Better to bind something than
+    # nothing.
+    txid = transaction_info.get("transactionId") or transaction_info.get("transaction_id")
+    return str(txid) if txid else ""
+
+
+class CrossContractorReceiptError(Exception):
+    """Raised when an Apple receipt has already been bound to a different contractor."""
+
+    def __init__(self, original_transaction_id: str, owner_contractor_id: str):
+        super().__init__(
+            f"original_transaction_id={original_transaction_id} already bound to {owner_contractor_id}"
+        )
+        self.original_transaction_id = original_transaction_id
+        self.owner_contractor_id = owner_contractor_id
+
+
 async def update_subscription_from_transaction(contractor_id: str, transaction_info: dict) -> bool:
     """Update contractor subscription status from a verified Apple transaction.
 
-    Returns True if updated successfully.
+    Returns True if updated successfully. Raises CrossContractorReceiptError if
+    the underlying Apple receipt has already been claimed by a different
+    contractor (F-06: global receipt-replay defense).
     """
     from app.db.contractors import update_contractor
+    from app.db.apple_transactions import claim_transaction
 
     product_id = transaction_info.get("productId", "")
     tier = PRODUCT_TO_TIER.get(product_id)
@@ -260,6 +408,20 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
     expires_ts = _active_subscription_expires_ts(transaction_info)
     if not expires_ts:
         return False
+
+    # Global receipt-replay defense (F-06): bind original_transaction_id to this
+    # contractor atomically. If a different contractor already claimed it, fail.
+    original_id = _resolve_original_transaction_id(transaction_info)
+    if original_id:
+        ok, owner = await claim_transaction(
+            original_transaction_id=original_id,
+            contractor_id=contractor_id,
+            transaction_id=str(transaction_info.get("transactionId", "")),
+            product_id=product_id,
+            environment=str(transaction_info.get("environment", "")),
+        )
+        if not ok:
+            raise CrossContractorReceiptError(original_id, owner or "unknown")
 
     await update_contractor(contractor_id, {
         "subscription_tier": tier,
@@ -404,6 +566,26 @@ async def handle_appstore_notification(payload: dict) -> bool:
         logger.warning(f"Contractor not found for appAccountToken (subscription_uuid): {app_account_token}")
         return False
     contractor_id = docs[0].id
+
+    # F-06: global receipt-replay defense. The original_transaction_id is the
+    # stable Apple receipt identity; reject if it has already been bound to a
+    # different contractor than the one that owns this appAccountToken.
+    from app.db.apple_transactions import claim_transaction
+    original_id = _resolve_original_transaction_id(transaction_info)
+    if original_id:
+        ok, owner = await claim_transaction(
+            original_transaction_id=original_id,
+            contractor_id=contractor_id,
+            transaction_id=str(transaction_info.get("transactionId", "")),
+            product_id=str(transaction_info.get("productId", "")),
+            environment=str(transaction_info.get("environment", "")),
+        )
+        if not ok:
+            logger.error(
+                "App Store notification cross-contractor reject: original_tx=%s contractor=%s already_bound_to=%s type=%s",
+                original_id, contractor_id, owner, notification_type,
+            )
+            return False
 
     if notification_type in ("DID_RENEW", "SUBSCRIBED"):
         product_id = transaction_info.get("productId", "")

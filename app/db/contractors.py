@@ -23,6 +23,11 @@ PROTECTED_FIELDS = frozenset({
     "twilio_number",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
+    # Identity bindings — written only at account creation / authenticated migration.
+    # Allowing PATCH to overwrite these would let an attacker hijack another account
+    # by claiming its phone number or Apple user ID. (Security audit F-04.)
+    "owner_phone",
+    "apple_user_id",
 })
 
 # Supported countries for Kevin AI

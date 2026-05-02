@@ -185,15 +185,19 @@ cd ios && xcodegen generate
 # 3. Upload: xcrun altool --upload-app --apiKey HLB7866PG8 --apiIssuer 4b083963-...
 ```
 
-### Branches
-- `main` → auto-deploys to `kevin-api` (production)
-- `staging` → auto-deploys to `kevin-api-staging`
+### Branches and deploy triggers
+Defined in `.github/workflows/deploy.yml`:
+- **PRs to `staging` or `main`** run the `Test` job only. No deploy.
+- **Push to `staging` branch** runs `Test` then `Deploy to Staging` (`kevin-api-staging`).
+- **Push to `main` runs nothing.** Merging a PR to `main` does not deploy. CLAUDE.md previously claimed otherwise; that was wrong.
+- **Production deploys are manual:** `gh workflow run deploy.yml -f target=production --ref main` (or click "Run workflow" in the Actions tab on the `Deploy` workflow with `target=production`). The job refuses to run from any ref other than `main`.
+- Direct `gcloud run deploy kevin-api --source .` from a developer machine also works and was the path used through the pre-launch hardening — but it bypasses CI tests, so prefer the workflow_dispatch path once `staging` is up to date.
 
 ### Environments
 | | Production | Staging |
 |--|--|--|
 | Cloud Run | `kevin-api` | `kevin-api-staging` |
-| URL | `https://kevin-api-752910912062.us-central1.run.app` | pending (created on first staging push) |
+| URL | `https://kevin-api-752910912062.us-central1.run.app` | `https://kevin-api-staging-l63rergg7a-uc.a.run.app` |
 | APNs | production | sandbox |
 | App Store | production | sandbox |
 

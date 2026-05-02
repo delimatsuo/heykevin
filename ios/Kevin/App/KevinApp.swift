@@ -11,12 +11,20 @@ struct KevinApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if appState.isOnboarded {
-                ContentView()
-                    .environmentObject(appState)
-            } else {
-                OnboardingView()
-                    .environmentObject(appState)
+            Group {
+                if appState.isOnboarded {
+                    ContentView()
+                        .environmentObject(appState)
+                } else {
+                    OnboardingView()
+                        .environmentObject(appState)
+                }
+            }
+            .appVersionGate()
+            .task {
+                // Kick off a version check on cold launch so the gate can decide
+                // whether to block, nudge, or stay silent.
+                await AppVersionService.shared.check()
             }
         }
         .onChange(of: scenePhase) {

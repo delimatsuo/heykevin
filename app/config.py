@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     # API auth
     api_bearer_token: str = ""
 
+    # vCard URL signing (F-08): dedicated HMAC secret. If unset in production
+    # the server still boots, but a clear warning is logged at startup and
+    # vcard signing falls back to a value derived from API_BEARER_TOKEN for
+    # backwards-compat. Required (not blank) for production hardening.
+    vcard_hmac_secret: str = ""
+
+    # Dial-in PIN brute-force protection (F-15). 10 attempts / 60 minutes per
+    # source key by default. Tunable via env to support legitimate retry
+    # patterns (e.g. PSTN re-dials) without weakening the lockout.
+    pin_rate_limit: int = 10
+    pin_rate_window_seconds: int = 3600
+
     # Gemini
     gemini_api_key: str = ""
 
@@ -92,6 +104,13 @@ class Settings(BaseSettings):
     allow_production_resources_in_non_production: bool = False
     log_level: str = "INFO"
     port: int = 8080
+
+    # Application-level encryption for call transcripts at rest (F-11).
+    # 32-byte AES-256-GCM key, base64 encoded. Generate with
+    # `python scripts/gen_transcript_key.py`. When unset, transcripts are
+    # written in plaintext (legacy behaviour); reads remain backwards
+    # compatible with both formats.
+    transcript_encryption_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

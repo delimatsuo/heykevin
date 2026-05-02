@@ -1,6 +1,6 @@
 """VoIP API — device registration, Twilio access tokens, call actions."""
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
 
@@ -176,12 +176,17 @@ async def get_voip_token(request: Request, body: VoIPTokenRequest, contractor_id
     """
     require_contractor_access(request, contractor_id)
     try:
-        # Create an access token
+        # Create an access token bound to this contractor's identity (F-07).
+        # The Twilio Voice SDK on iOS uses the identity as a label only; calls
+        # in this app reach contractors via PSTN routing on their Twilio number,
+        # not by client:<identity>. Binding the identity to contractor_id
+        # produces an audit trail and prevents one contractor's stolen token
+        # from impersonating another at the Twilio layer.
         token = AccessToken(
             settings.twilio_account_sid,
             settings.twilio_api_key_sid,
             settings.twilio_api_key_secret,
-            identity="kevin-user",
+            identity=f"contractor_{contractor_id}",
             ttl=600,  # 10 minutes
         )
 
@@ -192,7 +197,7 @@ async def get_voip_token(request: Request, body: VoIPTokenRequest, contractor_id
         )
         token.add_grant(voice_grant)
 
-        logger.info(f"VoIP token generated for call {body.call_sid}")
+        logger.info(f"VoIP token generated for call {body.call_sid} contractor={contractor_id}")
 
         return {
             "token": token.to_jwt(),
@@ -207,25 +212,62 @@ async def get_voip_token(request: Request, body: VoIPTokenRequest, contractor_id
 
 @router.post("/call-action")
 async def handle_call_action(request: Request, body: CallAction, contractor_id: str = Query(..., description="Contractor ID")):
-    """Handle an action from the iOS app (accept, decline, voicemail, text_reply)."""
+    """Handle an action from the iOS app (accept, decline, voicemail, text_reply).
+
+    F-13: verify the contractor actually owns the call_sid being acted on.
+    Two complementary checks:
+
+    1.  The RTDB ``active_call.contractor_id`` (kept in sync by the Twilio
+        webhooks) must match the authed contractor.
+    2.  If RTDB has no record (cleanup ran, restart, etc.) we fall back to
+        the persisted Firestore call record. Without this, an attacker who
+        leaked another contractor's CallSid could no-op route the call to
+        voicemail — see F-13 in SECURITY_AUDIT.md.
+    """
     require_contractor_access(request, contractor_id)
 
     # Verify the call belongs to this contractor
     try:
         from app.db.cache import get_active_call
         active_call = await get_active_call(body.call_sid)
-        if active_call and active_call.contractor_id != contractor_id:
-            logger.warning(f"Call action denied: call {body.call_sid} does not belong to contractor {contractor_id}")
-            return {"status": "error", "message": "Access denied"}
+        rtdb_owner = active_call.contractor_id if active_call else None
+        firestore_owner = None
+        if rtdb_owner is None:
+            # F-13: RTDB record missing — fall back to Firestore. If nothing
+            # there either, refuse rather than blindly hitting Twilio.
+            from app.db.calls import get_call
+
+            call_doc = await get_call(body.call_sid)
+            if not call_doc:
+                logger.warning(
+                    f"Call action denied: no record for {body.call_sid} (requester={contractor_id!r})"
+                )
+                raise HTTPException(status_code=404, detail="Call not found")
+            firestore_owner = call_doc.get("contractor_id", "") or None
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Call ownership check failed: {e}", exc_info=True)
         return {"status": "error", "message": "Internal error"}
+
+    if rtdb_owner is not None and rtdb_owner != contractor_id:
+        logger.warning(
+            f"Call action denied: call {body.call_sid} rtdb-owner={rtdb_owner!r} "
+            f"!= requester={contractor_id!r}"
+        )
+        raise HTTPException(status_code=403, detail="Access denied")
+    if rtdb_owner is None and firestore_owner and firestore_owner != contractor_id:
+        logger.warning(
+            f"Call action denied: call {body.call_sid} firestore-owner={firestore_owner!r} "
+            f"!= requester={contractor_id!r}"
+        )
+        raise HTTPException(status_code=403, detail="Access denied")
 
     logger.info(f"Call action: {body.action} for {body.call_sid}")
 
     try:
         if body.action == "accept":
-            return await _handle_accept(body.call_sid)
+            return await _handle_accept(body.call_sid, contractor_id=contractor_id)
         elif body.action == "decline":
             return await _handle_decline(body.call_sid)
         elif body.action == "voicemail":
@@ -240,13 +282,24 @@ async def handle_call_action(request: Request, body: CallAction, contractor_id: 
         return {"status": "error", "message": "Internal error"}
 
 
-def _generate_access_token() -> str:
-    """Generate a Twilio Voice access token for the iOS SDK."""
+def _generate_access_token(contractor_id: str = "") -> str:
+    """Generate a Twilio Voice access token for the iOS SDK.
+
+    The token's `identity` is bound to the contractor (F-07) so that a stolen
+    token cannot be reused to impersonate another contractor at the Twilio
+    layer. The identity is a label only — call routing in this app uses PSTN
+    numbers, not `client:<identity>` addressing.
+
+    Existing webhook callers that don't yet pass `contractor_id` will get an
+    unbound identity (``contractor_``); follow-up in `app/webhooks/` should
+    thread the contractor_id through. For the iOS pickup path (the original
+    F-07 vector), the identity is always populated.
+    """
     token = AccessToken(
         settings.twilio_account_sid,
         settings.twilio_api_key_sid,
         settings.twilio_api_key_secret,
-        identity="kevin-contractor",
+        identity=f"contractor_{contractor_id}",
         ttl=120,  # 2 minutes
     )
 
@@ -261,18 +314,25 @@ def _generate_access_token() -> str:
     return jwt_token if isinstance(jwt_token, str) else jwt_token.decode("utf-8")
 
 
-async def _handle_accept(call_sid: str) -> dict:
+async def _handle_accept(call_sid: str, contractor_id: str = "") -> dict:
     """Accept a call — move caller to conference, return token for direct SDK connection.
 
     The iOS app connects directly via Twilio Voice SDK using the returned
     access_token and conference_name. No VoIP push needed — the user already
     tapped 'Pick Up' in the app.
     """
-    import secrets
     from twilio.rest import Client
     import asyncio
+    from app.services.conference_registry import (
+        new_conference_name,
+        register_conference,
+    )
 
-    conference_name = f"pickup_{secrets.token_urlsafe(8)}"
+    # F-07/F-13: opaque random conference name + persisted ownership binding so
+    # /webhooks/twilio/ios-voice can verify the contractor that owns it.
+    conference_name = new_conference_name("pickup")
+    if contractor_id:
+        await register_conference(conference_name, contractor_id, call_sid)
 
     # Redirect the caller's Twilio call from <Stream> to <Conference>
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
@@ -299,7 +359,7 @@ async def _handle_accept(call_sid: str) -> dict:
     logger.info(f"Caller redirected to conference: {conference_name}")
 
     # Return access token so the iOS app can connect directly via SDK
-    access_token = _generate_access_token()
+    access_token = _generate_access_token(contractor_id=contractor_id)
 
     return {
         "status": "ok",

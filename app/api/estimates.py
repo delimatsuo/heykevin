@@ -1,10 +1,11 @@
 """AI estimate endpoints — token creation, upload, analysis, results."""
 
 import hashlib
+import os
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from typing import Optional
 
@@ -30,6 +31,23 @@ ALLOWED_CONTENT_TYPES = {
 }
 MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 10MB
 MAX_VIDEO_SIZE = 50 * 1024 * 1024   # 50MB
+
+# Hard absolute cap on any upload, regardless of content type. Defends against
+# DoS via memory exhaustion described in SECURITY_AUDIT.md F-10
+# (line 37 — `app/api/estimates.py:138-159`). Configurable via env var
+# (default 50 MiB to match the largest legitimate video upload — operators
+# can lower it to 10 MiB or similar if videos are not required).
+def _max_upload_bytes_default() -> int:
+    raw = os.environ.get("MAX_UPLOAD_BYTES", "").strip()
+    if not raw:
+        return 50 * 1024 * 1024
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 50 * 1024 * 1024
+
+
+MAX_UPLOAD_BYTES = _max_upload_bytes_default()
 
 
 def _hash_token(token: str) -> str:
@@ -135,11 +153,56 @@ async def get_upload_url(token: str, body: UploadUrlRequest):
     }
 
 
+async def _read_request_with_cap(request, max_bytes: int) -> bytes:
+    """Stream the request body and abort early past `max_bytes`.
+
+    F-10 (SECURITY_AUDIT.md line 37): the previous implementation called
+    `await request.body()` which buffers the entire payload before any size
+    check, letting a malicious client OOM the worker by streaming a multi-GB
+    body. We now check `Content-Length` up front (cheap rejection) and also
+    accumulate chunks from `request.stream()`, raising 413 the moment the
+    running total crosses `max_bytes`.
+    """
+    # Cheap up-front rejection: trust Content-Length when the client sets it.
+    cl_header = request.headers.get("content-length", "").strip()
+    if cl_header:
+        try:
+            cl_int = int(cl_header)
+        except ValueError:
+            cl_int = -1
+        if cl_int > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Max: {max_bytes // (1024 * 1024)}MB",
+            )
+
+    # Stream chunks; abort the moment we exceed the cap.
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            # Discard buffered data so it cannot continue to consume RAM.
+            chunks.clear()
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Max: {max_bytes // (1024 * 1024)}MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/{token}/upload")
 async def upload_and_analyze(token: str, request=None):
     """Receive media upload and trigger Gemini analysis.
 
     For MVP: direct upload. Production should use GCS signed URLs.
+
+    Size handling: rejects oversized uploads early via streamed-chunk
+    accumulation, never buffering more than `MAX_UPLOAD_BYTES` in memory
+    (SECURITY_AUDIT.md F-10).
     """
     from fastapi import Request
     if request is None:
@@ -149,14 +212,14 @@ async def upload_and_analyze(token: str, request=None):
     if not estimate:
         return {"error": "Invalid or expired token"}, 404
 
-    # Read the request body
-    body = await request.body()
     content_type = request.headers.get("content-type", "application/octet-stream")
 
-    # Validate size
-    max_size = MAX_VIDEO_SIZE if content_type.startswith("video/") else MAX_IMAGE_SIZE
-    if len(body) > max_size:
-        return {"error": f"File too large. Max: {max_size // (1024*1024)}MB"}, 413
+    # Per-content-type cap, but never exceeding the absolute MAX_UPLOAD_BYTES.
+    type_max = MAX_VIDEO_SIZE if content_type.startswith("video/") else MAX_IMAGE_SIZE
+    effective_max = min(type_max, MAX_UPLOAD_BYTES)
+
+    # Stream the body with the cap; raises HTTPException(413) on overflow.
+    body = await _read_request_with_cap(request, effective_max)
 
     # Update status
     token_hash = _hash_token(token)

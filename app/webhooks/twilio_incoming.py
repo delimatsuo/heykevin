@@ -256,8 +256,16 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             conference_name = ""
             if device_token:
                 from app.api.voip import _generate_access_token
-                access_token = _generate_access_token()
-                conference_name = f"expired_{call_sid}"
+                from app.services.conference_registry import (
+                    new_conference_name,
+                    register_conference,
+                )
+
+                # F-07: bind the access token's identity to this contractor.
+                # F-13: opaque random conference name (was f"expired_{call_sid}").
+                access_token = _generate_access_token(contractor_id=contractor_id)
+                conference_name = new_conference_name("expired")
+                await register_conference(conference_name, contractor_id, call_sid)
                 push_succeeded = await send_voip_push(
                     device_token=device_token,
                     caller_phone=caller_phone,
@@ -343,28 +351,36 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
 
         caller_name = contact.get("name", "") if contact else ""
 
-        # Check if we know this caller from previous calls (caller_contacts collection)
-        if not caller_name:
+        # Check if we know this caller from previous calls (per-contractor
+        # caller_contacts subcollection — F-14: was a global collection that leaked
+        # caller names across contractors). The new helper reads from
+        # contractors/{contractor_id}/caller_contacts/{phone_key} and transparently
+        # falls back to the legacy global doc until the migration script runs.
+        if not caller_name and contractor_id:
             try:
-                from app.db.firestore_client import get_firestore_client
-                db = get_firestore_client()
-                phone_key = caller_phone.replace("+", "").replace("-", "").replace(" ", "")
-                contact_doc = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: db.collection("caller_contacts").document(phone_key).get()
-                    ),
-                    timeout=1.0
+                from app.db.contacts import get_caller_contact as _get_caller_contact
+                contact_data = await asyncio.wait_for(
+                    _get_caller_contact(contractor_id, caller_phone),
+                    timeout=1.0,
                 )
-                if contact_doc.exists:
-                    contact_data = contact_doc.to_dict()
+                if contact_data:
                     caller_name = contact_data.get("caller_name", "")
                     if caller_name:
                         logger.info(f"Known caller: {caller_name[:1]}*** ({redact_phone(caller_phone)})")
             except Exception:
                 pass
 
-        conference_name = f"call_{call_sid}"
+        # F-07/F-13: opaque random conference names (no longer derived from
+        # call_sid). Register the binding so /ios-voice and /call-action can
+        # resolve back to the contractor and enforce ownership.
+        from app.services.conference_registry import (
+            new_conference_name,
+            register_conference,
+        )
+
+        conference_name = new_conference_name("call")
+        if contractor_id:
+            await register_conference(conference_name, contractor_id, call_sid)
 
         # Generate WebSocket auth token for AI screening media stream
         ws_token = secrets.token_urlsafe(32) if route == Route.AI_SCREENING else ""
@@ -391,7 +407,10 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
 
         # Fast-track known/whitelisted contacts — ring the contractor directly
         if contact and contact.get("is_whitelisted") and route == Route.WHITELIST_FORWARD:
-            conference_name = f"direct_{call_sid}"
+            # F-07/F-13: opaque random conference name (was f"direct_{call_sid}").
+            conference_name = new_conference_name("direct")
+            if contractor_id:
+                await register_conference(conference_name, contractor_id, call_sid)
 
             # Start background task to send VoIP push and handle timeout
             asyncio.create_task(_ring_contractor(
@@ -443,8 +462,9 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
             await _async_redirect_to_kevin(call_sid)
             return
 
-        # Generate Twilio Voice access token for the SDK
-        access_token = _generate_access_token()
+        # F-07: bind the Twilio access token's identity to this contractor so a
+        # leaked token cannot impersonate another contractor at the Twilio layer.
+        access_token = _generate_access_token(contractor_id=contractor_id)
 
         # Send VoIP push — this will ring the contractor's phone via CallKit
         await send_voip_push(
@@ -587,7 +607,7 @@ async def _post_routing_tasks(
                     call_sid=call_sid,
                     caller_phone=caller_phone,
                     state=CallState.SCREENING,
-                    conference_name=f"call_{call_sid}",
+                    conference_name=conference_name,
                     trust_score=trust_score,
                     caller_name=caller_name,
                     carrier=carrier,
@@ -665,6 +685,15 @@ async def handle_ios_voice(request: Request, _=Depends(verify_twilio_signature))
     When the iOS app accepts a call, the Twilio Voice SDK makes an outgoing
     call to this TwiML App. We return Conference TwiML so the app joins
     the same conference as the caller.
+
+    F-13: ownership of the conference is enforced by checking that the
+    Twilio Voice SDK access-token identity that initiated this leg
+    (delivered by Twilio in the `From` field as ``client:contractor_<id>``)
+    matches the contractor registered for the requested conference name.
+    Twilio signature verification (``verify_twilio_signature``) guarantees
+    this request actually came from Twilio and the `From` value is the
+    identity Twilio extracted from the signed JWT — i.e. it cannot be
+    forged by an iOS attacker holding a stolen conference name.
     """
     try:
         form_data = await request.form()
@@ -687,6 +716,43 @@ async def handle_ios_voice(request: Request, _=Depends(verify_twilio_signature))
             response.hangup()
             return twiml_response(str(response))
 
+        # F-13: verify the conference belongs to the contractor whose iOS Voice
+        # SDK identity initiated this leg.
+        from_field = form_data.get("From", "")
+        token_identity = ""
+        if from_field.startswith("client:"):
+            token_identity = from_field[len("client:"):]
+
+        if token_identity.startswith("contractor_"):
+            requesting_contractor = token_identity[len("contractor_"):]
+        else:
+            requesting_contractor = ""
+
+        from app.services.conference_registry import resolve_conference_owner
+
+        owner = await resolve_conference_owner(conference_name)
+        if owner is None:
+            # No registered binding — could be a legacy/expired call, or a
+            # conference name an attacker is probing. Reject defensively.
+            logger.warning(
+                f"iOS-voice rejected: no binding for conference {conference_name!r} "
+                f"(from={from_field!r})"
+            )
+            response = VoiceResponse()
+            response.say("This call session has expired.")
+            response.hangup()
+            return twiml_response(str(response))
+
+        if not requesting_contractor or requesting_contractor != owner:
+            logger.warning(
+                f"iOS-voice rejected: conference {conference_name!r} owner={owner!r} "
+                f"does not match requester={requesting_contractor!r}"
+            )
+            response = VoiceResponse()
+            response.say("Access denied.")
+            response.hangup()
+            return twiml_response(str(response))
+
         response = VoiceResponse()
         dial = Dial(time_limit=5400)  # 90 min max — matches caller's side
         dial.conference(
@@ -706,33 +772,9 @@ async def handle_ios_voice(request: Request, _=Depends(verify_twilio_signature))
         return twiml_response(str(response))
 
 
-async def _is_dial_in_rate_limited(caller: str) -> bool:
-    """Check if caller has exceeded max PIN attempts using Firestore."""
-    try:
-        from app.db.firestore_client import get_firestore_client
-        db = get_firestore_client()
-        doc = db.collection("dial_in_attempts").document(caller.replace("+", "")).get()
-        if not doc.exists:
-            return False
-        data = doc.to_dict()
-        now = time.time()
-        attempts = [t for t in data.get("attempts", []) if now - t < 600]  # 10-min window
-        return len(attempts) >= 3
-    except Exception as e:
-        logger.warning(f"Rate limit check failed: {e}")
-        return True  # Fail closed — block if we can't verify
-
-
-async def _record_dial_in_failure(caller: str):
-    """Record a failed PIN attempt in Firestore."""
-    try:
-        from app.db.firestore_client import get_firestore_client
-        from google.cloud.firestore_v1 import ArrayUnion
-        db = get_firestore_client()
-        doc_ref = db.collection("dial_in_attempts").document(caller.replace("+", ""))
-        doc_ref.set({"attempts": ArrayUnion([time.time()])}, merge=True)
-    except Exception as e:
-        logger.warning(f"Rate limit record failed: {e}")
+# Legacy hand-rolled limiter removed in favor of the persistent rolling-window
+# limiter exposed by ``app.api.forwarding.check_dial_in_pin_attempt``. See
+# security audit F-15.
 
 
 @router.post("/webhooks/twilio/dial-in")
@@ -749,14 +791,9 @@ async def handle_dial_in(request: Request, _=Depends(verify_twilio_signature)):
 
         logger.info(f"Dial-in from {redact_phone(caller)}, digits={'[redacted]' if digits else 'none'}")
 
-        # Rate limiting: reject if too many failed attempts
-        if await _is_dial_in_rate_limited(caller):
-            logger.warning(f"Dial-in rate limited: {redact_phone(caller)}")
-            response = VoiceResponse()
-            response.say("Too many failed attempts. Please try again later.")
-            return twiml_response(str(response))
-
-        # If no digits yet, prompt for PIN
+        # If no digits yet, prompt for PIN. The Gather webhook re-fires when the
+        # caller enters digits — we only want to charge a rate-limit slot per
+        # actual PIN attempt, not per "give me the prompt" hit.
         if not digits:
             response = VoiceResponse()
             gather = response.gather(num_digits=6, action=f"{settings.cloud_run_url}/webhooks/twilio/dial-in", method="POST")
@@ -764,11 +801,21 @@ async def handle_dial_in(request: Request, _=Depends(verify_twilio_signature)):
             response.say("No PIN entered. Goodbye.")
             return twiml_response(str(response))
 
+        # Rate-limit each PIN attempt (F-15). The persistent rolling-window
+        # limiter is per-caller and burns one slot per call.
+        from app.api.forwarding import check_dial_in_pin_attempt
+        rl = await check_dial_in_pin_attempt(caller_phone=caller)
+        if not rl.allowed:
+            logger.warning(f"Dial-in rate limited: {redact_phone(caller)}")
+            response = VoiceResponse()
+            response.say("Too many failed attempts. Please try again later.")
+            return twiml_response(str(response))
+
         # Look up contractor by PIN in Firestore
         from app.db.contractors import get_contractor_by_pin
         contractor = await get_contractor_by_pin(digits)
         if not contractor:
-            await _record_dial_in_failure(caller)
+            # The check above already counted this attempt; no extra record needed.
             logger.warning(f"Invalid dial-in PIN from {redact_phone(caller)}")
             response = VoiceResponse()
             response.say("Invalid PIN. Goodbye.")

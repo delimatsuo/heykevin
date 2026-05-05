@@ -22,6 +22,24 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+# F-25: warn loudly at import time when the gate config env vars are absent.
+# Silent fallback to "1.0.0" turns the version gate into a no-op, which is
+# exactly the failure mode that lets a forced-update never reach users.
+if not os.environ.get("IOS_MIN_VERSION", "").strip():
+    logger.warning(
+        "IOS_MIN_VERSION env var not set; /api/app/version will fall back to 1.0.0 "
+        "and the version-gate is effectively disabled. Set this on Cloud Run.",
+    )
+if not os.environ.get("IOS_LATEST_VERSION", "").strip():
+    logger.warning(
+        "IOS_LATEST_VERSION env var not set; /api/app/version latest_version will "
+        "mirror IOS_MIN_VERSION. Bump this on Cloud Run after each App Store release.",
+    )
+
 router = APIRouter(prefix="/api/app", tags=["app"])
 
 

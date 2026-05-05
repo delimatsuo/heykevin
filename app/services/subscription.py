@@ -402,7 +402,14 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
     contractor_profile = await get_contractor(contractor_id)
     expected_uuid = (contractor_profile or {}).get("subscription_uuid", "")
     if not expected_uuid or app_account_token != expected_uuid:
-        logger.error(f"appAccountToken mismatch: expected subscription_uuid={expected_uuid!r}, got {app_account_token!r}")
+        # F-16: log only the first 8 chars of each UUID. Sufficient to
+        # correlate across logs without disclosing the full user-identifying
+        # values to anyone with log read access.
+        logger.error(
+            "appAccountToken mismatch: expected_prefix=%s got_prefix=%s",
+            (expected_uuid[:8] if expected_uuid else "(empty)"),
+            (app_account_token[:8] if app_account_token else "(empty)"),
+        )
         return False
 
     expires_ts = _active_subscription_expires_ts(transaction_info)
@@ -563,7 +570,11 @@ async def handle_appstore_notification(payload: dict) -> bool:
         ),
     )
     if not docs:
-        logger.warning(f"Contractor not found for appAccountToken (subscription_uuid): {app_account_token}")
+        # F-16: redact the appAccountToken UUID to prefix-only.
+        logger.warning(
+            "Contractor not found for appAccountToken (subscription_uuid prefix=%s)",
+            (app_account_token[:8] if app_account_token else "(empty)"),
+        )
         return False
     contractor_id = docs[0].id
 

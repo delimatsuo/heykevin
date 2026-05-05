@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings, validate_runtime_safety
 from app.middleware.auth import verify_api_token
-from app.utils.logging import setup_logging, get_logger, redact_phone
+from app.utils.logging import setup_logging, get_logger
 from app.webhooks.twilio_incoming import router as twilio_router
 from app.webhooks.media_stream import router as media_stream_router
 from app.api.contractors import public_router as contractors_public_router
@@ -265,13 +265,10 @@ async def startup():
     asyncio.create_task(_orphan_call_cleanup())
     asyncio.create_task(_expired_contractor_cleanup())
 
-    logger.info(
-        "Kevin starting up",
-        extra={
-            "environment": settings.environment,
-            "twilio_number": redact_phone(settings.twilio_phone_number),
-        },
-    )
+    # F-21: drop the redacted Twilio number from startup logs entirely. Even
+    # the last 4 digits are unnecessary signal in centralised logs and the
+    # number is verifiable through admin tooling when actually needed.
+    logger.info("Kevin starting up", extra={"environment": settings.environment})
 
 
 @app.on_event("shutdown")

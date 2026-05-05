@@ -12,7 +12,11 @@ options:
 packages:
   TwilioVoice:
     url: https://github.com/twilio/twilio-voice-ios
-    from: "6.11.0"
+    # F-22: pin to the exact version that yesterday's build resolved to.
+    # Auto minor/patch upgrades on a telephony SDK have surprised us before
+    # (CallKit handler signatures, bundling of TwilioVoice.framework). Bump
+    # this number explicitly when reviewing release notes.
+    exactVersion: "6.13.6"
 
 # Build configurations: Debug → staging backend, Staging → staging backend, Release → production
 configs:

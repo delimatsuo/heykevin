@@ -102,26 +102,28 @@ struct PaywallView: View {
                     cancelForwardingButton
 
                     // Restore Purchases
+                    //
+                    // Audit F-1: this used to set `isOnboarded = true` whenever
+                    // `appState.subscriptionStatus == "trial"`, which is the
+                    // default on a fresh install. Restore on a device with no
+                    // Apple entitlement would land here, see the default
+                    // "trial" status, and bypass the onboarding paywall.
+                    // We now require `restorePurchases()` to return an
+                    // explicit success signal — i.e. the backend confirmed
+                    // an actually-active subscription — before progressing.
                     Button {
                         Task {
                             isRestoring = true
                             restoreMessage = nil
                             purchaseError = nil
-                            let statusBefore = appState.subscriptionStatus
-                            await subscriptionManager.restorePurchases()
+                            let restoredOK = await subscriptionManager.restorePurchases()
                             isRestoring = false
-                            if appState.subscriptionStatus == "active" || appState.subscriptionStatus == "trial" {
-                                // During onboarding the paywall is non-dismissible
-                                // (canDismiss=false), so the only way out after a
-                                // successful restore is to mark onboarding complete.
+
+                            if restoredOK {
                                 if isOnboarding {
                                     appState.isOnboarded = true
                                 }
-                                if statusBefore != appState.subscriptionStatus {
-                                    dismiss()
-                                } else {
-                                    restoreMessage = "Subscription restored."
-                                }
+                                dismiss()
                             } else if let err = subscriptionManager.purchaseError, !err.isEmpty {
                                 purchaseError = err
                             } else {

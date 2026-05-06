@@ -147,24 +147,53 @@ class SubscriptionManager: ObservableObject {
 
     // MARK: - Restore Purchases
 
-    func restorePurchases() async {
+    /// Restore purchases. Returns true only when AppStore.sync surfaces at
+    /// least one verified entitlement that the backend also confirms as
+    /// active.
+    ///
+    /// Audit F-1: callers used to gate "restore succeeded" on
+    /// `appState.subscriptionStatus == "trial" || "active"` after this
+    /// returned, but `subscriptionStatus` defaults to `"trial"` on a fresh
+    /// install. With no Apple entitlement, the inner loop in
+    /// `verifyCurrentEntitlements` runs zero times and never modifies the
+    /// status, so the caller incorrectly treated the default-`"trial"` as
+    /// a successful restore and let the user past the onboarding paywall.
+    /// We now return an explicit Bool that reflects whether a real
+    /// entitlement was found and confirmed by the backend.
+    @discardableResult
+    func restorePurchases() async -> Bool {
         do {
             purchaseError = nil
             try await AppStore.sync()
-            await verifyCurrentEntitlements()
+            return await verifyCurrentEntitlements()
         } catch {
             purchaseError = "Restore failed: \(error.localizedDescription)"
+            return false
         }
     }
 
     // MARK: - Server Verification
 
-    /// Verify all current entitlements with the server. Called on app launch.
-    func verifyCurrentEntitlements() async {
+    /// Verify all current entitlements with the server. Called on app launch
+    /// and from `restorePurchases`. Returns true if at least one
+    /// transaction was verified end-to-end (Apple-verified AND the backend
+    /// confirmed it as `subscription_status == "active"`).
+    @discardableResult
+    func verifyCurrentEntitlements() async -> Bool {
+        var anyActive = false
         for await result in Transaction.currentEntitlements {
             guard case .verified(let transaction) = result else { continue }
-            await verifyWithServer(transactionID: String(transaction.id))
+            // requireActiveStatus=true so we only count this entitlement if
+            // the backend says the contractor is currently active. A
+            // user-cancelled-but-still-in-grace-period transaction can still
+            // appear in currentEntitlements; we trust the server's view.
+            let confirmed = await verifyWithServer(
+                transactionID: String(transaction.id),
+                requireActiveStatus: true
+            )
+            if confirmed { anyActive = true }
         }
+        return anyActive
     }
 
     @discardableResult

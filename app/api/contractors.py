@@ -221,15 +221,61 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     # callers (global bearer token) bypass Apple verification.
     await _enforce_apple_identity(request, body.apple_user_id, body.apple_identity_token)
 
-    # Deduplicate: if owner_phone is provided, check for existing contractor
+    # Deduplicate: if owner_phone is provided, check for existing contractor.
+    #
+    # Audit F-4: this lookup branch previously trusted owner_phone alone.
+    # Any caller with a valid Apple identity token (i.e. any Apple account
+    # holder) could pass a victim's phone number and receive the victim's
+    # contractor_id, a fresh api_token, and the subscription_uuid.
+    # PROTECTED_FIELDS already locks identity fields against PATCH-based
+    # rebinding, so the create endpoint was the remaining hijack path.
+    #
+    # The fix is to require the existing record's apple_user_id to match
+    # the verified caller's apple_user_id. Legacy records with no
+    # apple_user_id are bound to the first caller that presents a verified
+    # Apple identity for them — acceptable for the current pre-launch user
+    # base (small, controlled) and aligns the legacy account with the
+    # current Sign-in-with-Apple flow on first use.
     if body.owner_phone:
         from app.db.contractors import get_contractor_by_owner_phone
         existing = await get_contractor_by_owner_phone(body.owner_phone)
         if existing:
-            logger.info(f"Returning existing contractor {existing['contractor_id']} for phone {redact_phone(body.owner_phone)}")
-            # Issue a fresh API token for the existing contractor
+            existing_apple_id = (existing.get("apple_user_id") or "").strip()
+            requested_apple_id = (body.apple_user_id or "").strip()
+
+            if existing_apple_id and existing_apple_id != requested_apple_id:
+                # Cross-account hijack attempt. Log prefixes only (F-16).
+                logger.warning(
+                    "Phone-lookup hijack attempt rejected: phone=%s "
+                    "existing_apple_prefix=%s requested_apple_prefix=%s",
+                    redact_phone(body.owner_phone),
+                    existing_apple_id[:8],
+                    requested_apple_id[:8] if requested_apple_id else "(empty)",
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="An account already exists for this phone number under a different Apple ID.",
+                )
+
+            logger.info(
+                "Returning existing contractor %s for phone %s",
+                existing["contractor_id"],
+                redact_phone(body.owner_phone),
+            )
             from app.middleware.auth import generate_contractor_token
             contractor_id = existing["contractor_id"]
+
+            # Bind apple_user_id on first authenticated access for legacy
+            # records that pre-date the Apple Sign-In requirement.
+            if not existing_apple_id and requested_apple_id:
+                logger.info(
+                    "Binding apple_user_id to legacy contractor %s on first verified sign-in",
+                    contractor_id,
+                )
+                await update_contractor(
+                    contractor_id, {"apple_user_id": requested_apple_id}
+                )
+
             subscription_uuid = await ensure_subscription_uuid(contractor_id, existing)
             raw_token, token_hash = generate_contractor_token(contractor_id)
             await update_contractor(contractor_id, {"api_token_hash": token_hash})

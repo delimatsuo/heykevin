@@ -925,12 +925,23 @@ struct OnboardingView: View {
         let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? "personal"
         let number = profile["twilio_number"] as? String ?? ""
         let subUUID = profile["subscription_uuid"] as? String ?? ""
+        // Audit F-2: previously this method propagated everything except
+        // subscription state, so a returning user whose server-side status
+        // was "expired" reinstalled the app, signed in, and landed in the
+        // main UI with the local default "trial". The expired-paywall in
+        // ContentView never fired because iOS still believed the trial was
+        // active. Read both server-authoritative fields here and apply them
+        // before flipping isOnboarded.
+        let subStatus = profile["subscription_status"] as? String ?? ""
+        let subTier = profile["subscription_tier"] as? String ?? ""
 
         await MainActor.run {
             if !name.isEmpty { appState.userName = name }
             if !biz.isEmpty { appState.businessName = biz }
             appState.mode = (mode == "personal") ? "personal" : "business"
             if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
+            if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
+            if !subTier.isEmpty { appState.subscriptionTier = subTier }
         }
 
         // If account has no Kevin number, provision one before completing restore
@@ -942,6 +953,11 @@ struct OnboardingView: View {
 
         await MainActor.run {
             appState.kevinNumber = number
+            // Even an expired account completes "onboarding" here; the
+            // ContentView gate (subscriptionStatus == "expired") then
+            // immediately presents the forced paywall on the first frame.
+            // This is the right shape: onboarding is "I have an account",
+            // ContentView's gate is "I have a paid subscription".
             appState.isOnboarded = true
         }
 

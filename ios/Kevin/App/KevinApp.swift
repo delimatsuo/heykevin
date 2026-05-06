@@ -74,8 +74,30 @@ struct KevinApp: App {
                         if !pushToken.isEmpty {
                             await APIClient.shared.registerDevice(pushToken: pushToken)
                         }
-                        // Verify subscription entitlements once on cold launch
+                        // Verify subscription entitlements once on cold launch.
+                        //
+                        // Audit F-5: verifyCurrentEntitlements only iterates
+                        // `Transaction.currentEntitlements`. If Apple has no
+                        // active entitlement to report (typical for an
+                        // expired or never-subscribed user), the loop is a
+                        // no-op and `appState.subscriptionStatus` stays at
+                        // whatever was in Keychain — which can be a stale
+                        // "trial" or "active" while the server already says
+                        // "expired". Always fetch the contractor profile
+                        // explicitly so the server view wins, then run the
+                        // entitlement loop for any active StoreKit
+                        // transactions.
                         if !appState.contractorId.isEmpty {
+                            if let profile = await APIClient.shared.getContractorProfile(
+                                contractorId: appState.contractorId
+                            ) {
+                                let status = profile["subscription_status"] as? String ?? ""
+                                let tier = profile["subscription_tier"] as? String ?? ""
+                                await MainActor.run {
+                                    if !status.isEmpty { appState.subscriptionStatus = status }
+                                    if !tier.isEmpty { appState.subscriptionTier = tier }
+                                }
+                            }
                             await SubscriptionManager.shared.verifyCurrentEntitlements()
                         }
                     }

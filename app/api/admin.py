@@ -25,6 +25,15 @@ def _require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+def _timestamp_sort_value(value) -> float:
+    """Return a numeric timestamp for sorting mixed Firestore timestamp values."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if hasattr(value, "timestamp"):
+        return float(value.timestamp())
+    return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Overview
 # ---------------------------------------------------------------------------
@@ -104,8 +113,6 @@ async def admin_list_contractors(request: Request):
         docs = list(
             db.collection("contractors")
             .where("active", "==", True)
-            .order_by("created_at", direction="DESCENDING")
-            .limit(200)
             .stream()
         )
         results = []
@@ -123,6 +130,11 @@ async def admin_list_contractors(request: Request):
                 "deleted_app_detected_at": d.get("deleted_app_detected_at"),
                 "twilio_number": d.get("twilio_number", ""),
             })
+        results.sort(
+            key=lambda item: _timestamp_sort_value(item.get("created_at")),
+            reverse=True,
+        )
+        results = results[:200]
         return results
 
     contractors = await loop.run_in_executor(None, _fetch)

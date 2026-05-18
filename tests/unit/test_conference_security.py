@@ -119,7 +119,9 @@ def test_new_conference_name_is_opaque_and_unique():
 
     # Without prefix the name is just the entropy.
     n3 = conference_registry.new_conference_name()
-    assert "_" not in n3 or len(n3.split("_", 1)[0]) > 3  # url-safe may include '-' and '_' inside
+    assert len(n3) >= 20
+    assert sample_call_sid not in n3
+    assert not n3.startswith(("call_", "direct_", "expired_", "pickup_", "urgent_"))
 
 
 @pytest.mark.asyncio

@@ -191,7 +191,8 @@ Defined in `.github/workflows/deploy.yml`:
 - **Push to `staging` branch** runs `Test` then `Deploy to Staging` (`kevin-api-staging`).
 - **Push to `main` runs nothing.** Merging a PR to `main` does not deploy. CLAUDE.md previously claimed otherwise; that was wrong.
 - **Production deploys are manual:** `gh workflow run deploy.yml -f target=production --ref main` (or click "Run workflow" in the Actions tab on the `Deploy` workflow with `target=production`). The job refuses to run from any ref other than `main`.
-- Direct `gcloud run deploy kevin-api --source .` from a developer machine also works and was the path used through the pre-launch hardening — but it bypasses CI tests, so prefer the workflow_dispatch path once `staging` is up to date.
+- Run `scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging` after the staging deploy and before production. Set `ADMIN_API_TOKEN` to include the authenticated admin overview smoke check.
+- Direct `gcloud run deploy kevin-api --source .` from a developer machine also works, but it bypasses CI tests and deploy approval, so prefer the workflow_dispatch path after staging is verified.
 
 ### Environments
 | | Production | Staging |

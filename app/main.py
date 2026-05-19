@@ -5,6 +5,7 @@ FastAPI application entry point.
 
 import signal
 import asyncio
+import os
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,8 +84,14 @@ async def admin_page():
 
 @app.get("/health")
 async def health():
-    """Health check — returns minimal info only."""
-    return {"status": "ok"}
+    """Health check with non-secret deploy identity."""
+    return {
+        "status": "ok",
+        "environment": settings.environment,
+        "service": os.getenv("K_SERVICE", ""),
+        "revision": os.getenv("K_REVISION", ""),
+        "deploy_sha": os.getenv("DEPLOY_SHA", ""),
+    }
 
 
 if settings.environment == "development":

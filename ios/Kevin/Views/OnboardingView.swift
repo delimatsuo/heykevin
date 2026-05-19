@@ -915,8 +915,9 @@ struct OnboardingView: View {
             }
         }
 
-        // 3. No account found — new user, continue with onboarding
-        await MainActor.run { step = .modeSelect }
+        // 3. No account found — new user, collect their phone number before
+        // choosing a mode so account creation can bind owner_phone/country.
+        await MainActor.run { step = .phoneEntry }
     }
 
     private func restoreFromProfile(_ profile: [String: Any]) async {
@@ -963,7 +964,7 @@ struct OnboardingView: View {
 
         // Sync contacts in background only if user has previously consented to upload
         if appState.contactsUploadConsent {
-            _ = await ContactSyncManager.shared.syncContacts(contractorId: appState.contractorId)
+            _ = await ContactSyncManager.shared.syncContacts(contractorId: appState.contractorId, force: true)
         }
     }
 
@@ -1166,7 +1167,7 @@ struct OnboardingView: View {
 
         // Sync contacts only if the user gave explicit upload consent
         if appState.contactsUploadConsent {
-            let syncResult = await ContactSyncManager.shared.syncContacts(contractorId: contractorId)
+            let syncResult = await ContactSyncManager.shared.syncContacts(contractorId: contractorId, force: true)
             if case .success(let synced, _) = syncResult {
                 contactsSynced = synced
             }

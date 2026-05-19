@@ -128,7 +128,8 @@ struct SettingsView: View {
                             Task {
                                 appState.contactsUploadConsent = true
                                 let result = await ContactSyncManager.shared.syncContacts(
-                                    contractorId: appState.contractorId
+                                    contractorId: appState.contractorId,
+                                    force: true
                                 )
                                 switch result {
                                 case .success(let synced, _):

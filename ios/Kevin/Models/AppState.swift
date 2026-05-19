@@ -8,6 +8,15 @@ enum AppTab {
 class AppState: ObservableObject {
     static let shared = AppState()
 
+    private static let keychainBackedKeys = [
+        "contractorId",
+        "appleUserId",
+        "subscriptionStatus",
+        "subscriptionTier",
+        "subscriptionUUID",
+        "contractorApiToken",
+    ]
+
     let backendURL: String = {
         guard let url = Bundle.main.infoDictionary?["BackendURL"] as? String,
               !url.isEmpty,
@@ -116,6 +125,7 @@ class AppState: ObservableObject {
 
     // Device
     @Published var pushToken: String = ""
+    @Published var voipToken: String = ""
 
     // Navigation
     @Published var selectedTab: AppTab = .recents
@@ -254,6 +264,9 @@ class AppState: ObservableObject {
     /// Check backend for an active call (used on app foreground)
     func checkForActiveCall() {
         Task {
+            await MainActor.run {
+                self.refreshSecureStorageForActiveUse()
+            }
             if let call = await APIClient.shared.getActiveCall() {
                 guard !call.callSid.isEmpty else { return }
                 await MainActor.run {
@@ -274,6 +287,41 @@ class AppState: ObservableObject {
                     showActiveCall = true
                 }
             }
+        }
+    }
+
+    @MainActor
+    func refreshSecureStorageForActiveUse() {
+        KeychainManager.shared.migrateAccessibility(for: Self.keychainBackedKeys)
+
+        if contractorId.isEmpty,
+           let savedContractorId = KeychainManager.shared.retrieve("contractorId"),
+           !savedContractorId.isEmpty {
+            contractorId = savedContractorId
+        }
+
+        if appleUserId.isEmpty,
+           let savedAppleUserId = KeychainManager.shared.retrieve("appleUserId"),
+           !savedAppleUserId.isEmpty {
+            appleUserId = savedAppleUserId
+        }
+
+        if subscriptionUUID.isEmpty,
+           let savedSubscriptionUUID = KeychainManager.shared.retrieve("subscriptionUUID"),
+           !savedSubscriptionUUID.isEmpty {
+            subscriptionUUID = savedSubscriptionUUID
+        }
+
+        if let savedSubscriptionStatus = KeychainManager.shared.retrieve("subscriptionStatus"),
+           !savedSubscriptionStatus.isEmpty,
+           subscriptionStatus != savedSubscriptionStatus {
+            subscriptionStatus = savedSubscriptionStatus
+        }
+
+        if let savedSubscriptionTier = KeychainManager.shared.retrieve("subscriptionTier"),
+           !savedSubscriptionTier.isEmpty,
+           subscriptionTier != savedSubscriptionTier {
+            subscriptionTier = savedSubscriptionTier
         }
     }
 }

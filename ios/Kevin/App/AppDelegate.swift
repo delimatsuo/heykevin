@@ -92,6 +92,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         #endif
 
         // Register VoIP token with backend
+        AppState.shared.voipToken = token
         Task {
             await APIClient.shared.registerDevice(pushToken: AppState.shared.pushToken, voipToken: token)
         }

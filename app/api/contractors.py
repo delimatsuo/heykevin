@@ -51,6 +51,17 @@ def _require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+def _resolve_country_code(country_code: str = "", owner_phone: str = "") -> str:
+    """Return a provisioning-safe country code for contractor onboarding."""
+    normalized = (country_code or "").strip().upper()
+    if normalized:
+        return normalized
+    if owner_phone:
+        from app.db.contractors import detect_country_from_phone
+        return detect_country_from_phone(owner_phone)
+    return "US"
+
+
 async def _enforce_apple_identity(
     request: Request,
     apple_user_id: str,
@@ -296,9 +307,10 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
         # Business or Business Pro entitlement.
         data["mode"] = "personal"
     # Auto-detect country from phone if not explicitly provided
-    if not data.get("country_code") and data.get("owner_phone"):
-        from app.db.contractors import detect_country_from_phone
-        data["country_code"] = detect_country_from_phone(data["owner_phone"])
+    data["country_code"] = _resolve_country_code(
+        data.get("country_code", ""),
+        data.get("owner_phone", ""),
+    )
     # Twilio number will be provisioned separately
     data["twilio_number"] = ""
     data["calendar_type"] = "none"
@@ -344,7 +356,12 @@ async def api_provision_number(contractor_id: str, request: Request):
         )
         return {"status": "ok", "phone_number": existing_number, "existing": True}
 
-    country_code = contractor.get("country_code", "US")
+    country_code = _resolve_country_code(
+        contractor.get("country_code", ""),
+        contractor.get("owner_phone", ""),
+    )
+    if contractor.get("country_code") != country_code:
+        await update_contractor(contractor_id, {"country_code": country_code})
 
     if country_code in REGULATORY_COUNTRIES:
         if not contractor.get("business_address") or not contractor.get("business_city"):

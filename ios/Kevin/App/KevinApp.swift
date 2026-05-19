@@ -6,6 +6,7 @@ struct KevinApp: App {
     @StateObject private var appState = AppState.shared
     @Environment(\.scenePhase) var scenePhase
     @State private var lastSyncTime: Date = .distantPast
+    @State private var lastDeviceRegistrationTime: Date = .distantPast
     @State private var isFirstLaunch = true
     @State private var listenerStarted = false
 
@@ -22,6 +23,9 @@ struct KevinApp: App {
             }
             .appVersionGate()
             .task {
+                await MainActor.run {
+                    appState.refreshSecureStorageForActiveUse()
+                }
                 // Kick off a version check on cold launch so the gate can decide
                 // whether to block, nudge, or stay silent.
                 await AppVersionService.shared.check()
@@ -29,6 +33,8 @@ struct KevinApp: App {
         }
         .onChange(of: scenePhase) {
             if scenePhase == .active {
+                appState.refreshSecureStorageForActiveUse()
+
                 // Start StoreKit transaction listener once
                 if !listenerStarted {
                     listenerStarted = true
@@ -64,16 +70,31 @@ struct KevinApp: App {
                 }
                 #endif
 
+                let wasFirstLaunch = isFirstLaunch
+                if wasFirstLaunch {
+                    isFirstLaunch = false
+                }
+
                 // Delay API calls on cold start — iOS networking needs time to initialize
                 Task {
-                    if isFirstLaunch {
-                        isFirstLaunch = false
+                    if wasFirstLaunch {
                         try? await Task.sleep(nanoseconds: 3_000_000_000)
-                        // Retry device registration after network is warm
-                        let pushToken = appState.pushToken
-                        if !pushToken.isEmpty {
-                            await APIClient.shared.registerDevice(pushToken: pushToken)
-                        }
+                    }
+
+                    // Retry device registration after network is warm, and again
+                    // periodically in case a token callback arrived while the
+                    // secure session was unavailable during a locked background launch.
+                    if !appState.contractorId.isEmpty,
+                       (!appState.pushToken.isEmpty || !appState.voipToken.isEmpty),
+                       Date().timeIntervalSince(lastDeviceRegistrationTime) > 3600 {
+                        lastDeviceRegistrationTime = Date()
+                        await APIClient.shared.registerDevice(
+                            pushToken: appState.pushToken,
+                            voipToken: appState.voipToken
+                        )
+                    }
+
+                    if wasFirstLaunch {
                         // Verify subscription entitlements once on cold launch.
                         //
                         // Audit F-5: verifyCurrentEntitlements only iterates
@@ -104,7 +125,8 @@ struct KevinApp: App {
                     appState.checkForActiveCall()
                 }
 
-                // Sync contacts at most once per hour — only if user has consented
+                // Ask for an automatic contact sync at most once per foreground hour.
+                // ContactSyncManager also persists a longer battery guard across launches.
                 if !appState.contractorId.isEmpty,
                    appState.contactsUploadConsent,
                    Date().timeIntervalSince(lastSyncTime) > 3600 {

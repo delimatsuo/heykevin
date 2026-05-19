@@ -89,14 +89,16 @@ class APIClient {
 
     /// Retry wrapper — only retries on 5xx server errors, not network failures.
     /// On 401, signals AppState to show re-auth (token expired/invalid).
-    private func retryRequest(_ request: URLRequest, maxRetries: Int = 1) async throws -> (Data, URLResponse) {
+    private func retryRequest(_ request: URLRequest, maxRetries: Int = 1, signalReauth: Bool = true) async throws -> (Data, URLResponse) {
         var lastError: Error?
         for attempt in 0...maxRetries {
             do {
                 let (data, response) = try await session.data(for: request)
                 if let http = response as? HTTPURLResponse {
                     if http.statusCode == 401 {
-                        await MainActor.run { AppState.shared.needsReauth = true }
+                        if signalReauth {
+                            await MainActor.run { AppState.shared.needsReauth = true }
+                        }
                         return (data, response)
                     }
                     if http.statusCode >= 500 && attempt < maxRetries {
@@ -149,6 +151,24 @@ class APIClient {
 
     func registerDevice(pushToken: String, voipToken: String = "") async {
         do {
+            guard !pushToken.isEmpty || !voipToken.isEmpty else { return }
+
+            await MainActor.run {
+                AppState.shared.refreshSecureStorageForActiveUse()
+            }
+
+            let contractorId = await MainActor.run { AppState.shared.contractorId }
+            guard !contractorId.isEmpty else {
+                debugLog("Register device skipped: no contractor ID yet")
+                return
+            }
+
+            let token = contractorToken
+            guard !token.isEmpty else {
+                debugLog("Register device skipped: contractor token unavailable")
+                return
+            }
+
             let url = URL(string: "\(baseURL)/api/register-device")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -163,22 +183,26 @@ class APIClient {
             if !voipToken.isEmpty {
                 body["voip_token"] = voipToken
             }
-            let contractorId = AppState.shared.contractorId
-            if !contractorId.isEmpty {
-                body["contractor_id"] = contractorId
-            }
+            body["contractor_id"] = contractorId
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            authorize(&request)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-            let (_, response) = try await retryRequest(request)
+            let (_, response) = try await retryRequest(request, signalReauth: false)
             if let http = response as? HTTPURLResponse {
                 debugLog("Register device: HTTP \(http.statusCode)")
                 if http.statusCode == 200 {
                     debugLog("Device registered successfully")
                     await MainActor.run {
                         AppState.shared.isRegistered = true
-                        AppState.shared.pushToken = pushToken
+                        if !pushToken.isEmpty {
+                            AppState.shared.pushToken = pushToken
+                        }
+                        if !voipToken.isEmpty {
+                            AppState.shared.voipToken = voipToken
+                        }
                     }
+                } else if http.statusCode == 401 {
+                    debugLog("Device registration unauthorized; will retry on next foreground")
                 }
             }
         } catch {

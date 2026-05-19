@@ -20,14 +20,20 @@ actor ContactSyncManager {
 
     private let store = CNContactStore()
     private let lastSyncHashKey = "lastContactSyncHash"
+    private let lastSyncAttemptKey = "lastContactSyncAttemptAt"
     private let permissionDeniedKey = "contactsPermissionDenied"
     private let minSyncInterval: TimeInterval = 300 // 5 minutes
+    private let automaticSyncInterval: TimeInterval = 24 * 3600
 
     private var lastSyncTime: Date?
     private var isSyncing = false
 
     /// Request full contacts access and sync all contacts to backend.
-    func syncContacts(contractorId: String) async -> SyncResult {
+    func syncContacts(contractorId: String, force: Bool = false) async -> SyncResult {
+        guard !contractorId.isEmpty else {
+            return .error("Missing contractor ID")
+        }
+
         // Prevent concurrent syncs
         guard !isSyncing else {
             debugLog("Contact sync: already in progress")
@@ -40,10 +46,22 @@ actor ContactSyncManager {
             return .permissionDenied
         }
 
-        // Rate limit client-side
-        if let last = lastSyncTime, Date().timeIntervalSince(last) < minSyncInterval {
-            debugLog("Contact sync: rate limited")
-            return .rateLimited
+        if !force {
+            let now = Date()
+            // Rate limit client-side within this process.
+            if let last = lastSyncTime, now.timeIntervalSince(last) < minSyncInterval {
+                debugLog("Contact sync: rate limited")
+                return .rateLimited
+            }
+
+            // Persist the automatic sync window so cold launches do not
+            // repeatedly enumerate the entire address book.
+            let persistedLast = UserDefaults.standard.double(forKey: lastSyncAttemptKey)
+            if persistedLast > 0,
+               now.timeIntervalSince(Date(timeIntervalSince1970: persistedLast)) < automaticSyncInterval {
+                debugLog("Contact sync: automatic sync recently completed")
+                return .rateLimited
+            }
         }
 
         // Check authorization
@@ -93,7 +111,10 @@ actor ContactSyncManager {
             return .error("Contact fetch failed: \(error.localizedDescription)")
         }
 
-        guard !contacts.isEmpty else { return .success(synced: 0, removed: 0) }
+        guard !contacts.isEmpty else {
+            recordSyncAttempt()
+            return .success(synced: 0, removed: 0)
+        }
 
         // Compute hash for server-side comparison (normalize to digits-only)
         let sortedPhones = contacts.map { $0.phone.filter { $0.isNumber } }.sorted()
@@ -106,7 +127,7 @@ actor ContactSyncManager {
         let lastHash = UserDefaults.standard.string(forKey: lastSyncHashKey) ?? ""
         if hash == lastHash {
             debugLog("Contact sync: hash unchanged locally, skipping")
-            lastSyncTime = Date()
+            recordSyncAttempt()
             return .success(synced: 0, removed: 0)
         }
 
@@ -132,7 +153,7 @@ actor ContactSyncManager {
         // Cache the hash locally
         UserDefaults.standard.set(hash, forKey: lastSyncHashKey)
 
-        lastSyncTime = Date()
+        recordSyncAttempt()
         debugLog("Contact sync complete: synced=\(totalSynced), removed=\(totalRemoved)")
         return .success(synced: totalSynced, removed: totalRemoved)
     }
@@ -159,5 +180,11 @@ actor ContactSyncManager {
     /// Reset permission denied cache (e.g., if user changes in Settings).
     func resetPermissionCache() {
         UserDefaults.standard.removeObject(forKey: permissionDeniedKey)
+    }
+
+    private func recordSyncAttempt() {
+        let now = Date()
+        lastSyncTime = now
+        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: lastSyncAttemptKey)
     }
 }

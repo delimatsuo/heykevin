@@ -5,9 +5,11 @@ class KeychainManager {
     static let shared = KeychainManager()
 
     private let serviceName = "com.kevin.callscreen"
+    private let defaultAccessibility = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
-    func save(_ key: String, value: String) {
-        guard let data = value.data(using: .utf8) else { return }
+    @discardableResult
+    func save(_ key: String, value: String) -> Bool {
+        guard let data = value.data(using: .utf8) else { return false }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -15,15 +17,25 @@ class KeychainManager {
             kSecAttrAccount as String: key,
         ]
 
-        // Delete existing item first
-        SecItemDelete(query as CFDictionary)
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: defaultAccessibility,
+        ]
 
-        // Add new item
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        guard updateStatus == errSecItemNotFound else {
+            return false
+        }
+
         var addQuery = query
         addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        addQuery[kSecAttrAccessible as String] = defaultAccessibility
 
-        SecItemAdd(addQuery as CFDictionary, nil)
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        return addStatus == errSecSuccess
     }
 
     func retrieve(_ key: String) -> String? {
@@ -52,5 +64,12 @@ class KeychainManager {
             kSecAttrAccount as String: key,
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    func migrateAccessibility(for keys: [String]) {
+        for key in keys {
+            guard let value = retrieve(key), !value.isEmpty else { continue }
+            _ = save(key, value: value)
+        }
     }
 }

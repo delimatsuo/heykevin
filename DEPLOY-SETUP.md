@@ -37,12 +37,22 @@
 feature branch
   -> pull request into staging
   -> push/merge to staging deploys kevin-api-staging
-  -> test with the Kevin Staging iOS scheme
+  -> run scripts/smoke_release.sh against staging
+  -> test with the Kevin Staging iOS scheme when iOS behavior changed
   -> pull request into main
   -> manually run GitHub Actions > Deploy > target=production from main
 ```
 
 Production no longer deploys automatically from a push to `main`. This keeps normal development isolated from live users while preserving a clear manual release button when it is time to update production.
+
+Cloud Run deploys set `DEPLOY_SHA=$GITHUB_SHA`, and `/health` returns `status`, `environment`, `service`, `revision`, and `deploy_sha` so the deployed revision can be tied back to GitHub.
+
+Run the release smoke script after staging deploys:
+
+```bash
+scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging
+ADMIN_API_TOKEN=... REQUIRE_ADMIN_API=true scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging
+```
 
 ## Required External Settings
 
@@ -165,7 +175,7 @@ gcloud run deploy kevin-api-staging \
   --allow-unauthenticated \
   --service-account STAGING_RUNTIME_SERVICE_ACCOUNT \
   --build-service-account STAGING_BUILD_SERVICE_ACCOUNT \
-  --update-env-vars ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=YOUR_STAGING_PROJECT,FIREBASE_DATABASE_URL=YOUR_STAGING_RTDB_URL,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=YOUR_PROD_TWILIO_ACCOUNT_SID
+            --update-env-vars ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=YOUR_STAGING_PROJECT,FIREBASE_DATABASE_URL=YOUR_STAGING_RTDB_URL,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=YOUR_PROD_TWILIO_ACCOUNT_SID,DEPLOY_SHA=MANUAL_DEPLOY_SHA
 
 # Deploy to production after staging has been tested
 git checkout main
@@ -176,5 +186,5 @@ gcloud run deploy kevin-api \
   --allow-unauthenticated \
   --service-account PRODUCTION_RUNTIME_SERVICE_ACCOUNT \
   --build-service-account PRODUCTION_BUILD_SERVICE_ACCOUNT \
-  --update-env-vars ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=kevin-491315,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=YOUR_PROD_TWILIO_ACCOUNT_SID
+  --update-env-vars ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=kevin-491315,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=YOUR_PROD_TWILIO_ACCOUNT_SID,DEPLOY_SHA=MANUAL_DEPLOY_SHA
 ```

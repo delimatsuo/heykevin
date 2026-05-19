@@ -167,11 +167,11 @@ Kevin speaks and understands **all languages automatically**. Deepgram runs in `
 
 ### Backend
 ```bash
-# Deploy to production
-gcloud run deploy kevin-api --source . --project kevin-491315 --region us-central1 --allow-unauthenticated
+# Normal production deploy: use the manual GitHub Actions workflow from main
+gh workflow run deploy.yml -f target=production --ref main
 
-# Or just push to main — GitHub Actions deploys automatically
-git push origin main
+# Smoke-test staging before production
+scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging
 ```
 
 ### iOS
@@ -185,15 +185,18 @@ cd ios && xcodegen generate
 # 3. Upload: xcrun altool --upload-app --apiKey HLB7866PG8 --apiIssuer 4b083963-...
 ```
 
-### Branches
-- `main` → auto-deploys to `kevin-api` (production)
-- `staging` → auto-deploys to `kevin-api-staging`
+### Branches and deploy triggers
+Defined in `.github/workflows/deploy.yml`:
+- **PRs to `staging` or `main`** run the `Test` job only. No deploy.
+- **Push to `staging` branch** runs `Test` then deploys `kevin-api-staging`.
+- **Push to `main` runs no deploy.** Production is manual.
+- **Production deploys are manual:** `gh workflow run deploy.yml -f target=production --ref main`.
 
 ### Environments
 | | Production | Staging |
 |--|--|--|
 | Cloud Run | `kevin-api` | `kevin-api-staging` |
-| URL | `https://kevin-api-752910912062.us-central1.run.app` | pending (created on first staging push) |
+| URL | `https://kevin-api-752910912062.us-central1.run.app` | `https://kevin-api-staging-l63rergg7a-uc.a.run.app` |
 | APNs | production | sandbox |
 | App Store | production | sandbox |
 

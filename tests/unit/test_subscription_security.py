@@ -13,8 +13,7 @@ contractor DB. They exercise:
 from __future__ import annotations
 
 import asyncio
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pytest
 from fastapi import HTTPException
@@ -238,6 +237,30 @@ async def test_verify_endpoint_fails_closed_when_apple_unreachable(monkeypatch):
     import json as _json
     payload = _json.loads(bytes(response.body).decode())
     assert payload["status"] == "verification_failed"
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_duplicate_transaction_bypasses_rate_limit(monkeypatch):
+    """Idempotent StoreKit retries must not be rejected by the verify limiter."""
+
+    async def fake_is_seen(_cid, _tx):
+        return True
+
+    async def fail_get_binding(_tx):
+        raise AssertionError("duplicate transaction should not check global binding")
+
+    async def fail_strict(_tx):
+        raise AssertionError("duplicate transaction should not call Apple")
+
+    monkeypatch.setattr(sub_service, "is_transaction_seen", fake_is_seen)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fail_get_binding)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", fail_strict)
+    monkeypatch.setattr(sub_api, "_check_rate_limit", lambda *_args, **_kwargs: False)
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    response = await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert response == {"status": "ok", "message": "already_processed"}
 
 
 @pytest.mark.asyncio

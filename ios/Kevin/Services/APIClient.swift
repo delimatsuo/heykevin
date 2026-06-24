@@ -122,9 +122,12 @@ class APIClient {
     // MARK: - Active Call Check
 
     func getActiveCall() async -> ActiveCallInfo? {
+        let contractorId = await MainActor.run { AppState.shared.contractorId }
+        guard !contractorId.isEmpty, !contractorToken.isEmpty else { return nil }
+
         do {
             var components = URLComponents(string: "\(baseURL)/api/active-call")!
-            components.queryItems = [URLQueryItem(name: "contractor_id", value: AppState.shared.contractorId)]
+            components.queryItems = [URLQueryItem(name: "contractor_id", value: contractorId)]
             let url = components.url!
             var request = URLRequest(url: url)
             request.timeoutInterval = 5
@@ -320,17 +323,15 @@ class APIClient {
     /// the original "soft fail and continue onboarding" behaviour.
     func findContractorByAppleId(appleUserId: String, appleIdentityToken: String = "") async throws -> [String: Any]? {
         do {
-            var components = URLComponents(string: "\(baseURL)/api/contractors/lookup-by-apple-id")!
-            components.queryItems = [
-                URLQueryItem(name: "apple_user_id", value: appleUserId),
-            ]
-            if !appleIdentityToken.isEmpty {
-                components.queryItems?.append(URLQueryItem(name: "apple_identity_token", value: appleIdentityToken))
-            }
-            let url = components.url!
+            let url = URL(string: "\(baseURL)/api/contractors/lookup-by-apple-id")!
             var request = URLRequest(url: url)
-            request.httpMethod = "GET"
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 10
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "apple_user_id": appleUserId,
+                "apple_identity_token": appleIdentityToken,
+            ])
             authorize(&request)
 
             let (data, response) = try await session.data(for: request)

@@ -4,9 +4,10 @@ This module verifies the JWT identity token returned by Sign in with Apple. It
 fetches and caches Apple's public JWKS from
 ``https://appleid.apple.com/auth/keys`` (1-hour TTL) and performs full RS256
 signature, issuer, audience, expiry, and ``sub`` validation. Used by the
-unauthenticated bootstrap endpoints (``POST /api/contractors`` and
-``GET /api/contractors/lookup-by-apple-id``) to prevent account takeover via
-forged Apple user IDs.
+unauthenticated bootstrap endpoints (``POST /api/contractors``,
+``POST /api/contractors/lookup-by-apple-id``, and the temporary build-23
+legacy ``GET /api/contractors/lookup-by-apple-id``) to prevent account
+takeover via forged Apple user IDs.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import Any, Optional
 import httpx
 from jose import jwk as jose_jwk
 from jose import jwt as jose_jwt
-from jose.exceptions import ExpiredSignatureError, JWTError
+from jose.exceptions import JWTError
 from jose.utils import base64url_decode
 
 from app.utils.logging import get_logger

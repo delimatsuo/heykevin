@@ -69,11 +69,11 @@ async def _enforce_apple_identity(
 ) -> None:
     """Require a valid Apple Sign-In identity token unless the caller is admin.
 
-    The two unauthenticated bootstrap endpoints (``POST /api/contractors`` and
-    ``GET /api/contractors/lookup-by-apple-id``) accept an
-    ``apple_identity_token`` from the iOS client. We must verify it server-side
-    so an attacker who only knows a victim's Apple user ID cannot impersonate
-    them. Admin callers (global bearer token) bypass this check.
+    The unauthenticated bootstrap endpoints accept an ``apple_identity_token``
+    from the iOS client. New clients send it in the request body; iOS build 23
+    still sends it to the temporary legacy GET lookup route. We must verify it
+    server-side so an attacker who only knows a victim's Apple user ID cannot
+    impersonate them. Admin callers (global bearer token) bypass this check.
     """
     if getattr(request.state, "is_admin", False):
         return
@@ -124,6 +124,11 @@ class ContractorCreate(BaseModel):
         if v and v.upper() not in SUPPORTED_COUNTRIES and v != "":
             raise ValueError(f"Unsupported country code: {v}")
         return v.upper() if v else v
+
+
+class AppleIdLookupRequest(BaseModel):
+    apple_user_id: str = Field(default="", max_length=100)
+    apple_identity_token: str = Field(default="", max_length=8192)
 
 
 class ContractorUpdate(BaseModel):
@@ -195,18 +200,13 @@ async def api_list_contractors(request: Request):
     return {"contractors": [_redact_contractor(c) for c in contractors]}
 
 
-@public_router.get("/lookup-by-apple-id")
-async def api_lookup_by_apple_id(
+async def _lookup_by_apple_id(
     request: Request,
-    apple_user_id: str = "",
-    apple_identity_token: str = "",
+    apple_user_id: str,
+    apple_identity_token: str,
 ):
-    """Find a contractor by their Apple User ID (used during onboarding/login).
-
-    Issues a fresh API token so the client can authenticate subsequent requests.
-    Requires a valid Apple Sign-In identity token whose ``sub`` matches the
-    supplied ``apple_user_id``; otherwise returns 401.
-    """
+    apple_user_id = (apple_user_id or "").strip()
+    apple_identity_token = apple_identity_token or ""
     if not apple_user_id:
         # Generic 401 — don't reveal that the only missing piece was the
         # Apple user id when the token is also missing.
@@ -224,6 +224,47 @@ async def api_lookup_by_apple_id(
         await update_contractor(contractor_id, {"api_token_hash": token_hash})
         return {"contractor_id": contractor_id, "api_token": raw_token, "subscription_uuid": subscription_uuid}
     return {"error": "Not found"}, 404
+
+
+@public_router.post("/lookup-by-apple-id")
+async def api_lookup_by_apple_id(
+    body: AppleIdLookupRequest,
+    request: Request,
+):
+    """Find a contractor by their Apple User ID (used during onboarding/login).
+
+    Issues a fresh API token so the client can authenticate subsequent requests.
+    Requires a valid Apple Sign-In identity token whose ``sub`` matches the
+    supplied ``apple_user_id``; otherwise returns 401.
+    """
+    return await _lookup_by_apple_id(
+        request,
+        apple_user_id=body.apple_user_id,
+        apple_identity_token=body.apple_identity_token,
+    )
+
+
+@public_router.get("/lookup-by-apple-id")
+async def api_lookup_by_apple_id_legacy_get(
+    request: Request,
+    apple_user_id: str = "",
+    apple_identity_token: str = "",
+):
+    """Temporary compatibility route for iOS build 23.
+
+    Build 24+ sends the Apple identity token in the POST body. Keep this GET
+    fallback only until build 24 adoption is high enough to avoid breaking
+    account restore/onboarding for users who already installed build 23.
+    """
+    logger.warning(
+        "Legacy GET lookup-by-apple-id used; apple_user_prefix=%s",
+        apple_user_id[:8] if apple_user_id else "(empty)",
+    )
+    return await _lookup_by_apple_id(
+        request,
+        apple_user_id=apple_user_id,
+        apple_identity_token=apple_identity_token,
+    )
 
 
 @router.post("")

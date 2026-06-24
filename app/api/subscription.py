@@ -82,9 +82,6 @@ async def verify_subscription(body: VerifyRequest, request: Request):
     """
     require_contractor_access(request, body.contractor_id)
 
-    if not _check_rate_limit(body.contractor_id, VERIFY_RATE_LIMIT, ":verify"):
-        raise HTTPException(status_code=429, detail="Too many verification requests")
-
     from app.services.subscription import (
         verify_transaction_strict,
         is_transaction_seen,
@@ -95,6 +92,8 @@ async def verify_subscription(body: VerifyRequest, request: Request):
     from app.db.apple_transactions import get_transaction_binding
 
     # Per-contractor dedup (cheap idempotency for retries from this same client).
+    # This must happen before the rate limit so legitimate StoreKit retries do
+    # not turn a successful purchase into noisy 429s.
     if await is_transaction_seen(body.contractor_id, body.transaction_id):
         logger.info(f"Duplicate transaction ignored: {body.transaction_id}")
         return {"status": "ok", "message": "already_processed"}
@@ -114,6 +113,9 @@ async def verify_subscription(body: VerifyRequest, request: Request):
             status_code=409,
             detail="receipt_already_bound",
         )
+
+    if not _check_rate_limit(body.contractor_id, VERIFY_RATE_LIMIT, ":verify"):
+        raise HTTPException(status_code=429, detail="Too many verification requests")
 
     result = await verify_transaction_strict(body.transaction_id)
 

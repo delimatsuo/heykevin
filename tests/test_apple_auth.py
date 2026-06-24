@@ -292,6 +292,14 @@ def _admin_request() -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(is_admin=True, contractor_id=""))
 
 
+def _lookup_route_methods() -> set[str]:
+    methods: set[str] = set()
+    for route in contractors_api.public_router.routes:
+        if getattr(route, "path", "").endswith("/lookup-by-apple-id"):
+            methods.update(getattr(route, "methods", set()) or set())
+    return methods
+
+
 @pytest.mark.asyncio
 async def test_create_contractor_rejects_missing_token():
     with pytest.raises(HTTPException) as exc_info:
@@ -399,13 +407,133 @@ async def test_create_contractor_admin_bypasses_apple_check(monkeypatch):
     assert response["status"] == "ok"
 
 
+def test_lookup_by_apple_id_keeps_legacy_get_for_build_23():
+    methods = _lookup_route_methods()
+    assert "POST" in methods
+    assert "GET" in methods
+
+
+@pytest.mark.asyncio
+async def test_lookup_by_apple_id_accepts_valid_post_body(monkeypatch):
+    captured: dict = {}
+
+    async def fake_verify(identity_token, expected_user_id, expected_audience):
+        captured["identity_token"] = identity_token
+        captured["expected_user_id"] = expected_user_id
+        captured["expected_audience"] = expected_audience
+
+    async def fake_get_contractor_by_apple_user_id(apple_user_id):
+        captured["lookup_apple_user_id"] = apple_user_id
+        return {"contractor_id": "contractor-1"}
+
+    async def fake_ensure_subscription_uuid(contractor_id, contractor):
+        captured["ensure_contractor_id"] = contractor_id
+        return "subscription-uuid-1"
+
+    async def fake_update_contractor(contractor_id, updates):
+        captured["updated_contractor_id"] = contractor_id
+        captured["updates"] = updates
+        return True
+
+    def fake_generate_contractor_token(contractor_id):
+        captured["token_contractor_id"] = contractor_id
+        return "raw-api-token", "stored-token-hash"
+
+    monkeypatch.setattr(contractors_api, "verify_apple_identity_token", fake_verify)
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_apple_user_id",
+        fake_get_contractor_by_apple_user_id,
+    )
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_subscription_uuid)
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(
+        "app.middleware.auth.generate_contractor_token",
+        fake_generate_contractor_token,
+    )
+
+    response = await contractors_api.api_lookup_by_apple_id(
+        contractors_api.AppleIdLookupRequest(
+            apple_user_id="apple-user-1",
+            apple_identity_token="identity-token-1",
+        ),
+        _non_admin_request(),
+    )
+
+    assert response == {
+        "contractor_id": "contractor-1",
+        "api_token": "raw-api-token",
+        "subscription_uuid": "subscription-uuid-1",
+    }
+    assert captured["identity_token"] == "identity-token-1"
+    assert captured["expected_user_id"] == "apple-user-1"
+    assert captured["lookup_apple_user_id"] == "apple-user-1"
+    assert captured["updates"] == {"api_token_hash": "stored-token-hash"}
+
+
+@pytest.mark.asyncio
+async def test_lookup_by_apple_id_legacy_get_accepts_build_23_query(monkeypatch):
+    captured: dict = {}
+
+    async def fake_verify(identity_token, expected_user_id, expected_audience):
+        captured["identity_token"] = identity_token
+        captured["expected_user_id"] = expected_user_id
+        captured["expected_audience"] = expected_audience
+
+    async def fake_get_contractor_by_apple_user_id(apple_user_id):
+        captured["lookup_apple_user_id"] = apple_user_id
+        return {"contractor_id": "contractor-1"}
+
+    async def fake_ensure_subscription_uuid(contractor_id, contractor):
+        captured["ensure_contractor_id"] = contractor_id
+        return "subscription-uuid-1"
+
+    async def fake_update_contractor(contractor_id, updates):
+        captured["updated_contractor_id"] = contractor_id
+        captured["updates"] = updates
+        return True
+
+    def fake_generate_contractor_token(contractor_id):
+        captured["token_contractor_id"] = contractor_id
+        return "raw-api-token", "stored-token-hash"
+
+    monkeypatch.setattr(contractors_api, "verify_apple_identity_token", fake_verify)
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_apple_user_id",
+        fake_get_contractor_by_apple_user_id,
+    )
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_subscription_uuid)
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(
+        "app.middleware.auth.generate_contractor_token",
+        fake_generate_contractor_token,
+    )
+
+    response = await contractors_api.api_lookup_by_apple_id_legacy_get(
+        _non_admin_request(),
+        apple_user_id="apple-user-1",
+        apple_identity_token="identity-token-1",
+    )
+
+    assert response == {
+        "contractor_id": "contractor-1",
+        "api_token": "raw-api-token",
+        "subscription_uuid": "subscription-uuid-1",
+    }
+    assert captured["identity_token"] == "identity-token-1"
+    assert captured["expected_user_id"] == "apple-user-1"
+    assert captured["lookup_apple_user_id"] == "apple-user-1"
+    assert captured["updates"] == {"api_token_hash": "stored-token-hash"}
+
+
 @pytest.mark.asyncio
 async def test_lookup_by_apple_id_rejects_missing_token():
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_lookup_by_apple_id(
+            contractors_api.AppleIdLookupRequest(
+                apple_user_id="apple-user-1",
+                apple_identity_token="",
+            ),
             _non_admin_request(),
-            apple_user_id="apple-user-1",
-            apple_identity_token="",
         )
 
     assert exc_info.value.status_code == 401
@@ -418,9 +546,11 @@ async def test_lookup_by_apple_id_rejects_invalid_token(signing_key, patch_jwks)
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_lookup_by_apple_id(
+            contractors_api.AppleIdLookupRequest(
+                apple_user_id="apple-user-victim",
+                apple_identity_token=bad_token,
+            ),
             _non_admin_request(),
-            apple_user_id="apple-user-victim",
-            apple_identity_token=bad_token,
         )
 
     assert exc_info.value.status_code == 401
@@ -431,9 +561,11 @@ async def test_lookup_by_apple_id_rejects_missing_user_id():
     """Empty apple_user_id should also produce a generic 401, not 400."""
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_lookup_by_apple_id(
+            contractors_api.AppleIdLookupRequest(
+                apple_user_id="",
+                apple_identity_token="anything",
+            ),
             _non_admin_request(),
-            apple_user_id="",
-            apple_identity_token="anything",
         )
 
     assert exc_info.value.status_code == 401

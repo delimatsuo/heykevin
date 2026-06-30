@@ -146,6 +146,52 @@ async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_google_calendar_create_error_logging_omits_response_text(monkeypatch, caplog):
+    from app.services import calendar
+
+    class FakeResponse:
+        status_code = 400
+        text = (
+            '{"error":{"message":"Cannot create appointment for Jane Private at '
+            '123 Secret Lane, call +15551234567, gate code 2468."}}'
+        )
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    sensitive_values = (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "gate code 2468",
+    )
+    monkeypatch.setattr(calendar.httpx, "AsyncClient", FakeAsyncClient)
+
+    with caplog.at_level(logging.ERROR):
+        result = await calendar.book_appointment(
+            "gcal-token",
+            title="Jane Private repair",
+            start_time="2026-07-01T13:00:00-04:00",
+            end_time="2026-07-01T14:00:00-04:00",
+            description="123 Secret Lane callback +15551234567",
+        )
+
+    assert result is None
+    assert "Google Calendar create event error" in caplog.text
+    assert "operation=create_event" in caplog.text
+    assert "status_code=400" in caplog.text
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_jobber_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
     sensitive_values = (
         "Jane Private",

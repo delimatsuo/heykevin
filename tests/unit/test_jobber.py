@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import time
 
 import pytest
@@ -39,6 +40,20 @@ class _FakeAsyncClient:
     async def post(self, url: str, **kwargs):
         self.calls.append((url, kwargs))
         return self.responses.pop(0)
+
+
+class _RaisingAsyncClient:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, *_args, **_kwargs):
+        raise self.exc
 
 
 @pytest.mark.asyncio
@@ -107,6 +122,97 @@ async def test_retries_once_after_jobber_401(monkeypatch):
     assert calls[1][0] == jobber.JOBBER_TOKEN_URL
     assert calls[2][0] == jobber.JOBBER_GRAPHQL_URL
     assert calls[2][1]["headers"]["Authorization"] == f"Bearer {new_token}"
+
+
+@pytest.mark.asyncio
+async def test_graphql_error_payload_logging_omits_sensitive_values(monkeypatch, caplog):
+    sensitive_values = (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "gate code 2468",
+    )
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "errors": [
+                    {
+                        "message": (
+                            "Cannot create job for Jane Private at 123 Secret Lane, "
+                            "call +15551234567, gate code 2468."
+                        ),
+                        "extensions": {
+                            "input": {
+                                "title": "Jane Private repair",
+                                "description": "123 Secret Lane callback +15551234567",
+                            }
+                        },
+                    },
+                    {"message": "Validation failed"},
+                ],
+                "data": None,
+            },
+        )
+    ]
+
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient([], responses))
+
+    with caplog.at_level(logging.WARNING):
+        result = await jobber._graphql_request(
+            "jobber-token",
+            "mutation CreateJob($input: JobCreateInput!) { jobCreate(input: $input) { job { id } } }",
+            {
+                "input": {
+                    "title": "Jane Private repair",
+                    "description": "123 Secret Lane callback +15551234567",
+                }
+            },
+        )
+
+    assert result is None
+    assert "Jobber GraphQL errors" in caplog.text
+    assert "error_count=2" in caplog.text
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_graphql_request_exception_logging_uses_exception_type_only(monkeypatch, caplog):
+    sensitive_values = (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "gate code 2468",
+    )
+    monkeypatch.setattr(
+        jobber.httpx,
+        "AsyncClient",
+        lambda: _RaisingAsyncClient(
+            RuntimeError(
+                "Transport failed for Jane Private at 123 Secret Lane, "
+                "call +15551234567, gate code 2468."
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = await jobber._graphql_request(
+            "jobber-token",
+            "mutation CreateJob($input: JobCreateInput!) { jobCreate(input: $input) { job { id } } }",
+            {
+                "input": {
+                    "title": "Jane Private repair",
+                    "description": "123 Secret Lane callback +15551234567",
+                }
+            },
+        )
+
+    assert result is None
+    assert "Jobber request failed" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in caplog.text
 
 
 async def _noop_async():

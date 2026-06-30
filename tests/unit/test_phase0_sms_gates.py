@@ -14,17 +14,20 @@ from app.services.gated_actions import ActionKey, GateContext
 
 
 class _Messages:
-    def __init__(self):
+    def __init__(self, events: list[str] | None = None):
         self.created = []
+        self.events = events
 
     def create(self, **kwargs):
+        if self.events is not None:
+            self.events.append("send")
         self.created.append(kwargs)
         return type("Message", (), {"sid": "SM123"})()
 
 
 class _Client:
-    def __init__(self):
-        self.messages = _Messages()
+    def __init__(self, events: list[str] | None = None):
+        self.messages = _Messages(events)
 
 
 def _allowed_contractor(action: ActionKey) -> dict:
@@ -67,9 +70,16 @@ async def test_send_sms_with_disabled_gate_does_not_call_twilio(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_send_sms_with_enabled_gate_calls_twilio_and_records_decision(monkeypatch):
-    client = _Client()
-    record_gate_decision = Mock()
-    monkeypatch.setattr(sms, "Client", lambda *_args, **_kwargs: client)
+    events = []
+    client = _Client(events)
+    record_gate_decision = Mock(side_effect=lambda **_kwargs: events.append("audit"))
+
+    def client_constructor(*_args, **_kwargs):
+        events.append("client")
+        assert "audit" in events
+        return client
+
+    monkeypatch.setattr(sms, "Client", client_constructor)
     monkeypatch.setattr(sms, "record_gate_decision", record_gate_decision)
 
     result = await sms.send_sms(
@@ -82,6 +92,7 @@ async def test_send_sms_with_enabled_gate_calls_twilio_and_records_decision(monk
     )
 
     assert result is True
+    assert events == ["audit", "client", "send"]
     assert client.messages.created == [
         {
             "to": "+15551234567",
@@ -126,9 +137,16 @@ async def test_send_mms_with_disabled_gate_does_not_call_twilio(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_send_mms_with_enabled_gate_calls_twilio_with_media_url_and_records_decision(monkeypatch):
-    client = _Client()
-    record_gate_decision = Mock()
-    monkeypatch.setattr(sms, "Client", lambda *_args, **_kwargs: client)
+    events = []
+    client = _Client(events)
+    record_gate_decision = Mock(side_effect=lambda **_kwargs: events.append("audit"))
+
+    def client_constructor(*_args, **_kwargs):
+        events.append("client")
+        assert "audit" in events
+        return client
+
+    monkeypatch.setattr(sms, "Client", client_constructor)
     monkeypatch.setattr(sms, "record_gate_decision", record_gate_decision)
 
     result = await sms.send_mms(
@@ -142,6 +160,7 @@ async def test_send_mms_with_enabled_gate_calls_twilio_with_media_url_and_record
     )
 
     assert result is True
+    assert events == ["audit", "client", "send"]
     assert client.messages.created == [
         {
             "to": "+15551234567",

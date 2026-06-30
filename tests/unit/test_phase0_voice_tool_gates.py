@@ -296,6 +296,75 @@ async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized
 
 
 @pytest.mark.asyncio
+async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    sensitive_values = (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "gate code 2468",
+        "client-sensitive",
+    )
+
+    async def fake_execute_tool(self, tool_name, tool_input):
+        assert self._call_sid == "CA-GEMINI-EXCEPTION"
+        assert tool_name == "book_appointment"
+        assert tool_input["client_id"] == "client-sensitive"
+        raise RuntimeError(
+            "Jobber rejected Jane Private at 123 Secret Lane, "
+            "callback +15551234567, gate code 2468, client-sensitive."
+        )
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute_tool)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA-GEMINI-EXCEPTION",
+        contractor_config={"contractor_id": "c1"},
+    )
+    pipeline._ws = FakeWebSocket()
+
+    sensitive_args = {
+        "title": "Jane Private kitchen sink repair",
+        "description": "Address 123 Secret Lane, gate code 2468, call +15551234567.",
+        "client_id": "client-sensitive",
+    }
+
+    with caplog.at_level(logging.ERROR):
+        await pipeline._handle_tool_calls([
+            {"id": "tool-1", "name": "book_appointment", "args": sensitive_args}
+        ])
+
+    assert pipeline._ws.sent == [
+        {
+            "tool_response": {
+                "function_responses": [
+                    {
+                        "id": "tool-1",
+                        "name": "book_appointment",
+                        "response": {"success": False, "error": "Tool execution failed."},
+                    }
+                ]
+            }
+        }
+    ]
+    assert "book_appointment" in caplog.text
+    assert "CA-GEMINI-EXCEPTION" in caplog.text
+    assert "RuntimeError" in caplog.text
+    response_payload = json.dumps(pipeline._ws.sent)
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in caplog.text
+        assert sensitive_value not in response_payload
+
+
+@pytest.mark.asyncio
 async def test_voice_tool_error_result_logging_does_not_include_sensitive_payload(monkeypatch, caplog):
     class FakeClaudeResponse:
         def __init__(self, body):

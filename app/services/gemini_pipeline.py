@@ -14,7 +14,12 @@ import websockets
 
 from app.config import settings
 from app.services.entitlements import effective_mode
-from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold
+from app.services.voice_pipeline import (
+    _log_tool_execution_failure,
+    _tool_execution_error_response,
+    build_system_prompt,
+    is_owner_availability_hold,
+)
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
 
@@ -525,7 +530,8 @@ class GeminiPipeline:
             except asyncio.TimeoutError:
                 result_str = json.dumps({"error": "Tool execution timed out"})
             except Exception as e:
-                result_str = json.dumps({"error": str(e)})
+                _log_tool_execution_failure(tool_name, self._call_sid, e)
+                result_str = _tool_execution_error_response()
 
             responses.append({
                 "id": call_id,

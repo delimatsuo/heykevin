@@ -5,8 +5,8 @@ import os
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from typing import Optional
 
 from app.config import settings
@@ -14,6 +14,8 @@ from app.middleware.auth import verify_api_token, require_contractor_access
 from app.db.firestore_client import get_firestore_client
 from app.db.contractors import get_contractor
 from app.services.ai_estimate import analyze_media
+from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services.side_effect_audit import record_gate_decision
 from app.services.sms import send_sms
 from app.utils.logging import get_logger, redact_phone
 
@@ -204,7 +206,6 @@ async def upload_and_analyze(token: str, request=None):
     accumulation, never buffering more than `MAX_UPLOAD_BYTES` in memory
     (SECURITY_AUDIT.md F-10).
     """
-    from fastapi import Request
     if request is None:
         return {"error": "No request"}, 400
 
@@ -269,7 +270,33 @@ async def upload_and_analyze(token: str, request=None):
                 f"based on the technician's hands-on diagnosis.\n\n"
                 f"Call {business_name}: {twilio_number}"
             )
-        await send_sms(caller_phone, customer_msg, from_number=twilio_number)
+        context = GateContext(
+            source="estimate",
+            actor="system",
+            idempotency_key=f"{token}:caller_sms",
+        )
+        decision = check_gated_action(contractor, ActionKey.ESTIMATE_RESULT_SMS, context)
+        record_gate_decision(
+            action=ActionKey.ESTIMATE_RESULT_SMS,
+            contractor_id=(contractor or {}).get("contractor_id") or estimate.get("contractor_id", ""),
+            source="estimate",
+            resource_id=token_hash[:12],
+            decision=decision,
+        )
+        if decision.allowed:
+            await send_sms(
+                caller_phone,
+                customer_msg,
+                from_number=twilio_number,
+                contractor=contractor,
+                action=ActionKey.ESTIMATE_RESULT_SMS,
+                gate_context=context,
+            )
+        else:
+            logger.info(
+                "Estimate caller SMS blocked by gate",
+                extra={"action": ActionKey.ESTIMATE_RESULT_SMS.value, "reason": decision.reason.value},
+            )
 
     # Send SMS to contractor
     contractor_phone = contractor.get("owner_phone", "") if contractor else ""

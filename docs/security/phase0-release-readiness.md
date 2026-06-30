@@ -15,8 +15,8 @@ Do not merge or deploy until all rows below have an owner and an outcome.
 | Gate | Required outcome | Status |
 |---|---|---|
 | Deployment source of truth | Confirm whether production deploys only by manual `workflow_dispatch` from `main`, as `.github/workflows/deploy.yml` currently states. If any other path auto-deploys `main`, block merge until a release window and rollback path are set. | Pending |
-| Production account audit | Count contractors that would be affected by default-off gates. Do not print customer names, phone numbers, transcripts, tokens, or message bodies. | Pending |
-| Staging account audit | Confirm a test contractor can exercise disabled and enabled gate paths without touching production Firestore, RTDB, APNs, or Twilio data. | Pending |
+| Production account audit | Count contractors that would be affected by default-off gates. Do not print customer names, phone numbers, transcripts, tokens, or message bodies. | Complete: see `docs/security/phase0-account-audit-2026-06-30.md`. |
+| Staging account audit | Confirm a test contractor can exercise disabled and enabled gate paths without touching production Firestore, RTDB, APNs, or Twilio data. | Blocked: staging has no contractor records; create or seed a staging test contractor before smoke tests. |
 | Backfill decision | Decide which existing side effects stay disabled and which accounts, if any, receive explicit flags before release. | Pending |
 | Staging smoke | Run the smoke matrix below against staging after deployment. | Pending |
 | Production release | Only after the above pass, mark the PR ready for review and merge in an approved window. | Pending |
@@ -27,12 +27,17 @@ Last updated: 2026-06-30.
 
 - ADC reauthentication was completed for `delimatsuo@gmail.com`.
 - The account can read Cloud Run service metadata for production and staging.
-- Production Firestore audit is blocked: `delimatsuo@gmail.com` lacks read/list
-  permission for `kevin-491315`.
-- Staging Firestore audit is blocked: `delimatsuo@gmail.com` lacks read/list
-  permission for `kevin-staging-491315`.
+- Production and staging Firestore audits completed with
+  `deli@ellaexecutivesearch.com`.
 - Staging Firestore project was confirmed from Cloud Run metadata as
   `kevin-staging-491315`.
+- Staging has no contractor or estimate records. Smoke tests require creating
+  or seeding a staging test contractor first.
+- Production has no `gated_actions`, `sms_compliance_status`,
+  `integration_write_status`, or `automation_approvals` configured on any
+  contractor document. Default-off gates will block caller-facing SMS/MMS,
+  estimate token/result sends, and integration writes after release unless
+  explicit account fields are backfilled.
 - The checked-in GitHub workflow deploys staging on `staging` push and
   production only by manual `workflow_dispatch` from `main`; no merge should
   proceed until the owner confirms there is no additional auto-deploy path.
@@ -41,12 +46,11 @@ Last updated: 2026-06-30.
   into tickets, PR comments, or chat. Secret Manager migration and rotation are
   outside this PR but remain production hardening work.
 
-Required permission to complete the account audit:
+Recommended backfill decision:
 
-- `delimatsuo@gmail.com` or another release operator needs read-only Firestore
-  access to `kevin-491315` and `kevin-staging-491315`.
-- After permission is granted, rerun the production and staging commands below
-  and paste only the aggregate JSON output into the release review.
+- Do not backfill caller-facing SMS, estimate, Jobber, or Google Calendar write
+  gates before A2P/SMS compliance, owner approval, and integration-write safety
+  are explicitly approved.
 
 ## Read-Only Account Audit
 

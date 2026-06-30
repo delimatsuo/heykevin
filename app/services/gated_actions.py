@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
-
-from app.config import settings
 
 
 class ActionKey(str, Enum):
@@ -109,7 +108,7 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
 
 
 def _environment(context: GateContext) -> str:
-    return context.environment or getattr(settings, "environment", "") or "production"
+    return context.environment or os.getenv("ENVIRONMENT", "production")
 
 
 def _flag_enabled(contractor: dict[str, Any], action: ActionKey) -> bool:

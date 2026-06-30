@@ -10,6 +10,8 @@ import time
 
 from app.services.job_card import extract_job_card
 from app.services.entitlements import effective_mode
+from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services.side_effect_audit import record_gate_decision
 from app.services.sms import send_sms, send_mms
 from app.db.jobs import save_job
 from app.config import settings
@@ -37,6 +39,24 @@ CALL_TYPE_HEADERS = {
     "spam": "SPAM",
     "unknown": "MISSED CALL",
 }
+
+
+def _post_call_gate(contractor: dict, action: ActionKey, call_sid: str, *, owner_confirmed: bool = False):
+    context = GateContext(
+        source="post_call",
+        actor="system",
+        idempotency_key=f"{call_sid}:{action.value}",
+        owner_confirmed=owner_confirmed,
+    )
+    decision = check_gated_action(contractor, action, context)
+    record_gate_decision(
+        action=action,
+        contractor_id=contractor.get("contractor_id", ""),
+        source="post_call",
+        resource_id=call_sid,
+        decision=decision,
+    )
+    return decision, context
 
 
 async def process_post_call(
@@ -185,7 +205,11 @@ async def _process_business(
 
     # 2b. Auto-create job in Jobber for service requests
     if contractor.get("jobber_access_token") and job_data.get("call_type") == "service_request":
-        asyncio.create_task(_create_jobber_job(contractor, job_data))
+        decision, _context = _post_call_gate(contractor, ActionKey.JOBBER_CREATE_JOB, call_sid)
+        if decision.allowed:
+            asyncio.create_task(_create_jobber_job(contractor, job_data))
+        else:
+            logger.info("Jobber auto-create blocked by gate", extra={"reason": decision.reason.value})
 
     # 3. Send SMS to contractor (in their language)
     user_language = contractor.get("user_language", "en")
@@ -216,11 +240,38 @@ async def _process_business(
         # Attach vCard if available
         vcard_url = _get_vcard_url(contractor)
         try:
+            sent_confirmation = False
             if vcard_url:
-                await send_mms(caller_phone, caller_sms, media_url=vcard_url, from_number=twilio_number)
+                action = ActionKey.CALLER_CONFIRMATION_MMS
+                decision, context = _post_call_gate(contractor, action, call_sid)
+                if decision.allowed:
+                    sent_confirmation = await send_mms(
+                        caller_phone,
+                        caller_sms,
+                        media_url=vcard_url,
+                        from_number=twilio_number,
+                        contractor=contractor,
+                        action=action,
+                        gate_context=context,
+                    )
+                else:
+                    logger.info("Caller confirmation MMS blocked by gate", extra={"reason": decision.reason.value})
             else:
-                await send_sms(caller_phone, caller_sms, from_number=twilio_number)
-            logger.info(f"Confirmation SMS sent to caller: {redact_phone(caller_phone)}")
+                action = ActionKey.CALLER_CONFIRMATION_SMS
+                decision, context = _post_call_gate(contractor, action, call_sid)
+                if decision.allowed:
+                    sent_confirmation = await send_sms(
+                        caller_phone,
+                        caller_sms,
+                        from_number=twilio_number,
+                        contractor=contractor,
+                        action=action,
+                        gate_context=context,
+                    )
+                else:
+                    logger.info("Caller confirmation SMS blocked by gate", extra={"reason": decision.reason.value})
+            if sent_confirmation:
+                logger.info(f"Confirmation SMS sent to caller: {redact_phone(caller_phone)}")
         except Exception as e:
             logger.error(f"Confirmation SMS to caller failed: {e}")
 
@@ -231,13 +282,30 @@ async def _process_business(
             business_name = contractor.get("business_name", "us")
             msg = f"Thanks for calling {business_name}! Save our contact info:"
             try:
-                await send_mms(caller_phone, msg, media_url=vcard_url, from_number=twilio_number)
+                action = ActionKey.CALLER_VCARD_MMS
+                decision, context = _post_call_gate(contractor, action, call_sid)
+                if decision.allowed:
+                    await send_mms(
+                        caller_phone,
+                        msg,
+                        media_url=vcard_url,
+                        from_number=twilio_number,
+                        contractor=contractor,
+                        action=action,
+                        gate_context=context,
+                    )
+                else:
+                    logger.info("Caller vCard MMS blocked by gate", extra={"reason": decision.reason.value})
             except Exception as e:
                 logger.error(f"vCard MMS to caller failed: {e}")
 
         # 5b. Auto-reply SMS for non-service calls (opt-in)
         if contractor.get("auto_reply_sms", False):
-            await _send_auto_reply(caller_phone, contractor, twilio_number, transcript_text, caller_language=caller_language)
+            decision, _context = _post_call_gate(contractor, ActionKey.CALLER_AUTO_REPLY, call_sid)
+            if decision.allowed:
+                await _send_auto_reply(caller_phone, contractor, twilio_number, transcript_text, caller_language=caller_language)
+            else:
+                logger.info("Auto-reply blocked by gate", extra={"reason": decision.reason.value})
 
     # 6. Send call summary push notification
     await _send_summary_push(job_data, contractor)
@@ -332,6 +400,11 @@ async def _format_caller_sms_with_estimate(
     services = contractor.get("services", [])
     if services and contractor_id and caller_phone:
         try:
+            decision, _context = _post_call_gate(contractor, ActionKey.ESTIMATE_TOKEN_CREATE, job_data.get("call_sid", ""))
+            if not decision.allowed:
+                logger.info("Estimate token creation blocked by gate", extra={"reason": decision.reason.value})
+                return base_msg
+
             import httpx
             async with httpx.AsyncClient() as client:
                 response = await client.post(

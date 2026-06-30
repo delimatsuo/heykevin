@@ -251,8 +251,8 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
     SideEffectSurface(
         path="app/api/voip.py",
         current_behavior="Call actions can redirect Twilio calls, queue take-message commands, route to voicemail, and send text replies.",
-        required_gate="Every call action must pass ownership, CallSession state, backend gate, and idempotency checks.",
-        required_evidence="Cross-tenant call-action tests and disabled-gate tests for accept, decline, voicemail, and text_reply.",
+        required_gate="Core live-call controls accept, decline, and voicemail remain ownership-only with CallSession/idempotency protections; text_reply requires the caller-text backend gate.",
+        required_evidence="Cross-tenant call-action tests for accept, decline, voicemail, and text_reply; disabled-gate tests for text_reply.",
         risk="twilio_mutation",
     ),
     SideEffectSurface(

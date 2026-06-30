@@ -120,10 +120,33 @@ async def _handle_pickup(call_sid: str, message_id: int):
 async def _handle_text_reply(call_sid: str, message_id: int):
     """Text Reply — send SMS to caller while Kevin keeps them engaged."""
     from app.services.sms import send_text_reply
+    from app.db.contractors import get_contractor
+    from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+    from app.services.side_effect_audit import record_gate_decision
 
     active_call = await get_active_call(call_sid)
     if not active_call:
         logger.warning("Text reply: call not found")
+        return
+
+    contractor_id = getattr(active_call, "contractor_id", "") or ""
+    contractor = await get_contractor(contractor_id) if contractor_id else None
+    context = GateContext(
+        source="telegram",
+        actor="operator",
+        idempotency_key=f"{call_sid}:telegram_text",
+        owner_confirmed=True,
+    )
+    decision = check_gated_action(contractor, ActionKey.CALLER_TEXT_REPLY, context)
+    record_gate_decision(
+        action=ActionKey.CALLER_TEXT_REPLY,
+        contractor_id=contractor_id,
+        source="telegram",
+        resource_id=call_sid,
+        decision=decision,
+    )
+    if not decision.allowed:
+        await answer_callback_query("", decision.message)
         return
 
     # Send the SMS
@@ -132,7 +155,8 @@ async def _handle_text_reply(call_sid: str, message_id: int):
     # Transition state (can continue screening after text)
     await transition_state(call_sid, CallState.TEXT_REPLIED)
 
-    status = "Text sent" if sent else "Failed to send text"
+    if not sent:
+        logger.warning("Text reply send failed")
     await update_call_ended(
         message_id=message_id,
         call_sid=call_sid,
@@ -188,7 +212,6 @@ async def _handle_ignore(call_sid: str, message_id: int):
 
 async def _handle_callback(call_sid: str, message_id: int):
     """Call Back — initiate a callback to the caller (post-call action)."""
-    from app.services.sms import send_sms
     from app.db.calls import get_call
 
     call = await get_call(call_sid)
@@ -228,9 +251,32 @@ async def _handle_text_them(call_sid: str, message_id: int):
     """Text Them — send follow-up SMS after call ended."""
     from app.services.sms import send_followup_text
     from app.db.calls import get_call
+    from app.db.contractors import get_contractor
+    from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+    from app.services.side_effect_audit import record_gate_decision
 
     call = await get_call(call_sid)
     if not call:
+        return
+
+    contractor_id = call.get("contractor_id", "") or ""
+    contractor = await get_contractor(contractor_id) if contractor_id else None
+    context = GateContext(
+        source="telegram",
+        actor="operator",
+        idempotency_key=f"{call_sid}:telegram_text",
+        owner_confirmed=True,
+    )
+    decision = check_gated_action(contractor, ActionKey.CALLER_AUTO_REPLY, context)
+    record_gate_decision(
+        action=ActionKey.CALLER_AUTO_REPLY,
+        contractor_id=contractor_id,
+        source="telegram",
+        resource_id=call_sid,
+        decision=decision,
+    )
+    if not decision.allowed:
+        await answer_callback_query("", decision.message)
         return
 
     caller_phone = call.get("caller_phone", "")

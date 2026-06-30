@@ -40,11 +40,19 @@ CALL_TYPE_HEADERS = {
     "unknown": "MISSED CALL",
 }
 
+SAFE_SUMMARY_URGENCY_LABELS = {
+    "emergency": "urgent",
+    "same_day": "same-day",
+    "routine": "routine",
+    "quote": "quote",
+}
+
 
 def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "") -> str:
     """Return lock-screen-safe summary copy with no raw issue text."""
-    if urgency and urgency not in ("none", ""):
-        return f"New {urgency} call summary. Open Kevin for details."
+    urgency_label = SAFE_SUMMARY_URGENCY_LABELS.get((urgency or "").strip().lower())
+    if urgency_label:
+        return f"New {urgency_label} call summary. Open Kevin for details."
     if call_type == "service_request":
         return "New service call summary. Open Kevin for details."
     return "New call summary. Open Kevin for details."

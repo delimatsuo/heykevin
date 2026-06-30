@@ -9,7 +9,19 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
 from app.webhooks import media_stream
+from app.webhooks import twilio_incoming
 from app.services import post_call
+
+
+def test_incoming_call_push_body_does_not_include_caller_identity():
+    body = twilio_incoming._safe_incoming_call_push_body(
+        caller_name="Pat Customer",
+        caller_phone="+15551234567",
+    )
+
+    assert "Pat Customer" not in body
+    assert "+15551234567" not in body
+    assert body == "Kevin is screening a call. Open Kevin for details."
 
 
 def test_urgent_push_body_does_not_include_raw_speech():
@@ -31,8 +43,35 @@ def test_summary_push_body_does_not_include_issue_details():
     )
 
     assert "Pat Customer" not in body
-    assert "emergency" in body.lower()
+    assert "urgent" in body.lower()
+    assert "emergency" not in body.lower()
     assert "Open Kevin" in body
+
+
+def test_summary_push_body_does_not_interpolate_unknown_urgency():
+    body = post_call._safe_summary_push_body(
+        caller_name="Pat Customer",
+        call_type="service_request",
+        urgency="emergency from Pat Customer +15551234567 burst pipe",
+    )
+
+    assert "emergency from" not in body
+    assert "Pat Customer" not in body
+    assert "+15551234567" not in body
+    assert "burst pipe" not in body
+    assert body == "New service call summary. Open Kevin for details."
+
+
+def test_summary_push_body_formats_same_day_urgency_safely():
+    body = post_call._safe_summary_push_body(
+        caller_name="Pat Customer",
+        call_type="service_request",
+        urgency="same_day",
+    )
+
+    assert "same_day" not in body
+    assert "same-day" in body
+    assert body == "New same-day call summary. Open Kevin for details."
 
 
 def test_summary_push_body_uses_generic_service_copy_without_urgency():
@@ -75,7 +114,7 @@ async def test_send_summary_push_sends_lock_screen_safe_body(monkeypatch):
     )
 
     assert len(sent_pushes) == 1
-    assert sent_pushes[0]["body"] == "New emergency call summary. Open Kevin for details."
+    assert sent_pushes[0]["body"] == "New urgent call summary. Open Kevin for details."
     assert "Pat Customer" not in sent_pushes[0]["body"]
     assert "+15551234567" not in sent_pushes[0]["body"]
     assert "burst pipe" not in sent_pushes[0]["body"]

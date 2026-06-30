@@ -1159,7 +1159,11 @@ class VoicePipeline:
                             tool_name = block["name"]
                             tool_input = block.get("input", {})
                             tool_id = block["id"]
-                            logger.info(f"Tool call: {tool_name}({tool_input})")
+                            logger.info(
+                                "Tool call: %s call_sid=%s",
+                                tool_name,
+                                getattr(self, "_call_sid", ""),
+                            )
 
                             result_str = await self._execute_tool(tool_name, tool_input)
 

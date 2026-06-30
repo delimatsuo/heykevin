@@ -511,7 +511,11 @@ class GeminiPipeline:
             tool_args = fc.get("args", {})
             call_id = fc.get("id", "")
 
-            logger.info(f"Gemini tool call: {tool_name}({tool_args})")
+            logger.info(
+                "Gemini tool call: %s call_sid=%s",
+                tool_name,
+                self._call_sid,
+            )
 
             try:
                 result_str = await asyncio.wait_for(

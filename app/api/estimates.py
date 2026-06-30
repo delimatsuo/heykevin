@@ -56,6 +56,10 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _gate_denied_response(decision):
+    raise HTTPException(status_code=403, detail=decision.to_response())
+
+
 # --- Authenticated endpoint: create token (called by post-call processing) ---
 
 class CreateTokenRequest(BaseModel):
@@ -68,6 +72,28 @@ class CreateTokenRequest(BaseModel):
 async def create_estimate_token(body: CreateTokenRequest, request: Request = None):
     """Create an estimate token for a caller after a service request call."""
     require_contractor_access(request, body.contractor_id)
+
+    contractor = await get_contractor(body.contractor_id)
+    context = GateContext(
+        source="estimate",
+        actor="system",
+        idempotency_key=f"{body.call_sid}:estimate_token" if body.call_sid else f"{body.contractor_id}:estimate_token",
+    )
+    decision = check_gated_action(contractor, ActionKey.ESTIMATE_TOKEN_CREATE, context)
+    record_gate_decision(
+        action=ActionKey.ESTIMATE_TOKEN_CREATE,
+        contractor_id=(contractor or {}).get("contractor_id") or body.contractor_id,
+        source="estimate",
+        resource_id=body.call_sid or body.contractor_id[:12],
+        decision=decision,
+    )
+    if not decision.allowed:
+        logger.info(
+            "Estimate token creation blocked by gate",
+            extra={"action": ActionKey.ESTIMATE_TOKEN_CREATE.value, "reason": decision.reason.value},
+        )
+        _gate_denied_response(decision)
+
     token = secrets.token_urlsafe(32)
     token_hash = _hash_token(token)
 
@@ -210,6 +236,28 @@ async def upload_and_analyze(token: str, request: Request):
     if not estimate:
         return {"error": "Invalid or expired token"}, 404
 
+    token_hash = _hash_token(token)
+    contractor = await get_contractor(estimate["contractor_id"])
+    context = GateContext(
+        source="estimate",
+        actor="system",
+        idempotency_key=f"{token_hash[:12]}:result",
+    )
+    decision = check_gated_action(contractor, ActionKey.ESTIMATE_RESULT_SMS, context)
+    record_gate_decision(
+        action=ActionKey.ESTIMATE_RESULT_SMS,
+        contractor_id=(contractor or {}).get("contractor_id") or estimate.get("contractor_id", ""),
+        source="estimate",
+        resource_id=token_hash[:12],
+        decision=decision,
+    )
+    if not decision.allowed:
+        logger.info(
+            "Estimate upload blocked by gate",
+            extra={"action": ActionKey.ESTIMATE_RESULT_SMS.value, "reason": decision.reason.value},
+        )
+        _gate_denied_response(decision)
+
     content_type = request.headers.get("content-type", "application/octet-stream")
 
     # Per-content-type cap, but never exceeding the absolute MAX_UPLOAD_BYTES.
@@ -220,12 +268,10 @@ async def upload_and_analyze(token: str, request: Request):
     body = await _read_request_with_cap(request, effective_max)
 
     # Update status
-    token_hash = _hash_token(token)
     db = get_firestore_client()
     db.collection(COLLECTION).document(token_hash).update({"status": "processing"})
 
     # Get contractor's service list
-    contractor = await get_contractor(estimate["contractor_id"])
     services = contractor.get("services", []) if contractor else []
     business_name = contractor.get("business_name", "") if contractor else ""
 
@@ -267,33 +313,14 @@ async def upload_and_analyze(token: str, request: Request):
                 f"based on the technician's hands-on diagnosis.\n\n"
                 f"Call {business_name}: {twilio_number}"
             )
-        context = GateContext(
-            source="estimate",
-            actor="system",
-            idempotency_key=f"{token_hash[:12]}:caller_sms",
-        )
-        decision = check_gated_action(contractor, ActionKey.ESTIMATE_RESULT_SMS, context)
-        record_gate_decision(
+        await send_sms(
+            caller_phone,
+            customer_msg,
+            from_number=twilio_number,
+            contractor=contractor,
             action=ActionKey.ESTIMATE_RESULT_SMS,
-            contractor_id=(contractor or {}).get("contractor_id") or estimate.get("contractor_id", ""),
-            source="estimate",
-            resource_id=token_hash[:12],
-            decision=decision,
+            gate_context=context,
         )
-        if decision.allowed:
-            await send_sms(
-                caller_phone,
-                customer_msg,
-                from_number=twilio_number,
-                contractor=contractor,
-                action=ActionKey.ESTIMATE_RESULT_SMS,
-                gate_context=context,
-            )
-        else:
-            logger.info(
-                "Estimate caller SMS blocked by gate",
-                extra={"action": ActionKey.ESTIMATE_RESULT_SMS.value, "reason": decision.reason.value},
-            )
 
     # Send SMS to contractor
     contractor_phone = contractor.get("owner_phone", "") if contractor else ""

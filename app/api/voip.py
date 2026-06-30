@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from typing import Optional
 
 from twilio.jwt.access_token import AccessToken
 from twilio.jwt.access_token.grants import VoiceGrant
@@ -403,12 +402,15 @@ async def _handle_text_reply(call_sid: str, message: str = "", contractor_id: st
     """Send text reply SMS to the caller."""
     from app.db.cache import get_active_call
     from app.services.sms import send_sms
+    from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+    from app.services.side_effect_audit import record_gate_decision
 
     active_call = await get_active_call(call_sid)
     if not active_call or not active_call.caller_phone:
         return {"status": "error", "message": "No active call or caller phone"}
 
     # Use contractor's Twilio number if available
+    contractor = None
     from_number = ""
     if contractor_id:
         from app.db.contractors import get_contractor
@@ -416,8 +418,32 @@ async def _handle_text_reply(call_sid: str, message: str = "", contractor_id: st
         if contractor:
             from_number = contractor.get("twilio_number", "")
 
+    context = GateContext(
+        source="ios",
+        actor="owner",
+        idempotency_key=f"{call_sid}:text_reply",
+        owner_confirmed=True,
+    )
+    decision = check_gated_action(contractor, ActionKey.CALLER_TEXT_REPLY, context)
+    record_gate_decision(
+        action=ActionKey.CALLER_TEXT_REPLY,
+        contractor_id=contractor_id,
+        source="ios",
+        resource_id=call_sid,
+        decision=decision,
+    )
+    if not decision.allowed:
+        return {"status": "error", "message": decision.message}
+
     body = message.strip() if message.strip() else "Can't talk right now. What's up?"
-    success = await send_sms(active_call.caller_phone, body, from_number=from_number)
+    success = await send_sms(
+        active_call.caller_phone,
+        body,
+        from_number=from_number,
+        contractor=contractor,
+        action=ActionKey.CALLER_TEXT_REPLY,
+        gate_context=context,
+    )
     if success:
         logger.info(f"Text reply sent to {redact_phone(active_call.caller_phone)}")
         return {"status": "ok"}

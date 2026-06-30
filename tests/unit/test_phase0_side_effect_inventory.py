@@ -1,0 +1,46 @@
+from app.services.side_effect_inventory import SIDE_EFFECT_SURFACES, surfaces_by_path
+
+
+REQUIRED_PATHS = {
+    "app/services/post_call.py",
+    "app/services/voice_pipeline.py",
+    "app/services/gemini_pipeline.py",
+    "app/services/sms.py",
+    "app/api/calls.py",
+    "app/api/voip.py",
+    "app/webhooks/telegram_callback.py",
+    "app/webhooks/twilio_incoming.py",
+    "app/webhooks/media_stream.py",
+    "app/db/jobs.py",
+    "app/services/job_card.py",
+    "app/services/calendar.py",
+    "app/services/jobber.py",
+    "app/api/integrations.py",
+    "app/api/estimates.py",
+    "app/api/contractors.py",
+    "app/services/conference.py",
+    "app/services/warm_transfer.py",
+    "app/services/vcard.py",
+    "app/api/vcard.py",
+    "app/services/push_notification.py",
+}
+
+
+def test_inventory_covers_required_phase0_paths():
+    paths = {surface.path for surface in SIDE_EFFECT_SURFACES}
+    assert REQUIRED_PATHS <= paths
+
+
+def test_every_surface_has_gate_and_evidence():
+    for surface in SIDE_EFFECT_SURFACES:
+        assert surface.path
+        assert surface.current_behavior
+        assert surface.required_gate
+        assert surface.required_evidence
+        assert surface.risk in {"user_contact", "external_write", "twilio_mutation", "sensitive_read", "irreversible"}
+
+
+def test_surfaces_by_path_groups_all_entries():
+    grouped = surfaces_by_path()
+    assert "app/services/post_call.py" in grouped
+    assert any("caller SMS" in s.current_behavior for s in grouped["app/services/post_call.py"])

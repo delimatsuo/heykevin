@@ -148,5 +148,7 @@ async def book_appointment(
         logger.info(f"Google Calendar event created: {event_id}")
         return event_id
 
-    logger.error(f"Google Calendar create event error: {resp.status_code} {resp.text[:200]}")
+    logger.error(
+        f"Google Calendar create event error: operation=create_event status_code={resp.status_code}"
+    )
     return None

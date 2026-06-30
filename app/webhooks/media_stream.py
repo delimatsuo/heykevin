@@ -325,6 +325,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 device_token=voip_token,
                 caller_phone=caller_phone,
                 caller_name=f"URGENT: {caller_name or caller_phone}",
+                reason="urgent_call",
                 call_sid=call_sid,
                 conference_name=urgent_conf,
             )

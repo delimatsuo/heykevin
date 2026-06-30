@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -11,6 +12,7 @@ os.environ.setdefault("USER_PHONE", "+15550000001")
 from app.webhooks import media_stream
 from app.webhooks import twilio_incoming
 from app.services import post_call
+from app.services import push_notification
 
 
 def test_incoming_call_push_body_does_not_include_caller_identity():
@@ -33,6 +35,17 @@ def test_urgent_push_body_does_not_include_raw_speech():
     assert "Caller says:" not in body
     assert "+15551234567" not in body
     assert body == "Urgent call needs review. Open Kevin for details."
+
+
+def test_voip_push_body_does_not_include_arbitrary_reason():
+    body = push_notification._safe_voip_push_body(
+        reason="emergency from Pat Customer +15551234567"
+    )
+
+    assert body == "Incoming call. Open Kevin for details."
+    assert "Pat Customer" not in body
+    assert "+15551234567" not in body
+    assert "emergency from" not in body
 
 
 def test_summary_push_body_does_not_include_issue_details():
@@ -119,3 +132,57 @@ async def test_send_summary_push_sends_lock_screen_safe_body(monkeypatch):
     assert "+15551234567" not in sent_pushes[0]["body"]
     assert "burst pipe" not in sent_pushes[0]["body"]
     assert "123 Main Street" not in sent_pushes[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_send_voip_push_sends_lock_screen_safe_body(monkeypatch):
+    sent_payloads = []
+
+    class FakeResponse:
+        status_code = 200
+        text = "OK"
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, content, timeout):
+            sent_payloads.append(json.loads(content))
+            return FakeResponse()
+
+    monkeypatch.setattr(push_notification.settings, "apns_key_content", "test-key")
+    monkeypatch.setattr(push_notification.settings, "apns_bundle_id", "com.kevin.callscreen")
+    monkeypatch.setattr(push_notification, "_generate_apns_token", lambda: "jwt-token")
+    monkeypatch.setattr(push_notification.httpx, "AsyncClient", FakeAsyncClient)
+
+    sent = await push_notification.send_voip_push(
+        device_token="voip-token",
+        caller_phone="+15551234567",
+        caller_name="URGENT: Pat Customer",
+        reason="urgent_call",
+        call_sid="CA123",
+        conference_name="urgent-conf",
+        access_token="twilio-access-token",
+    )
+
+    assert sent is True
+    assert len(sent_payloads) == 1
+    assert sent_payloads[0]["caller_phone"] == "+15551234567"
+    assert sent_payloads[0]["caller_name"] == "URGENT: Pat Customer"
+    assert sent_payloads[0]["reason"] == "urgent_call"
+    assert sent_payloads[0]["call_sid"] == "CA123"
+    assert sent_payloads[0]["conference_name"] == "urgent-conf"
+    assert sent_payloads[0]["access_token"] == "twilio-access-token"
+
+    body = sent_payloads[0]["aps"]["alert"]["body"]
+    assert body == "Urgent call needs review. Open Kevin for details."
+    assert "URGENT: Pat Customer" not in body
+    assert "Pat Customer" not in body
+    assert "+15551234567" not in body
+    assert "emergency from" not in body

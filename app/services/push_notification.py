@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 # APNs endpoints
 APNS_PRODUCTION = "https://api.push.apple.com"
 APNS_SANDBOX = "https://api.sandbox.push.apple.com"
+URGENT_VOIP_REASONS = {"urgent", "urgent_call", "emergency", "emergency_call"}
 
 
 def _get_apns_url() -> str:
@@ -31,6 +32,14 @@ def _get_apns_url() -> str:
         logger.debug("Using APNs sandbox endpoint")
         return APNS_SANDBOX
     return APNS_PRODUCTION
+
+
+def _safe_voip_push_body(reason: str = "") -> str:
+    """Return lock-screen-safe VoIP alert copy without caller identity."""
+    normalized_reason = "_".join((reason or "").strip().lower().replace("-", " ").split())
+    if normalized_reason in URGENT_VOIP_REASONS:
+        return "Urgent call needs review. Open Kevin for details."
+    return "Incoming call. Open Kevin for details."
 
 
 _cached_apns_token = None
@@ -132,7 +141,7 @@ async def send_voip_push(
         "aps": {
             "alert": {
                 "title": "Incoming Call",
-                "body": caller_name or caller_phone,
+                "body": _safe_voip_push_body(reason=reason),
             },
         },
         "call_sid": call_sid,

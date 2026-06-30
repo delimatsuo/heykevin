@@ -1,0 +1,82 @@
+import os
+
+import pytest
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
+os.environ.setdefault("USER_PHONE", "+15550000001")
+
+from app.webhooks import media_stream
+from app.services import post_call
+
+
+def test_urgent_push_body_does_not_include_raw_speech():
+    body = media_stream._safe_urgent_push_body(
+        caller_name="Pat Customer",
+        caller_phone="+15551234567",
+    )
+
+    assert "Caller says:" not in body
+    assert "+15551234567" not in body
+    assert body == "Urgent call needs review. Open Kevin for details."
+
+
+def test_summary_push_body_does_not_include_issue_details():
+    body = post_call._safe_summary_push_body(
+        caller_name="Pat Customer",
+        call_type="service_request",
+        urgency="emergency",
+    )
+
+    assert "Pat Customer" not in body
+    assert "emergency" in body.lower()
+    assert "Open Kevin" in body
+
+
+def test_summary_push_body_uses_generic_service_copy_without_urgency():
+    body = post_call._safe_summary_push_body(
+        caller_name="Pat Customer",
+        call_type="service_request",
+        urgency="none",
+    )
+
+    assert "Pat Customer" not in body
+    assert "leaking sink" not in body
+    assert body == "New service call summary. Open Kevin for details."
+
+
+@pytest.mark.asyncio
+async def test_send_summary_push_sends_lock_screen_safe_body(monkeypatch):
+    sent_pushes = []
+
+    async def fake_get_device_token(*, contractor_id):
+        assert contractor_id == "c1"
+        return "push-token"
+
+    async def fake_send_regular_push(**kwargs):
+        sent_pushes.append(kwargs)
+        return True
+
+    monkeypatch.setattr("app.services.push_notification.get_device_token", fake_get_device_token)
+    monkeypatch.setattr("app.services.push_notification.send_regular_push", fake_send_regular_push)
+
+    await post_call._send_summary_push(
+        {
+            "caller_name": "Pat Customer",
+            "caller_phone": "+15551234567",
+            "call_sid": "CA123",
+            "call_type": "service_request",
+            "issue_description": "burst pipe at 123 Main Street",
+            "urgency": "emergency",
+        },
+        {"contractor_id": "c1"},
+    )
+
+    assert len(sent_pushes) == 1
+    assert sent_pushes[0]["body"] == "New emergency call summary. Open Kevin for details."
+    assert "Pat Customer" not in sent_pushes[0]["body"]
+    assert "+15551234567" not in sent_pushes[0]["body"]
+    assert "burst pipe" not in sent_pushes[0]["body"]
+    assert "123 Main Street" not in sent_pushes[0]["body"]

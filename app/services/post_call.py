@@ -41,6 +41,15 @@ CALL_TYPE_HEADERS = {
 }
 
 
+def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "") -> str:
+    """Return lock-screen-safe summary copy with no raw issue text."""
+    if urgency and urgency not in ("none", ""):
+        return f"New {urgency} call summary. Open Kevin for details."
+    if call_type == "service_request":
+        return "New service call summary. Open Kevin for details."
+    return "New call summary. Open Kevin for details."
+
+
 def _post_call_gate(contractor: dict, action: ActionKey, call_sid: str, *, owner_confirmed: bool = False):
     context = GateContext(
         source="post_call",
@@ -465,18 +474,7 @@ async def _send_summary_push(job_data: dict, contractor: dict):
             return
 
         urgency = job_data.get("urgency", "")
-
-        # Build summary body — prefix with "Caller says:" to prevent social engineering
-        if issue:
-            body = f"Caller says: {caller_name} called about {issue}"
-            if urgency and urgency not in ("none", ""):
-                body += f". Urgency: {urgency}"
-        else:
-            body = f"Caller says: {caller_name} called"
-
-        # Truncate to 200 chars
-        if len(body) > 200:
-            body = body[:197] + "..."
+        body = _safe_summary_push_body(caller_name, call_type, urgency)
 
         await send_regular_push(
             device_token=device_token,

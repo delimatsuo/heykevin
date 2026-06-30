@@ -197,7 +197,7 @@ async def _read_request_with_cap(request, max_bytes: int) -> bytes:
 
 
 @router.post("/{token}/upload")
-async def upload_and_analyze(token: str, request=None):
+async def upload_and_analyze(token: str, request: Request):
     """Receive media upload and trigger Gemini analysis.
 
     For MVP: direct upload. Production should use GCS signed URLs.
@@ -206,9 +206,6 @@ async def upload_and_analyze(token: str, request=None):
     accumulation, never buffering more than `MAX_UPLOAD_BYTES` in memory
     (SECURITY_AUDIT.md F-10).
     """
-    if request is None:
-        return {"error": "No request"}, 400
-
     estimate = await _get_estimate_doc(token)
     if not estimate:
         return {"error": "Invalid or expired token"}, 404
@@ -273,7 +270,7 @@ async def upload_and_analyze(token: str, request=None):
         context = GateContext(
             source="estimate",
             actor="system",
-            idempotency_key=f"{token}:caller_sms",
+            idempotency_key=f"{token_hash[:12]}:caller_sms",
         )
         decision = check_gated_action(contractor, ActionKey.ESTIMATE_RESULT_SMS, context)
         record_gate_decision(

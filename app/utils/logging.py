@@ -23,7 +23,18 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
         # Include any extra fields
-        for key in ("caller_phone", "trust_score", "route", "action", "duration_ms"):
+        for key in (
+            "caller_phone",
+            "trust_score",
+            "route",
+            "action",
+            "duration_ms",
+            "contractor_id",
+            "source",
+            "resource_id",
+            "allowed",
+            "reason",
+        ):
             if hasattr(record, key):
                 value = getattr(record, key)
                 if key == "caller_phone" and isinstance(value, str):

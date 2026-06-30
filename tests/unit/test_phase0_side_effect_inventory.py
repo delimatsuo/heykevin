@@ -47,3 +47,12 @@ def test_surfaces_by_path_groups_all_entries():
     for surface in SIDE_EFFECT_SURFACES:
         assert surface in grouped[surface.path]
     assert any("caller SMS" in s.current_behavior for s in grouped["app/services/post_call.py"])
+
+
+def test_voip_inventory_distinguishes_core_call_controls_from_text_reply_gate():
+    surface = surfaces_by_path()["app/api/voip.py"][0]
+
+    assert "accept, decline, and voicemail remain ownership-only" in surface.required_gate
+    assert "text_reply requires the caller-text backend gate" in surface.required_gate
+    assert "disabled-gate tests for text_reply" in surface.required_evidence
+    assert "disabled-gate tests for accept" not in surface.required_evidence

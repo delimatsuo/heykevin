@@ -301,9 +301,16 @@ async def _process_business(
 
         # 5b. Auto-reply SMS for non-service calls (opt-in)
         if contractor.get("auto_reply_sms", False):
-            decision, _context = _post_call_gate(contractor, ActionKey.CALLER_AUTO_REPLY, call_sid)
+            decision, context = _post_call_gate(contractor, ActionKey.CALLER_AUTO_REPLY, call_sid)
             if decision.allowed:
-                await _send_auto_reply(caller_phone, contractor, twilio_number, transcript_text, caller_language=caller_language)
+                await _send_auto_reply(
+                    caller_phone,
+                    contractor,
+                    twilio_number,
+                    transcript_text,
+                    caller_language=caller_language,
+                    gate_context=context,
+                )
             else:
                 logger.info("Auto-reply blocked by gate", extra={"reason": decision.reason.value})
 
@@ -493,7 +500,15 @@ def _detect_spanish(transcript_text: str) -> bool:
     return matches >= 2
 
 
-async def _send_auto_reply(caller_phone: str, contractor: dict, twilio_number: str, transcript_text: str = "", caller_language: str = "en"):
+async def _send_auto_reply(
+    caller_phone: str,
+    contractor: dict,
+    twilio_number: str,
+    transcript_text: str = "",
+    caller_language: str = "en",
+    gate_context: GateContext | None = None,
+    call_sid: str = "",
+):
     """Send a courtesy auto-reply SMS to the caller in their language. Opt-in, rate-limited via Firestore."""
     if not caller_phone:
         return
@@ -551,7 +566,19 @@ async def _send_auto_reply(caller_phone: str, contractor: dict, twilio_number: s
             msg = f"Thanks for calling {business_name}! {reply_name} got your message and will get back to you shortly."
 
     try:
-        await send_sms(caller_phone, msg, from_number=twilio_number)
+        gate_context = gate_context or GateContext(
+            source="post_call",
+            actor="system",
+            idempotency_key=f"{call_sid}:caller_auto_reply" if call_sid else "",
+        )
+        await send_sms(
+            caller_phone,
+            msg,
+            from_number=twilio_number,
+            contractor=contractor,
+            action=ActionKey.CALLER_AUTO_REPLY,
+            gate_context=gate_context,
+        )
         # Record timestamp in Firestore
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(

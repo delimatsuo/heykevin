@@ -5,17 +5,21 @@ import base64
 import json
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 
 from app.config import settings
 from app.services.voice_pipeline import VoicePipeline
 from app.db.cache import get_active_call, update_active_call, _init_firebase, ACTIVE_CALLS_PATH
-from app.services.push_notification import get_device_token
 from app.utils.logging import get_logger, redact_phone
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _safe_urgent_push_body(caller_name: str = "", caller_phone: str = "") -> str:
+    """Return lock-screen-safe urgent call copy with no raw speech or full phone."""
+    return "Urgent call needs review. Open Kevin for details."
 
 
 def _log_task_exception(task: asyncio.Task):
@@ -325,12 +329,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 conference_name=urgent_conf,
             )
 
-        # Also send critical push notification with context
+        # Also send critical push notification without lock-screen-sensitive context.
         push_token = await get_device_token(contractor_id=_cid)
         if push_token:
             caller_name = active_call.caller_name if active_call else ""
             caller_phone = active_call.caller_phone if active_call else ""
-            body = f"Caller says: {caller_name or caller_phone} — {transcript_snippet[:150]}"
+            body = _safe_urgent_push_body(caller_name=caller_name, caller_phone=caller_phone)
             await send_urgent_push(
                 device_token=push_token,
                 title="URGENT CALL",

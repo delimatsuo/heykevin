@@ -162,7 +162,12 @@ async def _graphql_request(access_token: str, query: str, variables: dict = None
             if response.status_code == 200:
                 data = response.json()
                 if "errors" in data:
-                    logger.warning(f"Jobber GraphQL errors: {data['errors']}")
+                    errors = data["errors"]
+                    error_count = len(errors) if isinstance(errors, list) else 1
+                    logger.warning(
+                        f"Jobber GraphQL errors: operation=graphql_request "
+                        f"status_code=200 error_count={error_count}"
+                    )
                 return data.get("data")
             if response.status_code == 401:
                 raise JobberAuthError("Jobber access token rejected")
@@ -170,7 +175,7 @@ async def _graphql_request(access_token: str, query: str, variables: dict = None
     except JobberAuthError:
         raise
     except Exception as e:
-        logger.error(f"Jobber request failed: {e}")
+        logger.error(f"Jobber request failed: exception_type={type(e).__name__}")
     return None
 
 

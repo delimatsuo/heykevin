@@ -42,5 +42,8 @@ def test_every_surface_has_gate_and_evidence():
 
 def test_surfaces_by_path_groups_all_entries():
     grouped = surfaces_by_path()
-    assert "app/services/post_call.py" in grouped
+    assert set(grouped) == {surface.path for surface in SIDE_EFFECT_SURFACES}
+    assert sum(len(surfaces) for surfaces in grouped.values()) == len(SIDE_EFFECT_SURFACES)
+    for surface in SIDE_EFFECT_SURFACES:
+        assert surface in grouped[surface.path]
     assert any("caller SMS" in s.current_behavior for s in grouped["app/services/post_call.py"])

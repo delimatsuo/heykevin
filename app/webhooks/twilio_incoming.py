@@ -55,6 +55,11 @@ def _screening_twiml(call_sid: str, ws_token: str = "") -> str:
     return str(response)
 
 
+def _safe_incoming_call_push_body(caller_name: str = "", caller_phone: str = "") -> str:
+    """Return lock-screen-safe incoming screening copy without caller identity."""
+    return "Kevin is screening a call. Open Kevin for details."
+
+
 def _reject_twiml() -> str:
     """TwiML to reject a spam call."""
     response = VoiceResponse()
@@ -219,16 +224,12 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             owner_name = contractor.get("owner_name", settings.user_name)
             owner_phone = contractor.get("owner_phone", "")
             business_name = contractor.get("business_name", f"{owner_name}'s office")
-            service_type = contractor.get("service_type", "general")
-            mode = contractor.get("mode", "kevin")
             logger.info(f"Contractor found: {business_name} ({contractor_id})")
         else:
             contractor_id = ""
             owner_name = settings.user_name
             owner_phone = getattr(settings, "user_phone", "")
             business_name = f"{owner_name}'s office"
-            service_type = "general"
-            mode = "kevin"
             contractor = {}
             logger.info("No contractor found — using default settings")
 
@@ -626,7 +627,7 @@ async def _post_routing_tasks(
                         await send_regular_push(
                             device_token=_push_token,
                             title="Incoming Call",
-                            body=f"Kevin is screening a call from {caller_name or caller_phone}",
+                            body=_safe_incoming_call_push_body(caller_name=caller_name, caller_phone=caller_phone),
                             call_sid=call_sid,
                             caller_phone=caller_phone,
                             caller_name=caller_name,

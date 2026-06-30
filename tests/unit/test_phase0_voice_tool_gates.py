@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
@@ -96,6 +97,181 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
 
     assert result == {"success": False, "error": "Owner confirmation is required for this action."}
     assert created == []
+
+
+@pytest.mark.asyncio
+async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
+    created = []
+
+    async def fake_book_appointment(token, *, title, start_time, end_time, description):
+        created.append({
+            "token": token,
+            "title": title,
+            "start_time": start_time,
+            "end_time": end_time,
+            "description": description,
+        })
+        return "event-1"
+
+    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+        "integration_write_status": "approved",
+        "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+    })
+    result = json.loads(await pipeline._execute_tool(
+        "book_appointment",
+        {
+            "title": "Sink repair",
+            "start_time": "2026-07-01T13:00:00-04:00",
+            "end_time": "2026-07-01T14:00:00-04:00",
+            "description": "Caller asked for the upstairs sink.",
+            "ignored": "not passed through",
+        },
+    ))
+
+    assert result == {"success": True, "event_id": "event-1"}
+    assert created == [
+        {
+            "token": "gcal-token",
+            "title": "Sink repair",
+            "start_time": "2026-07-01T13:00:00-04:00",
+            "end_time": "2026-07-01T14:00:00-04:00",
+            "description": "Caller asked for the upstairs sink.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized_logging(caplog):
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA-GEMINI-PRIVACY",
+        contractor_config={
+            "contractor_id": "c1",
+            "jobber_access_token": "token",
+            "integration_write_status": "approved",
+            "gated_actions": {ActionKey.JOBBER_CREATE_JOB.value: True},
+        },
+    )
+    pipeline._ws = FakeWebSocket()
+
+    sensitive_args = {
+        "title": "Jane Private kitchen sink repair",
+        "instructions": "Address 123 Secret Lane, gate code 2468, call +15551234567.",
+        "client_id": "client-sensitive",
+    }
+
+    with caplog.at_level(logging.INFO):
+        await pipeline._handle_tool_calls([
+            {"id": "tool-1", "name": "book_appointment", "args": sensitive_args}
+        ])
+
+    assert pipeline._ws.sent == [
+        {
+            "tool_response": {
+                "function_responses": [
+                    {
+                        "id": "tool-1",
+                        "name": "book_appointment",
+                        "response": {
+                            "success": False,
+                            "error": "Owner confirmation is required for this action.",
+                        },
+                    }
+                ]
+            }
+        }
+    ]
+    assert "Gemini tool call: book_appointment call_sid=CA-GEMINI-PRIVACY" in caplog.text
+    for sensitive_value in (
+        "Jane Private",
+        "123 Secret Lane",
+        "2468",
+        "+15551234567",
+        "client-sensitive",
+    ):
+        assert sensitive_value not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(monkeypatch, caplog):
+    class FakeClaudeResponse:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class FakeClaudeClient:
+        def __init__(self):
+            self.responses = [
+                FakeClaudeResponse({
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu-1",
+                            "name": "book_appointment",
+                            "input": {
+                                "title": "Jane Private faucet repair",
+                                "start_time": "2026-07-01T13:00:00-04:00",
+                                "end_time": "2026-07-01T14:00:00-04:00",
+                                "description": "Address 123 Secret Lane, callback +15551234567.",
+                            },
+                        }
+                    ],
+                }),
+                FakeClaudeResponse({
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "I can take a message."}],
+                }),
+            ]
+
+        async def post(self, *_args, **_kwargs):
+            return self.responses.pop(0)
+
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+    })
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+
+    async def fake_execute_tool(tool_name, tool_input):
+        assert tool_name == "book_appointment"
+        assert tool_input["title"] == "Jane Private faucet repair"
+        return json.dumps({"success": False, "message": "not created"})
+
+    async def fake_speak(_text):
+        return None
+
+    monkeypatch.setattr(pipeline, "_execute_tool", fake_execute_tool)
+    monkeypatch.setattr(pipeline, "_speak", fake_speak)
+
+    with caplog.at_level(logging.INFO):
+        await pipeline._handle_caller_speech("I need help with a leak.")
+
+    assert "Tool call: book_appointment call_sid=CA123" in caplog.text
+    for sensitive_value in (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "2026-07-01T13:00:00-04:00",
+    ):
+        assert sensitive_value not in caplog.text
 
 
 @pytest.mark.asyncio

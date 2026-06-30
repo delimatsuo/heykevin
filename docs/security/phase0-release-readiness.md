@@ -21,6 +21,33 @@ Do not merge or deploy until all rows below have an owner and an outcome.
 | Staging smoke | Run the smoke matrix below against staging after deployment. | Pending |
 | Production release | Only after the above pass, mark the PR ready for review and merge in an approved window. | Pending |
 
+## Current Audit Status
+
+Last updated: 2026-06-30.
+
+- ADC reauthentication was completed for `delimatsuo@gmail.com`.
+- The account can read Cloud Run service metadata for production and staging.
+- Production Firestore audit is blocked: `delimatsuo@gmail.com` lacks read/list
+  permission for `kevin-491315`.
+- Staging Firestore audit is blocked: `delimatsuo@gmail.com` lacks read/list
+  permission for `kevin-staging-491315`.
+- Staging Firestore project was confirmed from Cloud Run metadata as
+  `kevin-staging-491315`.
+- The checked-in GitHub workflow deploys staging on `staging` push and
+  production only by manual `workflow_dispatch` from `main`; no merge should
+  proceed until the owner confirms there is no additional auto-deploy path.
+- Cloud Run service metadata currently exposes plaintext runtime secrets to
+  accounts with service-describe access. Do not paste service environment dumps
+  into tickets, PR comments, or chat. Secret Manager migration and rotation are
+  outside this PR but remain production hardening work.
+
+Required permission to complete the account audit:
+
+- `delimatsuo@gmail.com` or another release operator needs read-only Firestore
+  access to `kevin-491315` and `kevin-staging-491315`.
+- After permission is granted, rerun the production and staging commands below
+  and paste only the aggregate JSON output into the release review.
+
 ## Read-Only Account Audit
 
 Audit production and staging contractor documents by counts only. The audit

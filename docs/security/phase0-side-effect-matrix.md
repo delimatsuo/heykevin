@@ -35,3 +35,40 @@ pytest tests/unit/test_phase0_side_effect_inventory.py -q
 ```
 
 Expected: inventory completeness tests pass.
+
+## Phase 0 Verification Commands
+
+Run the focused Phase 0 suite:
+
+```bash
+pytest \
+  tests/unit/test_phase0_side_effect_inventory.py \
+  tests/unit/test_gated_actions.py \
+  tests/unit/test_phase0_call_ownership.py \
+  tests/unit/test_phase0_sms_gates.py \
+  tests/unit/test_phase0_post_call_gates.py \
+  tests/unit/test_phase0_action_gates.py \
+  tests/unit/test_phase0_voice_tool_gates.py \
+  tests/unit/test_phase0_estimate_gates.py \
+  tests/unit/test_phase0_push_payloads.py \
+  -q
+```
+
+Run the adjacent security regression suite:
+
+```bash
+pytest \
+  tests/unit/test_conference_security.py \
+  tests/unit/test_security_audit_medium.py \
+  tests/unit/test_security_audit_f9_f10_f11.py \
+  tests/unit/test_jobber.py \
+  tests/unit/test_twilio_provisioning.py \
+  tests/unit/test_voip_token.py \
+  -q
+```
+
+Run full backend tests before PR:
+
+```bash
+pytest --tb=short -q
+```

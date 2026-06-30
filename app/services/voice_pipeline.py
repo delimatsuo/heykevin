@@ -25,6 +25,20 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def _tool_execution_error_response() -> str:
+    return json.dumps({"success": False, "error": "Tool execution failed."})
+
+
+def _log_tool_execution_failure(tool_name: str, call_sid: str, exc: Exception):
+    logger.error(
+        "Tool execution failed: tool_name=%s call_sid=%s exception_type=%s",
+        tool_name,
+        call_sid,
+        type(exc).__name__,
+    )
+
+
 def _sanitize_prompt_field(text: str, max_length: int = 5000) -> str:
     """Sanitize contractor-provided text before injecting into system prompt."""
     if not text:
@@ -1018,11 +1032,15 @@ class VoicePipeline:
                     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
             except asyncio.TimeoutError:
-                logger.warning(f"Tool {tool_name} timed out")
+                logger.warning(
+                    "Tool timed out: tool_name=%s call_sid=%s",
+                    tool_name,
+                    getattr(self, "_call_sid", ""),
+                )
                 return json.dumps({"error": "Request timed out"})
             except Exception as e:
-                logger.error(f"Tool {tool_name} failed: {e}")
-                return json.dumps({"error": str(e)})
+                _log_tool_execution_failure(tool_name, getattr(self, "_call_sid", ""), e)
+                return _tool_execution_error_response()
 
         # --- Jobber tools ---
         from app.services.jobber import lookup_customer, get_available_slots, create_job
@@ -1070,11 +1088,15 @@ class VoicePipeline:
                 return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
         except asyncio.TimeoutError:
-            logger.warning(f"Tool {tool_name} timed out")
+            logger.warning(
+                "Tool timed out: tool_name=%s call_sid=%s",
+                tool_name,
+                getattr(self, "_call_sid", ""),
+            )
             return json.dumps({"error": "Request timed out"})
         except Exception as e:
-            logger.error(f"Tool {tool_name} failed: {e}")
-            return json.dumps({"error": str(e)})
+            _log_tool_execution_failure(tool_name, getattr(self, "_call_sid", ""), e)
+            return _tool_execution_error_response()
 
     # --- Claude LLM ---
 
@@ -1177,7 +1199,11 @@ class VoicePipeline:
                                 pass
 
                             if tool_failed:
-                                logger.warning(f"Tool {tool_name} returned error: {result_str}")
+                                logger.warning(
+                                    "Tool returned error: tool_name=%s call_sid=%s",
+                                    tool_name,
+                                    getattr(self, "_call_sid", ""),
+                                )
                                 # On failure, bail out with a graceful message
                                 fallback_msg = "I'm sorry, I can't check the schedule right now. Let me take a message instead."
                                 self._conversation.append({

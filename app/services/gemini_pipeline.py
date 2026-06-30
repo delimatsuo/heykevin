@@ -503,6 +503,7 @@ class GeminiPipeline:
         # Reuse VoicePipeline's _execute_tool — it has all the Jobber/Calendar logic
         temp_pipeline = VoicePipeline.__new__(VoicePipeline)
         temp_pipeline._contractor_config = self._contractor_config
+        temp_pipeline._call_sid = self._call_sid
 
         responses = []
         for fc in function_calls:

@@ -19,6 +19,8 @@ import websockets
 
 from app.config import settings
 from app.services.entitlements import effective_mode
+from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services.side_effect_audit import record_gate_decision
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -956,6 +958,23 @@ class VoicePipeline:
     def _get_google_calendar_token(self) -> str:
         return self._contractor_config.get("google_calendar_access_token", "")
 
+    def _check_tool_write_gate(self, action: ActionKey):
+        call_sid = getattr(self, "_call_sid", "")
+        context = GateContext(
+            source="voice_tool",
+            actor="automation",
+            idempotency_key=f"{call_sid}:{action.value}",
+        )
+        decision = check_gated_action(self._contractor_config, action, context)
+        record_gate_decision(
+            action=action,
+            contractor_id=self._contractor_config.get("contractor_id", ""),
+            source="voice_tool",
+            resource_id=call_sid,
+            decision=decision,
+        )
+        return decision
+
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool call (Jobber or Google Calendar) and return the result as a string."""
 
@@ -977,6 +996,10 @@ class VoicePipeline:
                     return json.dumps({"available_slots": slots, "days_checked": days})
 
                 elif tool_name == "book_appointment":
+                    decision = self._check_tool_write_gate(ActionKey.GOOGLE_CREATE_EVENT)
+                    if not decision.allowed:
+                        return json.dumps({"success": False, "error": decision.message})
+
                     event_id = await asyncio.wait_for(
                         gcal_book(
                             token,
@@ -1031,6 +1054,10 @@ class VoicePipeline:
                 return json.dumps({"booked_slots": slots, "days_checked": days})
 
             elif tool_name == "book_appointment":
+                decision = self._check_tool_write_gate(ActionKey.JOBBER_CREATE_JOB)
+                if not decision.allowed:
+                    return json.dumps({"success": False, "error": decision.message})
+
                 job_id = await asyncio.wait_for(
                     create_job(self._contractor_config, tool_input),
                     timeout=3.0,

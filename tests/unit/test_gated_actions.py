@@ -16,8 +16,18 @@ def import_gated_actions_without_config_env(monkeypatch):
     for key in REQUIRED_CONFIG_ENV:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
-    sys.modules.pop("app.config", None)
-    sys.modules.pop("app.services.gated_actions", None)
+
+    # Exercise the import without app.config while letting monkeypatch restore
+    # both sys.modules and package attributes afterward. A raw sys.modules.pop()
+    # leaves app.config attached to the package object, which can make later
+    # tests patch a stale settings module while app code imports a fresh one.
+    monkeypatch.delitem(sys.modules, "app.config", raising=False)
+    monkeypatch.delitem(sys.modules, "app.services.gated_actions", raising=False)
+    import app
+    import app.services
+    monkeypatch.delattr(app, "config", raising=False)
+    monkeypatch.delattr(app.services, "gated_actions", raising=False)
+
     return importlib.import_module("app.services.gated_actions")
 
 

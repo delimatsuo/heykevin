@@ -26,6 +26,35 @@ Do not merge or deploy until all rows below have an owner and an outcome.
 Audit production and staging contractor documents by counts only. The audit
 should answer these questions without exposing PII:
 
+Use the redacted audit helper:
+
+```bash
+# Production Firestore
+.venv/bin/python scripts/phase0_account_audit.py \
+  --project kevin-491315 \
+  --environment production
+
+# Staging Firestore. FIRESTORE_PROJECT_ID is a GitHub repository variable,
+# not a secret; do not use the production project for this command.
+STAGING_FIRESTORE_PROJECT_ID="$(gh variable get FIRESTORE_PROJECT_ID --repo delimatsuo/heykevin)"
+.venv/bin/python scripts/phase0_account_audit.py \
+  --project "$STAGING_FIRESTORE_PROJECT_ID" \
+  --environment staging
+```
+
+The script prints aggregate JSON only. Review the output before storing it and
+discard it if any unexpected raw value appears.
+
+If the command reports that ADC must be reauthenticated, run:
+
+```bash
+gcloud auth application-default login
+```
+
+with an account that has read access to the target Firestore project, then
+rerun the audit command. Do not use a service account key unless it is already
+approved for local incident/release work.
+
 | Field or behavior | Question |
 |---|---|
 | `gated_actions` | How many contractors already have action flags? Which action keys are present? |
@@ -84,4 +113,3 @@ If production release causes unexpected behavior:
 3. Confirm `/health` returns the expected previous `DEPLOY_SHA`.
 4. Re-run one incoming-call smoke test.
 5. Leave caller-facing gates disabled until the incident is understood.
-

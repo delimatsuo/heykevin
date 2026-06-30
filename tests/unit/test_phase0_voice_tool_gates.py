@@ -146,13 +146,103 @@ async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized_logging(caplog):
+async def test_jobber_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
+    sensitive_values = (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "gate code 2468",
+    )
+
+    async def fake_create_job(*_args, **_kwargs):
+        raise RuntimeError(
+            "Jobber rejected appointment for Jane Private at 123 Secret Lane, "
+            "callback +15551234567, gate code 2468."
+        )
+
+    monkeypatch.setattr("app.services.jobber.create_job", fake_create_job)
+
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "jobber_access_token": "token",
+        "integration_write_status": "approved",
+        "gated_actions": {ActionKey.JOBBER_CREATE_JOB.value: True},
+        "automation_approvals": {ActionKey.JOBBER_CREATE_JOB.value: True},
+    })
+
+    with caplog.at_level(logging.ERROR):
+        result = json.loads(await pipeline._execute_tool(
+            "book_appointment",
+            {"title": "Jane Private repair", "description": "123 Secret Lane"},
+        ))
+
+    assert result == {"success": False, "error": "Tool execution failed."}
+    assert "book_appointment" in caplog.text
+    assert "CA123" in caplog.text
+    assert "RuntimeError" in caplog.text
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in caplog.text
+        assert sensitive_value not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
+    sensitive_values = (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
+        "gate code 2468",
+    )
+
+    async def fake_book_appointment(*_args, **_kwargs):
+        raise ValueError(
+            "Calendar rejected appointment for Jane Private at 123 Secret Lane, "
+            "callback +15551234567, gate code 2468."
+        )
+
+    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+        "integration_write_status": "approved",
+        "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+    })
+
+    with caplog.at_level(logging.ERROR):
+        result = json.loads(await pipeline._execute_tool(
+            "book_appointment",
+            {
+                "title": "Jane Private repair",
+                "start_time": "2026-07-01T13:00:00-04:00",
+                "end_time": "2026-07-01T14:00:00-04:00",
+                "description": "123 Secret Lane callback +15551234567",
+            },
+        ))
+
+    assert result == {"success": False, "error": "Tool execution failed."}
+    assert "book_appointment" in caplog.text
+    assert "CA123" in caplog.text
+    assert "ValueError" in caplog.text
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in caplog.text
+        assert sensitive_value not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized_logging(monkeypatch, caplog):
     class FakeWebSocket:
         def __init__(self):
             self.sent = []
 
         async def send(self, payload):
             self.sent.append(json.loads(payload))
+
+    async def fail_create_job(*_args, **_kwargs):
+        raise AssertionError("create_job must not be called when Gemini gate denies")
+
+    monkeypatch.setattr("app.services.jobber.create_job", fail_create_job)
 
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
@@ -201,6 +291,66 @@ async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized
         "2468",
         "+15551234567",
         "client-sensitive",
+    ):
+        assert sensitive_value not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_voice_tool_error_result_logging_does_not_include_sensitive_payload(monkeypatch, caplog):
+    class FakeClaudeResponse:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class FakeClaudeClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeClaudeResponse({
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu-1",
+                        "name": "book_appointment",
+                        "input": {
+                            "title": "Jane Private faucet repair",
+                            "description": "Address 123 Secret Lane, callback +15551234567.",
+                        },
+                    }
+                ],
+            })
+
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+    })
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+
+    async def fake_execute_tool(tool_name, tool_input):
+        assert tool_name == "book_appointment"
+        assert tool_input["title"] == "Jane Private faucet repair"
+        return json.dumps({
+            "error": "Calendar rejected Jane Private at 123 Secret Lane, callback +15551234567."
+        })
+
+    async def fake_speak(_text):
+        return None
+
+    monkeypatch.setattr(pipeline, "_execute_tool", fake_execute_tool)
+    monkeypatch.setattr(pipeline, "_speak", fake_speak)
+
+    with caplog.at_level(logging.WARNING):
+        await pipeline._handle_caller_speech("I need help with a leak.")
+
+    assert "book_appointment" in caplog.text
+    assert "CA123" in caplog.text
+    for sensitive_value in (
+        "Jane Private",
+        "123 Secret Lane",
+        "+15551234567",
     ):
         assert sensitive_value not in caplog.text
 

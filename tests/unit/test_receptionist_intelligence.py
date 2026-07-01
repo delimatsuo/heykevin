@@ -1,13 +1,21 @@
 """Receptionist prompt, call-state, and post-call scope guardrails."""
 
 import asyncio
+import os
 
 import pytest
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
+os.environ.setdefault("USER_PHONE", "+15550000001")
 
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.job_card import _build_extraction_prompt
 from app.services.vcard import generate_vcard
 from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold, VoicePipeline
+from app.services import voice_pipeline as voice_pipeline_module
 
 
 def _plumbing_config() -> dict:
@@ -137,6 +145,50 @@ async def test_voice_pipeline_silence_waits_for_owner_availability_before_prompt
     assert "not available to take the call right now" in spoken
     assert "Are you still there?" in spoken
     assert "hang up for now" in spoken
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
+    request_bodies = []
+    transcripts = []
+
+    class FakeClaudeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "We handle plumbing repairs."}],
+            }
+
+    class FakeClaudeClient:
+        async def post(self, *_args, **kwargs):
+            request_bodies.append(kwargs["json"])
+            return FakeClaudeResponse()
+
+    async def on_audio_out(_chunk: bytes):
+        return None
+
+    async def on_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    assert hasattr(voice_pipeline_module.settings, "anthropic_model")
+    monkeypatch.setattr(voice_pipeline_module.settings, "anthropic_model", "claude-sonnet-5")
+
+    pipeline = VoicePipeline(
+        on_audio_out=on_audio_out,
+        on_transcript=on_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+    pipeline._speak = on_audio_out
+
+    await pipeline._handle_caller_speech("What kind of services do you offer?")
+
+    assert request_bodies[0]["model"] == "claude-sonnet-5"
+    assert transcripts[-1] == ("Kevin", "We handle plumbing repairs.")
 
 
 @pytest.mark.asyncio

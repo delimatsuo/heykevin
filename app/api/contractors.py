@@ -519,7 +519,7 @@ async def api_structure_knowledge(contractor_id: str, body: StructureKnowledgeRe
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": settings.anthropic_model,
                     "max_tokens": 1000,
                     "messages": [{"role": "user", "content": f"""A contractor described updates to their business by voice. Create a clean knowledge base document with these sections (only include sections with relevant info):
 
@@ -792,7 +792,7 @@ async def api_import_website(contractor_id: str, body: ImportWebsiteRequest, req
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": settings.anthropic_model,
                     "max_tokens": 1000,
                     "messages": [{"role": "user", "content": f"""Extract business information from this webpage HTML and format it as a knowledge base document. Include:
 

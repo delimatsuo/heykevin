@@ -22,7 +22,7 @@ from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
-from app.utils.logging import get_logger
+from app.utils.logging import get_logger, trace_event
 
 logger = get_logger(__name__)
 
@@ -471,6 +471,8 @@ class VoicePipeline:
 
         # Utterance accumulation: collect is_final segments until speech_final
         self._utterance_buffer: list[str] = []
+        self._turn_sequence = 0
+        self._active_trace_turn_id: Optional[int] = None
 
         # Serialization: only one Claude→TTS cycle at a time
         self._response_lock = asyncio.Lock()
@@ -891,14 +893,56 @@ class VoicePipeline:
 
         combined = " ".join(self._utterance_buffer)
         self._utterance_buffer.clear()
+        turn_id = self._next_turn_id()
 
         logger.info(f"Complete utterance: {combined}")
-        asyncio.create_task(self._process_utterance(combined))
+        return asyncio.create_task(self._process_utterance(combined, turn_id=turn_id))
 
-    async def _process_utterance(self, text: str):
+    def _next_turn_id(self) -> int:
+        self._turn_sequence += 1
+        return self._turn_sequence
+
+    def _trace_turn(self, event: str, turn_id: Optional[int], **fields):
+        trace_event(
+            logger,
+            event,
+            call_sid=self._call_sid,
+            contractor_id=self._contractor_config.get("contractor_id", ""),
+            turn_id=turn_id,
+            voice_engine="elevenlabs",
+            **fields,
+        )
+
+    async def _speak_for_turn(self, text: str, turn_id: Optional[int]):
+        previous_turn_id = self._active_trace_turn_id
+        self._active_trace_turn_id = turn_id
+        try:
+            await self._speak(text)
+        finally:
+            self._active_trace_turn_id = previous_turn_id
+
+    async def _process_utterance(self, text: str, turn_id: Optional[int] = None):
         """Run one Claude→TTS cycle, serialized by lock."""
+        if turn_id is None:
+            turn_id = self._next_turn_id()
+        self._trace_turn(
+            "voice_turn_utterance_final",
+            turn_id,
+            stage="stt",
+            status="ok",
+            utterance_chars=len(text),
+            word_count=len(text.split()),
+        )
+        lock_wait_started = time.monotonic()
         async with self._response_lock:
-            await self._handle_caller_speech(text)
+            self._trace_turn(
+                "voice_turn_lock_acquired",
+                turn_id,
+                stage="queue",
+                status="ok",
+                duration_ms=int((time.monotonic() - lock_wait_started) * 1000),
+            )
+            await self._handle_caller_speech(text, turn_id=turn_id)
 
     # --- Jobber tool definitions (only included if contractor has Jobber connected) ---
 
@@ -1183,7 +1227,7 @@ class VoicePipeline:
 
     # --- Claude LLM ---
 
-    async def _handle_caller_speech(self, caller_text: str):
+    async def _handle_caller_speech(self, caller_text: str, turn_id: Optional[int] = None):
         self._conversation.append({"role": "user", "content": f"<caller_speech>{caller_text}</caller_speech>"})
 
         # Select tools: Jobber > Google Calendar > none
@@ -1213,6 +1257,15 @@ class VoicePipeline:
                 # A4: Retry Claude API call once on failure
                 response = None
                 for attempt in range(2):
+                    llm_started = time.monotonic()
+                    self._trace_turn(
+                        "voice_turn_llm_start",
+                        turn_id,
+                        stage="llm",
+                        status="started",
+                        provider="anthropic",
+                        attempt=attempt + 1,
+                    )
                     try:
                         response = await client.post(
                             "https://api.anthropic.com/v1/messages",
@@ -1224,10 +1277,30 @@ class VoicePipeline:
                             json=request_body,
                             timeout=8.0,
                         )
+                        self._trace_turn(
+                            "voice_turn_llm_end",
+                            turn_id,
+                            stage="llm",
+                            status="ok" if response.status_code == 200 else "error",
+                            provider="anthropic",
+                            attempt=attempt + 1,
+                            http_status=response.status_code,
+                            duration_ms=int((time.monotonic() - llm_started) * 1000),
+                        )
                         if response.status_code == 200:
                             break
                         logger.error(f"Claude error (attempt {attempt + 1}): {response.status_code}")
                     except Exception as api_err:
+                        self._trace_turn(
+                            "voice_turn_llm_end",
+                            turn_id,
+                            stage="llm",
+                            status="exception",
+                            provider="anthropic",
+                            attempt=attempt + 1,
+                            reason=type(api_err).__name__,
+                            duration_ms=int((time.monotonic() - llm_started) * 1000),
+                        )
                         logger.error(f"Claude API exception (attempt {attempt + 1}): {api_err}")
                         response = None
 
@@ -1238,7 +1311,7 @@ class VoicePipeline:
                     fallback = "I'm sorry, I'm having trouble. Could you repeat that?"
                     self._conversation.append({"role": "assistant", "content": fallback})
                     await self.on_transcript("Kevin", fallback)
-                    await self._speak(fallback)
+                    await self._speak_for_turn(fallback, turn_id)
                     return
 
                 data = response.json()
@@ -1255,7 +1328,7 @@ class VoicePipeline:
                         tool_filler_said = True
                         filler = "Let me check on that for you."
                         await self.on_transcript("Kevin", filler)
-                        await self._speak(filler)
+                        await self._speak_for_turn(filler, turn_id)
 
                     # Process each tool_use block
                     tool_results = []
@@ -1295,7 +1368,7 @@ class VoicePipeline:
                                 })
                                 self._conversation.append({"role": "assistant", "content": fallback_msg})
                                 await self.on_transcript("Kevin", fallback_msg)
-                                await self._speak(fallback_msg)
+                                await self._speak_for_turn(fallback_msg, turn_id)
                                 return
 
                             tool_results.append({
@@ -1334,7 +1407,7 @@ class VoicePipeline:
 
                 logger.info(f"Kevin: {kevin_text}")
                 await self.on_transcript("Kevin", kevin_text)
-                await self._speak(kevin_text)
+                await self._speak_for_turn(kevin_text, turn_id)
                 if is_owner_availability_hold(kevin_text):
                     self._start_owner_availability_wait()
 
@@ -1517,6 +1590,17 @@ class VoicePipeline:
         """Convert text to speech. Supports barge-in (stops if caller interrupts)."""
         self._is_speaking = True
         self._interrupt_speaking = False
+        turn_id = self._active_trace_turn_id
+        tts_started = time.monotonic()
+        if turn_id is not None:
+            self._trace_turn(
+                "voice_turn_tts_start",
+                turn_id,
+                stage="tts",
+                status="started",
+                provider="elevenlabs",
+                transcript_chars=len(text),
+            )
 
         try:
             client = self._http_client
@@ -1547,11 +1631,23 @@ class VoicePipeline:
                     mulaw_data = mulaw_data[44:]
 
                 logger.info(f"TTS: {len(mulaw_data)} bytes ({len(mulaw_data)/8000:.1f}s)")
+                if turn_id is not None:
+                    self._trace_turn(
+                        "voice_turn_tts_generated",
+                        turn_id,
+                        stage="tts",
+                        status="ok",
+                        provider="elevenlabs",
+                        bytes_total=len(mulaw_data),
+                        audio_seconds=round(len(mulaw_data) / TWILIO_MULAW_SAMPLE_RATE, 3),
+                        duration_ms=int((time.monotonic() - tts_started) * 1000),
+                    )
 
                 # Send Twilio-sized media frames so barge-in and playback stay responsive.
                 chunk_size = TWILIO_MEDIA_FRAME_BYTES
                 start_time = asyncio.get_event_loop().time()
                 bytes_sent = 0
+                first_audio_sent = False
                 for i in range(0, len(mulaw_data), chunk_size):
                     if not self._connected or self._interrupt_speaking:
                         logger.info("TTS interrupted (barge-in)")
@@ -1560,6 +1656,17 @@ class VoicePipeline:
                     chunk = mulaw_data[i:i + chunk_size]
                     await self.on_audio_out(chunk)
                     bytes_sent += len(chunk)
+                    if turn_id is not None and not first_audio_sent:
+                        first_audio_sent = True
+                        self._trace_turn(
+                            "voice_turn_tts_first_audio",
+                            turn_id,
+                            stage="tts",
+                            status="ok",
+                            provider="elevenlabs",
+                            first_audio_ms=int((time.monotonic() - tts_started) * 1000),
+                            bytes_sent=bytes_sent,
+                        )
 
                     # Pace at real-time playback speed.
                     target = start_time + (bytes_sent / TWILIO_MULAW_SAMPLE_RATE)
@@ -1569,10 +1676,41 @@ class VoicePipeline:
 
                 # Update silence timeout — Kevin spoke
                 self._mark_kevin_activity()
+                if turn_id is not None:
+                    self._trace_turn(
+                        "voice_turn_tts_end",
+                        turn_id,
+                        stage="tts",
+                        status="interrupted" if self._interrupt_speaking else "ok",
+                        provider="elevenlabs",
+                        bytes_total=len(mulaw_data),
+                        bytes_sent=bytes_sent,
+                        duration_ms=int((time.monotonic() - tts_started) * 1000),
+                    )
             else:
+                if turn_id is not None:
+                    self._trace_turn(
+                        "voice_turn_tts_end",
+                        turn_id,
+                        stage="tts",
+                        status="error",
+                        provider="elevenlabs",
+                        http_status=response.status_code,
+                        duration_ms=int((time.monotonic() - tts_started) * 1000),
+                    )
                 logger.error(f"ElevenLabs error: {response.status_code} {response.text[:100]}")
 
         except Exception as e:
+            if turn_id is not None:
+                self._trace_turn(
+                    "voice_turn_tts_end",
+                    turn_id,
+                    stage="tts",
+                    status="exception",
+                    provider="elevenlabs",
+                    reason=type(e).__name__,
+                    duration_ms=int((time.monotonic() - tts_started) * 1000),
+                )
             logger.error(f"TTS error: {e}")
 
         self._is_speaking = False

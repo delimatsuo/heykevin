@@ -20,7 +20,7 @@ from twilio.twiml.voice_response import VoiceResponse, Dial, Connect
 from app.config import settings
 from app.middleware.twilio_verify import verify_twilio_signature
 from app.utils.error_handlers import twiml_response, fallback_twiml_response
-from app.utils.logging import get_logger, call_sid_var, redact_phone
+from app.utils.logging import get_logger, call_sid_var, redact_phone, trace_event
 from app.utils.phone import normalize_phone
 
 logger = get_logger(__name__)
@@ -212,6 +212,15 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
 
         call_sid_var.set(call_sid)
         logger.info("Incoming call received", extra={"caller_phone": redact_phone(caller_phone)})
+        trace_event(
+            logger,
+            "call_incoming_received",
+            call_sid=call_sid,
+            caller_phone=caller_phone,
+            stage="routing",
+            status="started",
+            source="twilio",
+        )
 
         # Look up contractor by the Twilio number that received the call
         to_number = form_data.get("To", "")
@@ -405,6 +414,18 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             f"Routing decided in {duration_ms}ms",
             extra={"route": route.value, "trust_score": trust_score, "duration_ms": duration_ms},
         )
+        trace_event(
+            logger,
+            "call_route_decided",
+            call_sid=call_sid,
+            contractor_id=contractor_id,
+            caller_phone=caller_phone,
+            route=route.value,
+            trust_score=trust_score,
+            stage="routing",
+            status="ok",
+            duration_ms=duration_ms,
+        )
 
         # Fast-track known/whitelisted contacts — ring the contractor directly
         if contact and contact.get("is_whitelisted") and route == Route.WHITELIST_FORWARD:
@@ -574,6 +595,17 @@ async def _post_routing_tasks(
 ):
     """Background tasks after routing — save call record, send push, save RTDB state."""
     call_sid_var.set(call_sid)
+    task_started = time.monotonic()
+    trace_event(
+        logger,
+        "call_post_routing_start",
+        call_sid=call_sid,
+        contractor_id=contractor_id,
+        caller_phone=caller_phone,
+        route=route.value,
+        stage="routing",
+        status="started",
+    )
 
     try:
         from app.db.calls import save_call
@@ -618,6 +650,16 @@ async def _post_routing_tasks(
                     ws_token=ws_token,
                 )
                 await save_active_call(active_call)
+                trace_event(
+                    logger,
+                    "call_active_state_saved",
+                    call_sid=call_sid,
+                    contractor_id=contractor_id,
+                    caller_phone=caller_phone,
+                    route=route.value,
+                    stage="rtdb",
+                    status="ok",
+                )
 
                 # Send push notification now that RTDB is saved and contractor_id is known
                 if contractor_id:
@@ -675,7 +717,31 @@ async def _post_routing_tasks(
                 except Exception as e:
                     logger.warning(f"Background Twilio lookup failed: {e}")
 
+        trace_event(
+            logger,
+            "call_post_routing_end",
+            call_sid=call_sid,
+            contractor_id=contractor_id,
+            caller_phone=caller_phone,
+            route=route.value,
+            stage="routing",
+            status="ok",
+            duration_ms=int((time.monotonic() - task_started) * 1000),
+        )
+
     except Exception as e:
+        trace_event(
+            logger,
+            "call_post_routing_end",
+            call_sid=call_sid,
+            contractor_id=contractor_id,
+            caller_phone=caller_phone,
+            route=getattr(route, "value", ""),
+            stage="routing",
+            status="exception",
+            reason=type(e).__name__,
+            duration_ms=int((time.monotonic() - task_started) * 1000),
+        )
         logger.error(f"Post-routing task error: {e}", exc_info=True)
 
 

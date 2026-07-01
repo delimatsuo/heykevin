@@ -11,6 +11,7 @@ Full-duplex architecture based on Deepgram best practices:
 
 import asyncio
 import json
+import re
 import time
 from typing import Callable, Awaitable, Optional
 
@@ -84,6 +85,88 @@ def _format_service_names_for_prompt(services: list) -> str:
         if name:
             names.append(name)
     return ", ".join(names)
+
+
+_ONES = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
+)
+_TENS = (
+    "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+    "eighty", "ninety",
+)
+_MONEY_AMOUNT_PATTERN = r"\d+(?:,\d{3})*"
+
+
+def _int_to_words(value: int) -> str:
+    """Small integer-to-words helper for TTS-safe currency pronunciation."""
+    if value < 20:
+        return _ONES[value]
+    if value < 100:
+        tens, ones = divmod(value, 10)
+        return _TENS[tens] if ones == 0 else f"{_TENS[tens]}-{_ONES[ones]}"
+    if value < 1000:
+        hundreds, remainder = divmod(value, 100)
+        prefix = f"{_ONES[hundreds]} hundred"
+        return prefix if remainder == 0 else f"{prefix} {_int_to_words(remainder)}"
+    if value < 1_000_000:
+        thousands, remainder = divmod(value, 1000)
+        prefix = f"{_int_to_words(thousands)} thousand"
+        return prefix if remainder == 0 else f"{prefix} {_int_to_words(remainder)}"
+    return f"{value:,}"
+
+
+def _parse_money_amount(raw: str) -> int:
+    return int(raw.replace(",", ""))
+
+
+def _money_words(raw: str) -> str:
+    amount = _parse_money_amount(raw)
+    unit = "dollar" if amount == 1 else "dollars"
+    return f"{_int_to_words(amount)} {unit}"
+
+
+def _money_modifier_words(raw: str) -> str:
+    return f"{_int_to_words(_parse_money_amount(raw))} dollar"
+
+
+def _normalize_tts_text(text: str) -> str:
+    """Make money amounts safer for voice synthesis without changing transcripts."""
+    if not text:
+        return text
+
+    spoken = text
+    spoken = re.sub(
+        rf"\$({_MONEY_AMOUNT_PATTERN})\s*(?:-|–|—|to)\s*\$({_MONEY_AMOUNT_PATTERN})",
+        lambda m: f"{_money_words(m.group(1))} to {_money_words(m.group(2))}",
+        spoken,
+        flags=re.IGNORECASE,
+    )
+    spoken = re.sub(
+        rf"\b({_MONEY_AMOUNT_PATTERN})\s*(?:-|–|—|to)\s*({_MONEY_AMOUNT_PATTERN})\s+dollars\b",
+        lambda m: f"{_money_words(m.group(1))} to {_money_words(m.group(2))}",
+        spoken,
+        flags=re.IGNORECASE,
+    )
+    spoken = re.sub(
+        rf"\$({_MONEY_AMOUNT_PATTERN})\s+((?:diagnostic|service|trip|call)\s+fee)\b",
+        lambda m: f"{_money_modifier_words(m.group(1))} {m.group(2)}",
+        spoken,
+        flags=re.IGNORECASE,
+    )
+    spoken = re.sub(
+        rf"\$({_MONEY_AMOUNT_PATTERN})",
+        lambda m: _money_words(m.group(1)),
+        spoken,
+    )
+    spoken = re.sub(
+        rf"\b({_MONEY_AMOUNT_PATTERN})\s+dollars\b",
+        lambda m: _money_words(m.group(1)),
+        spoken,
+        flags=re.IGNORECASE,
+    )
+    return spoken
 
 
 def is_owner_availability_hold(text: str) -> bool:
@@ -313,6 +396,8 @@ ELEVENLABS_VOICE_ID = "cjVigY5qzO86Huf0OWal"  # Eric — Smooth, Trustworthy, Am
 ELEVENLABS_VOICE_ID_SPANISH = "onwK4e9ZLuTAKqWW03F9"  # Daniel — Multilingual male
 ELEVENLABS_MODEL_DEFAULT = "eleven_flash_v2_5"
 ELEVENLABS_MODEL_MULTILINGUAL = "eleven_multilingual_v2"
+TWILIO_MULAW_SAMPLE_RATE = 8000
+TWILIO_MEDIA_FRAME_BYTES = 160  # 20ms of 8kHz mu-law audio
 
 
 class VoicePipeline:
@@ -1437,6 +1522,7 @@ class VoicePipeline:
 
         try:
             client = self._http_client
+            spoken_text = _normalize_tts_text(text)
             response = await client.post(
                 f"https://api.elevenlabs.io/v1/text-to-speech/{self._tts_voice_id}?output_format=ulaw_8000",
                 headers={
@@ -1444,7 +1530,7 @@ class VoicePipeline:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "text": text,
+                    "text": spoken_text,
                     "model_id": self._tts_model_id,
                     "voice_settings": {
                         "stability": 0.65,
@@ -1463,14 +1549,10 @@ class VoicePipeline:
 
                 logger.info(f"TTS: {len(mulaw_data)} bytes ({len(mulaw_data)/8000:.1f}s)")
 
-                # Send in large chunks for smooth playback
-                chunk_size = 4000  # 500ms of audio
-                total_duration = len(mulaw_data) / 8000.0
-                num_chunks = max(1, (len(mulaw_data) + chunk_size - 1) // chunk_size)
-                chunk_duration = total_duration / num_chunks
-
+                # Send Twilio-sized media frames so barge-in and playback stay responsive.
+                chunk_size = TWILIO_MEDIA_FRAME_BYTES
                 start_time = asyncio.get_event_loop().time()
-                chunk_index = 0
+                bytes_sent = 0
                 for i in range(0, len(mulaw_data), chunk_size):
                     if not self._connected or self._interrupt_speaking:
                         logger.info("TTS interrupted (barge-in)")
@@ -1478,17 +1560,13 @@ class VoicePipeline:
 
                     chunk = mulaw_data[i:i + chunk_size]
                     await self.on_audio_out(chunk)
-                    chunk_index += 1
+                    bytes_sent += len(chunk)
 
-                    # Pace at ~real-time
-                    target = start_time + (chunk_index * chunk_duration * 0.9)
+                    # Pace at real-time playback speed.
+                    target = start_time + (bytes_sent / TWILIO_MULAW_SAMPLE_RATE)
                     delay = target - asyncio.get_event_loop().time()
                     if delay > 0:
                         await asyncio.sleep(delay)
-
-                # Brief wait for Twilio to finish playing
-                if not self._interrupt_speaking and chunk_duration > 0:
-                    await asyncio.sleep(min(chunk_duration, 0.5))
 
                 # Update silence timeout — Kevin spoke
                 self._mark_kevin_activity()

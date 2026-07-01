@@ -157,7 +157,7 @@ async def _process_personal(
                 import anthropic
                 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
                 resp = await client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=settings.anthropic_model,
                     max_tokens=200,
                     messages=[{"role": "user", "content": (
                         f"Translate this missed call notification to language code '{user_language}'. "
@@ -384,7 +384,7 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
             import anthropic
             client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
             resp = await client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=settings.anthropic_model,
                 max_tokens=300,
                 messages=[{"role": "user", "content": (
                     f"Translate this call notification SMS to language code '{user_language}'. "
@@ -557,7 +557,7 @@ async def _send_auto_reply(
             import anthropic
             client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
             resp = await client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=settings.anthropic_model,
                 max_tokens=100,
                 messages=[{"role": "user", "content": (
                     f"Write a brief, friendly SMS auto-reply in language code '{caller_language}'. "

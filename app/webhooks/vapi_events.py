@@ -51,7 +51,7 @@ def _kevin_assistant_config(caller_phone: str, caller_name: str = "", contractor
         },
         "model": {
             "provider": "anthropic",
-            "model": "claude-sonnet-4-20250514",
+            "model": settings.anthropic_model,
             "maxTokens": 150,
             "messages": [
                 {
@@ -219,7 +219,7 @@ async def _handle_assistant_request(data: dict) -> dict:
                 "firstMessage": "Connecting you now.",
                 "model": {
                     "provider": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "model": settings.anthropic_model,
                     "messages": [{"role": "system", "content": "Say 'Connecting you now' and nothing else."}],
                 },
                 "voice": {"provider": "11labs", "voiceId": "bIHbv24MWmeRgasZH58o"},
@@ -235,7 +235,7 @@ async def _handle_assistant_request(data: dict) -> dict:
                 "firstMessage": "This number is not accepting calls. Goodbye.",
                 "model": {
                     "provider": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "model": settings.anthropic_model,
                     "messages": [{"role": "system", "content": "Say 'This number is not accepting calls. Goodbye.' then end the call immediately."}],
                 },
                 "voice": {"provider": "11labs", "voiceId": "bIHbv24MWmeRgasZH58o"},

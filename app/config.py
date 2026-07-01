@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # AI Services
     anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-5"
     deepgram_api_key: str = ""
     fish_audio_api_key: str = ""
     elevenlabs_api_key: str = ""

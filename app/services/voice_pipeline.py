@@ -650,10 +650,8 @@ class VoicePipeline:
         Key parameters:
         - encoding=mulaw, sample_rate=8000: accept Twilio's raw audio directly
         - interim_results=true: required for speech_final detection
-        - endpointing=400: finalize after 400ms silence. Lower values feel more
-          conversational but risk truncating mid-sentence pauses; 400ms is the
-          tightest setting that still rides through natural breaths and
-          hesitation in our testing.
+        - endpointing=600: finalize after 600ms silence. This gives callers
+          more room for natural mid-sentence pauses before Kevin responds.
         - utterance_end_ms=1000: fallback end-of-utterance signal
         - speech_final marks the TRUE end of an utterance (not just is_final)
         """
@@ -667,7 +665,7 @@ class VoicePipeline:
                 "&punctuate=true"
                 "&smart_format=true"
                 "&interim_results=true"
-                "&endpointing=400"
+                "&endpointing=600"
                 "&utterance_end_ms=1000"
                 "&language=multi"
             )

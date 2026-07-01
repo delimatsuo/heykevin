@@ -16,9 +16,9 @@ Do not merge or deploy until all rows below have an owner and an outcome.
 |---|---|---|
 | Deployment source of truth | Confirm whether production deploys only by manual `workflow_dispatch` from `main`, as `.github/workflows/deploy.yml` currently states. If any other path auto-deploys `main`, block merge until a release window and rollback path are set. | Pending |
 | Production account audit | Count contractors that would be affected by default-off gates. Do not print customer names, phone numbers, transcripts, tokens, or message bodies. | Complete: see `docs/security/phase0-account-audit-2026-06-30.md`. |
-| Staging account audit | Confirm a test contractor can exercise disabled and enabled gate paths without touching production Firestore, RTDB, APNs, or Twilio data. | Blocked: staging has no contractor records; create or seed a staging test contractor before smoke tests. |
+| Staging account audit | Confirm a test contractor can exercise disabled and enabled gate paths without touching production Firestore, RTDB, APNs, or Twilio data. | Partial: `scripts/phase0_staging_smoke.py` seeded `codex_phase0_smoke` in staging Firestore and read-only API smoke passes. Mutable gate smoke is pending a staging deploy of this PR SHA. |
 | Backfill decision | Decide which existing side effects stay disabled and which accounts, if any, receive explicit flags before release. | Pending |
-| Staging smoke | Run the smoke matrix below against staging after deployment. | Pending |
+| Staging smoke | Run the smoke matrix below against staging after deployment. | Partial: read-only staging smoke passes against revision `kevin-api-staging-00031-xic`; mutable safety checks were skipped because the deployed SHA does not match this PR. |
 | Production release | Only after the above pass, mark the PR ready for review and merge in an approved window. | Pending |
 
 ## Current Audit Status
@@ -31,8 +31,27 @@ Last updated: 2026-06-30.
   `deli@ellaexecutivesearch.com`.
 - Staging Firestore project was confirmed from Cloud Run metadata as
   `kevin-staging-491315`.
-- Staging has no contractor or estimate records. Smoke tests require creating
-  or seeding a staging test contractor first.
+- Staging initially had no contractor or estimate records. A disposable
+  `codex_phase0_smoke` contractor has now been seeded in staging by
+  `scripts/phase0_staging_smoke.py`; the script rotates a scoped staging API
+  token on each run and does not print it.
+- A missing staging Firestore composite index for
+  `jobs(contractor_id ASC, created_at DESC)` caused `/api/jobs` to return HTTP
+  500 during smoke. The staging index was created programmatically and reached
+  `READY`; `app/db/jobs.py` also now has a missing-index fallback so this
+  endpoint fails soft if another environment lacks the index.
+- Programmatic read-only staging smoke passes:
+
+  ```bash
+  .venv/bin/python scripts/phase0_staging_smoke.py \
+    --expected-sha "$(git rev-parse HEAD)" \
+    --mutable-checks
+  ```
+
+  The mutable checks are skipped while staging health reports a different
+  `deploy_sha` from this PR. Run the same command again after deploying this
+  PR to staging; at that point skipped mutable checks must either pass or name
+  the remaining permission/manual blocker.
 - Production has no `gated_actions`, `sms_compliance_status`,
   `integration_write_status`, or `automation_approvals` configured on any
   contractor document. Default-off gates will block caller-facing SMS/MMS,

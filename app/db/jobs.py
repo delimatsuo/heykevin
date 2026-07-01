@@ -4,6 +4,7 @@ import asyncio
 import time
 from typing import Optional
 
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud import firestore as firestore_module
 
 from app.db.firestore_client import get_firestore_client
@@ -73,14 +74,34 @@ async def list_jobs(limit: int = 20, contractor_id: str = "") -> list:
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
 
-    def _query():
+    def _ordered_query():
         query = db.collection(COLLECTION)
         if contractor_id:
             query = query.where("contractor_id", "==", contractor_id)
         query = query.order_by("created_at", direction=firestore_module.Query.DESCENDING)
         return list(query.limit(limit).stream())
 
-    docs = await loop.run_in_executor(None, _query)
+    def _fallback_contractor_query():
+        query = db.collection(COLLECTION).where("contractor_id", "==", contractor_id)
+        docs = list(query.limit(max(limit * 5, 100)).stream())
+        docs.sort(key=lambda doc: doc.to_dict().get("created_at", 0), reverse=True)
+        return docs[:limit]
+
+    try:
+        docs = await loop.run_in_executor(None, _ordered_query)
+    except FailedPrecondition as e:
+        if not contractor_id:
+            logger.error(f"Firestore job list query requires an index: {e}")
+            return []
+        logger.warning("Firestore job index missing; using contractor-only fallback")
+        try:
+            docs = await loop.run_in_executor(None, _fallback_contractor_query)
+        except Exception as fallback_error:
+            logger.error(f"Firestore job fallback failed: {fallback_error}", exc_info=True)
+            return []
+    except Exception as e:
+        logger.error(f"Firestore job list failed: {e}", exc_info=True)
+        return []
     return [{"job_id": d.id, **d.to_dict()} for d in docs]
 
 

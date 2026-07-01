@@ -65,6 +65,16 @@ def test_business_prompt_prevents_immediate_close_after_availability_check():
     assert "Silent caller" in prompt
 
 
+def test_business_prompt_prioritizes_fast_live_phone_turns():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "LIVE PHONE LATENCY POLICY" in prompt
+    assert "Keep most replies under 12 words" in prompt
+    assert "Ask exactly one question per turn" in prompt
+    assert "Do not recap the caller's address, issue, or phone number unless they ask" in prompt
+    assert "For closing, keep it under 10 seconds of speech" in prompt
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",

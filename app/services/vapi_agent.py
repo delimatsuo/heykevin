@@ -64,7 +64,7 @@ async def create_screening_call(
         },
         "model": {
             "provider": "anthropic",
-            "model": "claude-sonnet-4-20250514",
+            "model": settings.anthropic_model,
             "messages": [
                 {
                     "role": "system",

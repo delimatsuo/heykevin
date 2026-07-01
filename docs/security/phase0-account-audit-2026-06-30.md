@@ -112,3 +112,10 @@ Jobber, or Google Calendar write gates until A2P/SMS compliance, owner approval,
 and integration-write safety are explicitly approved. Keep the PR draft until a
 staging test contractor exists and the smoke matrix passes.
 
+## Post-Audit Staging Seed
+
+After this aggregate audit, `scripts/phase0_staging_smoke.py` seeded one
+disposable contractor in staging Firestore: `codex_phase0_smoke`. This is a
+Codex-managed test record for programmatic staging smoke only. It rotates a
+scoped staging API token on each smoke run and keeps all Phase 0 action gates in
+the default-off posture.

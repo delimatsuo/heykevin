@@ -1535,6 +1535,7 @@ class VoicePipeline:
                     "voice_settings": {
                         "stability": 0.65,
                         "similarity_boost": 0.75,
+                        "speed": 0.9,
                     },
                 },
                 timeout=10.0,

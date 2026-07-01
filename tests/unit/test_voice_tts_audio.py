@@ -94,3 +94,23 @@ async def test_tts_streams_mulaw_as_20ms_frames(monkeypatch):
     await pipeline._speak("Hi there.")
 
     assert [len(chunk) for chunk in spoken_chunks] == [160, 160, 80]
+
+
+@pytest.mark.asyncio
+async def test_tts_uses_slightly_slower_speech_speed(monkeypatch):
+    async def on_audio_out(_chunk: bytes):
+        return None
+
+    async def no_sleep(_delay: float):
+        return None
+
+    pipeline = _pipeline(on_audio_out)
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeTTSClient(b"\xff" * 160)
+    pipeline._connected = True
+    monkeypatch.setattr("app.services.voice_pipeline.asyncio.sleep", no_sleep)
+
+    await pipeline._speak("Hi there.")
+
+    request_settings = pipeline._http_client.requests[0]["json"]["voice_settings"]
+    assert request_settings["speed"] == 0.9

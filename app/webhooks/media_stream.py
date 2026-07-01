@@ -10,7 +10,7 @@ from fastapi import APIRouter, WebSocket
 from app.config import settings
 from app.services.voice_pipeline import VoicePipeline
 from app.db.cache import get_active_call, update_active_call, _init_firebase, ACTIVE_CALLS_PATH
-from app.utils.logging import get_logger, redact_phone
+from app.utils.logging import call_sid_var, get_logger, redact_phone, trace_event
 
 logger = get_logger(__name__)
 
@@ -145,9 +145,20 @@ async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid
 async def media_stream_ws(websocket: WebSocket, call_sid: str):
     """Bidirectional audio bridge: Twilio <-> Voice Pipeline (STT + Claude + TTS)."""
 
+    call_sid_var.set(call_sid)
+    connected_started = time.monotonic()
+
     # Accept the WebSocket first — Twilio sends custom parameters in the `start` message
     await websocket.accept()
     logger.info(f"Media stream connected: {call_sid}")
+    trace_event(
+        logger,
+        "media_stream_connected",
+        call_sid=call_sid,
+        stage="media",
+        status="started",
+        source="twilio",
+    )
 
     # Wait for the Twilio `start` event to get the ws_token from customParameters
     ws_token = ""
@@ -160,8 +171,28 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             if msg.get("event") == "start":
                 ws_token = msg.get("start", {}).get("customParameters", {}).get("ws_token", "")
                 start_stream_sid = msg.get("streamSid", "")
+                trace_event(
+                    logger,
+                    "media_stream_start_received",
+                    call_sid=call_sid,
+                    stream_sid=start_stream_sid,
+                    stage="media",
+                    status="ok",
+                    source="twilio",
+                    duration_ms=int((time.monotonic() - connected_started) * 1000),
+                )
                 break
     except Exception as e:
+        trace_event(
+            logger,
+            "media_stream_start_received",
+            call_sid=call_sid,
+            stage="media",
+            status="exception",
+            source="twilio",
+            reason=type(e).__name__,
+            duration_ms=int((time.monotonic() - connected_started) * 1000),
+        )
         logger.error(f"Failed to receive start event for {call_sid}: {e}")
         await websocket.close(code=1008)
         return
@@ -171,6 +202,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     from firebase_admin import db as rtdb
 
     call_data = None
+    auth_started = time.monotonic()
     try:
         ref = rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
         loop = asyncio.get_event_loop()
@@ -180,17 +212,62 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 break
             await asyncio.sleep(0.5)
     except Exception as e:
+        trace_event(
+            logger,
+            "media_stream_auth_failed",
+            call_sid=call_sid,
+            stream_sid=start_stream_sid,
+            stage="auth",
+            status="exception",
+            source="rtdb",
+            reason=type(e).__name__,
+            duration_ms=int((time.monotonic() - auth_started) * 1000),
+        )
         logger.error(f"RTDB lookup failed for {call_sid}: {e}")
 
     # Verify the token matches what we stored in RTDB for this call.
     if not call_data or not call_data.get("ws_token"):
+        trace_event(
+            logger,
+            "media_stream_auth_failed",
+            call_sid=call_sid,
+            stream_sid=start_stream_sid,
+            stage="auth",
+            status="rejected",
+            source="rtdb",
+            reason="missing_ws_token",
+            duration_ms=int((time.monotonic() - auth_started) * 1000),
+        )
         logger.warning(f"WebSocket: no RTDB record or ws_token for {call_sid} — rejecting")
         await websocket.close(code=1008)
         return
     if not ws_token or ws_token != call_data["ws_token"]:
+        trace_event(
+            logger,
+            "media_stream_auth_failed",
+            call_sid=call_sid,
+            stream_sid=start_stream_sid,
+            contractor_id=call_data.get("contractor_id", ""),
+            stage="auth",
+            status="rejected",
+            source="rtdb",
+            reason="invalid_ws_token",
+            duration_ms=int((time.monotonic() - auth_started) * 1000),
+        )
         logger.warning(f"WebSocket: invalid token for {call_sid} — rejecting")
         await websocket.close(code=1008)
         return
+    trace_event(
+        logger,
+        "media_stream_auth_ok",
+        call_sid=call_sid,
+        stream_sid=start_stream_sid,
+        contractor_id=call_data.get("contractor_id", ""),
+        stage="auth",
+        status="ok",
+        source="rtdb",
+        duration_ms=int((time.monotonic() - auth_started) * 1000),
+    )
 
     # Payload size limit for incoming WebSocket messages (64KB)
     WS_MAX_MESSAGE_SIZE = 65536
@@ -199,6 +276,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     pipeline = None
     transcript_lines = []
     last_rtdb_update = 0.0
+    inbound_bytes_total = 0
+    outbound_bytes_total = 0
+    first_inbound_audio_received = False
+    first_outbound_audio_sent = False
+    stream_close_status = "ok"
+    stream_close_reason = ""
 
     # Retry active call lookup — RTDB write from twilio_incoming may still be in-flight
     active_call = await get_active_call(call_sid)
@@ -222,7 +305,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     async def on_audio_out(mulaw_chunk: bytes):
         """Voice pipeline produced audio — send to Twilio."""
-        nonlocal stream_sid
+        nonlocal stream_sid, outbound_bytes_total, first_outbound_audio_sent
         if not stream_sid:
             return
         try:
@@ -232,6 +315,21 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 "streamSid": stream_sid,
                 "media": {"payload": payload_b64},
             })
+            outbound_bytes_total += len(mulaw_chunk)
+            if not first_outbound_audio_sent:
+                first_outbound_audio_sent = True
+                trace_event(
+                    logger,
+                    "media_stream_first_outbound_audio",
+                    call_sid=call_sid,
+                    stream_sid=stream_sid,
+                    contractor_id=contractor_config_loaded.get("contractor_id", ""),
+                    stage="media",
+                    status="ok",
+                    source="twilio",
+                    bytes_sent=outbound_bytes_total,
+                    duration_ms=int((time.monotonic() - connected_started) * 1000),
+                )
         except Exception as e:
             logger.warning(f"Error sending audio to Twilio: {e}")
 
@@ -353,6 +451,18 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         # Use stream_sid from the start event we already consumed during auth
         stream_sid = start_stream_sid
         if not stream_sid:
+            stream_close_status = "error"
+            stream_close_reason = "missing_stream_sid"
+            trace_event(
+                logger,
+                "media_stream_start_received",
+                call_sid=call_sid,
+                stage="media",
+                status="error",
+                source="twilio",
+                reason="missing_stream_sid",
+                duration_ms=int((time.monotonic() - connected_started) * 1000),
+            )
             logger.error("No stream_sid from Twilio start event")
             await websocket.close()
             return
@@ -360,6 +470,16 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
         # Select voice pipeline based on contractor config
         voice_engine = contractor_config_loaded.get("voice_engine", "elevenlabs")
+        trace_event(
+            logger,
+            "media_stream_pipeline_selected",
+            call_sid=call_sid,
+            stream_sid=stream_sid,
+            contractor_id=contractor_config_loaded.get("contractor_id", ""),
+            stage="pipeline",
+            status="ok",
+            voice_engine=voice_engine,
+        )
 
         if voice_engine == "gemini" and settings.gemini_api_key:
             from app.services.gemini_pipeline import GeminiPipeline
@@ -385,8 +505,22 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 caller_phone=active_call.caller_phone if active_call else "",
             )
             logger.info(f"Using ElevenLabs pipeline for call {call_sid}")
+        pipeline_started = time.monotonic()
         started = await pipeline.start()
+        trace_event(
+            logger,
+            "media_stream_pipeline_started",
+            call_sid=call_sid,
+            stream_sid=stream_sid,
+            contractor_id=contractor_config_loaded.get("contractor_id", ""),
+            stage="pipeline",
+            status="ok" if started else "error",
+            voice_engine=voice_engine,
+            duration_ms=int((time.monotonic() - pipeline_started) * 1000),
+        )
         if not started:
+            stream_close_status = "error"
+            stream_close_reason = "pipeline_start_failed"
             logger.error("Failed to start voice pipeline — closing stream")
             await websocket.close()
             return
@@ -397,6 +531,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         # Main loop: receive Twilio audio
         async for message in websocket.iter_text():
             if len(message) > WS_MAX_MESSAGE_SIZE:
+                stream_close_status = "rejected"
+                stream_close_reason = "message_too_large"
                 logger.warning(f"WebSocket message too large ({len(message)} bytes) — closing")
                 await websocket.close(code=1009)
                 return
@@ -422,6 +558,21 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 # Send raw mulaw directly to Deepgram — no conversion needed.
                 # Deepgram accepts mulaw 8kHz natively.
                 mulaw_bytes = base64.b64decode(payload)
+                inbound_bytes_total += len(mulaw_bytes)
+                if not first_inbound_audio_received:
+                    first_inbound_audio_received = True
+                    trace_event(
+                        logger,
+                        "media_stream_first_inbound_audio",
+                        call_sid=call_sid,
+                        stream_sid=stream_sid,
+                        contractor_id=contractor_config_loaded.get("contractor_id", ""),
+                        stage="media",
+                        status="ok",
+                        source="twilio",
+                        bytes_total=inbound_bytes_total,
+                        duration_ms=int((time.monotonic() - connected_started) * 1000),
+                    )
                 await pipeline.process_audio_in(mulaw_bytes)
 
             elif event == "stop":
@@ -444,6 +595,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 break
 
     except Exception as e:
+        stream_close_status = "exception"
+        stream_close_reason = type(e).__name__
         logger.error(f"Media stream error: {e}", exc_info=True)
 
     finally:
@@ -489,4 +642,17 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             ))
             task.add_done_callback(_log_task_exception)
 
+        trace_event(
+            logger,
+            "media_stream_closed",
+            call_sid=call_sid,
+            stream_sid=stream_sid or start_stream_sid,
+            contractor_id=contractor_config_loaded.get("contractor_id", ""),
+            stage="media",
+            status=stream_close_status,
+            reason=stream_close_reason,
+            bytes_total=inbound_bytes_total,
+            bytes_sent=outbound_bytes_total,
+            duration_ms=int((time.monotonic() - connected_started) * 1000),
+        )
         logger.info(f"Media stream closed: {call_sid}")

@@ -93,7 +93,8 @@ def test_business_prompt_defers_callback_number_until_followup_intent():
     assert "Do not ask for a callback number during early qualification" in prompt
     assert "Treat caller ID as the default callback number when available" in prompt
     assert "only if they want a callback, dispatch, booking, or owner handoff" in prompt
-    assert "Is the number you're calling from the best one?" in prompt
+    assert "confirm with the last four digits" in prompt
+    assert "Is the number ending in eight six six seven the best one" in prompt
     assert "Get their name, callback number, city/town" not in prompt
     assert "identify caller, issue, city/town or service area, urgency, and callback number" not in prompt
 

@@ -86,6 +86,16 @@ class FakeScriptedAnthropicClient:
         return FakeResponse(content=b"\xff" * 320)
 
 
+class FakeNoAnthropicClient:
+    calls = 0
+
+    async def post(self, url, **_kwargs):
+        self.calls += 1
+        if "anthropic.com" in url:
+            raise AssertionError("Anthropic should not be called for deterministic caller-ID readback")
+        return FakeResponse(content=b"\xff" * 320)
+
+
 def _pipeline(on_audio_out):
     return VoicePipeline(
         on_audio_out=on_audio_out,
@@ -297,6 +307,27 @@ async def test_business_fallback_qualifies_before_callback_number():
 
 
 @pytest.mark.asyncio
+async def test_direct_city_answer_counts_as_service_area():
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA_city_test",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+
+    pipeline._update_intake_state_from_caller("I need a toilet replacement.")
+    pipeline._update_intake_state_from_caller("South San Francisco.")
+
+    assert pipeline._no_spoken_response_fallback_text() == "I'm here. Could I get your name?"
+
+
+@pytest.mark.asyncio
 async def test_urgent_fallback_handoff_uses_caller_id_without_asking_callback_number():
     pipeline = VoicePipeline(
         on_audio_out=_noop,
@@ -321,3 +352,94 @@ async def test_urgent_fallback_handoff_uses_caller_id_without_asking_callback_nu
     assert fallback == "Got it. I'm going to try Alex now, one moment."
     assert "callback" not in fallback.lower()
     assert "number" not in fallback.lower()
+
+
+@pytest.mark.asyncio
+async def test_callback_confirmation_uses_caller_id_last_four():
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA_last_four_test",
+        caller_phone="+16504228667",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+
+    text = pipeline._caller_id_callback_confirmation_text()
+
+    assert text == "Is the number ending in eight six six seven the best one for Alex to call back?"
+    assert "6504228667" not in text
+    assert "+16504228667" not in text
+
+
+@pytest.mark.asyncio
+async def test_repeat_caller_id_number_is_handled_without_claude():
+    transcript_lines = []
+    spoken = []
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def fake_speak(text: str):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=on_transcript,
+        call_sid="CA_repeat_number_test",
+        caller_phone="+16504228667",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    no_anthropic_client = FakeNoAnthropicClient()
+    pipeline._http_client = no_anthropic_client
+    pipeline._speak = fake_speak
+
+    await pipeline._handle_caller_speech("Can you repeat that number to me?", turn_id=9)
+
+    assert transcript_lines == [("Kevin", "I have six five zero, four two two, eight six six seven.")]
+    assert spoken == ["I have six five zero, four two two, eight six six seven."]
+    assert no_anthropic_client.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_volunteered_phone_number_still_uses_claude_flow():
+    transcript_lines = []
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def fake_speak(_text: str):
+        return None
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=on_transcript,
+        call_sid="CA_volunteered_number_test",
+        caller_phone="+16504228667",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    fake_client = FakeTurnClient()
+    pipeline._http_client = fake_client
+    pipeline._speak = fake_speak
+
+    await pipeline._handle_caller_speech("My phone number is 415 555 1212.", turn_id=10)
+
+    assert transcript_lines == [("Kevin", "We can help with that.")]
+    assert any("anthropic.com" in url for url, _kwargs in fake_client.requests)

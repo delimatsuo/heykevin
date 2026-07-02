@@ -320,7 +320,7 @@ LIVE PHONE LATENCY POLICY:
 - Do not ask for a callback number during early qualification.
 - Treat caller ID as the default callback number when available.
 - Ask for callback confirmation only if they want a callback, dispatch, booking, or owner handoff.
-- If caller ID is available and callback confirmation is needed, ask: "Is the number you're calling from the best one?"
+- If caller ID is available and callback confirmation is needed, confirm with the last four digits. Example: "Is the number ending in eight six six seven the best one for Alex to call back?"
 - Only ask the caller to say a different callback number if caller ID is unavailable or they say they prefer a different number.
 - Confirm phone numbers only when first collecting a different number, then move on.
 - Repeat the full callback number once when confirming it.
@@ -477,6 +477,8 @@ class VoicePipeline:
 
         # Build system prompt from config (or defaults)
         self._system_prompt = build_system_prompt(self._contractor_config, after_hours=self._after_hours)
+        if self._caller_phone:
+            self._system_prompt += self._caller_id_context_for_prompt()
 
         self._deepgram_ws = None
         self._deepgram_task = None
@@ -949,6 +951,67 @@ class VoicePipeline:
         "quote", "repair", "replace", "replacement", "service", "sewage", "sink",
         "standing water", "toilet", "water",
     }
+    _DIRECT_SERVICE_AREA_HINTS = {
+        "east", "fort", "las", "los", "mount", "north", "saint", "san", "south",
+        "st", "st.", "west",
+    }
+
+    @staticmethod
+    def _digits_only(text: str) -> str:
+        return re.sub(r"\D", "", text or "")
+
+    @staticmethod
+    def _spoken_digits(digits: str) -> str:
+        return " ".join(_ONES[int(digit)] for digit in digits if digit.isdigit())
+
+    @classmethod
+    def _spoken_digit_groups(cls, digits: str) -> str:
+        if len(digits) == 10:
+            groups = (digits[:3], digits[3:6], digits[6:])
+        else:
+            groups = tuple(digits[index:index + 3] for index in range(0, len(digits), 3))
+        return ", ".join(cls._spoken_digits(group) for group in groups if group)
+
+    def _caller_phone_digits_for_speech(self) -> str:
+        digits = self._digits_only(self._caller_phone)
+        if len(digits) == 11 and digits.startswith("1"):
+            return digits[1:]
+        return digits
+
+    def _caller_id_last_four_words(self) -> str:
+        digits = self._caller_phone_digits_for_speech()
+        if len(digits) < 4:
+            return ""
+        return self._spoken_digits(digits[-4:])
+
+    def _caller_id_spoken_number(self) -> str:
+        digits = self._caller_phone_digits_for_speech()
+        if len(digits) < 4:
+            return ""
+        return self._spoken_digit_groups(digits)
+
+    def _caller_id_callback_confirmation_text(self) -> str:
+        owner_name = self._contractor_config.get("owner_name", settings.user_name)
+        first_name = owner_name.split()[0] if owner_name else "the owner"
+        last_four = self._caller_id_last_four_words()
+        if not last_four:
+            return f"Is this the best number for {first_name} to call back?"
+        return f"Is the number ending in {last_four} the best one for {first_name} to call back?"
+
+    def _caller_id_readback_text(self) -> str:
+        spoken_number = self._caller_id_spoken_number()
+        if not spoken_number:
+            return ""
+        return f"I have {spoken_number}."
+
+    def _caller_id_context_for_prompt(self) -> str:
+        confirmation = self._caller_id_callback_confirmation_text()
+        return (
+            "\n\nCALLER ID CONTEXT: Caller ID is available for this call. "
+            f"When confirming callback, say: \"{confirmation}\" "
+            "Do not ask the caller to recite the caller-ID number unless they prefer a different number. "
+            "If the caller asks what number you mean, the system can read it back deterministically."
+        )
 
     def _update_intake_state_from_caller(self, text: str):
         """Track only coarse intake completion flags for deterministic fallbacks."""
@@ -962,7 +1025,7 @@ class VoicePipeline:
             self._intake_state["callback_number"] = True
         if not self._intake_state["issue"] and self._mentions_service_issue(text_lower):
             self._intake_state["issue"] = True
-        if not self._intake_state["service_area"] and self._mentions_service_area(text_lower):
+        if not self._intake_state["service_area"] and self._mentions_service_area(text_lower, text):
             self._intake_state["service_area"] = True
         if not self._urgency_detected and self._mentions_urgency(text_lower):
             self._urgency_detected = True
@@ -989,17 +1052,54 @@ class VoicePipeline:
                 return True
         return False
 
-    @staticmethod
-    def _mentions_service_area(text_lower: str) -> bool:
+    @classmethod
+    def _mentions_service_area(cls, text_lower: str, raw_text: str = "") -> bool:
         area_patterns = (
             r"\b(?:i'm|i am|we're|we are|located|based)\s+(?:in|near|around)\s+[a-z]",
             r"\b(?:city|town|area|neighborhood)\s+(?:is|would be|will be)\s+[a-z]",
             r"\b(?:in|near|around)\s+[a-z][a-z .'-]{2,40},\s*[a-z]{2,20}\b",
         )
-        return any(re.search(pattern, text_lower) for pattern in area_patterns)
+        if any(re.search(pattern, text_lower) for pattern in area_patterns):
+            return True
+
+        normalized = re.sub(r"[^a-zA-Z .'-]", " ", raw_text or "").strip()
+        words = [word.strip(".").lower() for word in normalized.split() if word.strip(".")]
+        return 1 < len(words) <= 5 and any(
+            word in cls._DIRECT_SERVICE_AREA_HINTS for word in words
+        )
 
     def _mentions_urgency(self, text_lower: str) -> bool:
         return any(keyword in text_lower for keyword in self.URGENCY_KEYWORDS)
+
+    def _caller_asks_for_callback_number_readback(self, text_lower: str) -> bool:
+        if not self._caller_phone or "number" not in text_lower:
+            return False
+        readback_markers = (
+            "what number",
+            "which number",
+            "repeat",
+            "read",
+            "say",
+        )
+        return any(marker in text_lower for marker in readback_markers)
+
+    async def _maybe_handle_deterministic_caller_id_request(
+        self,
+        caller_text: str,
+        turn_id: Optional[int],
+    ) -> bool:
+        text_lower = caller_text.lower()
+        if not self._caller_asks_for_callback_number_readback(text_lower):
+            return False
+
+        response = self._caller_id_readback_text()
+        if not response:
+            return False
+
+        self._conversation.append({"role": "assistant", "content": response})
+        await self.on_transcript("Kevin", response)
+        await self._speak_for_turn(response, turn_id)
+        return True
 
     @staticmethod
     def _content_block_types(content_blocks: list) -> list[str]:
@@ -1380,6 +1480,8 @@ class VoicePipeline:
     async def _handle_caller_speech(self, caller_text: str, turn_id: Optional[int] = None):
         self._update_intake_state_from_caller(caller_text)
         self._conversation.append({"role": "user", "content": f"<caller_speech>{caller_text}</caller_speech>"})
+        if await self._maybe_handle_deterministic_caller_id_request(caller_text, turn_id):
+            return
 
         # Select tools: Jobber > Google Calendar > none
         if self._has_jobber():

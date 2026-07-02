@@ -208,7 +208,7 @@ async def test_empty_anthropic_response_speaks_business_fallback(monkeypatch):
 
     await pipeline._process_utterance("there is standing water", turn_id=6)
 
-    assert ("Kevin", "I'm here. Could I get your name?") in transcript_lines
+    assert ("Kevin", "I'm here. What city or town are you in?") in transcript_lines
     assert spoken_chunks
     assert any(
         event["event"] == "voice_turn_no_spoken_response"
@@ -273,7 +273,7 @@ async def test_empty_response_after_city_moves_to_handoff_instead_of_reasking_ci
 
 
 @pytest.mark.asyncio
-async def test_business_fallback_uses_next_missing_intake_field():
+async def test_business_fallback_qualifies_before_callback_number():
     pipeline = VoicePipeline(
         on_audio_out=_noop,
         on_transcript=_noop,
@@ -287,12 +287,37 @@ async def test_business_fallback_uses_next_missing_intake_field():
     )
     await pipeline._http_client.aclose()
 
-    assert pipeline._no_spoken_response_fallback_text() == "I'm here. Could I get your name?"
-    pipeline._update_intake_state_from_caller("My name is Jonathan.")
-    assert pipeline._no_spoken_response_fallback_text() == "I'm here. What's the best callback number?"
-    pipeline._update_intake_state_from_caller("(650) 422-8667.")
     assert pipeline._no_spoken_response_fallback_text() == "I'm here. What's going on?"
     pipeline._update_intake_state_from_caller("I have a sink leak.")
     assert pipeline._no_spoken_response_fallback_text() == "I'm here. What city or town are you in?"
     pipeline._update_intake_state_from_caller("I'm in San Francisco.")
+    assert pipeline._no_spoken_response_fallback_text() == "I'm here. Could I get your name?"
+    pipeline._update_intake_state_from_caller("My name is Jonathan.")
     assert pipeline._no_spoken_response_fallback_text() == "Got it. I'll make sure Alex gets this message."
+
+
+@pytest.mark.asyncio
+async def test_urgent_fallback_handoff_uses_caller_id_without_asking_callback_number():
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA_caller_id_test",
+        caller_phone="+16504228667",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+
+    pipeline._update_intake_state_from_caller("My name is Jonathan.")
+    pipeline._update_intake_state_from_caller("I have an emergency sink leak.")
+    pipeline._update_intake_state_from_caller("I'm in San Francisco.")
+
+    fallback = pipeline._no_spoken_response_fallback_text()
+
+    assert fallback == "Got it. I'm going to try Alex now, one moment."
+    assert "callback" not in fallback.lower()
+    assert "number" not in fallback.lower()

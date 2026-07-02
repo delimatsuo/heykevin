@@ -75,6 +75,15 @@ def test_business_prompt_prioritizes_fast_live_phone_turns():
     assert "For closing, keep it under 10 seconds of speech" in prompt
 
 
+def test_business_prompt_uses_short_phone_confirmation():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "Confirm callback numbers by last four digits only" in prompt
+    assert "Do not read the full phone number unless the caller asks" in prompt
+    assert "Do not confirm callback numbers digit by digit by default" in prompt
+    assert "Always read back phone numbers digit by digit" not in prompt
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",

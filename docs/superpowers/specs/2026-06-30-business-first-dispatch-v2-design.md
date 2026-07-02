@@ -108,16 +108,16 @@ Decision brief fields:
 - **Reason:** one-sentence reason for calling.
 - **Service category:** trade-specific category when confidence is sufficient.
 - **Urgency:** emergency, today, scheduled, sales/noise, or unknown.
-- **Address/location:** captured address or "not captured yet."
+- **Service area/location:** captured city/town/service area, plus full street address only if the caller volunteered it or owner-approved booking/dispatch is active.
 - **Confidence:** high, medium, or low, based on extraction completeness and ambiguity.
 - **Route reason:** why Kevin screened, rang through, escalated, or blocked.
-- **Recommended owner action:** pick up now, let Kevin take a message, ask for address, call back, or ignore/block.
+- **Recommended owner action:** pick up now, let Kevin take a message, ask for service area, approve address collection for booking/dispatch, call back, or ignore/block.
 
 Actions:
 
 - **Pick up:** starts warm transfer without dropping the caller.
 - **Let Kevin take message:** replaces "Ignore" and keeps caller expectations clear.
-- **Ask for missing detail:** Kevin can be prompted to ask for address, availability, issue type, or photos when the voice pipeline supports safe mid-call instructions.
+- **Ask for missing detail:** Kevin can be prompted to ask for service area, availability, issue type, or photos when the voice pipeline supports safe mid-call instructions. Full street address collection requires a volunteered address or owner-approved booking/dispatch path.
 - **Save contact:** available when caller identity is useful.
 - **Block or mark spam:** available only after enough evidence or owner confirmation.
 
@@ -220,7 +220,7 @@ Each pack should define:
 - Required intake questions.
 - Safety flags.
 - Urgency rules.
-- Address requirements.
+- Location requirements: service area first; full street address only if volunteered or owner-approved booking/dispatch is active.
 - After-hours behavior.
 - Follow-up and booking eligibility.
 
@@ -243,8 +243,9 @@ Every qualified business call should produce a structured job card:
 - `urgency_level`
 - `urgency_reason`
 - `safety_flags`
-- `address_raw`
-- `address_confidence`
+- `service_area_raw`
+- `volunteered_address_raw`
+- `location_confidence`
 - `property_type`
 - `preferred_time`
 - `after_hours`
@@ -507,7 +508,7 @@ Call value metrics:
 
 - Calls screened per active business.
 - Percent of screened calls that produce a job card.
-- Percent of job cards with caller, issue, address, urgency, and next action.
+- Percent of job cards with caller, issue, service area, urgency, and next action.
 - Percent of calls marked urgent by backend and owner-confirmed as urgent.
 - Time from call start to owner decision.
 
@@ -704,7 +705,7 @@ Sensitive data includes more than transcripts. v2 must classify and protect:
 - Contacts and caller contacts.
 - Full transcripts and live transcript buffers.
 - Summaries, urgency labels, route reasons, and trust signals.
-- Job cards, addresses, property type, issue descriptions, safety flags, and preferred times.
+- Job cards, service-area data, volunteered addresses, property type, issue descriptions, safety flags, and preferred times.
 - Business knowledge and service-area data.
 - RTDB active-call state.
 - Push payloads and notification metadata.
@@ -986,14 +987,14 @@ Row hierarchy:
 1. Caller or formatted phone.
 2. Urgency and action status.
 3. One-line job summary or call summary.
-4. Missing critical field indicator when address, callback number, or issue is missing.
+4. Missing critical field indicator when service area, callback number, or issue is missing. Full street address is not critical during AI screening.
 5. Time and unread badge.
 
 Job-card detail:
 
 - Job card appears before transcript.
 - Low-confidence fields display as "Needs review."
-- Missing fields have actions such as call back, ask for address, or mark not needed.
+- Missing fields have actions such as call back, ask for service area, approve address collection for booking/dispatch, or mark not needed.
 - Transcript is evidence, not the primary workflow.
 - Empty or unavailable transcript state explains whether recording/transcription failed or was intentionally unavailable.
 - Empty or unavailable job-card state offers "create manually" and "mark not a lead."

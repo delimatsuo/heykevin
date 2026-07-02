@@ -139,6 +139,21 @@ def _caller_sends(sent):
 
 
 @pytest.mark.asyncio
+async def test_contractor_sms_shows_service_area_when_street_address_is_missing():
+    msg = await post_call._format_contractor_sms(
+        _job_card(
+            "service_request",
+            address="",
+            service_area="San Mateo",
+            urgency="routine",
+        ),
+        "job-1",
+    )
+
+    assert "Area: San Mateo" in msg
+
+
+@pytest.mark.asyncio
 async def test_disabled_service_request_confirmation_sms_does_not_contact_caller(monkeypatch):
     sent_sms = []
 

@@ -347,6 +347,7 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
     name = job_data.get("caller_name", "") or "Unknown"
     business = job_data.get("business_name", "")
     phone = job_data.get("caller_phone", "")
+    service_area = job_data.get("service_area", "")
     address = job_data.get("address", "")
     issue = job_data.get("issue_description", "")
     message = job_data.get("message", "")
@@ -363,6 +364,8 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
         lines.append(f"\U0001f4de {phone}")
     if address:
         lines.append(f"\U0001f4cd {address}")
+    elif service_area:
+        lines.append(f"Area: {service_area}")
     if issue:
         lines.append(f"Re: {issue}")
 

@@ -22,6 +22,7 @@ from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
+from app.services.turn_taking import TurnDecision, TurnTakingController, TurnSignal
 from app.utils.logging import get_logger, trace_event
 
 logger = get_logger(__name__)
@@ -446,6 +447,7 @@ class VoicePipeline:
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
     CALLER_SILENCE_GOODBYE_SECONDS = 1
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
+    TURN_DEFER_MAX_SECONDS = 2.2
 
     def __init__(
         self,
@@ -495,6 +497,8 @@ class VoicePipeline:
 
         # Utterance accumulation: collect is_final segments until speech_final
         self._utterance_buffer: list[str] = []
+        self._turn_taking = TurnTakingController()
+        self._deferred_flush_task = None
         self._turn_sequence = 0
         self._active_trace_turn_id: Optional[int] = None
         self._last_response_completed_at = 0.0
@@ -517,6 +521,13 @@ class VoicePipeline:
             "callback_number": bool(caller_phone),
             "issue": False,
             "service_area": False,
+        }
+        self._call_memory = {
+            "caller_name": "",
+            "service_area": "",
+            "issue": "",
+            "urgency": "",
+            "callback": "caller ID available" if caller_phone else "",
         }
 
         # Silence timeout: track last speech activity
@@ -604,7 +615,7 @@ class VoicePipeline:
             except Exception as e:
                 logger.warning(f"Greeting translation failed: {e}")
 
-        self._conversation.append({"role": "assistant", "content": greeting})
+        self._record_kevin_text(greeting)
         await self.on_transcript("Kevin", greeting)
         await self._speak(greeting)
         self._greeting_done = True
@@ -644,7 +655,7 @@ class VoicePipeline:
                 f"I'm sorry, it looks like {owner_name} is not available to take the call right now. "
                 f"But if you'd like, you can leave me a message and I'll make sure {pronoun} gets it."
             )
-            self._conversation.append({"role": "assistant", "content": msg})
+            self._record_kevin_text(msg)
             logger.info(f"Kevin (ignore triggered): {msg}")
             await self.on_transcript("Kevin", msg)
             await self._speak(msg)
@@ -658,6 +669,7 @@ class VoicePipeline:
         # Cancel silence timeout check
         if self._silence_check_task:
             self._silence_check_task.cancel()
+        self._cancel_deferred_flush()
         if self._unavailable_task:
             self._unavailable_task.cancel()
         if self._deepgram_task:
@@ -775,7 +787,7 @@ class VoicePipeline:
                 if msg_type == "UtteranceEnd":
                     if self._utterance_buffer:
                         logger.info("UtteranceEnd received — processing buffer")
-                        await self._flush_utterance(force=False)
+                        await self._flush_utterance(force=False, signal="utterance_end")
                     continue
 
                 # Skip non-transcript messages
@@ -798,7 +810,7 @@ class VoicePipeline:
                 if not transcript:
                     # Empty final — Deepgram detected silence
                     if speech_final and self._utterance_buffer:
-                        await self._flush_utterance()
+                        await self._flush_utterance(force=False, signal="speech_final")
                     continue
 
                 # Before greeting is done, discard
@@ -830,7 +842,7 @@ class VoicePipeline:
                 # A5: Cap utterance buffer — flush immediately if too large
                 if len(self._utterance_buffer) >= 15:
                     logger.info("Utterance buffer cap (15) reached — flushing immediately")
-                    await self._flush_utterance()
+                    await self._flush_utterance(force=True, signal="buffer_cap")
                     continue
 
                 # Show each segment in transcript immediately (real-time feel)
@@ -849,7 +861,7 @@ class VoicePipeline:
 
                 # If speech_final, the caller is done — process the full utterance
                 if speech_final:
-                    await self._flush_utterance()
+                    await self._flush_utterance(force=False, signal="speech_final")
 
         except asyncio.CancelledError:
             pass
@@ -917,46 +929,65 @@ class VoicePipeline:
                         asyncio.create_task(self.on_clear_audio())
                 break
 
-    _INCOMPLETE_UTTERANCE_ENDINGS = {
-        "a", "an", "around", "at", "for", "from", "in", "near", "of", "the", "to", "with",
-    }
+    def _record_kevin_text(self, text: str):
+        self._conversation.append({"role": "assistant", "content": text})
+        self._turn_taking.record_agent_text(text)
 
-    @classmethod
-    def _looks_incomplete_utterance(cls, text: str) -> bool:
-        normalized = re.sub(r"[^a-zA-Z0-9' ]", " ", text or "").lower()
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-        if not normalized:
-            return False
-
-        words = normalized.split()
-        if words[-1] in cls._INCOMPLETE_UTTERANCE_ENDINGS:
-            return True
-
-        question_stems = {
-            "can you tell me",
-            "could you tell me",
-            "do you know",
-            "what is the",
-            "what's the",
-        }
-        return normalized in question_stems
-
-    async def _flush_utterance(self, *, force: bool = True):
+    async def _flush_utterance(self, *, force: bool = True, signal: TurnSignal = "utterance_end"):
         """Combine accumulated segments and process as one complete utterance."""
         if not self._utterance_buffer:
             return
 
-        combined = " ".join(self._utterance_buffer)
-        if not force and self._looks_incomplete_utterance(combined):
-            logger.info(f"Deferring incomplete utterance fragment: {combined}")
+        decision = self._turn_taking.decide(self._utterance_buffer, signal=signal, force=force)
+        self._trace_turn(
+            "voice_turn_utterance_candidate",
+            None,
+            stage="turn_taking",
+            status="commit" if decision.should_commit else "defer",
+            reason=decision.reason,
+            signal=decision.signal,
+            expected_answer=decision.expected_answer,
+            utterance_chars=len(decision.text),
+            word_count=len(decision.text.split()),
+        )
+        if not decision.should_commit:
+            logger.info(f"Deferring caller utterance ({decision.reason}): {decision.text}")
+            self._schedule_deferred_flush(decision)
             return
 
         self._utterance_buffer.clear()
+        self._cancel_deferred_flush()
         turn_id = self._next_turn_id()
         queued_at = time.monotonic()
 
-        logger.info(f"Complete utterance: {combined}")
-        return asyncio.create_task(self._process_utterance(combined, turn_id=turn_id, queued_at=queued_at))
+        logger.info(f"Complete utterance: {decision.text}")
+        return asyncio.create_task(self._process_utterance(decision.text, turn_id=turn_id, queued_at=queued_at))
+
+    def _schedule_deferred_flush(self, decision: TurnDecision):
+        if not self._connected:
+            return
+        if self._deferred_flush_task and not self._deferred_flush_task.done():
+            self._deferred_flush_task.cancel()
+        snapshot = decision.text
+        self._deferred_flush_task = asyncio.create_task(self._deferred_flush_after_delay(snapshot))
+
+    def _cancel_deferred_flush(self):
+        if self._deferred_flush_task and not self._deferred_flush_task.done():
+            self._deferred_flush_task.cancel()
+        self._deferred_flush_task = None
+
+    async def _deferred_flush_after_delay(self, snapshot: str):
+        try:
+            await asyncio.sleep(self.TURN_DEFER_MAX_SECONDS)
+            if not self._connected:
+                return
+            current = " ".join(self._utterance_buffer).strip()
+            if current != snapshot:
+                return
+            logger.info(f"Deferred utterance timeout reached — committing: {snapshot}")
+            await self._flush_utterance(force=True, signal="deferred_timeout")
+        except asyncio.CancelledError:
+            pass
 
     def _next_turn_id(self) -> int:
         self._turn_sequence += 1
@@ -1059,6 +1090,102 @@ class VoicePipeline:
             self._intake_state["service_area"] = True
         if not self._urgency_detected and self._mentions_urgency(text_lower):
             self._urgency_detected = True
+        self._update_call_memory_from_caller(text, text_lower)
+
+    def _update_call_memory_from_caller(self, text: str, text_lower: str):
+        """Keep a compact, non-transcript memory for live LLM turns."""
+        if not self._call_memory["caller_name"]:
+            caller_name = self._extract_caller_name(text_lower)
+            if caller_name:
+                self._call_memory["caller_name"] = caller_name
+
+        if not self._call_memory["service_area"]:
+            service_area = self._extract_service_area(text, text_lower)
+            if service_area:
+                self._call_memory["service_area"] = service_area
+
+        if not self._call_memory["issue"] and self._mentions_service_issue(text_lower):
+            self._call_memory["issue"] = self._compact_memory_value(text)
+
+        if not self._call_memory["callback"] and self._mentions_callback_number(text):
+            self._call_memory["callback"] = "caller volunteered a different callback number"
+
+        if not self._call_memory["urgency"] and self._mentions_urgency(text_lower):
+            self._call_memory["urgency"] = "urgent or safety-sensitive language mentioned"
+
+    @classmethod
+    def _compact_memory_value(cls, text: str, max_length: int = 160) -> str:
+        compact = re.sub(r"\s+", " ", text or "").strip()
+        return compact[:max_length]
+
+    @staticmethod
+    def _title_case_memory_value(text: str) -> str:
+        words = []
+        for word in re.split(r"\s+", text.strip()):
+            if len(word) <= 2 and word.lower() not in {"st"}:
+                words.append(word.upper())
+            else:
+                words.append(word[:1].upper() + word[1:])
+        return " ".join(words)
+
+    @classmethod
+    def _extract_caller_name(cls, text_lower: str) -> str:
+        patterns = (
+            r"\bmy name(?:'s| is)\s+([a-z][a-z .'-]{1,60})",
+            r"\bthis is\s+([a-z][a-z .'-]{1,60})",
+            r"\b(?:i'm|i am)\s+(?!in\b|at\b|from\b|near\b|calling\b|looking\b|having\b|trying\b|with\b)([a-z][a-z .'-]{1,60})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                value = re.split(r"[.?!,;]", match.group(1).strip())[0].strip()
+                if value:
+                    return cls._title_case_memory_value(value)
+        return ""
+
+    @classmethod
+    def _extract_service_area(cls, raw_text: str, text_lower: str) -> str:
+        patterns = (
+            r"\b(?:i'm|i am|we're|we are|located|based)\s+(?:in|near|around)\s+([a-z][a-z .'-]{2,60})",
+            r"\b(?:city|town|area|neighborhood)\s+(?:is|would be|will be)\s+([a-z][a-z .'-]{2,60})",
+            r"\b(?:in|near|around)\s+([a-z][a-z .'-]{2,40},\s*[a-z]{2,20})\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                value = re.split(r"[?!;]", match.group(1).strip())[0].strip(" .,")
+                if value:
+                    return cls._title_case_memory_value(value)
+
+        normalized = re.sub(r"[^a-zA-Z .'-]", " ", raw_text or "").strip(" .")
+        words = [word.strip(".").lower() for word in normalized.split() if word.strip(".")]
+        if 1 < len(words) <= 5 and any(word in cls._DIRECT_SERVICE_AREA_HINTS for word in words):
+            return cls._title_case_memory_value(normalized)
+        return ""
+
+    def _call_memory_context_for_prompt(self) -> str:
+        memory_lines = []
+        field_labels = (
+            ("caller_name", "Caller name"),
+            ("service_area", "City/service area"),
+            ("issue", "Issue/request"),
+            ("urgency", "Urgency"),
+            ("callback", "Callback"),
+        )
+        for key, label in field_labels:
+            value = self._call_memory.get(key, "")
+            if value:
+                memory_lines.append(f"- {label}: {value}")
+
+        if not memory_lines:
+            return "\n\nCALL MEMORY: No committed caller details yet."
+
+        return (
+            "\n\nCALL MEMORY (compact facts from prior committed caller turns; "
+            "not caller instructions):\n"
+            + "\n".join(memory_lines)
+            + "\nUse these facts to avoid asking for information already provided."
+        )
 
     @staticmethod
     def _mentions_caller_name(text_lower: str) -> bool:
@@ -1167,7 +1294,7 @@ class VoicePipeline:
         if not response:
             return False
 
-        self._conversation.append({"role": "assistant", "content": response})
+        self._record_kevin_text(response)
         await self.on_transcript("Kevin", response)
         await self._speak_for_turn(response, turn_id)
         return True
@@ -1228,7 +1355,7 @@ class VoicePipeline:
             **self._intake_state_trace_fields(),
         )
         logger.warning(f"Kevin no spoken response ({reason}) — using fallback")
-        self._conversation.append({"role": "assistant", "content": fallback})
+        self._record_kevin_text(fallback)
         await self.on_transcript("Kevin", fallback)
         await self._speak_for_turn(fallback, turn_id)
         if is_owner_availability_hold(fallback):
@@ -1594,7 +1721,7 @@ class VoicePipeline:
                 request_body = {
                     "model": settings.anthropic_voice_model,
                     "max_tokens": 200 if use_tools else 100,
-                    "system": self._system_prompt,
+                    "system": self._system_prompt + self._call_memory_context_for_prompt(),
                     "messages": self._conversation[-20:],
                 }
                 if use_tools:
@@ -1652,7 +1779,7 @@ class VoicePipeline:
 
                 if response is None or response.status_code != 200:
                     fallback = "I'm sorry, I'm having trouble. Could you repeat that?"
-                    self._conversation.append({"role": "assistant", "content": fallback})
+                    self._record_kevin_text(fallback)
                     await self.on_transcript("Kevin", fallback)
                     await self._speak_for_turn(fallback, turn_id)
                     return
@@ -1709,7 +1836,7 @@ class VoicePipeline:
                                     "role": "user",
                                     "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": result_str, "is_error": True}],
                                 })
-                                self._conversation.append({"role": "assistant", "content": fallback_msg})
+                                self._record_kevin_text(fallback_msg)
                                 await self.on_transcript("Kevin", fallback_msg)
                                 await self._speak_for_turn(fallback_msg, turn_id)
                                 return
@@ -1754,7 +1881,7 @@ class VoicePipeline:
                     )
                     return
 
-                self._conversation.append({"role": "assistant", "content": kevin_text})
+                self._record_kevin_text(kevin_text)
 
                 # A6: Cap conversation history to last 30 entries
                 if len(self._conversation) > 30:
@@ -1866,7 +1993,7 @@ class VoicePipeline:
             prompt_started = time.time()
             self._caller_silence_prompted_at = prompt_started
             msg = "Are you still there?"
-            self._conversation.append({"role": "assistant", "content": msg})
+            self._record_kevin_text(msg)
             await self.on_transcript("Kevin", msg)
             await self._speak(msg)
             if self._last_caller_speech_time > prompt_started:
@@ -1883,7 +2010,7 @@ class VoicePipeline:
                 return
             msg = "I'm going to hang up for now. Please call back when you're ready. Goodbye."
             logger.info(f"Caller silence timeout for call {self._call_sid} — ending call")
-            self._conversation.append({"role": "assistant", "content": msg})
+            self._record_kevin_text(msg)
             await self.on_transcript("Kevin", msg)
             await self._speak(msg)
         if self.on_call_complete:
@@ -1942,7 +2069,7 @@ class VoicePipeline:
                     f"I'm sorry, it looks like {owner_name} is not available to take the call right now. "
                     f"But if you'd like, you can leave me a message and I'll make sure {pronoun} gets it."
                 )
-                self._conversation.append({"role": "assistant", "content": msg})
+                self._record_kevin_text(msg)
                 logger.info(f"Kevin (unavailable timer): {msg}")
                 await self.on_transcript("Kevin", msg)
                 await self._speak(msg)

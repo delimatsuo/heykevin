@@ -75,12 +75,14 @@ def test_business_prompt_prioritizes_fast_live_phone_turns():
     assert "For closing, keep it under 10 seconds of speech" in prompt
 
 
-def test_business_prompt_uses_short_phone_confirmation():
+def test_business_prompt_confirms_full_phone_number_concisely():
     prompt = build_system_prompt(_plumbing_config())
 
-    assert "Confirm callback numbers by last four digits only" in prompt
-    assert "Do not read the full phone number unless the caller asks" in prompt
-    assert "Do not confirm callback numbers digit by digit by default" in prompt
+    assert "Repeat the full callback number once" in prompt
+    assert "Use three compact groups" in prompt
+    assert "Do not use long hyphenated digit-by-digit readbacks" in prompt
+    assert "Do not repeat the full callback number more than once unless the caller asks" in prompt
+    assert "last four digits only" not in prompt
     assert "Always read back phone numbers digit by digit" not in prompt
 
 

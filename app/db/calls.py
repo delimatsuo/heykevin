@@ -14,6 +14,7 @@ import secrets as _secrets
 import time
 from typing import Any, Optional
 
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -183,6 +184,22 @@ async def get_call_history(e164_phone: str, limit: int = 10) -> list[dict]:
             .stream()
         )
         return [_maybe_decrypt_call_doc(doc.to_dict()) for doc in docs]
+    except FailedPrecondition as e:
+        logger.warning(f"Firestore call history index missing; using caller-only fallback: {e}")
+        try:
+            db = get_firestore_client()
+            fallback_limit = max(limit * 5, 100)
+            docs = list(
+                db.collection(COLLECTION)
+                .where(filter=FieldFilter("caller_phone", "==", e164_phone))
+                .limit(fallback_limit)
+                .stream()
+            )
+            docs.sort(key=lambda doc: doc.to_dict().get("timestamp", 0), reverse=True)
+            return [_maybe_decrypt_call_doc(doc.to_dict()) for doc in docs[:limit]]
+        except Exception as fallback_error:
+            logger.error(f"Firestore call history fallback failed: {fallback_error}", exc_info=True)
+            return []
     except Exception as e:
         logger.error(f"Firestore call history failed: {e}", exc_info=True)
         return []

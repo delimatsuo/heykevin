@@ -87,6 +87,17 @@ def test_business_prompt_confirms_full_phone_number_concisely():
     assert "Always read back phone numbers digit by digit" not in prompt
 
 
+def test_business_prompt_defers_callback_number_until_followup_intent():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "Do not ask for a callback number during early qualification" in prompt
+    assert "Treat caller ID as the default callback number when available" in prompt
+    assert "only if they want a callback, dispatch, booking, or owner handoff" in prompt
+    assert "Is the number you're calling from the best one?" in prompt
+    assert "Get their name, callback number, city/town" not in prompt
+    assert "identify caller, issue, city/town or service area, urgency, and callback number" not in prompt
+
+
 def test_business_prompt_speaks_hours_in_words():
     prompt = build_system_prompt(_plumbing_config())
 

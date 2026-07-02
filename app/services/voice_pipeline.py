@@ -317,7 +317,12 @@ LIVE PHONE LATENCY POLICY:
 - Keep most replies under 12 words. Use short, direct sentences.
 - Ask exactly one question per turn unless giving urgent safety guidance.
 - Do not recap the caller's address, issue, or phone number unless they ask.
-- Confirm phone numbers only when first collecting them, then move on.
+- Do not ask for a callback number during early qualification.
+- Treat caller ID as the default callback number when available.
+- Ask for callback confirmation only if they want a callback, dispatch, booking, or owner handoff.
+- If caller ID is available and callback confirmation is needed, ask: "Is the number you're calling from the best one?"
+- Only ask the caller to say a different callback number if caller ID is unavailable or they say they prefer a different number.
+- Confirm phone numbers only when first collecting a different number, then move on.
 - Repeat the full callback number once when confirming it.
 - Use three compact groups, for example: "I have six five zero, four two two, eight six six seven, correct?"
 - Do not use long hyphenated digit-by-digit readbacks like "6-5-0, 4-2-2, 8-6-6-7."
@@ -328,11 +333,11 @@ LIVE PHONE LATENCY POLICY:
 
 PHASE 1 — INTAKE (first 2-3 exchanges):
 1. You already greeted them. Wait for them to speak first.
-2. Get their name, callback number, city/town or service area for service requests, and one-line reason for calling. If they only give part of this, politely ask for the missing information.
+2. First understand why they are calling. For service requests, collect city/town or service area and a one-line reason before asking identity or callback details.
 3. Do not ask for a full street address during AI screening. Only capture a full street address if the caller volunteers it or an owner-approved booking or dispatch workflow is active.
 4. Decide whether the request is IN SCOPE, OUT OF SCOPE, or UNCLEAR based on the business profile.
 5. If it is IN SCOPE, ask 1-2 smart follow-up questions that match the specific issue. Examples for a plumbing business: "Is there standing water?" "Can you get to the shut-off valve?" "Is it a sink, toilet, water heater, or appliance connection?" Think about what {owner_name} would want to know before calling back.
-6. If it is OUT OF SCOPE, say the business may not be the right company for that type of work, collect the caller's name/number/reason, and offer to pass the message to {owner_name}. Do not diagnose or troubleshoot another trade's work.
+6. If it is OUT OF SCOPE, say the business may not be the right company for that type of work, collect the caller's name and reason, and offer to pass the message to {owner_name}. Do not diagnose or troubleshoot another trade's work.
 7. If it is UNCLEAR, ask one clarifying question before treating it as a service request.
 8. If it's NOT a service request (personal call, sales, etc.), skip trade follow-up questions.
 
@@ -354,16 +359,16 @@ PHASE 4 — MESSAGE:
 15. The system may automatically tell the caller if {owner_name} is unavailable.
 16. If the caller is ALREADY leaving a message (giving details, callback number), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 17. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
-18. If you don't have their callback number, ask for it.
-19. Once you have their name, details, and callback number, confirm and wrap up: "I'll send this to {first_name}. Have a good day."
+18. If they want a callback and caller ID is unavailable, ask for the best callback number. If caller ID is available, ask whether the number they're calling from is best.
+19. Once you have their name and details, confirm and wrap up: "I'll send this to {first_name}. Have a good day."
 
 RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
-- New service request: identify caller, issue, city/town or service area, urgency, and callback number. Ask one or two issue-specific follow-up questions only after deciding the request is in scope.
+- New service request: identify issue, city/town or service area, urgency, and caller name. Use caller ID as the default callback path; ask about callback number only after the caller wants follow-up or the issue needs owner handoff.
 - Out-of-scope request: be honest that {business_name} may not be the right company, avoid diagnosing another trade's work, still offer to pass a concise message to {first_name}.
-- Safety emergency: give only immediate safety guidance, collect callback number and rough city/town or nearby area, and try to reach {first_name} if the issue is relevant to this business. For out-of-scope danger, tell them to contact emergency services or the right licensed trade.
+- Safety emergency: give only immediate safety guidance, collect rough city/town or nearby area, use caller ID as the default callback path, and try to reach {first_name} if the issue is relevant to this business. For out-of-scope danger, tell them to contact emergency services or the right licensed trade.
 - After-hours request: take a message unless there is a relevant safety emergency. Do not pretend {first_name} is available after hours.
 - Owner handoff: if you tell the caller you are trying {first_name}, stop speaking. The system will wait about 30 seconds. If {first_name} does not answer or declines, return to the caller, say {first_name} is unavailable, then continue taking the message.
-- Message taking: collect the actual message, name, callback number, and any useful details. If the caller already gave those, confirm and close; do not ask again.
+- Message taking: collect the actual message, name, and any useful details. Use caller ID for callback unless the caller asks to use another number or caller ID is unavailable.
 - Media follow-up: for in-scope visual problems, offer that Kevin can text a link after the call for a photo or short video. Do not claim live media review during the call.
 - Silent caller: if the caller stops responding after you ask a question or offer to take a message, the system may ask "Are you still there?" and then end the call if silence continues.
 
@@ -390,7 +395,7 @@ RULES:
             f"\n\nAFTER HOURS: The business is currently closed. Our hours are {hours_start} to {hours_end}."
             f"\n- Take a message and let the caller know {owner_name} will get back to them during business hours."
             f"\n- Do NOT say \"let me see if {pronoun}'s available\" — instead say \"I can take a message and make sure {owner_name} gets it first thing.\""
-            f"\n- Still collect their name, reason for calling, and callback number."
+            f"\n- Still collect their name and reason for calling. Use caller ID for callback unless they ask to use a different number."
         )
 
     # Prompt injection fence: instruct the model to treat caller speech as untrusted
@@ -506,7 +511,7 @@ class VoicePipeline:
         self._exchange_count = 0
         self._intake_state = {
             "caller_name": False,
-            "callback_number": False,
+            "callback_number": bool(caller_phone),
             "issue": False,
             "service_area": False,
         }
@@ -1022,14 +1027,12 @@ class VoicePipeline:
 
         owner_name = self._contractor_config.get("owner_name", settings.user_name)
         first_name = owner_name.split()[0] if owner_name else "the owner"
-        if not self._intake_state["caller_name"]:
-            return "I'm here. Could I get your name?"
-        if not self._intake_state["callback_number"]:
-            return "I'm here. What's the best callback number?"
         if not self._intake_state["issue"]:
             return "I'm here. What's going on?"
         if not self._intake_state["service_area"]:
             return "I'm here. What city or town are you in?"
+        if not self._intake_state["caller_name"]:
+            return "I'm here. Could I get your name?"
         if self._urgency_detected:
             return f"Got it. I'm going to try {first_name} now, one moment."
         return f"Got it. I'll make sure {first_name} gets this message."

@@ -86,6 +86,14 @@ def test_business_prompt_confirms_full_phone_number_concisely():
     assert "Always read back phone numbers digit by digit" not in prompt
 
 
+def test_business_prompt_speaks_hours_in_words():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "When saying business hours, speak them in words" in prompt
+    assert "say \"seven in the morning to six in the evening\"" in prompt
+    assert "Do not say compact forms like \"7 AM to 6 PM\"" in prompt
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",

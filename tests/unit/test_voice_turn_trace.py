@@ -61,6 +61,16 @@ class FakeRetryClient:
         return FakeResponse(content=b"")
 
 
+class FakeEmptyAnthropicClient:
+    async def post(self, url, **_kwargs):
+        if "anthropic.com" in url:
+            return FakeResponse(json_body={
+                "stop_reason": "end_turn",
+                "content": [],
+            })
+        return FakeResponse(content=b"\xff" * 320)
+
+
 def _pipeline(on_audio_out):
     return VoicePipeline(
         on_audio_out=on_audio_out,
@@ -142,3 +152,51 @@ async def test_anthropic_retry_uses_fast_voice_timeout_without_fixed_sleep(monke
     assert retry_client.anthropic_calls == 2
     assert retry_client.anthropic_timeouts[0] <= 4.0
     assert 2 not in sleep_calls
+
+
+@pytest.mark.asyncio
+async def test_empty_anthropic_response_speaks_business_fallback(monkeypatch):
+    trace_events = []
+    transcript_lines = []
+    spoken_chunks = []
+
+    def fake_trace_event(_logger, event, **fields):
+        trace_events.append({"event": event, **fields})
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def on_audio_out(chunk: bytes):
+        spoken_chunks.append(chunk)
+
+    async def no_sleep(_delay: float):
+        return None
+
+    monkeypatch.setattr(voice_pipeline_module, "trace_event", fake_trace_event)
+    monkeypatch.setattr(voice_pipeline_module.asyncio, "sleep", no_sleep)
+
+    pipeline = VoicePipeline(
+        on_audio_out=on_audio_out,
+        on_transcript=on_transcript,
+        call_sid="CA_empty_response_test",
+        contractor_config={
+            "contractor_id": "contractor-1",
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeEmptyAnthropicClient()
+    pipeline._connected = True
+
+    await pipeline._process_utterance("there is standing water", turn_id=6)
+
+    assert ("Kevin", "I'm here. Can you tell me the service address?") in transcript_lines
+    assert spoken_chunks
+    assert any(
+        event["event"] == "voice_turn_no_spoken_response"
+        and event["reason"] == "empty_response"
+        for event in trace_events
+    )

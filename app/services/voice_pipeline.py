@@ -928,6 +928,26 @@ class VoicePipeline:
             **fields,
         )
 
+    def _no_spoken_response_fallback_text(self) -> str:
+        mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
+        if mode == "personal":
+            return "I'm here. Could you tell me a little more?"
+        return "I'm here. Can you tell me the service address?"
+
+    async def _speak_no_response_fallback(self, turn_id: Optional[int], reason: str):
+        fallback = self._no_spoken_response_fallback_text()
+        self._trace_turn(
+            "voice_turn_no_spoken_response",
+            turn_id,
+            stage="llm",
+            status="fallback",
+            reason=reason,
+        )
+        logger.warning(f"Kevin no spoken response ({reason}) — using fallback")
+        self._conversation.append({"role": "assistant", "content": fallback})
+        await self.on_transcript("Kevin", fallback)
+        await self._speak_for_turn(fallback, turn_id)
+
     async def _speak_for_turn(self, text: str, turn_id: Optional[int]):
         previous_turn_id = self._active_trace_turn_id
         self._active_trace_turn_id = turn_id
@@ -1400,7 +1420,8 @@ class VoicePipeline:
                         kevin_text += block["text"]
 
                 if not kevin_text:
-                    break
+                    await self._speak_no_response_fallback(turn_id, "empty_response")
+                    return
 
                 # Filter out stage directions — don't speak these
                 stripped = kevin_text.strip().lower().strip("*[]() ")
@@ -1409,7 +1430,8 @@ class VoicePipeline:
                                     "continues waiting", "remains silent", "stays quiet"}
                 if stripped in stage_directions or stripped == "..." or stripped.startswith("*") and stripped.endswith("*"):
                     logger.info(f"Kevin output stage direction '{kevin_text.strip()}' — suppressing TTS")
-                    break
+                    await self._speak_no_response_fallback(turn_id, "stage_direction")
+                    return
 
                 self._conversation.append({"role": "assistant", "content": kevin_text})
 

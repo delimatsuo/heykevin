@@ -37,6 +37,13 @@ TRACE_FIELD_NAMES = {
     "transcript_chars",
     "first_audio_ms",
     "stream_sid",
+    "stop_reason",
+    "content_block_types",
+    "has_caller_name",
+    "has_callback_number",
+    "has_issue",
+    "has_service_area",
+    "urgency_detected",
 }
 
 _DISALLOWED_TRACE_FIELDS = {"raw_text", "transcript", "prompt", "messages", "request_body", "response_body"}

@@ -1,6 +1,7 @@
 """Application configuration. Loads from .env locally, Secret Manager in production."""
 
-import os
+import json as _json
+from typing import Optional as _Optional
 
 from pydantic_settings import BaseSettings
 
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     # AI Services
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
+    anthropic_voice_model: str = "claude-haiku-4-5"
     deepgram_api_key: str = ""
     fish_audio_api_key: str = ""
     elevenlabs_api_key: str = ""
@@ -165,8 +167,7 @@ def validate_runtime_safety() -> None:
     if errors:
         raise RuntimeError("Unsafe runtime configuration: " + "; ".join(errors))
 
-import json as _json
-from typing import Optional as _Optional
+
 _dial_in_cache: _Optional[dict] = None
 
 

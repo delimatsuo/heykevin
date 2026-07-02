@@ -300,7 +300,7 @@ async def test_voice_pipeline_silence_waits_for_owner_availability_before_prompt
 
 
 @pytest.mark.asyncio
-async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
+async def test_voice_pipeline_uses_configured_voice_model(monkeypatch):
     request_bodies = []
     transcripts = []
 
@@ -324,8 +324,9 @@ async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
     async def on_transcript(speaker: str, text: str):
         transcripts.append((speaker, text))
 
-    assert hasattr(voice_pipeline_module.settings, "anthropic_model")
+    assert hasattr(voice_pipeline_module.settings, "anthropic_voice_model")
     monkeypatch.setattr(voice_pipeline_module.settings, "anthropic_model", "claude-sonnet-5")
+    monkeypatch.setattr(voice_pipeline_module.settings, "anthropic_voice_model", "claude-haiku-4-5")
 
     pipeline = VoicePipeline(
         on_audio_out=on_audio_out,
@@ -339,7 +340,8 @@ async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
 
     await pipeline._handle_caller_speech("What kind of services do you offer?")
 
-    assert request_bodies[0]["model"] == "claude-sonnet-5"
+    assert voice_pipeline_module.settings.anthropic_model == "claude-sonnet-5"
+    assert request_bodies[0]["model"] == "claude-haiku-4-5"
     assert transcripts[-1] == ("Kevin", "We handle plumbing repairs.")
 
 

@@ -1,4 +1,5 @@
 import os
+import logging
 
 import pytest
 
@@ -114,3 +115,27 @@ async def test_tts_uses_slightly_slower_speech_speed(monkeypatch):
 
     request_settings = pipeline._http_client.requests[0]["json"]["voice_settings"]
     assert request_settings["speed"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_tts_logs_exact_spoken_text_before_request(monkeypatch, caplog):
+    async def on_audio_out(_chunk: bytes):
+        return None
+
+    async def no_sleep(_delay: float):
+        return None
+
+    pipeline = _pipeline(on_audio_out)
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeTTSClient(b"\xff" * 160)
+    pipeline._connected = True
+    monkeypatch.setattr("app.services.voice_pipeline.asyncio.sleep", no_sleep)
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._speak("Hi, thanks for calling Bayview Plumbing. How can I help?")
+
+    assert any(
+        record.getMessage()
+        == "Kevin TTS: Hi, thanks for calling Bayview Plumbing. How can I help?"
+        for record in caplog.records
+    )

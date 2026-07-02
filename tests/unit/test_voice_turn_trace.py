@@ -1,6 +1,7 @@
 import os
 
 import pytest
+import httpx
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
@@ -40,6 +41,24 @@ class FakeTurnClient:
                 "content": [{"type": "text", "text": "We can help with that."}],
             })
         return FakeResponse(content=b"\xff" * 320)
+
+
+class FakeRetryClient:
+    def __init__(self):
+        self.anthropic_timeouts = []
+        self.anthropic_calls = 0
+
+    async def post(self, url, **kwargs):
+        if "anthropic.com" in url:
+            self.anthropic_calls += 1
+            self.anthropic_timeouts.append(kwargs.get("timeout"))
+            if self.anthropic_calls == 1:
+                raise httpx.ReadTimeout("slow Anthropic response")
+            return FakeResponse(json_body={
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Yes, I can help."}],
+            })
+        return FakeResponse(content=b"")
 
 
 def _pipeline(on_audio_out):
@@ -98,3 +117,28 @@ async def test_voice_turn_emits_stage_timings_without_raw_caller_text(monkeypatc
     serialized = repr(trace_events)
     assert "650-422-8667" not in serialized
     assert "my private phone" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_anthropic_retry_uses_fast_voice_timeout_without_fixed_sleep(monkeypatch):
+    sleep_calls = []
+
+    async def on_audio_out(_chunk: bytes):
+        return None
+
+    async def record_sleep(delay: float):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(voice_pipeline_module.asyncio, "sleep", record_sleep)
+
+    pipeline = _pipeline(on_audio_out)
+    await pipeline._http_client.aclose()
+    retry_client = FakeRetryClient()
+    pipeline._http_client = retry_client
+    pipeline._connected = True
+
+    await pipeline._process_utterance("hello", turn_id=3)
+
+    assert retry_client.anthropic_calls == 2
+    assert retry_client.anthropic_timeouts[0] <= 4.0
+    assert 2 not in sleep_calls

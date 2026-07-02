@@ -26,6 +26,8 @@ from app.utils.logging import get_logger, trace_event
 
 logger = get_logger(__name__)
 
+ANTHROPIC_VOICE_RETRY_TIMEOUTS_SECONDS = (4.0, 6.0)
+
 
 def _tool_execution_error_response() -> str:
     return json.dumps({"success": False, "error": "Tool execution failed."})
@@ -1269,7 +1271,7 @@ class VoicePipeline:
 
                 # A4: Retry Claude API call once on failure
                 response = None
-                for attempt in range(2):
+                for attempt, request_timeout in enumerate(ANTHROPIC_VOICE_RETRY_TIMEOUTS_SECONDS):
                     llm_started = time.monotonic()
                     self._trace_turn(
                         "voice_turn_llm_start",
@@ -1288,7 +1290,7 @@ class VoicePipeline:
                                 "content-type": "application/json",
                             },
                             json=request_body,
-                            timeout=8.0,
+                            timeout=request_timeout,
                         )
                         self._trace_turn(
                             "voice_turn_llm_end",
@@ -1316,9 +1318,6 @@ class VoicePipeline:
                         )
                         logger.error(f"Claude API exception (attempt {attempt + 1}): {api_err}")
                         response = None
-
-                    if attempt == 0:
-                        await asyncio.sleep(2)
 
                 if response is None or response.status_code != 200:
                     fallback = "I'm sorry, I'm having trouble. Could you repeat that?"
@@ -1618,6 +1617,7 @@ class VoicePipeline:
         try:
             client = self._http_client
             spoken_text = _normalize_tts_text(text)
+            logger.info(f"Kevin TTS: {spoken_text}")
             response = await client.post(
                 f"https://api.elevenlabs.io/v1/text-to-speech/{self._tts_voice_id}?output_format=ulaw_8000",
                 headers={

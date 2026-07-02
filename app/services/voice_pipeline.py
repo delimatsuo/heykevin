@@ -504,6 +504,12 @@ class VoicePipeline:
         # Urgency detection
         self._urgency_detected = False
         self._exchange_count = 0
+        self._intake_state = {
+            "caller_name": False,
+            "callback_number": False,
+            "issue": False,
+            "service_area": False,
+        }
 
         # Silence timeout: track last speech activity
         self._last_speech_time = time.time()
@@ -930,13 +936,112 @@ class VoicePipeline:
             **fields,
         )
 
+    _ISSUE_KEYWORDS = {
+        "ac", "air conditioner", "appliance", "backup", "broken", "burst", "clog",
+        "clogged", "dishwasher", "drain", "dripping", "emergency", "estimate",
+        "faucet", "filter", "fixture", "flood", "flooding", "heater", "install",
+        "installation", "leak", "leaking", "maintenance", "pipe", "plumbing",
+        "quote", "repair", "replace", "replacement", "service", "sewage", "sink",
+        "standing water", "toilet", "water",
+    }
+
+    def _update_intake_state_from_caller(self, text: str):
+        """Track only coarse intake completion flags for deterministic fallbacks."""
+        if not text:
+            return
+
+        text_lower = text.lower()
+        if not self._intake_state["caller_name"] and self._mentions_caller_name(text_lower):
+            self._intake_state["caller_name"] = True
+        if not self._intake_state["callback_number"] and self._mentions_callback_number(text):
+            self._intake_state["callback_number"] = True
+        if not self._intake_state["issue"] and self._mentions_service_issue(text_lower):
+            self._intake_state["issue"] = True
+        if not self._intake_state["service_area"] and self._mentions_service_area(text_lower):
+            self._intake_state["service_area"] = True
+        if not self._urgency_detected and self._mentions_urgency(text_lower):
+            self._urgency_detected = True
+
+    @staticmethod
+    def _mentions_caller_name(text_lower: str) -> bool:
+        name_patterns = (
+            r"\bmy name(?:'s| is)\s+[a-z][a-z .'-]{1,60}",
+            r"\bthis is\s+[a-z][a-z .'-]{1,60}",
+            r"\b(?:i'm|i am)\s+(?!in\b|at\b|from\b|near\b|calling\b|looking\b|having\b|trying\b|with\b)[a-z][a-z .'-]{1,60}",
+        )
+        return any(re.search(pattern, text_lower) for pattern in name_patterns)
+
+    @staticmethod
+    def _mentions_callback_number(text: str) -> bool:
+        return len(re.findall(r"\d", text)) >= 7
+
+    def _mentions_service_issue(self, text_lower: str) -> bool:
+        for keyword in self._ISSUE_KEYWORDS:
+            if len(keyword) <= 3 and keyword.isalpha():
+                if re.search(rf"\b{re.escape(keyword)}\b", text_lower):
+                    return True
+            elif keyword in text_lower:
+                return True
+        return False
+
+    @staticmethod
+    def _mentions_service_area(text_lower: str) -> bool:
+        area_patterns = (
+            r"\b(?:i'm|i am|we're|we are|located|based)\s+(?:in|near|around)\s+[a-z]",
+            r"\b(?:city|town|area|neighborhood)\s+(?:is|would be|will be)\s+[a-z]",
+            r"\b(?:in|near|around)\s+[a-z][a-z .'-]{2,40},\s*[a-z]{2,20}\b",
+        )
+        return any(re.search(pattern, text_lower) for pattern in area_patterns)
+
+    def _mentions_urgency(self, text_lower: str) -> bool:
+        return any(keyword in text_lower for keyword in self.URGENCY_KEYWORDS)
+
+    @staticmethod
+    def _content_block_types(content_blocks: list) -> list[str]:
+        block_types = []
+        for block in content_blocks or []:
+            if isinstance(block, dict):
+                block_types.append(str(block.get("type", "unknown")))
+            else:
+                block_types.append(type(block).__name__)
+        return block_types
+
+    def _intake_state_trace_fields(self) -> dict:
+        return {
+            "has_caller_name": self._intake_state["caller_name"],
+            "has_callback_number": self._intake_state["callback_number"],
+            "has_issue": self._intake_state["issue"],
+            "has_service_area": self._intake_state["service_area"],
+            "urgency_detected": self._urgency_detected,
+        }
+
     def _no_spoken_response_fallback_text(self) -> str:
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
         if mode == "personal":
             return "I'm here. Could you tell me a little more?"
-        return "I'm here. What city or town are you in?"
 
-    async def _speak_no_response_fallback(self, turn_id: Optional[int], reason: str):
+        owner_name = self._contractor_config.get("owner_name", settings.user_name)
+        first_name = owner_name.split()[0] if owner_name else "the owner"
+        if not self._intake_state["caller_name"]:
+            return "I'm here. Could I get your name?"
+        if not self._intake_state["callback_number"]:
+            return "I'm here. What's the best callback number?"
+        if not self._intake_state["issue"]:
+            return "I'm here. What's going on?"
+        if not self._intake_state["service_area"]:
+            return "I'm here. What city or town are you in?"
+        if self._urgency_detected:
+            return f"Got it. I'm going to try {first_name} now, one moment."
+        return f"Got it. I'll make sure {first_name} gets this message."
+
+    async def _speak_no_response_fallback(
+        self,
+        turn_id: Optional[int],
+        reason: str,
+        *,
+        stop_reason: str = "",
+        content_blocks: Optional[list] = None,
+    ):
         fallback = self._no_spoken_response_fallback_text()
         self._trace_turn(
             "voice_turn_no_spoken_response",
@@ -944,11 +1049,16 @@ class VoicePipeline:
             stage="llm",
             status="fallback",
             reason=reason,
+            stop_reason=stop_reason,
+            content_block_types=self._content_block_types(content_blocks or []),
+            **self._intake_state_trace_fields(),
         )
         logger.warning(f"Kevin no spoken response ({reason}) — using fallback")
         self._conversation.append({"role": "assistant", "content": fallback})
         await self.on_transcript("Kevin", fallback)
         await self._speak_for_turn(fallback, turn_id)
+        if is_owner_availability_hold(fallback):
+            self._start_owner_availability_wait()
 
     async def _speak_for_turn(self, text: str, turn_id: Optional[int]):
         previous_turn_id = self._active_trace_turn_id
@@ -1265,6 +1375,7 @@ class VoicePipeline:
     # --- Claude LLM ---
 
     async def _handle_caller_speech(self, caller_text: str, turn_id: Optional[int] = None):
+        self._update_intake_state_from_caller(caller_text)
         self._conversation.append({"role": "user", "content": f"<caller_speech>{caller_text}</caller_speech>"})
 
         # Select tools: Jobber > Google Calendar > none
@@ -1422,7 +1533,12 @@ class VoicePipeline:
                         kevin_text += block["text"]
 
                 if not kevin_text:
-                    await self._speak_no_response_fallback(turn_id, "empty_response")
+                    await self._speak_no_response_fallback(
+                        turn_id,
+                        "empty_response",
+                        stop_reason=stop_reason,
+                        content_blocks=content_blocks,
+                    )
                     return
 
                 # Filter out stage directions — don't speak these
@@ -1432,7 +1548,12 @@ class VoicePipeline:
                                     "continues waiting", "remains silent", "stays quiet"}
                 if stripped in stage_directions or stripped == "..." or stripped.startswith("*") and stripped.endswith("*"):
                     logger.info(f"Kevin output stage direction '{kevin_text.strip()}' — suppressing TTS")
-                    await self._speak_no_response_fallback(turn_id, "stage_direction")
+                    await self._speak_no_response_fallback(
+                        turn_id,
+                        "stage_direction",
+                        stop_reason=stop_reason,
+                        content_blocks=content_blocks,
+                    )
                     return
 
                 self._conversation.append({"role": "assistant", "content": kevin_text})

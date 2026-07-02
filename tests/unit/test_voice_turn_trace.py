@@ -71,6 +71,21 @@ class FakeEmptyAnthropicClient:
         return FakeResponse(content=b"\xff" * 320)
 
 
+class FakeScriptedAnthropicClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    async def post(self, url, **_kwargs):
+        if "anthropic.com" in url:
+            if self.responses:
+                return FakeResponse(json_body=self.responses.pop(0))
+            return FakeResponse(json_body={
+                "stop_reason": "end_turn",
+                "content": [],
+            })
+        return FakeResponse(content=b"\xff" * 320)
+
+
 def _pipeline(on_audio_out):
     return VoicePipeline(
         on_audio_out=on_audio_out,
@@ -193,10 +208,91 @@ async def test_empty_anthropic_response_speaks_business_fallback(monkeypatch):
 
     await pipeline._process_utterance("there is standing water", turn_id=6)
 
-    assert ("Kevin", "I'm here. What city or town are you in?") in transcript_lines
+    assert ("Kevin", "I'm here. Could I get your name?") in transcript_lines
     assert spoken_chunks
     assert any(
         event["event"] == "voice_turn_no_spoken_response"
         and event["reason"] == "empty_response"
+        and event["stop_reason"] == "end_turn"
+        and event["content_block_types"] == []
+        and event["has_issue"] is True
+        and event["has_service_area"] is False
         for event in trace_events
     )
+
+
+@pytest.mark.asyncio
+async def test_empty_response_after_city_moves_to_handoff_instead_of_reasking_city(monkeypatch):
+    transcript_lines = []
+    spoken_chunks = []
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def on_audio_out(chunk: bytes):
+        spoken_chunks.append(chunk)
+
+    async def no_sleep(_delay: float):
+        return None
+
+    monkeypatch.setattr(voice_pipeline_module.asyncio, "sleep", no_sleep)
+
+    pipeline = VoicePipeline(
+        on_audio_out=on_audio_out,
+        on_transcript=on_transcript,
+        call_sid="CA_san_francisco_loop_test",
+        contractor_config={
+            "contractor_id": "contractor-1",
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeScriptedAnthropicClient([
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Can I get your name first?"}]},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "What's the best callback number?"}]},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Got it. What city are you in?"}]},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Just to confirm, is that San Francisco city?"}]},
+        {"stop_reason": "end_turn", "content": []},
+    ])
+    pipeline._connected = True
+
+    await pipeline._process_utterance("Can you do emergency service? I have a sink leaking.", turn_id=1)
+    await pipeline._process_utterance("My name is Jonathan.", turn_id=2)
+    await pipeline._process_utterance("(650) 422-8667.", turn_id=3)
+    await pipeline._process_utterance("I'm in San Francisco, California.", turn_id=4)
+    await pipeline._process_utterance("Yes.", turn_id=5)
+
+    assert transcript_lines[-1] == ("Kevin", "Got it. I'm going to try Alex now, one moment.")
+    assert "city or town" not in transcript_lines[-1][1].lower()
+    assert spoken_chunks
+    if pipeline._unavailable_task:
+        pipeline._unavailable_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_business_fallback_uses_next_missing_intake_field():
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA_state_test",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+
+    assert pipeline._no_spoken_response_fallback_text() == "I'm here. Could I get your name?"
+    pipeline._update_intake_state_from_caller("My name is Jonathan.")
+    assert pipeline._no_spoken_response_fallback_text() == "I'm here. What's the best callback number?"
+    pipeline._update_intake_state_from_caller("(650) 422-8667.")
+    assert pipeline._no_spoken_response_fallback_text() == "I'm here. What's going on?"
+    pipeline._update_intake_state_from_caller("I have a sink leak.")
+    assert pipeline._no_spoken_response_fallback_text() == "I'm here. What city or town are you in?"
+    pipeline._update_intake_state_from_caller("I'm in San Francisco.")
+    assert pipeline._no_spoken_response_fallback_text() == "Got it. I'll make sure Alex gets this message."

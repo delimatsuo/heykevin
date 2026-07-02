@@ -97,6 +97,23 @@ Urgency guide:
 <transcript>{transcript}</transcript>"""
 
 
+def _content_block_types(content_blocks: list) -> list[str]:
+    block_types = []
+    for block in content_blocks or []:
+        if isinstance(block, dict):
+            block_types.append(str(block.get("type", "unknown")))
+        else:
+            block_types.append(type(block).__name__)
+    return block_types
+
+
+def _first_text_block(content_blocks: list) -> str:
+    for block in content_blocks or []:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            return block["text"]
+    return ""
+
+
 async def extract_job_card(transcript: str, caller_phone: str, contractor: dict | None = None) -> dict:
     """Extract structured job information from a call transcript.
 
@@ -123,7 +140,15 @@ async def extract_job_card(transcript: str, caller_phone: str, contractor: dict 
 
             if response.status_code == 200:
                 data = response.json()
-                text = data["content"][0]["text"]
+                content_blocks = data.get("content", [])
+                text = _first_text_block(content_blocks)
+                if not text:
+                    logger.error(
+                        "Job card extraction returned no text block: stop_reason=%s content_block_types=%s",
+                        data.get("stop_reason", ""),
+                        _content_block_types(content_blocks),
+                    )
+                    raise ValueError("no_text_content")
                 # Handle markdown code blocks
                 if "```" in text:
                     text = text.split("```")[1]

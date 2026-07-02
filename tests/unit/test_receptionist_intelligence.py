@@ -170,6 +170,53 @@ async def test_extract_job_card_defaults_service_area_when_model_omits_it(monkey
     assert result["service_area"] == ""
 
 
+@pytest.mark.asyncio
+async def test_extract_job_card_reads_first_text_content_block(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "internal notes are not text"},
+                    {
+                        "type": "text",
+                        "text": (
+                            '{"call_type":"service_request","caller_name":"Pat",'
+                            '"business_name":"","service_area":"San Francisco",'
+                            '"address":"","issue_description":"sink leak",'
+                            '"urgency":"same_day","message":"","callback_number":"6504228667"}'
+                        ),
+                    },
+                ],
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(job_card_module.httpx, "AsyncClient", FakeClient)
+
+    result = await extract_job_card(
+        "Caller: This is Pat. My sink is leaking in San Francisco. Call me at 6504228667.",
+        "+15551234567",
+        contractor=_plumbing_config(),
+    )
+
+    assert result["call_type"] == "service_request"
+    assert result["caller_name"] == "Pat"
+    assert result["service_area"] == "San Francisco"
+    assert result["issue_description"] == "sink leak"
+    assert result["callback_number"] == "6504228667"
+
+
 def test_electrical_panel_terms_trigger_urgency_escalation():
     assert "electric panel" in VoicePipeline.URGENCY_KEYWORDS
     assert "breaker tripped" in VoicePipeline.URGENCY_KEYWORDS

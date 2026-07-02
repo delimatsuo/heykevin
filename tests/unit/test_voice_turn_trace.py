@@ -1,4 +1,5 @@
 import os
+import asyncio
 import time
 
 import pytest
@@ -266,6 +267,54 @@ async def test_stale_substantive_utterance_still_uses_claude(monkeypatch):
     assert transcript_lines == [("Kevin", "We can help with that.")]
     assert spoken == ["We can help with that."]
     assert any("anthropic.com" in url for url, _kwargs in fake_client.requests)
+
+
+@pytest.mark.asyncio
+async def test_utterance_end_defers_incomplete_location_fragment():
+    processed = []
+
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+
+    async def fake_process(text: str, turn_id=None, queued_at=None):
+        processed.append((text, turn_id, queued_at))
+
+    pipeline._process_utterance = fake_process
+    pipeline._utterance_buffer = ["I am in"]
+
+    task = await pipeline._flush_utterance(force=False)
+
+    assert task is None
+    assert processed == []
+    assert pipeline._utterance_buffer == ["I am in"]
+
+    pipeline._utterance_buffer.append("San Mateo, California.")
+    task = await pipeline._flush_utterance(force=True)
+    await task
+
+    assert [item[0] for item in processed] == ["I am in San Mateo, California."]
+
+
+@pytest.mark.asyncio
+async def test_caller_activity_cancels_owner_availability_timer():
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+    pipeline._connected = True
+
+    pipeline._start_owner_availability_wait()
+    try:
+        assert pipeline._waiting_for_owner_availability is True
+        assert pipeline._unavailable_task is not None
+
+        pipeline._mark_caller_activity()
+        await asyncio.sleep(0)
+
+        assert pipeline._waiting_for_owner_availability is False
+        assert pipeline._unavailable_task is None
+        assert pipeline._unavailable_said is False
+    finally:
+        if pipeline._unavailable_task:
+            pipeline._unavailable_task.cancel()
 
 
 @pytest.mark.asyncio

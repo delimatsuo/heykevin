@@ -775,7 +775,7 @@ class VoicePipeline:
                 if msg_type == "UtteranceEnd":
                     if self._utterance_buffer:
                         logger.info("UtteranceEnd received — processing buffer")
-                        await self._flush_utterance()
+                        await self._flush_utterance(force=False)
                     continue
 
                 # Skip non-transcript messages
@@ -917,12 +917,40 @@ class VoicePipeline:
                         asyncio.create_task(self.on_clear_audio())
                 break
 
-    async def _flush_utterance(self):
+    _INCOMPLETE_UTTERANCE_ENDINGS = {
+        "a", "an", "around", "at", "for", "from", "in", "near", "of", "the", "to", "with",
+    }
+
+    @classmethod
+    def _looks_incomplete_utterance(cls, text: str) -> bool:
+        normalized = re.sub(r"[^a-zA-Z0-9' ]", " ", text or "").lower()
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return False
+
+        words = normalized.split()
+        if words[-1] in cls._INCOMPLETE_UTTERANCE_ENDINGS:
+            return True
+
+        question_stems = {
+            "can you tell me",
+            "could you tell me",
+            "do you know",
+            "what is the",
+            "what's the",
+        }
+        return normalized in question_stems
+
+    async def _flush_utterance(self, *, force: bool = True):
         """Combine accumulated segments and process as one complete utterance."""
         if not self._utterance_buffer:
             return
 
         combined = " ".join(self._utterance_buffer)
+        if not force and self._looks_incomplete_utterance(combined):
+            logger.info(f"Deferring incomplete utterance fragment: {combined}")
+            return
+
         self._utterance_buffer.clear()
         turn_id = self._next_turn_id()
         queued_at = time.monotonic()
@@ -1767,11 +1795,21 @@ class VoicePipeline:
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
 
+    def _cancel_owner_availability_wait_for_caller_activity(self):
+        if not self._waiting_for_owner_availability:
+            return
+        self._finish_owner_availability_wait()
+        if self._unavailable_task and not self._unavailable_task.done():
+            self._unavailable_task.cancel()
+        self._unavailable_task = None
+        logger.info("Owner availability hold cancelled because caller resumed speaking")
+
     def _mark_caller_activity(self):
         now = time.time()
         self._last_speech_time = now
         self._last_caller_speech_time = now
         self._caller_silence_prompted_at = None
+        self._cancel_owner_availability_wait_for_caller_activity()
 
     def _mark_kevin_activity(self):
         now = time.time()

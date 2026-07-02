@@ -296,6 +296,27 @@ async def test_utterance_end_defers_incomplete_location_fragment():
 
 
 @pytest.mark.asyncio
+async def test_speech_final_defers_incomplete_question_fragment():
+    processed = []
+
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+
+    async def fake_process(text: str, turn_id=None, queued_at=None):
+        processed.append((text, turn_id, queued_at))
+
+    pipeline._process_utterance = fake_process
+    pipeline._turn_taking.record_agent_text("What's your city or area?")
+    pipeline._utterance_buffer = ["do you service"]
+
+    task = await pipeline._flush_utterance(force=False, signal="speech_final")
+
+    assert task is None
+    assert processed == []
+    assert pipeline._utterance_buffer == ["do you service"]
+
+
+@pytest.mark.asyncio
 async def test_caller_activity_cancels_owner_availability_timer():
     pipeline = _pipeline(_noop)
     await pipeline._http_client.aclose()
@@ -581,3 +602,39 @@ async def test_volunteered_phone_number_still_uses_claude_flow():
 
     assert transcript_lines == [("Kevin", "We can help with that.")]
     assert any("anthropic.com" in url for url, _kwargs in fake_client.requests)
+
+
+@pytest.mark.asyncio
+async def test_llm_request_includes_compact_call_memory_outside_rolling_messages():
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+    fake_client = FakeTurnClient()
+    pipeline._http_client = fake_client
+    pipeline._speak = _noop
+    pipeline._connected = True
+    pipeline._call_memory.update({
+        "caller_name": "Jonathan",
+        "service_area": "San Mateo, California.",
+        "issue": "Caller wants to upgrade an existing toilet.",
+        "callback": "caller ID ending in 8667 confirmed",
+    })
+    pipeline._conversation = [
+        {"role": "user", "content": f"<caller_speech>old detail {index}</caller_speech>"}
+        for index in range(30)
+    ]
+
+    await pipeline._handle_caller_speech("Can you send that to Alex?", turn_id=11)
+
+    anthropic_requests = [
+        kwargs["json"]
+        for url, kwargs in fake_client.requests
+        if "anthropic.com" in url
+    ]
+    assert anthropic_requests
+    request_body = anthropic_requests[-1]
+    assert "CALL MEMORY" in request_body["system"]
+    assert "Jonathan" in request_body["system"]
+    assert "San Mateo, California." in request_body["system"]
+    assert "upgrade an existing toilet" in request_body["system"]
+    assert len(request_body["messages"]) <= 20
+    assert "old detail 0" not in repr(request_body["messages"])

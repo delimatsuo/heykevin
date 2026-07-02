@@ -1,4 +1,5 @@
 import os
+import time
 
 import pytest
 import httpx
@@ -177,6 +178,94 @@ async def test_anthropic_retry_uses_fast_voice_timeout_without_fixed_sleep(monke
     assert retry_client.anthropic_calls == 2
     assert retry_client.anthropic_timeouts[0] <= 4.0
     assert 2 not in sleep_calls
+
+
+@pytest.mark.asyncio
+async def test_stale_filler_utterance_is_dropped_after_prior_response(monkeypatch):
+    trace_events = []
+    transcript_lines = []
+    spoken = []
+
+    def fake_trace_event(_logger, event, **fields):
+        trace_events.append({"event": event, **fields})
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def fake_speak(text: str):
+        spoken.append(text)
+
+    monkeypatch.setattr(voice_pipeline_module, "trace_event", fake_trace_event)
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=on_transcript,
+        call_sid="CA_stale_filler_test",
+        contractor_config={
+            "contractor_id": "contractor-1",
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    fake_client = FakeTurnClient()
+    pipeline._http_client = fake_client
+    pipeline._speak = fake_speak
+    pipeline._last_response_completed_at = time.monotonic()
+
+    queued_at = pipeline._last_response_completed_at - 0.5
+
+    await pipeline._process_utterance("Hello?", turn_id=4, queued_at=queued_at)
+
+    assert transcript_lines == []
+    assert spoken == []
+    assert not any("anthropic.com" in url for url, _kwargs in fake_client.requests)
+    assert any(
+        event["event"] == "voice_turn_stale_utterance_dropped"
+        and event["turn_id"] == 4
+        and event["reason"] == "stale_filler"
+        for event in trace_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_substantive_utterance_still_uses_claude(monkeypatch):
+    transcript_lines = []
+    spoken = []
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def fake_speak(text: str):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=on_transcript,
+        call_sid="CA_stale_substantive_test",
+        contractor_config={
+            "contractor_id": "contractor-1",
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    fake_client = FakeTurnClient()
+    pipeline._http_client = fake_client
+    pipeline._speak = fake_speak
+    pipeline._last_response_completed_at = time.monotonic()
+
+    queued_at = pipeline._last_response_completed_at - 0.5
+
+    await pipeline._process_utterance("My name is Jonathan.", turn_id=5, queued_at=queued_at)
+
+    assert transcript_lines == [("Kevin", "We can help with that.")]
+    assert spoken == ["We can help with that."]
+    assert any("anthropic.com" in url for url, _kwargs in fake_client.requests)
 
 
 @pytest.mark.asyncio

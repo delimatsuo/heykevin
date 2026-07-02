@@ -497,6 +497,7 @@ class VoicePipeline:
         self._utterance_buffer: list[str] = []
         self._turn_sequence = 0
         self._active_trace_turn_id: Optional[int] = None
+        self._last_response_completed_at = 0.0
 
         # Serialization: only one Claude→TTS cycle at a time
         self._response_lock = asyncio.Lock()
@@ -924,9 +925,10 @@ class VoicePipeline:
         combined = " ".join(self._utterance_buffer)
         self._utterance_buffer.clear()
         turn_id = self._next_turn_id()
+        queued_at = time.monotonic()
 
         logger.info(f"Complete utterance: {combined}")
-        return asyncio.create_task(self._process_utterance(combined, turn_id=turn_id))
+        return asyncio.create_task(self._process_utterance(combined, turn_id=turn_id, queued_at=queued_at))
 
     def _next_turn_id(self) -> int:
         self._turn_sequence += 1
@@ -1071,6 +1073,47 @@ class VoicePipeline:
     def _mentions_urgency(self, text_lower: str) -> bool:
         return any(keyword in text_lower for keyword in self.URGENCY_KEYWORDS)
 
+    @staticmethod
+    def _is_low_information_filler_utterance(text: str) -> bool:
+        normalized = re.sub(r"[^a-zA-Z0-9' ]", " ", text or "").lower()
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return False
+
+        while True:
+            words = normalized.split()
+            if words and words[0] in {"uh", "um", "hmm"}:
+                normalized = " ".join(words[1:])
+                continue
+            break
+
+        if not normalized:
+            return False
+
+        filler_phrases = {
+            "hello",
+            "hello kevin",
+            "hi",
+            "hi kevin",
+            "hey",
+            "hey kevin",
+            "are you there",
+            "are you still there",
+            "you there",
+            "still there",
+            "can you hear me",
+            "do you hear me",
+            "can anybody hear me",
+            "is anyone there",
+            "is somebody there",
+        }
+        return normalized in filler_phrases
+
+    def _should_drop_stale_utterance(self, text: str, queued_at: float) -> bool:
+        if queued_at <= 0 or self._last_response_completed_at <= queued_at:
+            return False
+        return self._is_low_information_filler_utterance(text)
+
     def _caller_asks_for_callback_number_readback(self, text_lower: str) -> bool:
         if not self._caller_phone or "number" not in text_lower:
             return False
@@ -1171,10 +1214,17 @@ class VoicePipeline:
         finally:
             self._active_trace_turn_id = previous_turn_id
 
-    async def _process_utterance(self, text: str, turn_id: Optional[int] = None):
+    async def _process_utterance(
+        self,
+        text: str,
+        turn_id: Optional[int] = None,
+        queued_at: Optional[float] = None,
+    ):
         """Run one Claude→TTS cycle, serialized by lock."""
         if turn_id is None:
             turn_id = self._next_turn_id()
+        if queued_at is None:
+            queued_at = time.monotonic()
         self._trace_turn(
             "voice_turn_utterance_final",
             turn_id,
@@ -1192,7 +1242,22 @@ class VoicePipeline:
                 status="ok",
                 duration_ms=int((time.monotonic() - lock_wait_started) * 1000),
             )
+            if self._should_drop_stale_utterance(text, queued_at):
+                self._trace_turn(
+                    "voice_turn_stale_utterance_dropped",
+                    turn_id,
+                    stage="queue",
+                    status="dropped",
+                    reason="stale_filler",
+                    duration_ms=int((time.monotonic() - queued_at) * 1000),
+                    utterance_chars=len(text),
+                    word_count=len(text.split()),
+                )
+                logger.info("Dropped stale low-information caller utterance")
+                return
+
             await self._handle_caller_speech(text, turn_id=turn_id)
+            self._last_response_completed_at = time.monotonic()
 
     # --- Jobber tool definitions (only included if contractor has Jobber connected) ---
 

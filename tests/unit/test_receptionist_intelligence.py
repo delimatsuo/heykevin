@@ -12,7 +12,8 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
 from app.services.gemini_pipeline import GeminiPipeline
-from app.services.job_card import _build_extraction_prompt
+from app.services import job_card as job_card_module
+from app.services.job_card import _build_extraction_prompt, extract_job_card
 from app.services.vcard import generate_vcard
 from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold, VoicePipeline
 from app.services import voice_pipeline as voice_pipeline_module
@@ -94,6 +95,18 @@ def test_business_prompt_speaks_hours_in_words():
     assert "Do not say compact forms like \"7 AM to 6 PM\"" in prompt
 
 
+def test_business_prompt_collects_city_not_full_street_address_during_screening():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "city/town or service area" in prompt
+    assert "Do not ask for a full street address during AI screening" in prompt
+    assert "Only capture a full street address if the caller volunteers it" in prompt
+    assert "owner-approved booking or dispatch" in prompt
+    assert "service address when relevant" not in prompt
+    assert "address if relevant" not in prompt
+    assert "collect callback/location" not in prompt
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",
@@ -104,6 +117,57 @@ def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     assert "electrical panel or breaker request is out_of_scope" in prompt
     assert "Only use service_request when the caller's request appears related" in prompt
     assert "Water heater services" in prompt
+
+
+def test_job_card_prompt_treats_street_address_as_optional_volunteered_data():
+    prompt = _build_extraction_prompt(
+        "Caller: I have a leak in San Mateo.\nKevin: I'll pass this to Deli.",
+        _plumbing_config(),
+    )
+
+    assert "service_area: string (city/town or service area if given, empty if not)" in prompt
+    assert "address: string (full street address only if the caller volunteered it, empty if not)" in prompt
+    assert "Missing a full street address is acceptable" in prompt
+    assert "service address if given" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_extract_job_card_defaults_service_area_when_model_omits_it(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "content": [
+                    {
+                        "text": (
+                            '{"call_type":"service_request","caller_name":"Pat",'
+                            '"business_name":"","address":"","issue_description":"leak",'
+                            '"urgency":"routine","message":"","callback_number":""}'
+                        )
+                    }
+                ]
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(job_card_module.httpx, "AsyncClient", FakeClient)
+
+    result = await extract_job_card(
+        "Caller: I have a leak in San Mateo.",
+        "+15551234567",
+        contractor=_plumbing_config(),
+    )
+
+    assert result["service_area"] == ""
 
 
 def test_electrical_panel_terms_trigger_urgency_escalation():

@@ -193,7 +193,7 @@ async def test_empty_anthropic_response_speaks_business_fallback(monkeypatch):
 
     await pipeline._process_utterance("there is standing water", turn_id=6)
 
-    assert ("Kevin", "I'm here. Can you tell me the service address?") in transcript_lines
+    assert ("Kevin", "I'm here. What city or town are you in?") in transcript_lines
     assert spoken_chunks
     assert any(
         event["event"] == "voice_turn_no_spoken_response"

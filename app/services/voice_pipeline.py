@@ -592,7 +592,7 @@ class VoicePipeline:
                 import anthropic
                 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
                 resp = await client.messages.create(
-                    model=settings.anthropic_model,
+                    model=settings.anthropic_voice_model,
                     max_tokens=200,
                     messages=[{"role": "user", "content": (
                         f"Translate this phone greeting to language code '{user_language}'. "
@@ -1564,7 +1564,7 @@ class VoicePipeline:
             client = self._http_client
             for iteration in range(max_tool_iterations + 1):
                 request_body = {
-                    "model": settings.anthropic_model,
+                    "model": settings.anthropic_voice_model,
                     "max_tokens": 200 if use_tools else 100,
                     "system": self._system_prompt,
                     "messages": self._conversation[-20:],

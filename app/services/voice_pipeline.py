@@ -134,6 +134,59 @@ def _money_modifier_words(raw: str) -> str:
     return f"{_int_to_words(_parse_money_amount(raw))} dollar"
 
 
+def _spoken_business_time(raw: str, *, range_position: str = "") -> str:
+    value = str(raw or "").strip()
+    match = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?$", value, flags=re.IGNORECASE)
+    if not match:
+        return value
+
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
+    meridiem = (match.group(3) or "").lower().replace(".", "")
+
+    if hour > 23 or minute > 59:
+        return value
+
+    if meridiem == "am":
+        hour_24 = 0 if hour == 12 else hour
+    elif meridiem == "pm":
+        hour_24 = 12 if hour == 12 else hour + 12
+    else:
+        hour_24 = hour
+        if range_position == "end" and 1 <= hour <= 7:
+            hour_24 = hour + 12
+
+    if hour_24 == 0:
+        display_hour = 12
+        period = "at night"
+    elif hour_24 < 12:
+        display_hour = hour_24
+        period = "in the morning"
+    elif hour_24 == 12:
+        display_hour = 12
+        period = "at noon" if minute == 0 else "in the afternoon"
+    elif hour_24 < 17:
+        display_hour = hour_24 - 12
+        period = "in the afternoon"
+    else:
+        display_hour = hour_24 - 12
+        period = "in the evening"
+
+    if minute:
+        minute_words = f"oh {_int_to_words(minute)}" if minute < 10 else _int_to_words(minute)
+        return f"{_int_to_words(display_hour)} {minute_words} {period}"
+    if period == "at noon":
+        return "noon"
+    return f"{_int_to_words(display_hour)} {period}"
+
+
+def _spoken_business_hours_range(hours_start: str, hours_end: str) -> str:
+    return (
+        f"{_spoken_business_time(hours_start, range_position='start')} "
+        f"to {_spoken_business_time(hours_end, range_position='end')}"
+    )
+
+
 def _normalize_tts_text(text: str) -> str:
     """Make money amounts safer for voice synthesis without changing transcripts."""
     if not text:
@@ -392,8 +445,9 @@ RULES:
     if after_hours:
         hours_start = config.get("business_hours_start", "8:00")
         hours_end = config.get("business_hours_end", "5:00")
+        hours_range = _spoken_business_hours_range(hours_start, hours_end)
         base_prompt += (
-            f"\n\nAFTER HOURS: The business is currently closed. Our hours are {hours_start} to {hours_end}."
+            f"\n\nAFTER HOURS: The business is currently closed. Our hours are {hours_range}."
             f"\n- Take a message and let the caller know {owner_name} will get back to them during business hours."
             f"\n- Do NOT say \"let me see if {pronoun}'s available\" — instead say \"I can take a message and make sure {owner_name} gets it first thing.\""
             f"\n- Still collect their name and reason for calling. Use caller ID for callback unless they ask to use a different number."
@@ -585,9 +639,10 @@ class VoicePipeline:
         elif self._after_hours:
             hours_start = self._contractor_config.get("business_hours_start", "8:00")
             hours_end = self._contractor_config.get("business_hours_end", "5:00")
+            hours_range = _spoken_business_hours_range(hours_start, hours_end)
             greeting = (
                 f"Hi, thanks for calling {business_name}. "
-                f"We're currently closed — our hours are {hours_start} to {hours_end}. "
+                f"We're currently closed — our hours are {hours_range}. "
                 f"But I can take a message and make sure it gets handled. How can I help?"
             )
         else:
@@ -947,6 +1002,7 @@ class VoicePipeline:
             reason=decision.reason,
             signal=decision.signal,
             expected_answer=decision.expected_answer,
+            allow_timeout_commit=decision.allow_timeout_commit,
             utterance_chars=len(decision.text),
             word_count=len(decision.text.split()),
         )
@@ -964,6 +1020,14 @@ class VoicePipeline:
         return asyncio.create_task(self._process_utterance(decision.text, turn_id=turn_id, queued_at=queued_at))
 
     def _schedule_deferred_flush(self, decision: TurnDecision):
+        if not decision.allow_timeout_commit:
+            self._cancel_deferred_flush()
+            logger.info(
+                "Deferring caller utterance without timeout (%s): %s",
+                decision.reason,
+                decision.text,
+            )
+            return
         if not self._connected:
             return
         if self._deferred_flush_task and not self._deferred_flush_task.done():
@@ -1073,6 +1137,21 @@ class VoicePipeline:
             "Do not ask the caller to recite the caller-ID number unless they prefer a different number. "
             "If the caller asks what number you mean, the system can read it back deterministically."
         )
+
+    def _rewrite_caller_id_callback_confirmation(self, text: str) -> str:
+        if not self._caller_phone or not text:
+            return text
+        normalized = re.sub(r"[^a-z0-9 ]", " ", text.lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        is_callback_confirmation = (
+            "number ending" in normalized
+            and "call back" in normalized
+            and ("best" in normalized or "correct" in normalized)
+        )
+        if not is_callback_confirmation:
+            return text
+        confirmation = self._caller_id_callback_confirmation_text()
+        return confirmation or text
 
     def _update_intake_state_from_caller(self, text: str):
         """Track only coarse intake completion flags for deterministic fallbacks."""
@@ -1880,6 +1959,16 @@ class VoicePipeline:
                         content_blocks=content_blocks,
                     )
                     return
+
+                rewritten_kevin_text = self._rewrite_caller_id_callback_confirmation(kevin_text)
+                if rewritten_kevin_text != kevin_text:
+                    self._trace_turn(
+                        "voice_turn_callback_confirmation_rewritten",
+                        turn_id,
+                        stage="llm",
+                        status="rewritten",
+                    )
+                    kevin_text = rewritten_kevin_text
 
                 self._record_kevin_text(kevin_text)
 

@@ -51,6 +51,28 @@ def test_deferred_fragments_commit_when_later_segments_complete_the_thought():
     assert decision.text == "I am in San Mateo, California."
 
 
+def test_known_incomplete_fragment_does_not_allow_timeout_commit():
+    controller = TurnTakingController()
+    controller.record_agent_text("What's your city or area?")
+
+    decision = controller.decide(["I am in"], signal="utterance_end")
+
+    assert decision.should_commit is False
+    assert decision.reason == "trailing_continuation_word"
+    assert decision.allow_timeout_commit is False
+
+
+def test_thank_you_commits_after_callback_confirmation():
+    controller = TurnTakingController()
+    controller.record_agent_text("Is the number ending in eight six six seven the best one?")
+
+    decision = controller.decide(["Yes. Thank you."], signal="speech_final")
+
+    assert decision.should_commit is True
+    assert decision.reason == "expected_short_answer"
+    assert decision.expected_answer == "yes_no"
+
+
 def test_commits_complete_short_question_without_terminal_punctuation():
     controller = TurnTakingController()
     controller.record_agent_text("What can we help you with?")

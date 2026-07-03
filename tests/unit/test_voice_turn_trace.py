@@ -296,6 +296,31 @@ async def test_utterance_end_defers_incomplete_location_fragment():
 
 
 @pytest.mark.asyncio
+async def test_known_incomplete_location_fragment_does_not_schedule_forced_timeout():
+    processed = []
+
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+
+    async def fake_process(text: str, turn_id=None, queued_at=None):
+        processed.append((text, turn_id, queued_at))
+
+    pipeline._process_utterance = fake_process
+    pipeline._connected = True
+    pipeline._utterance_buffer = ["I am in"]
+
+    try:
+        task = await pipeline._flush_utterance(force=False, signal="utterance_end")
+
+        assert task is None
+        assert processed == []
+        assert pipeline._utterance_buffer == ["I am in"]
+        assert pipeline._deferred_flush_task is None
+    finally:
+        pipeline._cancel_deferred_flush()
+
+
+@pytest.mark.asyncio
 async def test_speech_final_defers_incomplete_question_fragment():
     processed = []
 
@@ -537,6 +562,50 @@ async def test_callback_confirmation_uses_caller_id_last_four():
 
 
 @pytest.mark.asyncio
+async def test_llm_callback_confirmation_is_rewritten_to_caller_id_last_four():
+    transcript_lines = []
+    spoken = []
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def fake_speak(text: str):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=on_transcript,
+        call_sid="CA_callback_rewrite_test",
+        caller_phone="+16504228667",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+        },
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeScriptedAnthropicClient([
+        {
+            "stop_reason": "end_turn",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Thanks, Jonathan. Is the number ending in sixty-seven the best one for Alex to call back?",
+                }
+            ],
+        },
+    ])
+    pipeline._speak = fake_speak
+
+    await pipeline._handle_caller_speech("My name is Jonathan.", turn_id=12)
+
+    expected = "Is the number ending in eight six six seven the best one for Alex to call back?"
+    assert transcript_lines == [("Kevin", expected)]
+    assert spoken == [expected]
+
+
+@pytest.mark.asyncio
 async def test_repeat_caller_id_number_is_handled_without_claude():
     transcript_lines = []
     spoken = []
@@ -638,3 +707,48 @@ async def test_llm_request_includes_compact_call_memory_outside_rolling_messages
     assert "upgrade an existing toilet" in request_body["system"]
     assert len(request_body["messages"]) <= 20
     assert "old detail 0" not in repr(request_body["messages"])
+
+
+@pytest.mark.asyncio
+async def test_after_hours_greeting_speaks_business_hours_in_words():
+    transcript_lines = []
+    spoken = []
+
+    async def on_transcript(speaker: str, text: str):
+        transcript_lines.append((speaker, text))
+
+    async def fake_connect_deepgram():
+        return True
+
+    async def fake_speak(text: str):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=on_transcript,
+        call_sid="",
+        contractor_config={
+            "owner_name": "Alex Rivera",
+            "business_name": "Bayview Plumbing & Drain",
+            "mode": "business",
+            "effective_mode": "business",
+            "business_hours_start": "07:00",
+            "business_hours_end": "18:00",
+        },
+    )
+    await pipeline._http_client.aclose()
+    pipeline._connect_deepgram = fake_connect_deepgram
+    pipeline._speak = fake_speak
+    pipeline._after_hours = True
+
+    try:
+        await pipeline.start()
+    finally:
+        await pipeline.stop()
+
+    assert transcript_lines
+    greeting = transcript_lines[0][1]
+    assert "seven in the morning to six in the evening" in greeting
+    assert "07:00" not in greeting
+    assert "18:00" not in greeting
+    assert spoken == [greeting]

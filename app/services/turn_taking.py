@@ -22,6 +22,7 @@ class TurnDecision:
     reason: str
     expected_answer: ExpectedAnswer
     signal: TurnSignal
+    allow_timeout_commit: bool = True
 
 
 class TurnTakingController:
@@ -30,7 +31,7 @@ class TurnTakingController:
     _CONTINUATION_WORDS = {
         "a", "an", "and", "are", "around", "at", "because", "but", "by",
         "for", "from", "if", "in", "is", "near", "of", "or", "that",
-        "the", "to", "with", "you",
+        "the", "to", "with",
     }
     _DISCOURSE_TRAILING_PHRASES = {
         "i mean",
@@ -70,19 +71,19 @@ class TurnTakingController:
 
         normalized = self._normalize(text)
         if not normalized:
-            return TurnDecision(False, text, "empty", expected_answer, signal)
+            return TurnDecision(False, text, "empty", expected_answer, signal, allow_timeout_commit=False)
 
         if self._is_function_word_fragment(normalized):
-            return TurnDecision(False, text, "function_word_fragment", expected_answer, signal)
+            return TurnDecision(False, text, "function_word_fragment", expected_answer, signal, allow_timeout_commit=False)
 
         if self._is_discourse_fragment(normalized):
-            return TurnDecision(False, text, "discourse_fragment", expected_answer, signal)
+            return TurnDecision(False, text, "discourse_fragment", expected_answer, signal, allow_timeout_commit=False)
 
         if self._is_incomplete_question(normalized, text):
-            return TurnDecision(False, text, "incomplete_question", expected_answer, signal)
+            return TurnDecision(False, text, "incomplete_question", expected_answer, signal, allow_timeout_commit=False)
 
         if self._ends_with_continuation_word(normalized):
-            return TurnDecision(False, text, "trailing_continuation_word", expected_answer, signal)
+            return TurnDecision(False, text, "trailing_continuation_word", expected_answer, signal, allow_timeout_commit=False)
 
         if self._is_expected_short_answer(normalized, expected_answer):
             return TurnDecision(True, text, "expected_short_answer", expected_answer, signal)

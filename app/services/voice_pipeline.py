@@ -17,6 +17,7 @@ from typing import Callable, Awaitable, Optional
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from app.config import settings
 from app.services.entitlements import effective_mode
@@ -770,8 +771,11 @@ class VoicePipeline:
                 "&language=multi"
             )
 
-            # Cancel old receive task before creating a new one (prevents duplicate loops)
-            if self._deepgram_task and not self._deepgram_task.done():
+            # Cancel old receive task before creating a new one (prevents duplicate loops).
+            # Reconnects are initiated from inside the receive task, so never cancel
+            # the current task while it is creating its replacement.
+            current_task = asyncio.current_task()
+            if self._deepgram_task and not self._deepgram_task.done() and self._deepgram_task is not current_task:
                 self._deepgram_task.cancel()
                 try:
                     await self._deepgram_task
@@ -791,6 +795,40 @@ class VoicePipeline:
             logger.error(f"Deepgram connect failed: {e}")
             return False
 
+    async def _reconnect_deepgram(self, reason: str) -> bool:
+        if not self._connected or self._reconnecting:
+            return False
+
+        self._reconnect_count += 1
+        if self._reconnect_count > self._max_reconnect_attempts:
+            logger.error(f"Deepgram reconnect limit ({self._max_reconnect_attempts}) reached — ending call gracefully")
+            if self.on_call_complete:
+                await self.on_call_complete()
+            return False
+
+        self._reconnecting = True
+        try:
+            logger.info(
+                "Attempting Deepgram reconnection after %s (attempt %s/%s)",
+                reason,
+                self._reconnect_count,
+                self._max_reconnect_attempts,
+            )
+            if self._deepgram_ws:
+                try:
+                    await self._deepgram_ws.close()
+                except Exception:
+                    pass
+            reconnected = await self._connect_deepgram()
+        finally:
+            self._reconnecting = False
+
+        if not reconnected:
+            logger.error(f"Deepgram reconnection failed after {reason} — ending call gracefully")
+            if self.on_call_complete:
+                await self.on_call_complete()
+        return reconnected
+
     async def _deepgram_receive_loop(self):
         """Process Deepgram messages using proper end-of-utterance detection.
 
@@ -809,30 +847,16 @@ class VoicePipeline:
                     )
                 except asyncio.TimeoutError:
                     logger.warning("Deepgram receive timeout (30s) — no data received")
-                    if not self._connected or self._reconnecting:
-                        break
-                    self._reconnect_count += 1
-                    if self._reconnect_count > self._max_reconnect_attempts:
-                        logger.error(f"Deepgram reconnect limit ({self._max_reconnect_attempts}) reached — ending call gracefully")
-                        if self.on_call_complete:
-                            await self.on_call_complete()
-                        break
-                    # Attempt reconnection
-                    self._reconnecting = True
-                    try:
-                        logger.info(f"Attempting Deepgram reconnection after timeout (attempt {self._reconnect_count}/{self._max_reconnect_attempts})")
-                        await self._deepgram_ws.close()
-                    except Exception:
-                        pass
-                    reconnected = await self._connect_deepgram()
-                    self._reconnecting = False
-                    if not reconnected:
-                        logger.error("Deepgram reconnection failed — ending call gracefully")
-                        if self.on_call_complete:
-                            await self.on_call_complete()
+                    await self._reconnect_deepgram("timeout")
                     break  # This loop ends; _connect_deepgram starts a new receive loop
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("Deepgram WebSocket closed")
+                except ConnectionClosed as close_err:
+                    close_frame = getattr(close_err, "rcvd", None)
+                    logger.warning(
+                        "Deepgram WebSocket closed: code=%s reason=%s",
+                        getattr(close_frame, "code", None),
+                        getattr(close_frame, "reason", None),
+                    )
+                    await self._reconnect_deepgram("connection_closed")
                     break
 
                 data = json.loads(message)

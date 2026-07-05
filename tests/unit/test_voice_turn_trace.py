@@ -4,6 +4,7 @@ import time
 
 import pytest
 import httpx
+from websockets.exceptions import ConnectionClosedOK
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
@@ -98,6 +99,16 @@ class FakeNoAnthropicClient:
         return FakeResponse(content=b"\xff" * 320)
 
 
+class FakeClosedDeepgramWebSocket:
+    close_calls = 0
+
+    async def recv(self):
+        raise ConnectionClosedOK(None, None)
+
+    async def close(self):
+        self.close_calls += 1
+
+
 def _pipeline(on_audio_out):
     return VoicePipeline(
         on_audio_out=on_audio_out,
@@ -179,6 +190,55 @@ async def test_anthropic_retry_uses_fast_voice_timeout_without_fixed_sleep(monke
     assert retry_client.anthropic_calls == 2
     assert retry_client.anthropic_timeouts[0] <= 4.0
     assert 2 not in sleep_calls
+
+
+@pytest.mark.asyncio
+async def test_deepgram_connection_closed_reconnects_stt_stream():
+    reconnect_attempts = []
+
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+    pipeline._connected = True
+    pipeline._deepgram_ws = FakeClosedDeepgramWebSocket()
+
+    async def fake_connect_deepgram():
+        reconnect_attempts.append(pipeline._reconnect_count)
+        return True
+
+    pipeline._connect_deepgram = fake_connect_deepgram
+
+    await pipeline._deepgram_receive_loop()
+
+    assert reconnect_attempts == [1]
+    assert pipeline._reconnecting is False
+    assert pipeline._deepgram_ws.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_connect_deepgram_does_not_cancel_current_receive_task(monkeypatch):
+    connect_calls = []
+
+    async def fake_websocket_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        return FakeClosedDeepgramWebSocket()
+
+    monkeypatch.setattr(voice_pipeline_module.websockets, "connect", fake_websocket_connect)
+
+    pipeline = _pipeline(_noop)
+    await pipeline._http_client.aclose()
+    current_task = asyncio.current_task()
+    pipeline._deepgram_task = current_task
+
+    connected = await pipeline._connect_deepgram()
+
+    try:
+        assert connected is True
+        assert connect_calls
+        assert pipeline._deepgram_task is not current_task
+        assert current_task.cancelling() == 0
+    finally:
+        if pipeline._deepgram_task and not pipeline._deepgram_task.done():
+            pipeline._deepgram_task.cancel()
 
 
 @pytest.mark.asyncio

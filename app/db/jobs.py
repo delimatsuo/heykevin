@@ -113,3 +113,33 @@ async def update_job(job_id: str, updates: dict):
         None,
         lambda: db.collection(COLLECTION).document(job_id).update(updates)
     )
+
+
+async def claim_jobber_sync(job_id: str) -> bool:
+    """Claim one Jobber sync attempt for a local job record."""
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+
+    def _claim() -> bool:
+        transaction = db.transaction()
+        doc_ref = db.collection(COLLECTION).document(job_id)
+
+        @firestore_module.transactional
+        def _transactional_claim(tx) -> bool:
+            snapshot = doc_ref.get(transaction=tx)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("jobber_request_id"):
+                return False
+            if data.get("jobber_sync_status") == "in_progress":
+                return False
+            tx.update(doc_ref, {
+                "jobber_sync_status": "in_progress",
+                "jobber_sync_started_at": time.time(),
+            })
+            return True
+
+        return _transactional_claim(transaction)
+
+    return await loop.run_in_executor(None, _claim)

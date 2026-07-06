@@ -1,5 +1,6 @@
 """Post-call Jobber lead capture behavior."""
 
+import asyncio
 import inspect
 import os
 import time
@@ -360,6 +361,43 @@ async def test_capture_jobber_lead_call_mirror_failure_does_not_mark_failed(monk
         "jobber_request_id": "request-1",
         "jobber_client_id": "client-1",
         "jobber_synced_at": 44444.0,
+    })]
+
+
+@pytest.mark.asyncio
+async def test_capture_jobber_lead_call_mirror_cancel_does_not_mark_failed(monkeypatch):
+    job_updates = []
+
+    async def cancel_save_call(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(post_call.time, "time", lambda: 55555.0)
+    monkeypatch.setattr(post_call.job_db, "claim_jobber_sync", lambda job_id: _async_return(True))
+    monkeypatch.setattr(post_call.job_db, "update_job", lambda job_id, updates: _record_async(job_updates, job_id, updates))
+    monkeypatch.setattr(post_call.call_db, "save_call", cancel_save_call)
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "lookup_customer",
+        lambda *args, **kwargs: _async_return({"id": "client-1"}),
+    )
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "create_request",
+        lambda *args, **kwargs: _async_return({"id": "request-1"}),
+    )
+    monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return(None))
+
+    await post_call._capture_jobber_lead(
+        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        _lead_job_data(),
+        "job-1",
+    )
+
+    assert job_updates == [("job-1", {
+        "jobber_sync_status": "succeeded",
+        "jobber_request_id": "request-1",
+        "jobber_client_id": "client-1",
+        "jobber_synced_at": 55555.0,
     })]
 
 

@@ -250,10 +250,11 @@
             <th>Duration</th>
             <th>Summary</th>
             <th>Transcript</th>
+            <th>Jobber</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.length ? rows.map(callRow).join('') : emptyRow(9, 'No calls found.')}
+          ${rows.length ? rows.map(callRow).join('') : emptyRow(10, 'No calls found.')}
         </tbody>
       </table>
     `;
@@ -271,8 +272,43 @@
         <td>${esc(call.duration_seconds || 0)}s</td>
         <td>${call.has_summary ? 'Yes' : 'No'}</td>
         <td>${call.has_transcript ? 'Yes' : 'No'}</td>
+        <td>${jobberCell(call)}</td>
       </tr>
     `;
+  }
+
+  function jobberCell(call) {
+    const status = call.jobber_sync_status || '';
+    if (!status) return '-';
+    const statusHtml = `<span class="text-${statusTone(status)}">${esc(status)}</span>`;
+    const requestUrl = safeHttpsUrl(call.jobber_request_url);
+    const requestLink = requestUrl
+      ? `<a href="${esc(requestUrl)}" target="_blank" rel="noopener">Open request</a>`
+      : '';
+    const error = call.jobber_sync_error
+      ? `<span class="muted-inline">${esc(call.jobber_sync_error)}</span>`
+      : '';
+    const syncedAt = call.jobber_synced_at
+      ? `<span class="muted-inline">${fmtDate(call.jobber_synced_at)}</span>`
+      : '';
+    return [statusHtml, requestLink, error, syncedAt].filter(Boolean).join('<br>');
+  }
+
+  function safeHttpsUrl(value) {
+    if (!value) return '';
+    try {
+      const url = new URL(String(value));
+      return url.protocol === 'https:' ? url.href : '';
+    } catch (_error) {
+      return '';
+    }
+  }
+
+  function statusTone(status) {
+    if (status === 'succeeded') return 'green';
+    if (status === 'failed') return 'red';
+    if (status === 'in_progress') return 'yellow';
+    return 'muted';
   }
 
   function renderNumbers() {
@@ -400,7 +436,9 @@
       const detail = await apiFetch(`/api/admin/contractors/${encodeURIComponent(contractorId)}`);
       const contractor = detail.contractor || {};
       const device = detail.device || {};
+      const jobber = detail.jobber || {};
       const diagnostics = detail.diagnostics || [];
+      const recentCalls = detail.recent_calls || [];
       panel.innerHTML = `
         <div class="panel-heading"><h2>${esc(contractor.business_name || contractor.contractor_id)}</h2></div>
         <div class="stack">
@@ -418,9 +456,81 @@
           <dt>VoIP Token</dt><dd>${device.voip_token_present ? 'Present' : 'Missing'}</dd>
           <dt>Device Updated</dt><dd>${fmtDate(device.updated_at)}</dd>
         </dl>
+        ${renderJobberPanel(contractor, jobber)}
+        ${renderRecentCalls(recentCalls)}
       `;
     } catch (error) {
       panel.innerHTML = `<div class="notice notice-error">Failed to load detail: ${esc(error.message)}</div>`;
+    }
+  }
+
+  function renderJobberPanel(contractor, jobber) {
+    const connected = jobber.connected === true;
+    const enabled = jobber.lead_capture_enabled === true;
+    const toggleLabel = enabled ? 'Disable lead capture' : 'Enable lead capture';
+    const toggleAction = enabled ? 'disable' : 'enable';
+    return `
+      <section class="detail-section">
+        <div class="detail-section-heading">
+          <h3>Jobber</h3>
+          <button
+            class="button button-secondary"
+            type="button"
+            data-jobber-toggle="${toggleAction}"
+            data-id="${esc(contractor.contractor_id)}"
+            ${connected ? '' : 'disabled'}
+          >${esc(toggleLabel)}</button>
+        </div>
+        <dl class="key-value">
+          <dt>Connection</dt><dd>${connected ? '<span class="text-green">Connected</span>' : '<span class="text-muted">Not connected</span>'}</dd>
+          <dt>Connected At</dt><dd>${fmtDate(jobber.connected_at)}</dd>
+          <dt>Lead Capture</dt><dd>${enabled ? '<span class="text-green">Enabled</span>' : '<span class="text-muted">Disabled</span>'}</dd>
+          <dt>Lead Capture Updated</dt><dd>${fmtDate(jobber.lead_capture_updated_at)}</dd>
+        </dl>
+      </section>
+    `;
+  }
+
+  function renderRecentCalls(calls) {
+    return `
+      <section class="detail-section">
+        <div class="detail-section-heading"><h3>Recent Calls</h3></div>
+        <div class="table-wrap detail-table">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Caller</th><th>Route</th><th>Outcome</th><th>Jobber</th></tr>
+            </thead>
+            <tbody>
+              ${calls.length ? calls.map(call => `
+                <tr>
+                  <td>${fmtDate(call.timestamp)}</td>
+                  <td>${esc(call.caller_phone || '-')}</td>
+                  <td>${esc(call.route || '-')}</td>
+                  <td>${esc(call.outcome || '-')}</td>
+                  <td>${jobberCell(call)}</td>
+                </tr>
+              `).join('') : emptyRow(5, 'No recent calls.')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  async function updateJobberLeadCapture(contractorId, enabled, button) {
+    if (!contractorId) return;
+    button.disabled = true;
+    try {
+      await apiPost(`/api/integrations/jobber/lead-capture?contractor_id=${encodeURIComponent(contractorId)}`, {
+        enabled,
+        reason: 'admin dashboard',
+      });
+      toast(enabled ? 'Jobber lead capture enabled' : 'Jobber lead capture disabled');
+      await loadDetail(contractorId);
+      await loadAll();
+    } catch (error) {
+      toast(`Error: ${error.message}`, 'err');
+      button.disabled = false;
     }
   }
 
@@ -508,6 +618,14 @@
     document.body.addEventListener('click', event => {
       const detailButton = event.target.closest('[data-detail]');
       if (detailButton) loadDetail(detailButton.dataset.detail);
+      const jobberButton = event.target.closest('[data-jobber-toggle]');
+      if (jobberButton) {
+        updateJobberLeadCapture(
+          jobberButton.dataset.id,
+          jobberButton.dataset.jobberToggle === 'enable',
+          jobberButton,
+        );
+      }
       const actionButton = event.target.closest('[data-action]');
       if (actionButton) openAction(actionButton.dataset.action, actionButton.dataset.id);
     });

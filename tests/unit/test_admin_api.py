@@ -205,6 +205,36 @@ async def test_admin_contractor_detail_masks_secrets_and_summarizes_device(monke
 
 
 @pytest.mark.asyncio
+async def test_admin_contractor_detail_includes_jobber_status_without_tokens(monkeypatch):
+    fake_db = _FakeFirestore(
+        [
+            _FakeDoc("contractor-1", {
+                "active": True,
+                "owner_name": "A Contractor",
+                "jobber_access_token": "jobber-access-secret",
+                "jobber_refresh_token": "jobber-refresh-secret",
+                "jobber_connected_at": 123.0,
+                "jobber_lead_capture_enabled": True,
+                "jobber_lead_capture_updated_at": 456.0,
+            }),
+        ],
+    )
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+
+    contractor = response["contractor"]
+    assert "jobber_access_token" not in contractor
+    assert "jobber_refresh_token" not in contractor
+    assert response["jobber"] == {
+        "connected": True,
+        "connected_at": 123.0,
+        "lead_capture_enabled": True,
+        "lead_capture_updated_at": 456.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_admin_list_calls_redacts_phone_and_hides_transcript(monkeypatch):
     fake_db = _FakeFirestore(
         [],
@@ -246,6 +276,38 @@ async def test_admin_list_calls_redacts_phone_and_hides_transcript(monkeypatch):
     assert old_call["has_transcript"] is True
     assert "summary" not in old_call
     assert "transcript" not in old_call
+
+
+@pytest.mark.asyncio
+async def test_admin_call_items_include_jobber_sync_metadata(monkeypatch):
+    fake_db = _FakeFirestore(
+        [],
+        collections={
+            "calls": [
+                _FakeDoc("jobber-call", {
+                    "call_sid": "jobber-call",
+                    "contractor_id": "contractor-1",
+                    "timestamp": 100,
+                    "caller_phone": "+15550001111",
+                    "jobber_sync_status": "succeeded",
+                    "jobber_request_id": "request-1",
+                    "jobber_request_url": "https://secure.getjobber.com/work_requests/31433685",
+                    "jobber_synced_at": 123.0,
+                    "jobber_sync_error": "ignored-after-success",
+                }),
+            ],
+        },
+    )
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_list_calls(_admin_request())
+
+    call = response["calls"][0]
+    assert call["jobber_sync_status"] == "succeeded"
+    assert call["jobber_request_id"] == "request-1"
+    assert call["jobber_request_url"] == "https://secure.getjobber.com/work_requests/31433685"
+    assert call["jobber_synced_at"] == 123.0
+    assert call["jobber_sync_error"] == "ignored-after-success"
 
 
 @pytest.mark.asyncio

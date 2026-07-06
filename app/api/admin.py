@@ -42,6 +42,8 @@ SECRET_CONTRACTOR_FIELDS = {
     "auth_token",
     "contractor_api_token",
     "contractor_token",
+    "jobber_access_token",
+    "jobber_refresh_token",
     "token_hash",
 }
 
@@ -99,6 +101,16 @@ def _sanitize_contractor_profile(contractor_id: str, data: dict) -> dict:
     return sanitized
 
 
+def _jobber_summary(data: dict) -> dict:
+    connected = bool(data.get("jobber_access_token"))
+    return {
+        "connected": connected,
+        "connected_at": data.get("jobber_connected_at"),
+        "lead_capture_enabled": connected and data.get("jobber_lead_capture_enabled") is True,
+        "lead_capture_updated_at": data.get("jobber_lead_capture_updated_at"),
+    }
+
+
 def _device_summary(device_doc) -> dict:
     if not getattr(device_doc, "exists", False):
         return {
@@ -119,7 +131,7 @@ def _call_list_item(doc) -> dict:
     data = doc.to_dict() or {}
     summary = data.get("summary")
     transcript = data.get("transcript")
-    return {
+    item = {
         "call_sid": data.get("call_sid") or doc.id,
         "contractor_id": data.get("contractor_id", ""),
         "timestamp": data.get("timestamp"),
@@ -131,6 +143,16 @@ def _call_list_item(doc) -> dict:
         "has_summary": bool(summary),
         "has_transcript": bool(transcript),
     }
+    for key in (
+        "jobber_sync_status",
+        "jobber_request_id",
+        "jobber_request_url",
+        "jobber_synced_at",
+        "jobber_sync_error",
+    ):
+        if key in data:
+            item[key] = data.get(key)
+    return item
 
 
 def _contractor_inventory_item(doc) -> dict:
@@ -265,7 +287,8 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
             return None
 
         device_doc = ref.collection("devices").document("primary").get()
-        contractor = _sanitize_contractor_profile(contractor_id, doc.to_dict() or {})
+        contractor_data = doc.to_dict() or {}
+        contractor = _sanitize_contractor_profile(contractor_id, contractor_data)
         device = _device_summary(device_doc)
         recent_calls = [
             _call_list_item(call_doc)
@@ -280,6 +303,7 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
         return {
             "contractor": contractor,
             "device": device,
+            "jobber": _jobber_summary(contractor_data),
             "recent_calls": recent_calls,
             "diagnostics": diagnose_contractor(contractor, device, recent_calls),
             "audit_events": [],

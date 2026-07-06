@@ -13,3 +13,11 @@ def test_admin_dashboard_uses_split_assets_and_tabs():
 
     for tab in ["command", "contractors", "calls", "numbers", "subscriptions", "audit"]:
         assert f'data-tab="{tab}"' in html
+
+
+def test_admin_dashboard_exposes_jobber_visibility_controls():
+    script = Path("app/static/admin.js").read_text()
+
+    assert "renderJobberPanel" in script
+    assert "jobberCell" in script
+    assert "/api/integrations/jobber/lead-capture" in script

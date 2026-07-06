@@ -262,7 +262,8 @@ async def test_process_business_mirrors_job_card_summary_to_call_record(monkeypa
         merged.update(updates)
 
     assert merged["caller_name"] == "Maya Patel"
-    assert merged["summary"] == "Kitchen sink is leaking"
+    assert "summary" not in merged
+    assert merged["summary_present"] is True
     assert merged["call_type"] == "service_request"
     assert merged["urgency"] == "same_day"
     assert merged["outcome"] == "message_taken"

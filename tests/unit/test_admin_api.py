@@ -249,6 +249,63 @@ async def test_admin_list_calls_redacts_phone_and_hides_transcript(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_admin_call_items_include_jobber_sync_metadata(monkeypatch):
+    fake_db = _FakeFirestore(
+        [],
+        collections={
+            "calls": [
+                _FakeDoc("jobber-call", {
+                    "call_sid": "jobber-call",
+                    "contractor_id": "contractor-1",
+                    "timestamp": 100,
+                    "caller_phone": "+15550001111",
+                    "jobber_sync_status": "succeeded",
+                    "jobber_request_id": "request-1",
+                    "jobber_request_url": "https://secure.getjobber.com/work_requests/31433685",
+                    "jobber_synced_at": 123.0,
+                    "jobber_sync_error": "ignored-after-success",
+                }),
+            ],
+        },
+    )
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_list_calls(_admin_request())
+
+    call = response["calls"][0]
+    assert call["jobber_sync_status"] == "succeeded"
+    assert call["jobber_request_id"] == "request-1"
+    assert call["jobber_request_url"] == "https://secure.getjobber.com/work_requests/31433685"
+    assert call["jobber_synced_at"] == 123.0
+    assert call["jobber_sync_error"] == "ignored-after-success"
+
+
+@pytest.mark.asyncio
+async def test_admin_call_items_accept_summary_present_flag(monkeypatch):
+    fake_db = _FakeFirestore(
+        [],
+        collections={
+            "calls": [
+                _FakeDoc("summary-call", {
+                    "call_sid": "summary-call",
+                    "contractor_id": "contractor-1",
+                    "timestamp": 100,
+                    "caller_phone": "+15550001111",
+                    "summary_present": True,
+                }),
+            ],
+        },
+    )
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_list_calls(_admin_request())
+
+    call = response["calls"][0]
+    assert call["has_summary"] is True
+    assert "summary" not in call
+
+
+@pytest.mark.asyncio
 async def test_admin_list_contractor_calls_filters_by_contractor(monkeypatch):
     fake_db = _FakeFirestore(
         [],

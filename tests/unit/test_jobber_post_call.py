@@ -156,7 +156,7 @@ def _lead_job_data(**overrides):
         "urgency": "same_day",
         "issue_description": "Kitchen sink is leaking",
         "message": "Water is pooling under the cabinet.",
-        "transcript": "Caller: My kitchen sink is leaking.\nKevin: I can pass that along.",
+        "transcript": "Caller: My kitchen sink is leaking. My number is 555-765-4321.\nKevin: Got it, ending in 4-3-2-1?",
     }
     data.update(overrides)
     return data
@@ -276,7 +276,12 @@ async def test_capture_jobber_lead_success_existing_customer(monkeypatch):
     assert notes[0][0] == "request-1"
     assert "Source: Hey Kevin" in notes[0][1]
     assert "Caller: Maya Patel" in notes[0][1]
+    assert "Phone: ***4567" in notes[0][1]
+    assert "Callback: ***4321" in notes[0][1]
     assert "Transcript:" in notes[0][1]
+    assert "+15551234567" not in notes[0][1]
+    assert "+15557654321" not in notes[0][1]
+    assert "555-765-4321" not in notes[0][1]
     assert job_updates == [("job-1", {
         "jobber_sync_status": "succeeded",
         "jobber_request_id": "request-1",
@@ -286,6 +291,19 @@ async def test_capture_jobber_lead_success_existing_customer(monkeypatch):
         "jobber_synced_at": 12345.0,
     })]
     assert call_updates == [("CA123", job_updates[0][1])]
+
+
+def test_jobber_note_masks_phone_like_transcript_text():
+    note = post_call._format_jobber_lead_note(_lead_job_data(
+        transcript=(
+            "Caller: The phone number is 65042 8556.\n"
+            "Kevin: Just to confirm, the number is 6-5-0, 4-2-2, 8-5-5-6?"
+        ),
+    ))
+
+    assert "65042 8556" not in note
+    assert "6-5-0, 4-2-2, 8-5-5-6" not in note
+    assert "***8556" in note
 
 
 @pytest.mark.asyncio

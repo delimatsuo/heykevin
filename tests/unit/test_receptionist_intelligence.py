@@ -65,6 +65,28 @@ def test_business_prompt_prevents_immediate_close_after_availability_check():
     assert "Silent caller" in prompt
 
 
+def test_business_prompt_confirms_only_phone_last_four():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "confirm only the last 4 digits" in prompt
+    assert "Do not read back the full phone number" in prompt
+    assert "Always read back phone numbers digit by digit" not in prompt
+    assert "6-5-0, 6-9-1, 8-6-6-7" not in prompt
+
+
+def test_personal_prompt_confirms_only_phone_last_four():
+    prompt = build_system_prompt({
+        "owner_name": "Deli Matsuo",
+        "mode": "personal",
+        "effective_mode": "personal",
+    })
+
+    assert "confirm only the last 4 digits" in prompt
+    assert "Do not read back the full phone number" in prompt
+    assert "Always read back phone numbers digit by digit" not in prompt
+    assert "6-5-0, 6-9-1, 8-6-6-7" not in prompt
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",

@@ -6,6 +6,7 @@ Supports two modes:
 """
 
 import asyncio
+import re
 import time
 
 from app.db import calls as call_db
@@ -614,6 +615,7 @@ def _get_vcard_url(contractor: dict) -> str:
 JOBBER_LOOKUP_TIMEOUT_SECONDS = 8.0
 JOBBER_MUTATION_TIMEOUT_SECONDS = 15.0
 JOBBER_NOTE_LIMIT = 5000
+PHONE_LIKE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().,\-]{6,}\d)(?!\w)")
 
 
 def _jobber_lead_capture_enabled(contractor: dict) -> bool:
@@ -649,16 +651,27 @@ def _format_jobber_lead_note(job_data: dict) -> str:
     ]
     for label, value in fields:
         if value:
-            lines.append(f"{label}: {value}")
+            lines.append(f"{label}: {_mask_phone_like_text(str(value))}")
 
     transcript = (job_data.get("transcript") or "").strip()
     if transcript:
-        lines.extend(["", "Transcript:", transcript])
+        lines.extend(["", "Transcript:", _mask_phone_like_text(transcript)])
 
     note = "\n".join(lines).strip()
     if len(note) > JOBBER_NOTE_LIMIT:
         return note[: JOBBER_NOTE_LIMIT - 3].rstrip() + "..."
     return note
+
+
+def _mask_phone_like_text(text: str) -> str:
+    """Mask phone-shaped text in external notes while keeping the last 4 digits."""
+    def _replace(match: re.Match) -> str:
+        digits = re.sub(r"\D", "", match.group(0))
+        if len(digits) < 7:
+            return match.group(0)
+        return f"***{digits[-4:]}"
+
+    return PHONE_LIKE_RE.sub(_replace, text)
 
 
 async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):

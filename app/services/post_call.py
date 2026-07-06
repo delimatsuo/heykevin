@@ -89,8 +89,7 @@ def _call_record_updates_from_job_data(job_data: dict, job_id: str = "") -> dict
         "outcome": _call_outcome_from_job_data(job_data),
     }
     summary = _call_summary_from_job_data(job_data)
-    if summary:
-        updates["summary"] = summary
+    updates["summary_present"] = bool(summary)
     if job_data.get("callback_number"):
         updates["callback_number"] = job_data["callback_number"]
     if job_id:

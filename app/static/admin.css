@@ -315,6 +315,38 @@ pre {
 .key-value dt { color: var(--muted); }
 .key-value dd { margin: 0; overflow-wrap: anywhere; }
 
+.detail-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.detail-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.detail-section-heading h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.detail-table table {
+  min-width: 640px;
+}
+
+.muted-inline,
+.text-muted {
+  color: var(--muted);
+}
+
+.text-green { color: var(--green); }
+.text-yellow { color: var(--yellow); }
+.text-red { color: var(--red); }
+
 .auth-overlay, .modal-backdrop {
   position: fixed;
   inset: 0;

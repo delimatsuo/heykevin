@@ -345,7 +345,7 @@ async def test_create_client_builds_jobber_client_payload(monkeypatch):
     input_payload = calls[0][1]["json"]["variables"]["input"]
     assert input_payload["firstName"] == "Jane"
     assert input_payload["lastName"] == "Private"
-    assert input_payload["phones"] == [{"number": "+15551234567", "primary": True, "smsAllowed": True}]
+    assert input_payload["phones"] == [{"number": "+15551234567", "primary": True}]
     assert input_payload["sourceAttribution"] == {"sourceText": "Hey Kevin"}
     assert input_payload["properties"] == [{"address": {"street1": "123 Main Street, Denver CO"}}]
 
@@ -474,7 +474,7 @@ def _build_client_create_input(job_data: dict) -> dict:
     }
     phone = job_data.get("caller_phone", "")
     if phone:
-        payload["phones"] = [{"number": phone, "primary": True, "smsAllowed": True}]
+        payload["phones"] = [{"number": phone, "primary": True}]
     address = (job_data.get("address") or "").strip()
     if address:
         payload["properties"] = [{"address": {"street1": address}}]

@@ -109,16 +109,21 @@ async def _run_business(monkeypatch, *, job_data, contractor, vcard_url="", crea
         sent_mms.append((args, kwargs))
         return True
 
-    async def fake_create_jobber_job(*args, **kwargs):
+    def fake_capture_jobber_lead(*args, **kwargs):
         created_jobs.append((args, kwargs))
 
+        async def _noop():
+            return None
+
+        return _noop()
+
     monkeypatch.setattr(post_call, "extract_job_card", fake_extract_job_card)
-    monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
-    monkeypatch.setattr("app.db.jobs.get_job_by_call_sid", fake_get_job_by_call_sid)
-    monkeypatch.setattr(post_call, "save_job", fake_save_job)
+    monkeypatch.setattr(post_call.call_db, "save_call", fake_save_call)
+    monkeypatch.setattr(post_call.job_db, "get_job_by_call_sid", fake_get_job_by_call_sid)
+    monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
     monkeypatch.setattr(post_call, "send_mms", fake_send_mms)
-    monkeypatch.setattr(post_call, "_create_jobber_job", fake_create_jobber_job)
+    monkeypatch.setattr(post_call, "_capture_jobber_lead", fake_capture_jobber_lead)
     monkeypatch.setattr(post_call, "_send_summary_push", fake_save_call)
     monkeypatch.setattr(post_call, "_get_vcard_url", lambda _contractor: vcard_url)
 
@@ -320,33 +325,12 @@ async def test_allowed_auto_reply_sends_with_caller_auto_reply_action_and_contex
     ("contractor", "expected"),
     [
         (_contractor(jobber_access_token="token"), False),
-        (_allow(_contractor(jobber_access_token="token"), ActionKey.JOBBER_CREATE_JOB), False),
-        (
-            _approve_automation(
-                _contractor(
-                    jobber_access_token="token",
-                    integration_write_status="approved",
-                ),
-                ActionKey.JOBBER_CREATE_JOB,
-            ),
-            False,
-        ),
-        (
-            _approve_automation(
-                _allow(
-                    _contractor(
-                        jobber_access_token="token",
-                        integration_write_status="approved",
-                    ),
-                    ActionKey.JOBBER_CREATE_JOB,
-                ),
-                ActionKey.JOBBER_CREATE_JOB,
-            ),
-            True,
-        ),
+        (_contractor(jobber_lead_capture_enabled=True), False),
+        (_contractor(jobber_access_token="token", jobber_lead_capture_enabled=False), False),
+        (_contractor(jobber_access_token="token", jobber_lead_capture_enabled=True), True),
     ],
 )
-async def test_jobber_create_job_is_scheduled_only_when_all_gate_requirements_are_satisfied(
+async def test_jobber_lead_capture_is_scheduled_only_when_feature_flag_enabled(
     monkeypatch, contractor, expected
 ):
     scheduled = []

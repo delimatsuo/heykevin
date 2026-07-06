@@ -13,6 +13,7 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 COLLECTION = "jobs"
+JOBBER_SYNC_CLAIM_TTL_SECONDS = 15 * 60
 
 
 async def save_job(job_data: dict) -> str:
@@ -133,7 +134,11 @@ async def claim_jobber_sync(job_id: str) -> bool:
             if data.get("jobber_request_id"):
                 return False
             if data.get("jobber_sync_status") == "in_progress":
-                return False
+                started_at = data.get("jobber_sync_started_at")
+                if not isinstance(started_at, (int, float)):
+                    return False
+                if time.time() - started_at < JOBBER_SYNC_CLAIM_TTL_SECONDS:
+                    return False
             tx.update(doc_ref, {
                 "jobber_sync_status": "in_progress",
                 "jobber_sync_started_at": time.time(),

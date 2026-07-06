@@ -736,9 +736,11 @@ async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
             updates["jobber_note_id"] = note_id
 
         await job_db.update_job(job_id, updates)
-        if call_sid:
-            await call_db.save_call(call_sid, updates)
+        await _mirror_jobber_sync_to_call(call_sid, updates)
         logger.info("Jobber lead captured for call %s", call_sid[:8])
+    except asyncio.CancelledError:
+        await _mark_jobber_sync_failed(job_id, call_sid, "cancelled")
+        raise
     except asyncio.TimeoutError:
         await _mark_jobber_sync_failed(job_id, call_sid, "timeout")
         logger.warning("Jobber lead capture timed out")
@@ -772,5 +774,16 @@ async def _mark_jobber_sync_failed(job_id: str, call_sid: str, error: str):
         "jobber_sync_finished_at": time.time(),
     }
     await job_db.update_job(job_id, updates)
-    if call_sid:
+    await _mirror_jobber_sync_to_call(call_sid, updates)
+
+
+async def _mirror_jobber_sync_to_call(call_sid: str, updates: dict):
+    if not call_sid:
+        return
+    try:
         await call_db.save_call(call_sid, updates)
+    except Exception as exc:
+        logger.warning(
+            "Jobber sync call mirror failed: exception_type=%s",
+            type(exc).__name__,
+        )

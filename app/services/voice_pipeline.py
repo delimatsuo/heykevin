@@ -1522,7 +1522,7 @@ class VoicePipeline:
     JOBBER_TOOLS = [
         {
             "name": "check_customer",
-            "description": "Look up the caller in the business's customer database by phone number. Returns customer name, address, and history if found.",
+            "description": "Look up the caller in the business's customer database by phone number. Returns customer name and address if found.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1532,42 +1532,6 @@ class VoicePipeline:
                     }
                 },
                 "required": ["phone"],
-            },
-        },
-        {
-            "name": "check_availability",
-            "description": "Check the business's schedule for available appointment slots in the next 7 days.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "days_ahead": {
-                        "type": "integer",
-                        "description": "Number of days ahead to check (default 7, max 14)",
-                    }
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "book_appointment",
-            "description": "Create a new job/appointment in the business's scheduling system.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Short description of the job (e.g. 'Faucet repair')",
-                    },
-                    "instructions": {
-                        "type": "string",
-                        "description": "Detailed notes about what the customer needs",
-                    },
-                    "client_id": {
-                        "type": "string",
-                        "description": "Jobber client ID if the caller is an existing customer (from check_customer)",
-                    },
-                },
-                "required": ["title"],
             },
         },
     ]
@@ -1743,7 +1707,7 @@ class VoicePipeline:
                 return _tool_execution_error_response()
 
         # --- Jobber tools ---
-        from app.services.jobber import lookup_customer, get_available_slots, create_job
+        from app.services.jobber import lookup_customer
 
         if not self._get_jobber_token():
             return json.dumps({"error": "No scheduling integration connected."})
@@ -1762,27 +1726,6 @@ class VoicePipeline:
                         "address": customer.get("billingAddress", {}),
                     })
                 return json.dumps({"found": False})
-
-            elif tool_name == "check_availability":
-                days = min(tool_input.get("days_ahead", 7), 14)
-                slots = await asyncio.wait_for(
-                    get_available_slots(self._contractor_config, days),
-                    timeout=3.0,
-                )
-                return json.dumps({"booked_slots": slots, "days_checked": days})
-
-            elif tool_name == "book_appointment":
-                decision = self._check_tool_write_gate(ActionKey.JOBBER_CREATE_JOB)
-                if not decision.allowed:
-                    return json.dumps({"success": False, "error": decision.message})
-
-                job_id = await asyncio.wait_for(
-                    create_job(self._contractor_config, tool_input),
-                    timeout=3.0,
-                )
-                if job_id:
-                    return json.dumps({"success": True, "job_id": job_id})
-                return json.dumps({"success": False, "error": "Failed to create job"})
 
             else:
                 return json.dumps({"error": f"Unknown tool: {tool_name}"})

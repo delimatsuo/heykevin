@@ -38,6 +38,8 @@ class _FakeAsyncClient:
         return False
 
     async def post(self, url: str, **kwargs):
+        if "variables" not in kwargs and isinstance(kwargs.get("json"), dict):
+            kwargs["variables"] = kwargs["json"].get("variables")
         self.calls.append((url, kwargs))
         return self.responses.pop(0)
 
@@ -297,6 +299,134 @@ async def test_create_quote_logs_sanitized_user_errors(monkeypatch, caplog):
     assert "mutation=quoteCreate" in caplog.text
     assert "error_count=1" in caplog.text
     assert "Property is required" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lookup_customer_searches_phone_fields(monkeypatch):
+    calls = []
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "clients": {
+                        "nodes": [
+                            {
+                                "id": "client-1",
+                                "name": "Jane Private",
+                                "firstName": "Jane",
+                                "lastName": "Private",
+                                "phones": [{"number": "+15551234567"}],
+                                "emails": [],
+                                "billingAddress": None,
+                                "clientProperties": {"nodes": []},
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+    ]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
+
+    customer = await jobber.lookup_customer("jobber-token", "+15551234567")
+
+    assert customer["id"] == "client-1"
+    assert calls[0][1]["variables"] == {"phone": "+15551234567"}
+    assert "searchFields: [PHONES]" in calls[0][1]["json"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_create_client_builds_jobber_client_payload(monkeypatch):
+    calls = []
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "clientCreate": {
+                        "client": {
+                            "id": "client-1",
+                            "name": "Jane Private",
+                            "clientProperties": {"nodes": [{"id": "property-1"}]},
+                        },
+                        "userErrors": [],
+                    }
+                }
+            },
+        )
+    ]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
+
+    result = await jobber.create_client(
+        "jobber-token",
+        {
+            "caller_name": "Jane Private",
+            "caller_phone": "+15551234567",
+            "address": "123 Main Street, Denver CO",
+        },
+    )
+
+    assert result == {"id": "client-1", "name": "Jane Private", "property_id": "property-1"}
+    input_payload = calls[0][1]["json"]["variables"]["input"]
+    assert input_payload["firstName"] == "Jane"
+    assert input_payload["lastName"] == "Private"
+    assert input_payload["phones"] == [{"number": "+15551234567", "primary": True, "smsAllowed": True}]
+    assert input_payload["sourceAttribution"] == {"sourceText": "Hey Kevin"}
+    assert input_payload["properties"] == [{"address": {"street1": "123 Main Street, Denver CO"}}]
+
+
+@pytest.mark.asyncio
+async def test_create_request_and_note(monkeypatch):
+    calls = []
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "requestCreate": {
+                        "request": {"id": "request-1", "title": "Leaking sink", "jobberWebUri": "https://example.test/request"},
+                        "userErrors": [],
+                    }
+                }
+            },
+        ),
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "requestCreateNote": {
+                        "request": {"id": "request-1"},
+                        "requestNote": {"id": "note-1"},
+                        "userErrors": [],
+                    }
+                }
+            },
+        ),
+    ]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
+
+    request = await jobber.create_request(
+        "jobber-token",
+        {
+            "client_id": "client-1",
+            "property_id": "property-1",
+            "title": "Leaking sink",
+        },
+    )
+    note_id = await jobber.create_request_note("jobber-token", "request-1", "Call summary")
+
+    assert request == {"id": "request-1", "title": "Leaking sink", "jobberWebUri": "https://example.test/request"}
+    assert note_id == "note-1"
+    assert calls[0][1]["json"]["variables"]["input"] == {
+        "clientId": "client-1",
+        "propertyId": "property-1",
+        "title": "Leaking sink",
+    }
+    assert calls[1][1]["json"]["variables"] == {
+        "requestId": "request-1",
+        "input": {"message": "Call summary", "pinned": False},
+    }
 
 
 async def _noop_async():

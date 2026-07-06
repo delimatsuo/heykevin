@@ -30,7 +30,7 @@ def _pipeline(config):
 
 
 @pytest.mark.asyncio
-async def test_jobber_book_appointment_requires_automation_approval(monkeypatch):
+async def test_jobber_book_appointment_is_unknown_tool_and_does_not_create_job(monkeypatch):
     created = []
 
     async def fake_create_job(*args, **kwargs):
@@ -47,19 +47,19 @@ async def test_jobber_book_appointment_requires_automation_approval(monkeypatch)
     })
     result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
 
-    assert result == {"success": False, "error": "Owner confirmation is required for this action."}
+    assert result == {"error": "Unknown tool: book_appointment"}
     assert created == []
 
 
 @pytest.mark.asyncio
-async def test_jobber_book_appointment_calls_create_job_when_gate_allows(monkeypatch):
-    created = []
+async def test_jobber_check_availability_is_unknown_tool_and_does_not_query_availability(monkeypatch):
+    checked = []
 
-    async def fake_create_job(*args, **kwargs):
-        created.append((args, kwargs))
-        return "jobber-1"
+    async def fake_get_available_slots(*args, **kwargs):
+        checked.append((args, kwargs))
+        return []
 
-    monkeypatch.setattr("app.services.jobber.create_job", fake_create_job)
+    monkeypatch.setattr("app.services.jobber.get_available_slots", fake_get_available_slots)
 
     config = {
         "contractor_id": "c1",
@@ -69,12 +69,12 @@ async def test_jobber_book_appointment_calls_create_job_when_gate_allows(monkeyp
         "automation_approvals": {ActionKey.JOBBER_CREATE_JOB.value: True},
     }
     pipeline = _pipeline(config)
-    tool_input = {"title": "Repair"}
+    tool_input = {"days_ahead": 7}
 
-    result = json.loads(await pipeline._execute_tool("book_appointment", tool_input))
+    result = json.loads(await pipeline._execute_tool("check_availability", tool_input))
 
-    assert result == {"success": True, "job_id": "jobber-1"}
-    assert created == [((config, tool_input), {})]
+    assert result == {"error": "Unknown tool: check_availability"}
+    assert checked == []
 
 
 @pytest.mark.asyncio
@@ -192,19 +192,18 @@ async def test_google_calendar_create_error_logging_omits_response_text(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_jobber_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
+async def test_jobber_book_appointment_unknown_tool_does_not_call_create_job_or_log_payload(monkeypatch, caplog):
     sensitive_values = (
         "Jane Private",
         "123 Secret Lane",
         "+15551234567",
         "gate code 2468",
     )
+    created = []
 
-    async def fake_create_job(*_args, **_kwargs):
-        raise RuntimeError(
-            "Jobber rejected appointment for Jane Private at 123 Secret Lane, "
-            "callback +15551234567, gate code 2468."
-        )
+    async def fake_create_job(*args, **kwargs):
+        created.append((args, kwargs))
+        return "jobber-1"
 
     monkeypatch.setattr("app.services.jobber.create_job", fake_create_job)
 
@@ -222,10 +221,8 @@ async def test_jobber_tool_exception_returns_generic_error_and_sanitizes_logs(mo
             {"title": "Jane Private repair", "description": "123 Secret Lane"},
         ))
 
-    assert result == {"success": False, "error": "Tool execution failed."}
-    assert "book_appointment" in caplog.text
-    assert "CA123" in caplog.text
-    assert "RuntimeError" in caplog.text
+    assert result == {"error": "Unknown tool: book_appointment"}
+    assert created == []
     for sensitive_value in sensitive_values:
         assert sensitive_value not in caplog.text
         assert sensitive_value not in json.dumps(result)
@@ -277,7 +274,7 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
 
 
 @pytest.mark.asyncio
-async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized_logging(monkeypatch, caplog):
+async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_create_job(monkeypatch, caplog):
     class FakeWebSocket:
         def __init__(self):
             self.sent = []
@@ -285,10 +282,13 @@ async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized
         async def send(self, payload):
             self.sent.append(json.loads(payload))
 
-    async def fail_create_job(*_args, **_kwargs):
-        raise AssertionError("create_job must not be called when Gemini gate denies")
+    created = []
 
-    monkeypatch.setattr("app.services.jobber.create_job", fail_create_job)
+    async def fake_create_job(*args, **kwargs):
+        created.append((args, kwargs))
+        return "jobber-1"
+
+    monkeypatch.setattr("app.services.jobber.create_job", fake_create_job)
 
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
@@ -322,14 +322,14 @@ async def test_gemini_denied_book_appointment_uses_real_voice_gate_and_sanitized
                         "id": "tool-1",
                         "name": "book_appointment",
                         "response": {
-                            "success": False,
-                            "error": "Owner confirmation is required for this action.",
+                            "error": "Unknown tool: book_appointment",
                         },
                     }
                 ]
             }
         }
     ]
+    assert created == []
     assert "Gemini tool call: book_appointment call_sid=CA-GEMINI-PRIVACY" in caplog.text
     for sensitive_value in (
         "Jane Private",

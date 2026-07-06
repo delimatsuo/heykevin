@@ -1,6 +1,7 @@
 """Receptionist prompt, call-state, and post-call scope guardrails."""
 
 import asyncio
+import json
 import os
 
 import pytest
@@ -238,6 +239,54 @@ async def test_gemini_owner_availability_hold_suppresses_caller_silence():
     finally:
         if pipeline._unavailable_task:
             pipeline._unavailable_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_gemini_barge_in_resets_caller_silence_state():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    clear_count = 0
+
+    async def clear_audio():
+        nonlocal clear_count
+        clear_count += 1
+
+    class OneMessageWebSocket:
+        def __init__(self, message: dict):
+            self._messages = [json.dumps(message)]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._messages:
+                raise StopAsyncIteration
+            return self._messages.pop(0)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._mark_kevin_activity()
+    pipeline._caller_silence_prompted_at = pipeline._last_kevin_speech_time
+    pipeline._ws = OneMessageWebSocket({"serverContent": {"interrupted": True}})
+
+    assert pipeline._waiting_on_caller()
+
+    await pipeline._receive_loop()
+
+    assert clear_count == 1
+    assert pipeline._caller_silence_prompted_at is None
+    assert pipeline._last_caller_speech_time >= pipeline._last_kevin_speech_time
+    assert not pipeline._waiting_on_caller()
 
 
 def test_vcard_ignores_generic_or_wrong_service_type_labels():

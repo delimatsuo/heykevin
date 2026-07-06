@@ -8,12 +8,14 @@ Supports two modes:
 import asyncio
 import time
 
+from app.db import calls as call_db
+from app.db import jobs as job_db
 from app.services.job_card import extract_job_card
 from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services import jobber as jobber_service
 from app.services.side_effect_audit import record_gate_decision
 from app.services.sms import send_sms, send_mms
-from app.db.jobs import save_job
 from app.config import settings
 from app.utils.logging import get_logger, redact_phone
 
@@ -138,11 +140,10 @@ async def _process_personal(
     callback = job_data.get("callback_number", "") or caller_phone
 
     # Save callback number and caller name to call record
-    from app.db.calls import save_call
     call_updates = {"caller_name": name}
     if job_data.get("callback_number"):
         call_updates["callback_number"] = job_data["callback_number"]
-    await save_call(call_sid, call_updates)
+    await call_db.save_call(call_sid, call_updates)
 
     # Send simple SMS to owner (in their language)
     owner_phone = contractor_phone or getattr(settings, "user_phone", "")
@@ -202,31 +203,30 @@ async def _process_business(
                 logger.error(f"Job card extraction failed permanently: {e}")
                 job_data = {"caller_phone": caller_phone, "call_type": "unknown"}
     job_data["call_sid"] = call_sid
+    job_data.setdefault("caller_phone", caller_phone)
 
     # Save callback number and caller name to call record
-    from app.db.calls import save_call
     call_updates = {"caller_name": job_data.get("caller_name", "")}
     if job_data.get("callback_number"):
         call_updates["callback_number"] = job_data["callback_number"]
-    await save_call(call_sid, call_updates)
+    await call_db.save_call(call_sid, call_updates)
 
     # 2. Save to Firestore (with idempotency check on call_sid)
     job_data["transcript"] = transcript_text
-    from app.db.jobs import get_job_by_call_sid
-    existing_job = await get_job_by_call_sid(call_sid)
+    existing_job = await job_db.get_job_by_call_sid(call_sid)
     if existing_job:
         job_id = existing_job["job_id"]
         logger.info(f"Job already exists for call_sid {call_sid}, skipping creation: {job_id}")
     else:
-        job_id = await save_job(job_data)
+        job_id = await job_db.save_job(job_data)
 
-    # 2b. Auto-create job in Jobber for service requests
-    if contractor.get("jobber_access_token") and job_data.get("call_type") == "service_request":
-        decision, _context = _post_call_gate(contractor, ActionKey.JOBBER_CREATE_JOB, call_sid)
-        if decision.allowed:
-            asyncio.create_task(_create_jobber_job(contractor, job_data))
-        else:
-            logger.info("Jobber auto-create blocked by gate", extra={"reason": decision.reason.value})
+    # 2b. Best-effort Jobber lead capture for service requests.
+    if (
+        contractor.get("jobber_access_token")
+        and job_data.get("call_type") == "service_request"
+        and _jobber_lead_capture_enabled(contractor)
+    ):
+        asyncio.create_task(_capture_jobber_lead(contractor, job_data, job_id))
 
     # 3. Send SMS to contractor (in their language)
     user_language = contractor.get("user_language", "en")
@@ -608,48 +608,169 @@ def _get_vcard_url(contractor: dict) -> str:
         return ""
 
 
-async def _create_jobber_job(contractor: dict, job_data: dict):
-    """Best-effort: create a job card in Jobber after a service-request call."""
-    try:
-        from app.services.jobber import lookup_customer, create_job
-        caller_phone = job_data.get("caller_phone", "")
+JOBBER_LOOKUP_TIMEOUT_SECONDS = 3.0
+JOBBER_MUTATION_TIMEOUT_SECONDS = 5.0
+JOBBER_NOTE_LIMIT = 5000
 
-        # Look up existing client so we can attach job to their record
-        client_id = None
+
+def _jobber_lead_capture_enabled(contractor: dict) -> bool:
+    """Return True only for explicit server-enabled Jobber lead capture."""
+    return contractor.get("jobber_lead_capture_enabled") is True
+
+
+def _jobber_request_title(job_data: dict) -> str:
+    """Build a concise Jobber Request title."""
+    issue = (job_data.get("issue_description") or "").strip()
+    if issue:
+        return issue[:100]
+
+    caller = (job_data.get("caller_name") or "").strip()
+    if caller:
+        return f"Phone inquiry from {caller}"[:100]
+
+    return "Phone inquiry from Hey Kevin"
+
+
+def _format_jobber_lead_note(job_data: dict) -> str:
+    """Format deterministic Hey Kevin call details for a Jobber Request note."""
+    lines = ["Source: Hey Kevin", "Lead captured from an AI-screened phone call."]
+
+    fields = [
+        ("Caller", job_data.get("caller_name")),
+        ("Phone", job_data.get("caller_phone")),
+        ("Callback", job_data.get("callback_number")),
+        ("Address", job_data.get("address")),
+        ("Urgency", job_data.get("urgency")),
+        ("Issue", job_data.get("issue_description")),
+        ("Message", job_data.get("message")),
+    ]
+    for label, value in fields:
+        if value:
+            lines.append(f"{label}: {value}")
+
+    transcript = (job_data.get("transcript") or "").strip()
+    if transcript:
+        lines.extend(["", "Transcript:", transcript])
+
+    note = "\n".join(lines).strip()
+    if len(note) > JOBBER_NOTE_LIMIT:
+        return note[: JOBBER_NOTE_LIMIT - 3].rstrip() + "..."
+    return note
+
+
+async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
+    """Best-effort: capture a service-request call as a Jobber Request."""
+    if not _jobber_lead_capture_enabled(contractor):
+        return
+
+    call_sid = job_data.get("call_sid", "")
+    try:
+        claimed = await job_db.claim_jobber_sync(job_id)
+        if not claimed:
+            return
+
+        caller_phone = job_data.get("caller_phone", "")
+        customer = None
         if caller_phone:
             customer = await asyncio.wait_for(
-                lookup_customer(contractor, caller_phone),
-                timeout=3.0,
+                jobber_service.lookup_customer(contractor, caller_phone),
+                timeout=JOBBER_LOOKUP_TIMEOUT_SECONDS,
             )
-            if customer:
-                client_id = customer.get("id")
 
-        issue = job_data.get("issue_description", "Phone inquiry")
-        caller_name = job_data.get("caller_name", "")
-        address = job_data.get("address", "")
+        if not customer:
+            customer = await asyncio.wait_for(
+                jobber_service.create_client(contractor, job_data),
+                timeout=JOBBER_MUTATION_TIMEOUT_SECONDS,
+            )
 
-        instructions_parts = []
-        if caller_name:
-            instructions_parts.append(f"Caller: {caller_name}")
-        if caller_phone:
-            instructions_parts.append(f"Phone: {caller_phone}")
-        if address:
-            instructions_parts.append(f"Address: {address}")
-        instructions_parts.append("Screened by Kevin AI")
+        client_id = _jobber_client_id(customer)
+        property_id = _jobber_property_id(customer)
+        if not client_id:
+            await _mark_jobber_sync_failed(job_id, call_sid, "client_missing")
+            return
 
-        job_id = await asyncio.wait_for(
-            create_job(contractor, {
-                "title": issue[:100],
-                "instructions": "\n".join(instructions_parts),
-                "client_id": client_id,
-            }),
-            timeout=5.0,
+        request = await asyncio.wait_for(
+            jobber_service.create_request(
+                contractor,
+                {
+                    "client_id": client_id,
+                    "property_id": property_id,
+                    "title": _jobber_request_title(job_data),
+                },
+            ),
+            timeout=JOBBER_MUTATION_TIMEOUT_SECONDS,
         )
-        if job_id:
-            logger.info(f"Jobber job created: {job_id} for call {job_data.get('call_sid', '')[:8]}")
-        else:
-            logger.warning("Jobber job creation returned no ID")
+        request_id = (request or {}).get("id", "")
+        if not request_id:
+            await _mark_jobber_sync_failed(job_id, call_sid, "request_create_failed")
+            return
+
+        note_id = ""
+        try:
+            note_id = await asyncio.wait_for(
+                jobber_service.create_request_note(
+                    contractor,
+                    request_id,
+                    _format_jobber_lead_note(job_data),
+                ),
+                timeout=JOBBER_MUTATION_TIMEOUT_SECONDS,
+            ) or ""
+        except asyncio.TimeoutError:
+            logger.warning("Jobber request note creation timed out")
+        except Exception as exc:
+            logger.warning(
+                "Jobber request note creation failed: exception_type=%s",
+                type(exc).__name__,
+            )
+
+        updates = {
+            "jobber_sync_status": "succeeded",
+            "jobber_request_id": request_id,
+            "jobber_client_id": client_id,
+            "jobber_synced_at": time.time(),
+        }
+        request_url = (request or {}).get("jobberWebUri", "")
+        if request_url:
+            updates["jobber_request_url"] = request_url
+        if note_id:
+            updates["jobber_note_id"] = note_id
+
+        await job_db.update_job(job_id, updates)
+        if call_sid:
+            await call_db.save_call(call_sid, updates)
+        logger.info("Jobber lead captured for call %s", call_sid[:8])
     except asyncio.TimeoutError:
-        logger.warning("Jobber job creation timed out")
-    except Exception as e:
-        logger.warning(f"Jobber job creation failed (non-critical): {e}")
+        await _mark_jobber_sync_failed(job_id, call_sid, "timeout")
+        logger.warning("Jobber lead capture timed out")
+    except Exception as exc:
+        error_type = type(exc).__name__
+        await _mark_jobber_sync_failed(job_id, call_sid, error_type)
+        logger.warning("Jobber lead capture failed: exception_type=%s", error_type)
+
+
+def _jobber_client_id(customer: dict | None) -> str:
+    if not isinstance(customer, dict):
+        return ""
+    return customer.get("id", "")
+
+
+def _jobber_property_id(customer: dict | None) -> str:
+    if not isinstance(customer, dict):
+        return ""
+    if customer.get("property_id"):
+        return customer["property_id"]
+    nodes = ((customer.get("clientProperties") or {}).get("nodes") or [])
+    if nodes:
+        return nodes[0].get("id", "")
+    return ""
+
+
+async def _mark_jobber_sync_failed(job_id: str, call_sid: str, error: str):
+    updates = {
+        "jobber_sync_status": "failed",
+        "jobber_sync_error": error,
+        "jobber_sync_finished_at": time.time(),
+    }
+    await job_db.update_job(job_id, updates)
+    if call_sid:
+        await call_db.save_call(call_sid, updates)

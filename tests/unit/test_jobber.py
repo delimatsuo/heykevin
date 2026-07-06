@@ -240,7 +240,63 @@ def test_extract_mutation_payload_rejects_user_errors(caplog):
 
     assert result is None
     assert "Jobber mutation returned user errors" in caplog.text
+    assert "mutation=requestCreate" in caplog.text
+    assert "error_count=1" in caplog.text
     assert "Client is required" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_job_logs_sanitized_user_errors(monkeypatch, caplog):
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "jobCreate": {
+                        "job": None,
+                        "userErrors": [{"message": "Client is required", "path": ["clientId"]}],
+                    }
+                }
+            },
+        )
+    ]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient([], responses))
+
+    with caplog.at_level(logging.WARNING):
+        job_id = await jobber.create_job("jobber-token", {"title": "Phone inquiry"})
+
+    assert job_id is None
+    assert "Jobber mutation returned user errors" in caplog.text
+    assert "mutation=jobCreate" in caplog.text
+    assert "error_count=1" in caplog.text
+    assert "Client is required" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_quote_logs_sanitized_user_errors(monkeypatch, caplog):
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "quoteCreate": {
+                        "quote": None,
+                        "userErrors": [{"message": "Property is required", "path": ["propertyId"]}],
+                    }
+                }
+            },
+        )
+    ]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient([], responses))
+
+    with caplog.at_level(logging.WARNING):
+        quote_id = await jobber.create_quote("jobber-token", {"title": "Phone inquiry"})
+
+    assert quote_id is None
+    assert "Jobber mutation returned user errors" in caplog.text
+    assert "mutation=quoteCreate" in caplog.text
+    assert "error_count=1" in caplog.text
+    assert "Property is required" not in caplog.text
 
 
 async def _noop_async():

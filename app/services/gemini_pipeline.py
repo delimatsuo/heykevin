@@ -290,6 +290,9 @@ class GeminiPipeline:
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):
                     self._interrupt_speaking = True
+                    self._is_speaking = False
+                    self._assistant_instruction_pending = False
+                    self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
                     if self.on_clear_audio:
                         await self.on_clear_audio()

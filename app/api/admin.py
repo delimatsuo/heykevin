@@ -118,8 +118,9 @@ def _device_summary(device_doc) -> dict:
 def _call_list_item(doc) -> dict:
     data = doc.to_dict() or {}
     summary = data.get("summary")
+    summary_present = bool(summary) or data.get("summary_present") is True
     transcript = data.get("transcript")
-    return {
+    item = {
         "call_sid": data.get("call_sid") or doc.id,
         "contractor_id": data.get("contractor_id", ""),
         "timestamp": data.get("timestamp"),
@@ -128,9 +129,19 @@ def _call_list_item(doc) -> dict:
         "outcome": data.get("outcome", ""),
         "route": data.get("route") or data.get("route_taken", ""),
         "duration_seconds": data.get("duration_seconds") or data.get("duration") or 0,
-        "has_summary": bool(summary),
+        "has_summary": summary_present,
         "has_transcript": bool(transcript),
     }
+    for key in (
+        "jobber_sync_status",
+        "jobber_request_id",
+        "jobber_request_url",
+        "jobber_synced_at",
+        "jobber_sync_error",
+    ):
+        if key in data:
+            item[key] = data.get(key)
+    return item
 
 
 def _contractor_inventory_item(doc) -> dict:

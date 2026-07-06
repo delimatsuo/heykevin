@@ -224,6 +224,115 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
 
 
 @pytest.mark.asyncio
+async def test_process_business_mirrors_job_card_summary_to_call_record(monkeypatch):
+    call_updates = []
+
+    async def fake_extract_job_card(transcript_text, caller_phone, contractor=None):
+        return _lead_job_data(call_sid="", caller_phone=caller_phone)
+
+    async def fake_save_call(call_sid, updates):
+        call_updates.append((call_sid, dict(updates)))
+
+    async def fake_save_job(job_data):
+        return "job-1"
+
+    async def fake_send_sms(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(post_call, "extract_job_card", fake_extract_job_card)
+    monkeypatch.setattr(post_call.call_db, "save_call", fake_save_call)
+    monkeypatch.setattr(post_call.job_db, "get_job_by_call_sid", lambda call_sid: _async_return(None))
+    monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
+    monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
+    monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
+    monkeypatch.setattr(post_call, "_get_vcard_url", lambda _contractor: "")
+
+    await post_call._process_business(
+        "Caller: My kitchen sink is leaking.",
+        "+15551234567",
+        "CA123",
+        "",
+        "+15550000000",
+        {"contractor_id": "contractor-1"},
+    )
+
+    merged = {}
+    for call_sid, updates in call_updates:
+        assert call_sid == "CA123"
+        merged.update(updates)
+
+    assert merged["caller_name"] == "Maya Patel"
+    assert "summary" not in merged
+    assert merged["summary_present"] is True
+    assert merged["call_type"] == "service_request"
+    assert merged["urgency"] == "same_day"
+    assert merged["outcome"] == "message_taken"
+    assert merged["job_id"] == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_process_business_marks_jobber_skipped_for_non_service_call(monkeypatch):
+    call_updates = []
+    captured_jobs = []
+    scheduled = []
+
+    async def fake_extract_job_card(transcript_text, caller_phone, contractor=None):
+        return _lead_job_data(
+            call_sid="",
+            caller_phone=caller_phone,
+            call_type="business",
+            issue_description="Vendor checking on an invoice",
+            urgency="none",
+        )
+
+    async def fake_save_call(call_sid, updates):
+        call_updates.append((call_sid, dict(updates)))
+
+    async def fake_save_job(job_data):
+        captured_jobs.append(dict(job_data))
+        return "job-1"
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        return coro
+
+    async def fake_send_sms(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(post_call, "extract_job_card", fake_extract_job_card)
+    monkeypatch.setattr(post_call.call_db, "save_call", fake_save_call)
+    monkeypatch.setattr(post_call.job_db, "get_job_by_call_sid", lambda call_sid: _async_return(None))
+    monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
+    monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
+    monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
+    monkeypatch.setattr(post_call, "_get_vcard_url", lambda _contractor: "")
+    monkeypatch.setattr(post_call.asyncio, "create_task", fake_create_task)
+
+    await post_call._process_business(
+        "Caller: I am checking on an invoice.",
+        "+15551234567",
+        "CA123",
+        "",
+        "+15550000000",
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_lead_capture_enabled": True,
+        },
+    )
+
+    merged = {}
+    for call_sid, updates in call_updates:
+        assert call_sid == "CA123"
+        merged.update(updates)
+
+    assert scheduled == []
+    assert captured_jobs[0]["call_type"] == "business"
+    assert merged["jobber_sync_status"] == "skipped"
+    assert merged["jobber_sync_error"] == "non_service_request"
+
+
+@pytest.mark.asyncio
 async def test_capture_jobber_lead_success_existing_customer(monkeypatch):
     job_updates = []
     call_updates = []

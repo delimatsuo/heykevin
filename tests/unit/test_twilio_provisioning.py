@@ -1,8 +1,15 @@
 """Twilio number provisioning safety checks."""
 
+import os
 from types import SimpleNamespace
 
 import pytest
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15005550006")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
+os.environ.setdefault("USER_PHONE", "+15555550123")
 
 from app.api import contractors as contractors_api
 from app.db import contractors as contractors_db
@@ -147,3 +154,35 @@ async def test_contractor_patch_cannot_change_twilio_number(monkeypatch):
 
 def test_subscription_uuid_is_server_protected():
     assert "subscription_uuid" in contractors_db.PROTECTED_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_contractor_patch_cannot_enable_jobber_lead_capture(monkeypatch):
+    updates_seen = {}
+
+    async def fake_update_contractor(contractor_id, updates):
+        updates_seen["contractor_id"] = contractor_id
+        updates_seen["updates"] = updates
+        return True
+
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
+
+    response = await contractors_api.api_update_contractor(
+        "contractor-1",
+        contractors_api.ContractorUpdate(
+            mode="personal",
+            jobber_lead_capture_enabled=True,
+        ),
+        request,
+    )
+
+    assert response == {"status": "ok"}
+    assert updates_seen == {
+        "contractor_id": "contractor-1",
+        "updates": {"mode": "personal"},
+    }
+
+
+def test_jobber_lead_capture_flag_is_server_protected():
+    assert "jobber_lead_capture_enabled" in contractors_db.PROTECTED_FIELDS

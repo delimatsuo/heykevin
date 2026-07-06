@@ -23,6 +23,8 @@ PROTECTED_FIELDS = frozenset({
     "twilio_number",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
+    # Integrations — feature flags are enabled by backend/admin flows only.
+    "jobber_lead_capture_enabled",
     # Identity bindings — written only at account creation / authenticated migration.
     # Allowing PATCH to overwrite these would let an attacker hijack another account
     # by claiming its phone number or Apple user ID. (Security audit F-04.)

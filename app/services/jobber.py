@@ -14,6 +14,7 @@ logger = get_logger(__name__)
 
 JOBBER_GRAPHQL_URL = "https://api.getjobber.com/api/graphql"
 JOBBER_TOKEN_URL = "https://api.getjobber.com/api/oauth/token"
+JOBBER_GRAPHQL_VERSION = "2025-04-16"
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -155,6 +156,7 @@ async def _graphql_request(access_token: str, query: str, variables: dict = None
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
+                    "X-JOBBER-GRAPHQL-VERSION": JOBBER_GRAPHQL_VERSION,
                 },
                 json={"query": query, "variables": variables or {}},
                 timeout=5.0,
@@ -204,11 +206,74 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
         return None
 
 
+def _extract_mutation_object(data: Optional[dict], mutation_name: str, object_name: str) -> Optional[dict]:
+    """Return a mutation object only when Jobber accepted the mutation."""
+    payload = (data or {}).get(mutation_name) or {}
+    user_errors = payload.get("userErrors") or []
+    if user_errors:
+        logger.warning(
+            "Jobber mutation returned user errors: mutation=%s error_count=%s",
+            mutation_name,
+            len(user_errors),
+        )
+        return None
+    obj = payload.get(object_name)
+    if not obj:
+        logger.warning("Jobber mutation returned no object: mutation=%s object=%s", mutation_name, object_name)
+        return None
+    return obj
+
+
+def _split_name(full_name: str) -> tuple[str, str]:
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "Unknown", "Caller"
+    if len(parts) == 1:
+        return parts[0], "Caller"
+    return parts[0], " ".join(parts[1:])
+
+
+def _first_property_id(client: dict) -> str:
+    nodes = ((client or {}).get("clientProperties") or {}).get("nodes") or []
+    if nodes:
+        return nodes[0].get("id", "")
+    return ""
+
+
+def _build_client_create_input(job_data: dict) -> dict:
+    first_name, last_name = _split_name(job_data.get("caller_name", ""))
+    payload: dict = {
+        "firstName": first_name,
+        "lastName": last_name,
+        "sourceAttribution": {"sourceText": "Hey Kevin"},
+    }
+    phone = job_data.get("caller_phone", "")
+    if phone:
+        payload["phones"] = [{"number": phone, "primary": True}]
+    address = (job_data.get("address") or "").strip()
+    if address:
+        payload["properties"] = [{"address": {"street1": address}}]
+    return payload
+
+
+def _normalize_client_address(client: dict) -> dict:
+    address = (client or {}).get("billingAddress")
+    if not isinstance(address, dict) or address.get("street"):
+        return client
+
+    street = " ".join(filter(None, [address.get("street1", ""), address.get("street2", "")]))
+    if street:
+        address["street"] = street
+    return client
+
+
 async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:
-    """Look up a Jobber customer by phone number."""
+    """Look up a Jobber client by phone number."""
+    if not phone:
+        return None
     query = """
     query LookupClient($phone: String!) {
-        clients(filter: {phone: $phone}, first: 1) {
+        clients(searchTerm: $phone, searchFields: [PHONES], first: 1) {
             nodes {
                 id
                 name
@@ -216,15 +281,83 @@ async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:
                 lastName
                 phones { number }
                 emails { address }
-                billingAddress { street city province postalCode }
+                billingAddress { street1 street2 city province postalCode }
+                clientProperties(first: 1) { nodes { id } }
             }
         }
     }
     """
     data = await _graphql_request_with_refresh(auth, query, {"phone": phone})
     if data and data.get("clients", {}).get("nodes"):
-        return data["clients"]["nodes"][0]
+        return _normalize_client_address(data["clients"]["nodes"][0])
     return None
+
+
+async def create_client(auth: str | dict, job_data: dict) -> Optional[dict]:
+    """Create a Jobber client for an unknown caller."""
+    query = """
+    mutation CreateClient($input: ClientCreateInput!) {
+        clientCreate(input: $input) {
+            client {
+                id
+                name
+                clientProperties(first: 1) { nodes { id } }
+            }
+            userErrors { message path }
+        }
+    }
+    """
+    data = await _graphql_request_with_refresh(auth, query, {"input": _build_client_create_input(job_data)})
+    client = _extract_mutation_object(data, "clientCreate", "client")
+    if not client:
+        return None
+    return {
+        "id": client.get("id", ""),
+        "name": client.get("name", ""),
+        "property_id": _first_property_id(client),
+    }
+
+
+async def create_request(auth: str | dict, request_data: dict) -> Optional[dict]:
+    """Create a Jobber Request for a captured lead."""
+    query = """
+    mutation CreateRequest($input: RequestCreateInput!) {
+        requestCreate(input: $input) {
+            request { id title jobberWebUri }
+            userErrors { message path }
+        }
+    }
+    """
+    input_data = {
+        "clientId": request_data["client_id"],
+        "title": request_data.get("title", "Phone inquiry from Hey Kevin")[:100],
+    }
+    if request_data.get("property_id"):
+        input_data["propertyId"] = request_data["property_id"]
+    data = await _graphql_request_with_refresh(auth, query, {"input": input_data})
+    return _extract_mutation_object(data, "requestCreate", "request")
+
+
+async def create_request_note(auth: str | dict, request_id: str, message: str) -> Optional[str]:
+    """Attach Kevin call details to a Jobber Request."""
+    query = """
+    mutation CreateRequestNote($requestId: EncodedId!, $input: RequestCreateNoteInput!) {
+        requestCreateNote(requestId: $requestId, input: $input) {
+            request { id }
+            requestNote { id }
+            userErrors { message path }
+        }
+    }
+    """
+    data = await _graphql_request_with_refresh(
+        auth,
+        query,
+        {"requestId": request_id, "input": {"message": message[:5000], "pinned": False}},
+    )
+    note = _extract_mutation_object(data, "requestCreateNote", "requestNote")
+    if not note:
+        return None
+    return note.get("id", "")
 
 
 async def get_available_slots(auth: str | dict, days_ahead: int = 7) -> list[dict]:
@@ -272,8 +405,9 @@ async def create_job(auth: str | dict, job_data: dict) -> Optional[str]:
         input_data["clientId"] = job_data["client_id"]
 
     data = await _graphql_request_with_refresh(auth, query, {"input": input_data})
-    if data and data.get("jobCreate", {}).get("job"):
-        return data["jobCreate"]["job"]["id"]
+    job = _extract_mutation_object(data, "jobCreate", "job")
+    if job:
+        return job["id"]
     return None
 
 
@@ -288,6 +422,7 @@ async def create_quote(auth: str | dict, quote_data: dict) -> Optional[str]:
     }
     """
     data = await _graphql_request_with_refresh(auth, query, {"input": quote_data})
-    if data and data.get("quoteCreate", {}).get("quote"):
-        return data["quoteCreate"]["quote"]["id"]
+    quote = _extract_mutation_object(data, "quoteCreate", "quote")
+    if quote:
+        return quote["id"]
     return None

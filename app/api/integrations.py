@@ -6,10 +6,12 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 import httpx
 
 from app.config import settings
+from app.db.admin_audit import write_admin_audit_event
 from app.middleware.auth import verify_api_token, require_contractor_access
 from app.utils.logging import get_logger
 
@@ -86,6 +88,17 @@ def _get_firestore():
     """Lazy import to avoid circular deps."""
     from app.db.firestore_client import get_firestore_client
     return get_firestore_client()
+
+
+def _require_admin(request: Request):
+    """Raise 403 if the caller is not using the global admin token."""
+    if not getattr(request.state, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+class JobberLeadCaptureUpdate(BaseModel):
+    enabled: bool
+    reason: str = Field(default="", max_length=500)
 
 
 # ── Connect (start OAuth flow) ──────────────────────────────────────
@@ -191,6 +204,60 @@ async def jobber_status(contractor_id: str = Query(...), request: Request = None
     return {
         "connected": connected,
         "connected_at": data.get("jobber_connected_at"),
+        "lead_capture_enabled": connected and data.get("jobber_lead_capture_enabled") is True,
+    }
+
+
+# ── Lead capture toggle ──────────────────────────────────────────────
+
+@router.post("/jobber/lead-capture", dependencies=[Depends(verify_api_token)])
+async def jobber_update_lead_capture(
+    body: JobberLeadCaptureUpdate,
+    contractor_id: str = Query(...),
+    request: Request = None,
+):
+    """Enable or disable Jobber Request lead capture for a connected contractor."""
+    _require_admin(request)
+    db = _get_firestore()
+    doc_ref = db.collection("contractors").document(contractor_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Contractor not found")
+
+    data = doc.to_dict() or {}
+    connected = bool(data.get("jobber_access_token"))
+    if body.enabled and not connected:
+        raise HTTPException(status_code=409, detail="Connect Jobber before enabling lead capture")
+
+    previous_enabled = data.get("jobber_lead_capture_enabled") is True
+    now = time.time()
+    updates = {
+        "jobber_lead_capture_enabled": body.enabled,
+        "jobber_lead_capture_updated_at": now,
+    }
+    doc_ref.update(updates)
+    await write_admin_audit_event(
+        request=request,
+        action="jobber_lead_capture_update",
+        target_type="contractor",
+        target_id=contractor_id,
+        reason=body.reason or "admin toggled Jobber lead capture",
+        before={"jobber_lead_capture_enabled": previous_enabled},
+        after={"jobber_lead_capture_enabled": body.enabled},
+        metadata={"jobber_connected": connected},
+    )
+
+    logger.info(
+        "Jobber lead capture updated for contractor %s enabled=%s",
+        contractor_id,
+        body.enabled,
+    )
+    return {
+        "status": "ok",
+        "contractor_id": contractor_id,
+        "connected": connected,
+        "lead_capture_enabled": body.enabled,
+        "updated_at": now,
     }
 
 
@@ -231,6 +298,7 @@ async def jobber_disconnect(contractor_id: str = Query(...), request: Request = 
         "jobber_access_token": DELETE_FIELD,
         "jobber_refresh_token": DELETE_FIELD,
         "jobber_connected_at": DELETE_FIELD,
+        "jobber_lead_capture_enabled": False,
     })
 
     logger.info(f"Jobber disconnected for contractor {contractor_id}")

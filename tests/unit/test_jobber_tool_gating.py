@@ -1,5 +1,13 @@
 """Jobber v1 exposes caller lookup only, not scheduling or booking."""
 
+import os
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
+os.environ.setdefault("USER_PHONE", "+15550000001")
+
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
 

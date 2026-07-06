@@ -292,8 +292,9 @@ async def create_job(auth: str | dict, job_data: dict) -> Optional[str]:
         input_data["clientId"] = job_data["client_id"]
 
     data = await _graphql_request_with_refresh(auth, query, {"input": input_data})
-    if data and data.get("jobCreate", {}).get("job"):
-        return data["jobCreate"]["job"]["id"]
+    job = _extract_mutation_object(data, "jobCreate", "job")
+    if job:
+        return job["id"]
     return None
 
 
@@ -308,6 +309,7 @@ async def create_quote(auth: str | dict, quote_data: dict) -> Optional[str]:
     }
     """
     data = await _graphql_request_with_refresh(auth, query, {"input": quote_data})
-    if data and data.get("quoteCreate", {}).get("quote"):
-        return data["quoteCreate"]["quote"]["id"]
+    quote = _extract_mutation_object(data, "quoteCreate", "quote")
+    if quote:
+        return quote["id"]
     return None

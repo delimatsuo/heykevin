@@ -340,6 +340,47 @@ async def test_lookup_customer_searches_phone_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lookup_customer_preserves_billing_address_street_compatibility(monkeypatch):
+    calls = []
+    responses = [
+        _FakeResponse(
+            200,
+            {
+                "data": {
+                    "clients": {
+                        "nodes": [
+                            {
+                                "id": "client-1",
+                                "name": "Jane Private",
+                                "firstName": "Jane",
+                                "lastName": "Private",
+                                "phones": [{"number": "+15551234567"}],
+                                "emails": [],
+                                "billingAddress": {
+                                    "street1": "123 Main Street",
+                                    "street2": "Suite 4",
+                                    "city": "Denver",
+                                    "province": "CO",
+                                    "postalCode": "80202",
+                                },
+                                "clientProperties": {"nodes": []},
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+    ]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
+
+    customer = await jobber.lookup_customer("jobber-token", "+15551234567")
+
+    assert customer["billingAddress"]["street"] == "123 Main Street Suite 4"
+    assert customer["billingAddress"]["street1"] == "123 Main Street"
+    assert customer["billingAddress"]["street2"] == "Suite 4"
+
+
+@pytest.mark.asyncio
 async def test_create_client_builds_jobber_client_payload(monkeypatch):
     calls = []
     responses = [
@@ -374,7 +415,7 @@ async def test_create_client_builds_jobber_client_payload(monkeypatch):
     input_payload = calls[0][1]["json"]["variables"]["input"]
     assert input_payload["firstName"] == "Jane"
     assert input_payload["lastName"] == "Private"
-    assert input_payload["phones"] == [{"number": "+15551234567", "primary": True, "smsAllowed": True}]
+    assert input_payload["phones"] == [{"number": "+15551234567", "primary": True}]
     assert input_payload["sourceAttribution"] == {"sourceText": "Hey Kevin"}
     assert input_payload["properties"] == [{"address": {"street1": "123 Main Street, Denver CO"}}]
 

@@ -249,11 +249,22 @@ def _build_client_create_input(job_data: dict) -> dict:
     }
     phone = job_data.get("caller_phone", "")
     if phone:
-        payload["phones"] = [{"number": phone, "primary": True, "smsAllowed": True}]
+        payload["phones"] = [{"number": phone, "primary": True}]
     address = (job_data.get("address") or "").strip()
     if address:
         payload["properties"] = [{"address": {"street1": address}}]
     return payload
+
+
+def _normalize_client_address(client: dict) -> dict:
+    address = (client or {}).get("billingAddress")
+    if not isinstance(address, dict) or address.get("street"):
+        return client
+
+    street = " ".join(filter(None, [address.get("street1", ""), address.get("street2", "")]))
+    if street:
+        address["street"] = street
+    return client
 
 
 async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:
@@ -278,7 +289,7 @@ async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:
     """
     data = await _graphql_request_with_refresh(auth, query, {"phone": phone})
     if data and data.get("clients", {}).get("nodes"):
-        return data["clients"]["nodes"][0]
+        return _normalize_client_address(data["clients"]["nodes"][0])
     return None
 
 

@@ -785,6 +785,8 @@ async def _mirror_jobber_sync_to_call(call_sid: str, updates: dict):
         return
     try:
         await call_db.save_call(call_sid, updates)
+    except asyncio.CancelledError:
+        logger.warning("Jobber sync call mirror cancelled")
     except Exception as exc:
         logger.warning(
             "Jobber sync call mirror failed: exception_type=%s",

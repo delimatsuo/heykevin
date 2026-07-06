@@ -215,5 +215,33 @@ async def test_graphql_request_exception_logging_uses_exception_type_only(monkey
         assert sensitive_value not in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_graphql_request_sends_jobber_version_header(monkeypatch):
+    calls = []
+    responses = [_FakeResponse(200, {"data": {"viewer": {"id": "viewer-1"}}})]
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
+
+    data = await jobber._graphql_request("jobber-token", "query { viewer { id } }")
+
+    assert data == {"viewer": {"id": "viewer-1"}}
+    assert calls[0][1]["headers"]["X-JOBBER-GRAPHQL-VERSION"] == "2025-04-16"
+
+
+def test_extract_mutation_payload_rejects_user_errors(caplog):
+    payload = {
+        "requestCreate": {
+            "request": None,
+            "userErrors": [{"message": "Client is required", "path": ["clientId"]}],
+        }
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = jobber._extract_mutation_object(payload, "requestCreate", "request")
+
+    assert result is None
+    assert "Jobber mutation returned user errors" in caplog.text
+    assert "Client is required" not in caplog.text
+
+
 async def _noop_async():
     return None

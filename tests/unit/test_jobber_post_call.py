@@ -1,5 +1,6 @@
 """Post-call Jobber lead capture behavior."""
 
+import inspect
 import os
 import time
 
@@ -96,15 +97,33 @@ async def test_claim_jobber_sync_skips_missing_doc(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_claim_jobber_sync_skips_in_progress(monkeypatch):
-    fake_doc = _FakeDoc({"jobber_sync_status": "in_progress"})
+    fake_doc = _FakeDoc({"jobber_sync_status": "in_progress", "jobber_sync_started_at": 12300.0})
     fake_db = _FakeDb(fake_doc)
     monkeypatch.setattr(jobs, "get_firestore_client", lambda: fake_db)
     monkeypatch.setattr(jobs.firestore_module, "transactional", lambda fn: fn)
+    monkeypatch.setattr(time, "time", lambda: 12345.0)
 
     claimed = await jobs.claim_jobber_sync("job-1")
 
     assert claimed is False
     assert fake_doc.updates == []
+    assert fake_doc.get_transactions == [fake_db.tx]
+
+
+@pytest.mark.asyncio
+async def test_claim_jobber_sync_reclaims_stale_in_progress(monkeypatch):
+    fake_doc = _FakeDoc({"jobber_sync_status": "in_progress", "jobber_sync_started_at": 10000.0})
+    fake_db = _FakeDb(fake_doc)
+    monkeypatch.setattr(jobs, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(jobs.firestore_module, "transactional", lambda fn: fn)
+    monkeypatch.setattr(time, "time", lambda: 12345.0)
+
+    claimed = await jobs.claim_jobber_sync("job-1")
+
+    assert claimed is True
+    assert fake_doc.updates == [
+        {"jobber_sync_status": "in_progress", "jobber_sync_started_at": 12345.0}
+    ]
     assert fake_doc.get_transactions == [fake_db.tx]
 
 
@@ -149,15 +168,15 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
     async def fake_extract_job_card(transcript_text, caller_phone, contractor=None):
         return _lead_job_data(call_sid="", caller_phone=caller_phone)
 
-    def fake_capture_jobber_lead(contractor, job_data, job_id):
+    async def fake_capture_jobber_lead(contractor, job_data, job_id):
         captured["contractor"] = contractor
         captured["job_data"] = dict(job_data)
         captured["job_id"] = job_id
-        return "lead-capture-task"
 
-    def fake_create_task(task):
-        captured["task"] = task
-        return task
+    def fake_create_task(coro):
+        assert inspect.iscoroutine(coro)
+        captured["task"] = coro
+        return coro
 
     async def fake_save_call(*args, **kwargs):
         return None
@@ -189,7 +208,8 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
         contractor,
     )
 
-    assert captured["task"] == "lead-capture-task"
+    assert inspect.iscoroutine(captured["task"])
+    await captured["task"]
     assert captured["contractor"] is contractor
     assert captured["job_id"] == "job-1"
     assert captured["job_data"]["call_sid"] == "CA123"
@@ -303,6 +323,43 @@ async def test_capture_jobber_lead_success_creates_customer_when_lookup_misses(m
         "jobber_request_id": "request-new",
         "jobber_client_id": "client-new",
         "jobber_synced_at": 22222.0,
+    })]
+
+
+@pytest.mark.asyncio
+async def test_capture_jobber_lead_call_mirror_failure_does_not_mark_failed(monkeypatch):
+    job_updates = []
+
+    async def fail_save_call(*args, **kwargs):
+        raise RuntimeError("call mirror unavailable")
+
+    monkeypatch.setattr(post_call.time, "time", lambda: 44444.0)
+    monkeypatch.setattr(post_call.job_db, "claim_jobber_sync", lambda job_id: _async_return(True))
+    monkeypatch.setattr(post_call.job_db, "update_job", lambda job_id, updates: _record_async(job_updates, job_id, updates))
+    monkeypatch.setattr(post_call.call_db, "save_call", fail_save_call)
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "lookup_customer",
+        lambda *args, **kwargs: _async_return({"id": "client-1"}),
+    )
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "create_request",
+        lambda *args, **kwargs: _async_return({"id": "request-1"}),
+    )
+    monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return(None))
+
+    await post_call._capture_jobber_lead(
+        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        _lead_job_data(),
+        "job-1",
+    )
+
+    assert job_updates == [("job-1", {
+        "jobber_sync_status": "succeeded",
+        "jobber_request_id": "request-1",
+        "jobber_client_id": "client-1",
+        "jobber_synced_at": 44444.0,
     })]
 
 

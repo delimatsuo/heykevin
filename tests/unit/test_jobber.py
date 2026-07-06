@@ -3,9 +3,16 @@
 import base64
 import json
 import logging
+import os
 import time
 
 import pytest
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15005550006")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
+os.environ.setdefault("USER_PHONE", "+15555550123")
 
 from app.services import jobber
 

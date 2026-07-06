@@ -435,7 +435,7 @@ class GeminiPipeline:
         declarations = []
 
         if has_jobber:
-            declarations.extend([
+            declarations.append(
                 {
                     "name": "check_customer",
                     "description": "Look up the caller in the business's customer database by phone number.",
@@ -446,31 +446,8 @@ class GeminiPipeline:
                         },
                         "required": ["phone"],
                     },
-                },
-                {
-                    "name": "check_availability",
-                    "description": "Check the business's schedule for available appointment slots in the next 7 days.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "days_ahead": {"type": "INTEGER", "description": "Days ahead to check (default 7, max 14)"}
-                        },
-                    },
-                },
-                {
-                    "name": "book_appointment",
-                    "description": "Create a new job/appointment in the business's scheduling system.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "title": {"type": "STRING", "description": "Short description of the job"},
-                            "instructions": {"type": "STRING", "description": "Detailed notes about what the customer needs"},
-                            "client_id": {"type": "STRING", "description": "Jobber client ID if existing customer"},
-                        },
-                        "required": ["title"],
-                    },
-                },
-            ])
+                }
+            )
         elif has_gcal:
             declarations.extend([
                 {

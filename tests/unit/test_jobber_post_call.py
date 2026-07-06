@@ -1,8 +1,15 @@
 """Post-call Jobber lead capture behavior."""
 
+import os
 import time
 
 import pytest
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15005550006")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
+os.environ.setdefault("USER_PHONE", "+15555550123")
 
 from app.db import jobs
 
@@ -20,8 +27,10 @@ class _FakeDoc:
     def __init__(self, data):
         self.data = data
         self.updates = []
+        self.get_transactions = []
 
     def get(self, transaction=None):
+        self.get_transactions.append(transaction)
         return _FakeSnapshot(self.data)
 
 
@@ -67,6 +76,35 @@ async def test_claim_jobber_sync_skips_existing_request(monkeypatch):
 
     assert claimed is False
     assert fake_doc.updates == []
+    assert fake_doc.get_transactions == [fake_db.tx]
+
+
+@pytest.mark.asyncio
+async def test_claim_jobber_sync_skips_missing_doc(monkeypatch):
+    fake_doc = _FakeDoc(None)
+    fake_db = _FakeDb(fake_doc)
+    monkeypatch.setattr(jobs, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(jobs.firestore_module, "transactional", lambda fn: fn)
+
+    claimed = await jobs.claim_jobber_sync("job-1")
+
+    assert claimed is False
+    assert fake_doc.updates == []
+    assert fake_doc.get_transactions == [fake_db.tx]
+
+
+@pytest.mark.asyncio
+async def test_claim_jobber_sync_skips_in_progress(monkeypatch):
+    fake_doc = _FakeDoc({"jobber_sync_status": "in_progress"})
+    fake_db = _FakeDb(fake_doc)
+    monkeypatch.setattr(jobs, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(jobs.firestore_module, "transactional", lambda fn: fn)
+
+    claimed = await jobs.claim_jobber_sync("job-1")
+
+    assert claimed is False
+    assert fake_doc.updates == []
+    assert fake_doc.get_transactions == [fake_db.tx]
 
 
 @pytest.mark.asyncio
@@ -83,3 +121,4 @@ async def test_claim_jobber_sync_marks_in_progress(monkeypatch):
     assert fake_doc.updates == [
         {"jobber_sync_status": "in_progress", "jobber_sync_started_at": 12345.0}
     ]
+    assert fake_doc.get_transactions == [fake_db.tx]

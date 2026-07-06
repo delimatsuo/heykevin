@@ -185,10 +185,14 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
     async def fake_send_sms(*args, **kwargs):
         return True
 
+    async def fake_save_job(job_data):
+        captured["saved_job_data"] = dict(job_data)
+        return "job-1"
+
     monkeypatch.setattr(post_call, "extract_job_card", fake_extract_job_card)
     monkeypatch.setattr(post_call.call_db, "save_call", fake_save_call)
     monkeypatch.setattr(post_call.job_db, "get_job_by_call_sid", lambda call_sid: _async_return(None))
-    monkeypatch.setattr(post_call.job_db, "save_job", lambda job_data: _async_return("job-1"))
+    monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
     monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
     monkeypatch.setattr(post_call, "_capture_jobber_lead", fake_capture_jobber_lead)
@@ -214,6 +218,8 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
     assert captured["contractor"] is contractor
     assert captured["job_id"] == "job-1"
     assert captured["job_data"]["call_sid"] == "CA123"
+    assert captured["job_data"]["contractor_id"] == "contractor-1"
+    assert captured["saved_job_data"]["contractor_id"] == "contractor-1"
     assert captured["job_data"]["transcript"] == "transcript"
 
 
@@ -325,6 +331,51 @@ async def test_capture_jobber_lead_success_creates_customer_when_lookup_misses(m
         "jobber_client_id": "client-new",
         "jobber_synced_at": 22222.0,
     })]
+
+
+@pytest.mark.asyncio
+async def test_capture_jobber_lead_treats_lookup_timeout_as_miss(monkeypatch):
+    job_updates = []
+    call_updates = []
+
+    monkeypatch.setattr(post_call.time, "time", lambda: 98765.0)
+    monkeypatch.setattr(post_call, "JOBBER_LOOKUP_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(post_call.job_db, "claim_jobber_sync", lambda job_id: _async_return(True))
+    monkeypatch.setattr(post_call.job_db, "update_job", lambda job_id, updates: _record_async(job_updates, job_id, updates))
+    monkeypatch.setattr(post_call.call_db, "save_call", lambda call_sid, updates: _record_async(call_updates, call_sid, updates))
+
+    async def slow_lookup(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(post_call.jobber_service, "lookup_customer", slow_lookup)
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "create_client",
+        lambda *args, **kwargs: _async_return({"id": "client-new", "property_id": "property-new"}),
+    )
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "create_request",
+        lambda *args, **kwargs: _async_return({"id": "request-new", "jobberWebUri": "https://example.test/request-new"}),
+    )
+    monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return("note-new"))
+
+    await post_call._capture_jobber_lead(
+        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        _lead_job_data(),
+        "job-1",
+    )
+
+    expected_updates = {
+        "jobber_sync_status": "succeeded",
+        "jobber_request_id": "request-new",
+        "jobber_client_id": "client-new",
+        "jobber_synced_at": 98765.0,
+        "jobber_request_url": "https://example.test/request-new",
+        "jobber_note_id": "note-new",
+    }
+    assert job_updates == [("job-1", expected_updates)]
+    assert call_updates == [("CA123", expected_updates)]
 
 
 @pytest.mark.asyncio

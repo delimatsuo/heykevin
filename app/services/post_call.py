@@ -204,6 +204,9 @@ async def _process_business(
                 job_data = {"caller_phone": caller_phone, "call_type": "unknown"}
     job_data["call_sid"] = call_sid
     job_data.setdefault("caller_phone", caller_phone)
+    contractor_id = contractor.get("contractor_id", "")
+    if contractor_id:
+        job_data["contractor_id"] = contractor_id
 
     # Save callback number and caller name to call record
     call_updates = {"caller_name": job_data.get("caller_name", "")}
@@ -608,8 +611,8 @@ def _get_vcard_url(contractor: dict) -> str:
         return ""
 
 
-JOBBER_LOOKUP_TIMEOUT_SECONDS = 3.0
-JOBBER_MUTATION_TIMEOUT_SECONDS = 5.0
+JOBBER_LOOKUP_TIMEOUT_SECONDS = 8.0
+JOBBER_MUTATION_TIMEOUT_SECONDS = 15.0
 JOBBER_NOTE_LIMIT = 5000
 
 
@@ -672,10 +675,13 @@ async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
         caller_phone = job_data.get("caller_phone", "")
         customer = None
         if caller_phone:
-            customer = await asyncio.wait_for(
-                jobber_service.lookup_customer(contractor, caller_phone),
-                timeout=JOBBER_LOOKUP_TIMEOUT_SECONDS,
-            )
+            try:
+                customer = await asyncio.wait_for(
+                    jobber_service.lookup_customer(contractor, caller_phone),
+                    timeout=JOBBER_LOOKUP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Jobber customer lookup timed out; creating a new client")
 
         if not customer:
             customer = await asyncio.wait_for(

@@ -333,7 +333,10 @@ async def test_lookup_customer_searches_phone_fields(monkeypatch):
 
     assert customer["id"] == "client-1"
     assert calls[0][1]["variables"] == {"phone": "+15551234567"}
-    assert "searchFields: [PHONES]" in calls[0][1]["json"]["query"]
+    query = calls[0][1]["json"]["query"]
+    assert "clients(searchTerm: $phone" in query
+    assert "searchFields: [PHONES]" in query
+    assert "first: 1" in query
 
 
 @pytest.mark.asyncio
@@ -414,7 +417,9 @@ async def test_create_request_and_note(monkeypatch):
             "title": "Leaking sink",
         },
     )
-    note_id = await jobber.create_request_note("jobber-token", "request-1", "Call summary")
+    long_message = "Call summary " + ("x" * 6000)
+    expected_note_message = long_message[:5000]
+    note_id = await jobber.create_request_note("jobber-token", "request-1", long_message)
 
     assert request == {"id": "request-1", "title": "Leaking sink", "jobberWebUri": "https://example.test/request"}
     assert note_id == "note-1"
@@ -423,9 +428,12 @@ async def test_create_request_and_note(monkeypatch):
         "propertyId": "property-1",
         "title": "Leaking sink",
     }
+    note_variables = calls[1][1]["json"]["variables"]
+    assert len(note_variables["input"]["message"]) == 5000
+    assert note_variables["input"]["message"] == expected_note_message
     assert calls[1][1]["json"]["variables"] == {
         "requestId": "request-1",
-        "input": {"message": "Call summary", "pinned": False},
+        "input": {"message": expected_note_message, "pinned": False},
     }
 
 

@@ -37,6 +37,31 @@ def test_urgent_push_body_does_not_include_raw_speech():
     assert body == "Urgent call needs review. Open Kevin for details."
 
 
+def test_media_stream_active_call_fallback_uses_authenticated_context():
+    active_call = media_stream._active_call_fallback(
+        "CA123",
+        {
+            "contractor_id": "contractor-1",
+            "caller_phone": "+15551234567",
+            "caller_name": "Pat Customer",
+            "accepted": True,
+        },
+    )
+
+    assert active_call is not None
+    assert active_call.call_sid == "CA123"
+    assert active_call.contractor_id == "contractor-1"
+    assert active_call.caller_phone == "+15551234567"
+    assert active_call.caller_name == "Pat Customer"
+    assert active_call.accepted is True
+
+
+def test_media_stream_active_call_fallback_requires_owner_context():
+    assert media_stream._active_call_fallback("CA123", None) is None
+    assert media_stream._active_call_fallback("CA123", {"caller_phone": "+15551234567"}) is None
+    assert media_stream._active_call_fallback("CA123", {"contractor_id": "contractor-1"}) is None
+
+
 def test_voip_push_body_does_not_include_arbitrary_reason():
     body = push_notification._safe_voip_push_body(
         reason="emergency from Pat Customer +15551234567"

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import time
+from types import SimpleNamespace
 
 from fastapi import APIRouter, WebSocket
 
@@ -30,6 +31,25 @@ def _log_task_exception(task: asyncio.Task):
         logger.error(f"Background task failed: {exc}", exc_info=exc)
 
 TRANSCRIPT_THROTTLE = 1.0
+
+
+def _active_call_fallback(call_sid: str, call_data: dict | None):
+    """Build minimal call context from authenticated RTDB data."""
+    if not isinstance(call_data, dict):
+        return None
+
+    contractor_id = call_data.get("contractor_id", "")
+    caller_phone = call_data.get("caller_phone", "")
+    if not contractor_id or not caller_phone:
+        return None
+
+    return SimpleNamespace(
+        call_sid=call_sid,
+        contractor_id=contractor_id,
+        caller_phone=caller_phone,
+        caller_name=call_data.get("caller_name", ""),
+        accepted=call_data.get("accepted") is True,
+    )
 
 
 async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid: str, contractor_id: str = ""):
@@ -288,6 +308,10 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     if not active_call:
         await asyncio.sleep(1)
         active_call = await get_active_call(call_sid)
+    if not active_call:
+        active_call = _active_call_fallback(call_sid, call_data)
+        if active_call:
+            logger.warning("Active call lookup missed; using authenticated stream context")
 
     # Load contractor config for this call
     contractor_config_loaded = {}

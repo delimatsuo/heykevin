@@ -14,6 +14,7 @@ logger = get_logger(__name__)
 
 JOBBER_GRAPHQL_URL = "https://api.getjobber.com/api/graphql"
 JOBBER_TOKEN_URL = "https://api.getjobber.com/api/oauth/token"
+JOBBER_GRAPHQL_VERSION = "2025-04-16"
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -155,6 +156,7 @@ async def _graphql_request(access_token: str, query: str, variables: dict = None
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
+                    "X-JOBBER-GRAPHQL-VERSION": JOBBER_GRAPHQL_VERSION,
                 },
                 json={"query": query, "variables": variables or {}},
                 timeout=5.0,
@@ -202,6 +204,24 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
     except JobberAuthError:
         logger.error("Jobber API error: 401")
         return None
+
+
+def _extract_mutation_object(data: Optional[dict], mutation_name: str, object_name: str) -> Optional[dict]:
+    """Return a mutation object only when Jobber accepted the mutation."""
+    payload = (data or {}).get(mutation_name) or {}
+    user_errors = payload.get("userErrors") or []
+    if user_errors:
+        logger.warning(
+            "Jobber mutation returned user errors: mutation=%s error_count=%s",
+            mutation_name,
+            len(user_errors),
+        )
+        return None
+    obj = payload.get(object_name)
+    if not obj:
+        logger.warning("Jobber mutation returned no object: mutation=%s object=%s", mutation_name, object_name)
+        return None
+    return obj
 
 
 async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:

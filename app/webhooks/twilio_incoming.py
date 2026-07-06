@@ -28,6 +28,21 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+TERMINAL_TWILIO_STATUSES = {"completed", "busy", "no-answer", "canceled", "failed"}
+
+
+def _parse_call_duration_seconds(raw_duration: str) -> int | None:
+    try:
+        duration = int(raw_duration)
+    except (TypeError, ValueError):
+        return None
+    return duration if duration >= 0 else None
+
+
+def _outcome_from_twilio_status(status: str) -> str:
+    return (status or "").strip().lower().replace("-", "_")
+
+
 def _forward_twiml(phone: str, caller_id: str = "") -> str:
     """TwiML to forward call directly to a number."""
     cid = caller_id or settings.twilio_phone_number
@@ -990,11 +1005,28 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
     form_data = await request.form()
     call_sid = form_data.get("CallSid", "")
     status = form_data.get("CallStatus", "")
+    duration_seconds = _parse_call_duration_seconds(form_data.get("CallDuration", ""))
     call_sid_var.set(call_sid)
     logger.info(f"Call status update: {status}")
 
+    if call_sid and status in TERMINAL_TWILIO_STATUSES:
+        try:
+            from app.db import calls as call_db
+
+            updates = {"twilio_status": status}
+            if duration_seconds is not None:
+                updates["duration_seconds"] = duration_seconds
+
+            existing = await call_db.get_call(call_sid) or {}
+            if not existing.get("outcome"):
+                updates["outcome"] = _outcome_from_twilio_status(status)
+
+            await call_db.save_call(call_sid, updates)
+        except Exception as e:
+            logger.warning(f"Failed to save terminal call metadata: {e}")
+
     # Clean up RTDB active call when call ends
-    if status in ("completed", "busy", "no-answer", "canceled", "failed"):
+    if status in TERMINAL_TWILIO_STATUSES:
         try:
             from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
             _init_firebase()

@@ -60,6 +60,43 @@ def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "")
     return "New call summary. Open Kevin for details."
 
 
+def _call_summary_from_job_data(job_data: dict) -> str:
+    """Return the one-line summary mirrored onto the call record."""
+    for key in ("issue_description", "message"):
+        value = (job_data.get(key) or "").strip()
+        if value:
+            return value
+    call_type = (job_data.get("call_type") or "").strip()
+    return call_type.replace("_", " ") if call_type else ""
+
+
+def _call_outcome_from_job_data(job_data: dict) -> str:
+    call_type = (job_data.get("call_type") or "unknown").strip().lower()
+    if call_type == "spam":
+        return "spam"
+    if _call_summary_from_job_data(job_data) or job_data.get("caller_name") or job_data.get("callback_number"):
+        return "message_taken"
+    return "screened"
+
+
+def _call_record_updates_from_job_data(job_data: dict, job_id: str = "") -> dict:
+    """Build non-secret call-list metadata from a post-call job card."""
+    updates = {
+        "caller_name": job_data.get("caller_name", ""),
+        "call_type": job_data.get("call_type", "unknown"),
+        "urgency": job_data.get("urgency", "none"),
+        "outcome": _call_outcome_from_job_data(job_data),
+    }
+    summary = _call_summary_from_job_data(job_data)
+    if summary:
+        updates["summary"] = summary
+    if job_data.get("callback_number"):
+        updates["callback_number"] = job_data["callback_number"]
+    if job_id:
+        updates["job_id"] = job_id
+    return updates
+
+
 def _post_call_gate(contractor: dict, action: ActionKey, call_sid: str, *, owner_confirmed: bool = False):
     context = GateContext(
         source="post_call",
@@ -138,11 +175,10 @@ async def _process_personal(
     name = job_data.get("caller_name", "") or "Unknown caller"
     reason = job_data.get("issue_description", "") or job_data.get("message", "") or "No details"
     callback = job_data.get("callback_number", "") or caller_phone
+    job_data["caller_name"] = name
 
-    # Save callback number and caller name to call record
-    call_updates = {"caller_name": name}
-    if job_data.get("callback_number"):
-        call_updates["callback_number"] = job_data["callback_number"]
+    # Mirror post-call metadata to the call record for admin/support views.
+    call_updates = _call_record_updates_from_job_data(job_data)
     await call_db.save_call(call_sid, call_updates)
 
     # Send simple SMS to owner (in their language)
@@ -208,12 +244,6 @@ async def _process_business(
     if contractor_id:
         job_data["contractor_id"] = contractor_id
 
-    # Save callback number and caller name to call record
-    call_updates = {"caller_name": job_data.get("caller_name", "")}
-    if job_data.get("callback_number"):
-        call_updates["callback_number"] = job_data["callback_number"]
-    await call_db.save_call(call_sid, call_updates)
-
     # 2. Save to Firestore (with idempotency check on call_sid)
     job_data["transcript"] = transcript_text
     existing_job = await job_db.get_job_by_call_sid(call_sid)
@@ -223,13 +253,24 @@ async def _process_business(
     else:
         job_id = await job_db.save_job(job_data)
 
+    # Mirror post-call metadata to the call record for admin/support views.
+    call_updates = _call_record_updates_from_job_data(job_data, job_id)
+
     # 2b. Best-effort Jobber lead capture for service requests.
     if (
         contractor.get("jobber_access_token")
-        and job_data.get("call_type") == "service_request"
         and _jobber_lead_capture_enabled(contractor)
     ):
-        asyncio.create_task(_capture_jobber_lead(contractor, job_data, job_id))
+        if job_data.get("call_type") == "service_request":
+            asyncio.create_task(_capture_jobber_lead(contractor, job_data, job_id))
+        else:
+            call_updates.update({
+                "jobber_sync_status": "skipped",
+                "jobber_sync_error": "non_service_request",
+                "jobber_sync_finished_at": time.time(),
+            })
+
+    await call_db.save_call(call_sid, call_updates)
 
     # 3. Send SMS to contractor (in their language)
     user_language = contractor.get("user_language", "en")

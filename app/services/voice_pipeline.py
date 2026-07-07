@@ -86,6 +86,32 @@ def _format_service_names_for_prompt(services: list) -> str:
     return ", ".join(names)
 
 
+def _phone_last_four(phone: str) -> str:
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    return digits[-4:] if len(digits) >= 4 else ""
+
+
+def _callback_number_policy(caller_phone: str = "") -> str:
+    """Build caller-ID-aware callback collection rules without exposing full numbers."""
+    last_four = _phone_last_four(caller_phone)
+    caller_id_line = (
+        f"- Caller ID is available as the default callback number. Use only the caller ID number ending in {last_four}; never say the full caller ID.\n"
+        f"- When callback intent exists, ask exactly: \"Is the number ending in {last_four} the best number for a callback?\""
+        if last_four
+        else "- Caller ID is not available to you."
+    )
+    return f"""
+CALLBACK NUMBER POLICY:
+- It is okay to ask for the caller's name early so you can address them naturally.
+- Do not ask for or confirm a callback number during basic intake, service/pricing questions, or before callback intent exists.
+- Confirm a callback number only after the caller asks for or agrees to a callback, scheduling, appointment booking, or follow-up.
+- Answer service and pricing questions first. Then, if useful, offer follow-up or scheduling as optional.
+{caller_id_line}
+- If the caller confirms the caller ID is best, use that number. If they say no or volunteer a different number, collect the different number and confirm only the last 4 digits.
+- If caller ID is missing or blocked, ask for the full callback number only after callback, scheduling, or follow-up intent is established.
+"""
+
+
 def is_owner_availability_hold(text: str) -> bool:
     """Return True when Kevin has told the caller he is trying the owner."""
     normalized = f" {text.lower()} "
@@ -117,7 +143,11 @@ def is_owner_availability_hold(text: str) -> bool:
     )
 
 
-def build_system_prompt(config: Optional[dict] = None, after_hours: bool = False) -> str:
+def build_system_prompt(
+    config: Optional[dict] = None,
+    after_hours: bool = False,
+    caller_phone: str = "",
+) -> str:
     """Build Kevin's system prompt dynamically from contractor config.
 
     Supports two modes:
@@ -130,6 +160,7 @@ def build_system_prompt(config: Optional[dict] = None, after_hours: bool = False
     owner_name = config.get("owner_name", settings.user_name)
     pronoun = config.get("pronoun", "he")
     mode = config.get("effective_mode") or effective_mode(config)
+    callback_policy = _callback_number_policy(caller_phone)
 
     # Personal mode — simple personal assistant
     if mode == "personal":
@@ -143,15 +174,16 @@ FLOW:
 3. Say: "Got it. Let me see if {owner_name.split()[0]} is available, one moment."
 4. Say NOTHING until the caller speaks again. Do NOT output any text — no stage directions, no asterisks, nothing.
 5. The system will handle unavailability automatically.
-6. If the caller is ALREADY leaving a message (giving you details, name, callback number), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
+6. If the caller is ALREADY leaving a message (giving you details, name, or a callback number they volunteered), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 7. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
-8. Once you have their name, message, and callback number, confirm and wrap up: "I'll pass this along to {owner_name}. Have a great day!"
+8. Once you have their name and message, confirm and wrap up: "I'll pass this along to {owner_name}. Have a great day!"
 
 RECEPTIONIST OPERATING POLICY:
 - If you say you are checking whether {owner_name} is available, stop talking. The system will wait briefly and then tell the caller whether {owner_name} is unavailable.
-- If the system says {owner_name} is unavailable or the owner declines, apologize, offer to take a message, collect any missing callback details, and only close after the caller has left the message.
+- If the system says {owner_name} is unavailable or the owner declines, apologize, offer to take a message, and only confirm callback details if the caller asks for or agrees to a callback.
 - If the caller goes quiet while you are waiting for their answer, the system may ask if they are still there and hang up if they remain silent. Do not contradict that behavior.
 - If the caller already started leaving a message, listen and collect it. Do not ask permission for a message they are already giving.
+{callback_policy}
 
 RULES:
 - ONE or two short sentences per response.
@@ -226,14 +258,14 @@ BUSINESS PROFILE AND SERVICE SCOPE:
 
 Treat the business profile, listed services, and knowledge base as the source of truth. Infer the business's trade from that information, but do not invent services. If a caller asks for work outside that scope, do not pretend the business handles it and do not ask trade-specific diagnostic questions for a different trade.
 
-YOUR ROLE: Find out WHO is calling and WHAT they need. For in-scope service requests, ask smart follow-up questions that help {owner_name} understand the situation, assess urgency, and prepare before calling back. You think like a knowledgeable receptionist who works for this specific business, not a generic repair hotline.
+YOUR ROLE: Find out WHO is calling and WHAT they need. For in-scope service requests, ask smart follow-up questions that help {owner_name} understand the situation, assess urgency, and prepare for follow-up if needed. You think like a knowledgeable receptionist who works for this specific business, not a generic repair hotline.
 
 PHASE 1 — INTAKE (first 2-3 exchanges):
 1. You already greeted them. Wait for them to speak first.
-2. Get their name, callback number, service address when relevant, and one-line reason for calling. If they only give part of this, politely ask for the missing information.
+2. Get their name, one-line reason for calling, and service address when relevant. Do not ask for a callback number in this phase.
 3. Decide whether the request is IN SCOPE, OUT OF SCOPE, or UNCLEAR based on the business profile.
 4. If it is IN SCOPE, ask 1-2 smart follow-up questions that match the specific issue. Examples for a plumbing business: "Is there standing water?" "Can you get to the shut-off valve?" "Is it a sink, toilet, water heater, or appliance connection?" Think about what {owner_name} would want to know before calling back.
-5. If it is OUT OF SCOPE, say the business may not be the right company for that type of work, collect the caller's name/number/reason, and offer to pass the message to {owner_name}. Do not diagnose or troubleshoot another trade's work.
+5. If it is OUT OF SCOPE, say the business may not be the right company for that type of work, collect the caller's name and reason, and offer to pass the message to {owner_name}. Do not diagnose or troubleshoot another trade's work.
 6. If it is UNCLEAR, ask one clarifying question before treating it as a service request.
 7. If it's NOT a service request (personal call, sales, etc.), skip trade follow-up questions.
 
@@ -253,20 +285,21 @@ PHASE 3 — HOLD / HANDOFF:
 
 PHASE 4 — MESSAGE:
 14. The system may automatically tell the caller if {owner_name} is unavailable.
-15. If the caller is ALREADY leaving a message (giving details, callback number), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
+15. If the caller is ALREADY leaving a message (giving details or a callback number they volunteered), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 16. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
-17. If you don't have their callback number, ask for it.
-18. Once you have their name, details, and callback number, confirm and wrap up: "I'll send this to {first_name}. Have a good day."
+17. If callback, scheduling, or follow-up intent exists, follow the callback number policy below. Otherwise do not ask for or confirm a callback number.
+18. Once you have their name and details, plus any callback number the caller agreed to confirm, wrap up: "I'll send this to {first_name}. Have a good day."
 
 RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
-- New service request: identify caller, issue, address if relevant, urgency, and callback number. Ask one or two issue-specific follow-up questions only after deciding the request is in scope.
+- New service request: identify caller, issue, address if relevant, and urgency. Ask one or two issue-specific follow-up questions only after deciding the request is in scope. Do not ask for a callback number unless the caller asks for or agrees to callback, scheduling, appointment booking, or follow-up.
 - Out-of-scope request: be honest that {business_name} may not be the right company, avoid diagnosing another trade's work, still offer to pass a concise message to {first_name}.
-- Safety emergency: give only immediate safety guidance, collect callback/location, and try to reach {first_name} if the issue is relevant to this business. For out-of-scope danger, tell them to contact emergency services or the right licensed trade.
+- Safety emergency: give only immediate safety guidance, collect location if relevant, and try to reach {first_name} if the issue is relevant to this business. Only confirm callback details through the callback number policy. For out-of-scope danger, tell them to contact emergency services or the right licensed trade.
 - After-hours request: take a message unless there is a relevant safety emergency. Do not pretend {first_name} is available after hours.
 - Owner handoff: if you tell the caller you are trying {first_name}, stop speaking. The system will wait about 30 seconds. If {first_name} does not answer or declines, return to the caller, say {first_name} is unavailable, then continue taking the message.
-- Message taking: collect the actual message, name, callback number, and any useful details. If the caller already gave those, confirm and close; do not ask again.
+- Message taking: collect the actual message, name, and any useful details. If the caller asks for or agrees to a callback, confirm the callback number using the policy below. If the caller already gave those details, confirm and close; do not ask again.
 - Media follow-up: for in-scope visual problems, offer that Kevin can text a link after the call for a photo or short video. Do not claim live media review during the call.
 - Silent caller: if the caller stops responding after you ask a question or offer to take a message, the system may ask "Are you still there?" and then end the call if silence continues.
+{callback_policy}
 
 RULES:
 - Be warm, friendly, and professional. You represent {business_name}.
@@ -290,7 +323,7 @@ RULES:
             f"\n\nAFTER HOURS: The business is currently closed. Our hours are {hours_start} to {hours_end}."
             f"\n- Take a message and let the caller know {owner_name} will get back to them during business hours."
             f"\n- Do NOT say \"let me see if {pronoun}'s available\" — instead say \"I can take a message and make sure {owner_name} gets it first thing.\""
-            f"\n- Still collect their name, reason for calling, and callback number."
+            f"\n- Still collect their name and reason for calling. Only confirm callback details if the caller asks for or agrees to callback, scheduling, or follow-up."
         )
 
     # Prompt injection fence: instruct the model to treat caller speech as untrusted
@@ -369,7 +402,11 @@ class VoicePipeline:
             self._after_hours = not is_business_hours(self._contractor_config)
 
         # Build system prompt from config (or defaults)
-        self._system_prompt = build_system_prompt(self._contractor_config, after_hours=self._after_hours)
+        self._system_prompt = build_system_prompt(
+            self._contractor_config,
+            after_hours=self._after_hours,
+            caller_phone=self._caller_phone,
+        )
 
         self._deepgram_ws = None
         self._deepgram_task = None

@@ -150,6 +150,15 @@ def test_prompt_without_caller_id_asks_full_number_only_after_callback_intent():
     assert "only after callback, scheduling, or follow-up intent is established" in prompt
 
 
+def test_business_prompt_answers_scope_and_pricing_before_address_collection():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "Answer direct service, scope, and pricing questions before asking for name" in prompt
+    assert "Do not ask for a service address during basic intake" in prompt
+    assert "Ask for a service address only after" in prompt
+    assert "Get their name, one-line reason for calling, and service address" not in prompt
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",
@@ -332,6 +341,140 @@ def test_media_stream_passes_caller_phone_to_gemini_pipeline():
     )[0]
 
     assert "caller_phone=active_call.caller_phone if active_call else \"\"" in gemini_call
+
+
+@pytest.mark.asyncio
+async def test_gemini_reconnect_can_resume_without_repeating_greeting(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    started = await pipeline.start(
+        send_greeting=False,
+        start_background_tasks=False,
+        reconnect_context="Caller: Do you replace toilets?\nKevin: Yes, we do.",
+    )
+
+    assert started
+    assert len(sent_messages) == 1
+    setup_text = sent_messages[0]["setup"]["system_instruction"]["parts"][0]["text"]
+    assert "CONVERSATION CONTEXT BEFORE RECONNECT" in setup_text
+    assert "Do not greet the caller again" in setup_text
+    assert "Caller: Do you replace toilets?" in setup_text
+
+
+@pytest.mark.asyncio
+async def test_gemini_receive_reconnect_preserves_context_without_greeting(monkeypatch):
+    from websockets.exceptions import ConnectionClosedError
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    class ClosingWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise ConnectionClosedError(None, None)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = ClosingWebSocket()
+    pipeline._transcript_lines = [
+        "Caller: Do you replace toilets?",
+        "Kevin: Yes, we do.",
+    ]
+
+    reconnect_calls = []
+
+    async def fake_start(**kwargs):
+        reconnect_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
+
+    await pipeline._receive_loop()
+
+    assert reconnect_calls == [
+        {
+            "send_greeting": False,
+            "start_background_tasks": False,
+            "reconnect_context": "Caller: Do you replace toilets?\nKevin: Yes, we do.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_transcript_flush_records_response_timing():
+    transcripts = []
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def record_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=record_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._caller_transcript_buf = ["Do you replace toilets?"]
+
+    await pipeline._flush_caller_transcript()
+
+    assert pipeline._last_caller_transcript_flushed_at > 0
+
+    pipeline._kevin_transcript_buf = ["Yes, we do."]
+
+    await pipeline._flush_kevin_transcript()
+
+    assert transcripts == [
+        ("Caller", "Do you replace toilets?"),
+        ("Kevin", "Yes, we do."),
+    ]
+    assert pipeline._last_caller_transcript_flushed_at == 0.0
 
 
 @pytest.mark.asyncio

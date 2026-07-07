@@ -95,7 +95,6 @@ def _call_record_updates_from_job_data(job_data: dict) -> dict:
     call_type = job_data.get("call_type", "")
     if call_type:
         updates["call_type"] = call_type
-        updates["outcome"] = call_type
 
     urgency = job_data.get("urgency", "")
     if urgency:

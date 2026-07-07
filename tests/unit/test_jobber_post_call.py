@@ -224,7 +224,7 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
 
 
 @pytest.mark.asyncio
-async def test_process_business_mirrors_summary_and_outcome_to_call(monkeypatch):
+async def test_process_business_mirrors_summary_and_call_type_to_call(monkeypatch):
     saved_calls = []
 
     async def fake_extract_job_card(transcript_text, caller_phone, contractor=None):
@@ -256,8 +256,8 @@ async def test_process_business_mirrors_summary_and_outcome_to_call(monkeypatch)
     call_sid, updates = saved_calls[0]
     assert call_sid == "CA123"
     assert updates["summary"] == "Kitchen sink is leaking"
-    assert updates["outcome"] == "service_request"
     assert updates["call_type"] == "service_request"
+    assert "outcome" not in updates
     assert updates["urgency"] == "same_day"
 
 

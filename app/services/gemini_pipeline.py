@@ -412,7 +412,7 @@ class GeminiPipeline:
                 if self._caller_transcript_buf:
                     await self._flush_caller_transcript()
                 if self._kevin_transcript_buf:
-                    await self._flush_kevin_transcript()
+                    await self._flush_kevin_transcript(apply_side_effects=False)
                 reconnect_context = self._build_reconnect_context()
                 reconnected = await self.start(
                     send_greeting=False,
@@ -470,7 +470,11 @@ class GeminiPipeline:
                         self._unavailable_task = None
                     break
 
-    async def _flush_kevin_transcript(self, detect_goodbye: bool = False) -> bool:
+    async def _flush_kevin_transcript(
+        self,
+        detect_goodbye: bool = False,
+        apply_side_effects: bool = True,
+    ) -> bool:
         """Flush buffered Kevin transcript fragments as one message.
 
         Returns True when the flushed text is a goodbye and the caller should be disconnected.
@@ -492,10 +496,14 @@ class GeminiPipeline:
         ):
             self._caller_silence_prompted_at = time.time()
         self._exchange_count += 1
-        if is_owner_availability_hold(full_text):
+        if apply_side_effects and is_owner_availability_hold(full_text):
             self._start_owner_availability_wait()
 
-        return detect_goodbye and any(p in full_text.lower() for p in self.GOODBYE_PHRASES)
+        return (
+            apply_side_effects
+            and detect_goodbye
+            and any(p in full_text.lower() for p in self.GOODBYE_PHRASES)
+        )
 
     def _log_response_start_latency(self):
         if (

@@ -101,6 +101,31 @@ def test_business_prompt_defers_callback_number_until_callback_intent():
     assert "Still collect their name, reason for calling, and callback number" not in prompt
 
 
+def test_business_prompt_requires_explicit_callback_opt_in():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "Do not treat a normal service request as callback intent" in prompt
+    assert "Only confirm the callback number after the caller explicitly asks for" in prompt
+    assert "or clearly accepts your offer of a callback" in prompt
+    assert "Do not ask for callback confirmation immediately after detecting urgency" in prompt
+
+
+def test_business_prompt_limits_pricing_turns_to_one_followup():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "When answering pricing questions, answer first, then ask at most one short follow-up question" in prompt
+    assert "Do not bundle multiple intake questions into the same pricing answer" in prompt
+    assert "ask 1-2 smart follow-up questions" not in prompt
+
+
+def test_business_prompt_restricts_live_owner_hold_to_emergencies_or_live_transfer():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "Only try the owner live for emergencies or when the caller explicitly asks to speak with" in prompt
+    assert "For routine and same-day leads, take a concise message instead of putting the caller on hold" in prompt
+    assert "For urgent or same-day issues" not in prompt
+
+
 def test_personal_prompt_defers_callback_number_until_callback_intent():
     prompt = build_system_prompt(
         {
@@ -442,6 +467,44 @@ async def test_gemini_receive_reconnect_preserves_context_without_greeting(monke
             "reconnect_context": "Caller: Do you replace toilets?\nKevin: Yes, we do.",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_reconnect_does_not_start_owner_hold_from_partial_kevin_text(monkeypatch):
+    from websockets.exceptions import ConnectionClosedError
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def record_transcript(_speaker: str, _text: str):
+        return None
+
+    class ClosingWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise ConnectionClosedError(None, None)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=record_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = ClosingWebSocket()
+    pipeline._kevin_transcript_buf = ["Got it. I'm going to try Deli now, one moment."]
+
+    async def fake_start(**_kwargs):
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
+
+    await pipeline._receive_loop()
+
+    assert pipeline._waiting_for_owner_availability is False
+    assert pipeline._unavailable_task is None
 
 
 @pytest.mark.asyncio

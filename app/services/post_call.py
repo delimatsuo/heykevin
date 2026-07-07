@@ -83,6 +83,46 @@ def _call_summary_from_job_data(job_data: dict) -> str:
     return (job_data.get("issue_description") or job_data.get("message") or "").strip()
 
 
+def _digits_only(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def _normalize_callback_number(callback_number: str, caller_phone: str) -> str:
+    """Resolve last-four caller-ID confirmations to a dialable callback number."""
+    callback = (callback_number or "").strip()
+    if not callback:
+        return ""
+
+    callback_digits = _digits_only(callback)
+    caller_digits = _digits_only(caller_phone)
+
+    if len(callback_digits) >= 7:
+        return callback
+
+    if len(callback_digits) == 4:
+        if caller_digits.endswith(callback_digits):
+            return caller_phone
+        return ""
+
+    lowered = callback.lower()
+    if caller_phone and any(
+        phrase in lowered
+        for phrase in ("caller id", "caller-id", "same number", "that number", "this number")
+    ):
+        return caller_phone
+
+    return callback
+
+
+def _normalize_job_callback_data(job_data: dict) -> dict:
+    normalized = dict(job_data)
+    normalized["callback_number"] = _normalize_callback_number(
+        str(normalized.get("callback_number", "")),
+        str(normalized.get("caller_phone", "")),
+    )
+    return normalized
+
+
 def _call_record_updates_from_job_data(job_data: dict) -> dict:
     updates = {"caller_name": job_data.get("caller_name", "")}
     if job_data.get("callback_number"):
@@ -166,6 +206,8 @@ async def _process_personal(
 
     call_job_data = dict(job_data)
     call_job_data["caller_name"] = name
+    call_job_data.setdefault("caller_phone", caller_phone)
+    call_job_data = _normalize_job_callback_data(call_job_data)
     await call_db.save_call(call_sid, _call_record_updates_from_job_data(call_job_data))
 
     # Send simple SMS to owner (in their language)
@@ -227,6 +269,7 @@ async def _process_business(
                 job_data = {"caller_phone": caller_phone, "call_type": "unknown"}
     job_data["call_sid"] = call_sid
     job_data.setdefault("caller_phone", caller_phone)
+    job_data = _normalize_job_callback_data(job_data)
     contractor_id = contractor.get("contractor_id", "")
     if contractor_id:
         job_data["contractor_id"] = contractor_id
@@ -240,7 +283,9 @@ async def _process_business(
         job_id = existing_job["job_id"]
         logger.info(f"Job already exists for call_sid {call_sid}, skipping creation: {job_id}")
     else:
-        job_id = await job_db.save_job(job_data)
+        job_data_for_storage = dict(job_data)
+        job_data_for_storage.pop("transcript", None)
+        job_id = await job_db.save_job(job_data_for_storage)
 
     # 2b. Best-effort Jobber lead capture for service requests.
     if (

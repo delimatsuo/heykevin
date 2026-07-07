@@ -1,6 +1,7 @@
 """Receptionist prompt, call-state, and post-call scope guardrails."""
 
 import asyncio
+import inspect
 import json
 import os
 
@@ -86,6 +87,67 @@ def test_personal_prompt_confirms_only_phone_last_four():
     assert "Do not read back the full phone number" in prompt
     assert "Always read back phone numbers digit by digit" not in prompt
     assert "6-5-0, 6-9-1, 8-6-6-7" not in prompt
+
+
+def test_business_prompt_defers_callback_number_until_callback_intent():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "It is okay to ask for the caller's name early" in prompt
+    assert "Do not ask for or confirm a callback number" in prompt
+    assert "only after the caller asks for or agrees to a callback" in prompt
+    assert "Get their name, callback number" not in prompt
+    assert "If you don't have their callback number, ask for it" not in prompt
+    assert "urgency, and callback number" not in prompt
+    assert "Still collect their name, reason for calling, and callback number" not in prompt
+
+
+def test_personal_prompt_defers_callback_number_until_callback_intent():
+    prompt = build_system_prompt(
+        {
+            "owner_name": "Deli Matsuo",
+            "mode": "personal",
+            "effective_mode": "personal",
+        },
+        caller_phone="+16504228667",
+    )
+
+    assert "It is okay to ask for the caller's name early" in prompt
+    assert "Do not ask for or confirm a callback number" in prompt
+    assert "only after the caller asks for or agrees to a callback" in prompt
+    assert "name, message, and callback number" not in prompt
+    assert "collect any missing callback details" not in prompt
+
+
+def test_after_hours_prompt_defers_callback_number_until_callback_intent():
+    prompt = build_system_prompt(
+        {
+            **_plumbing_config(),
+            "business_hours_start": "8:00",
+            "business_hours_end": "5:00",
+        },
+        after_hours=True,
+        caller_phone="+16504228667",
+    )
+
+    assert "after-hours" in prompt.lower()
+    assert "only after the caller asks for or agrees to a callback" in prompt
+    assert "Still collect their name, reason for calling, and callback number" not in prompt
+
+
+def test_prompt_uses_caller_id_last_four_without_exposing_full_number():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "caller ID number ending in 8667" in prompt
+    assert "Is the number ending in 8667 the best number for a callback?" in prompt
+    assert "+16504228667" not in prompt
+    assert "6504228667" not in prompt
+
+
+def test_prompt_without_caller_id_asks_full_number_only_after_callback_intent():
+    prompt = build_system_prompt(_plumbing_config())
+
+    assert "If caller ID is missing or blocked" in prompt
+    assert "only after callback, scheduling, or follow-up intent is established" in prompt
 
 
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
@@ -239,6 +301,37 @@ async def test_gemini_owner_availability_hold_suppresses_caller_silence():
     finally:
         if pipeline._unavailable_task:
             pipeline._unavailable_task.cancel()
+
+
+def test_gemini_pipeline_receives_caller_phone_context():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="+16504228667",
+    )
+
+    assert pipeline._caller_phone == "+16504228667"
+    assert "caller ID number ending in 8667" in pipeline._system_prompt
+    assert "+16504228667" not in pipeline._system_prompt
+
+
+def test_media_stream_passes_caller_phone_to_gemini_pipeline():
+    from app.webhooks import media_stream
+
+    source = inspect.getsource(media_stream.media_stream_ws)
+    gemini_call = source.split("pipeline = GeminiPipeline(", 1)[1].split(
+        "logger.info(f\"Using Gemini Live pipeline", 1
+    )[0]
+
+    assert "caller_phone=active_call.caller_phone if active_call else \"\"" in gemini_call
 
 
 @pytest.mark.asyncio

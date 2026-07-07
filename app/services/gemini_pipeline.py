@@ -87,6 +87,7 @@ class GeminiPipeline:
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
         contractor_config: Optional[dict] = None,
+        caller_phone: str = "",
     ):
         self.on_audio_out = on_audio_out
         self.on_transcript = on_transcript
@@ -95,6 +96,7 @@ class GeminiPipeline:
         self.on_urgency_detected = on_urgency_detected
         self._call_sid = call_sid
         self._contractor_config = contractor_config or {}
+        self._caller_phone = caller_phone
 
         self._ws = None
         self._receive_task = None
@@ -131,7 +133,11 @@ class GeminiPipeline:
         else:
             from app.services.quiet_hours import is_business_hours
             self._after_hours = not is_business_hours(self._contractor_config)
-        self._system_prompt = build_system_prompt(self._contractor_config, after_hours=self._after_hours)
+        self._system_prompt = build_system_prompt(
+            self._contractor_config,
+            after_hours=self._after_hours,
+            caller_phone=self._caller_phone,
+        )
 
         # Voice selection — pick the best voice for the contractor's language
         user_language = self._contractor_config.get("user_language", "en")

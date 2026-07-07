@@ -162,6 +162,29 @@ def _lead_job_data(**overrides):
     return data
 
 
+def test_callback_last_four_confirmation_resolves_to_caller_id():
+    job_data = _lead_job_data(
+        caller_phone="+16506918667",
+        callback_number="ending in 8667",
+    )
+
+    normalized = post_call._normalize_job_callback_data(job_data)
+
+    assert normalized["callback_number"] == "+16506918667"
+    assert job_data["callback_number"] == "ending in 8667"
+
+
+def test_callback_last_four_confirmation_without_match_is_not_stored_as_number():
+    job_data = _lead_job_data(
+        caller_phone="+16506918667",
+        callback_number="ending in 8556",
+    )
+
+    normalized = post_call._normalize_job_callback_data(job_data)
+
+    assert normalized["callback_number"] == ""
+
+
 @pytest.mark.asyncio
 async def test_process_business_schedules_jobber_lead_capture_when_enabled(monkeypatch):
     captured = {}
@@ -220,6 +243,7 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
     assert captured["job_data"]["call_sid"] == "CA123"
     assert captured["job_data"]["contractor_id"] == "contractor-1"
     assert captured["saved_job_data"]["contractor_id"] == "contractor-1"
+    assert "transcript" not in captured["saved_job_data"]
     assert captured["job_data"]["transcript"] == "transcript"
 
 

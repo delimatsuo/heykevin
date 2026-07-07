@@ -79,6 +79,31 @@ def _post_call_gate(contractor: dict, action: ActionKey, call_sid: str, *, owner
     return decision, context
 
 
+def _call_summary_from_job_data(job_data: dict) -> str:
+    return (job_data.get("issue_description") or job_data.get("message") or "").strip()
+
+
+def _call_record_updates_from_job_data(job_data: dict) -> dict:
+    updates = {"caller_name": job_data.get("caller_name", "")}
+    if job_data.get("callback_number"):
+        updates["callback_number"] = job_data["callback_number"]
+
+    summary = _call_summary_from_job_data(job_data)
+    if summary:
+        updates["summary"] = summary
+
+    call_type = job_data.get("call_type", "")
+    if call_type:
+        updates["call_type"] = call_type
+        updates["outcome"] = call_type
+
+    urgency = job_data.get("urgency", "")
+    if urgency:
+        updates["urgency"] = urgency
+
+    return updates
+
+
 async def process_post_call(
     transcript_lines: list,
     caller_phone: str,
@@ -140,11 +165,9 @@ async def _process_personal(
     reason = job_data.get("issue_description", "") or job_data.get("message", "") or "No details"
     callback = job_data.get("callback_number", "") or caller_phone
 
-    # Save callback number and caller name to call record
-    call_updates = {"caller_name": name}
-    if job_data.get("callback_number"):
-        call_updates["callback_number"] = job_data["callback_number"]
-    await call_db.save_call(call_sid, call_updates)
+    call_job_data = dict(job_data)
+    call_job_data["caller_name"] = name
+    await call_db.save_call(call_sid, _call_record_updates_from_job_data(call_job_data))
 
     # Send simple SMS to owner (in their language)
     owner_phone = contractor_phone or getattr(settings, "user_phone", "")
@@ -209,11 +232,7 @@ async def _process_business(
     if contractor_id:
         job_data["contractor_id"] = contractor_id
 
-    # Save callback number and caller name to call record
-    call_updates = {"caller_name": job_data.get("caller_name", "")}
-    if job_data.get("callback_number"):
-        call_updates["callback_number"] = job_data["callback_number"]
-    await call_db.save_call(call_sid, call_updates)
+    await call_db.save_call(call_sid, _call_record_updates_from_job_data(job_data))
 
     # 2. Save to Firestore (with idempotency check on call_sid)
     job_data["transcript"] = transcript_text

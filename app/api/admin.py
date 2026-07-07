@@ -127,17 +127,41 @@ def _device_summary(device_doc) -> dict:
     }
 
 
-def _call_list_item(doc) -> dict:
+def _summary_from_job_card(data: dict) -> str:
+    return (data.get("issue_description") or data.get("message") or "").strip()
+
+
+def _job_cards_by_call_sid(db) -> dict[str, dict]:
+    try:
+        jobs = {}
+        for doc in db.collection("jobs").stream():
+            data = doc.to_dict() or {}
+            call_sid = data.get("call_sid", "")
+            if call_sid:
+                jobs[call_sid] = data
+        return jobs
+    except Exception:
+        return {}
+
+
+def _call_list_item(doc, job_cards: Optional[dict[str, dict]] = None) -> dict:
     data = doc.to_dict() or {}
-    summary = data.get("summary")
+    call_sid = data.get("call_sid") or doc.id
+    job_card = (job_cards or {}).get(call_sid, {})
+    summary = data.get("summary") or _summary_from_job_card(job_card)
     transcript = data.get("transcript")
     item = {
-        "call_sid": data.get("call_sid") or doc.id,
+        "call_sid": call_sid,
         "contractor_id": data.get("contractor_id", ""),
         "timestamp": data.get("timestamp"),
         "caller_phone": redact_phone(data.get("caller_phone", "")),
         "caller_name": data.get("caller_name", ""),
-        "outcome": data.get("outcome", ""),
+        "outcome": (
+            data.get("outcome")
+            or data.get("call_type")
+            or job_card.get("call_type")
+            or data.get("call_status", "")
+        ),
         "route": data.get("route") or data.get("route_taken", ""),
         "duration_seconds": data.get("duration_seconds") or data.get("duration") or 0,
         "has_summary": bool(summary),
@@ -290,8 +314,9 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
         contractor_data = doc.to_dict() or {}
         contractor = _sanitize_contractor_profile(contractor_id, contractor_data)
         device = _device_summary(device_doc)
+        job_cards = _job_cards_by_call_sid(db)
         recent_calls = [
-            _call_list_item(call_doc)
+            _call_list_item(call_doc, job_cards)
             for call_doc in db.collection("calls").stream()
             if (call_doc.to_dict() or {}).get("contractor_id") == contractor_id
         ]
@@ -359,7 +384,8 @@ async def admin_list_calls(request: Request, limit: int = 50):
 
     def _fetch():
         docs = list(db.collection("calls").stream())
-        calls = [_call_list_item(doc) for doc in docs]
+        job_cards = _job_cards_by_call_sid(db)
+        calls = [_call_list_item(doc, job_cards) for doc in docs]
         calls.sort(
             key=lambda item: _timestamp_sort_value(item.get("timestamp")),
             reverse=True,
@@ -414,8 +440,9 @@ async def admin_list_contractor_calls(
 
     def _fetch():
         docs = list(db.collection("calls").stream())
+        job_cards = _job_cards_by_call_sid(db)
         calls = [
-            _call_list_item(doc)
+            _call_list_item(doc, job_cards)
             for doc in docs
             if (doc.to_dict() or {}).get("contractor_id") == contractor_id
         ]

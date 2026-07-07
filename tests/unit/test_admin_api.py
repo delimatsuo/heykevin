@@ -311,6 +311,40 @@ async def test_admin_call_items_include_jobber_sync_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_admin_list_calls_uses_job_card_for_existing_call_summary(monkeypatch):
+    fake_db = _FakeFirestore(
+        [],
+        collections={
+            "calls": [
+                _FakeDoc("call-with-job", {
+                    "call_sid": "call-with-job",
+                    "contractor_id": "contractor-1",
+                    "timestamp": 100,
+                    "caller_phone": "+15550001111",
+                    "route_taken": "ai_screening",
+                }),
+            ],
+            "jobs": [
+                _FakeDoc("job-1", {
+                    "call_sid": "call-with-job",
+                    "call_type": "service_request",
+                    "issue_description": "Caller needs toilet replacement pricing",
+                    "urgency": "quote",
+                }),
+            ],
+        },
+    )
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_list_calls(_admin_request())
+
+    call = response["calls"][0]
+    assert call["outcome"] == "service_request"
+    assert call["has_summary"] is True
+    assert "summary" not in call
+
+
+@pytest.mark.asyncio
 async def test_admin_list_contractor_calls_filters_by_contractor(monkeypatch):
     fake_db = _FakeFirestore(
         [],

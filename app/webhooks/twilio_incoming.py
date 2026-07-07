@@ -929,6 +929,19 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
 
     # Clean up RTDB active call when call ends
     if status in ("completed", "busy", "no-answer", "canceled", "failed"):
+        updates = {"call_status": status, "ended_at": time.time()}
+        duration = form_data.get("CallDuration") or form_data.get("Duration")
+        if duration:
+            try:
+                updates["duration_seconds"] = int(duration)
+            except (TypeError, ValueError):
+                logger.warning("Invalid Twilio CallDuration for %s: %r", call_sid, duration)
+        if call_sid:
+            try:
+                from app.db.calls import save_call
+                await save_call(call_sid, updates)
+            except Exception as e:
+                logger.warning(f"Failed to save call status: {e}")
         try:
             from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
             _init_firebase()

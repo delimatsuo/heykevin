@@ -100,6 +100,7 @@ class GeminiPipeline:
 
         self._ws = None
         self._receive_task = None
+        self._audio_playout_task = None
         self._connected = False
 
         # State tracking
@@ -128,6 +129,7 @@ class GeminiPipeline:
         self._last_caller_transcript_flushed_at = 0.0
         self._last_caller_transcript_fragment_at = 0.0
         self._response_start_latency_logged = False
+        self._audio_queue: asyncio.Queue[tuple[bytes, float]] = asyncio.Queue()
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -182,6 +184,16 @@ class GeminiPipeline:
                     },
                     "input_audio_transcription": {},
                     "output_audio_transcription": {},
+                    "realtime_input_config": {
+                        "automatic_activity_detection": {
+                            "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                            "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
+                            "prefix_padding_ms": 100,
+                            "silence_duration_ms": 500,
+                        },
+                        "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+                        "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+                    },
                 }
             }
 
@@ -203,6 +215,7 @@ class GeminiPipeline:
 
             # Start receiving audio/text from Gemini
             self._receive_task = asyncio.create_task(self._receive_loop())
+            self._ensure_audio_playout_task()
 
             if start_background_tasks:
                 # Start silence timeout check
@@ -302,6 +315,9 @@ class GeminiPipeline:
             self._command_check_task.cancel()
         if self._receive_task:
             self._receive_task.cancel()
+        if self._audio_playout_task:
+            self._audio_playout_task.cancel()
+        await self._clear_audio_queue()
         if self._ws:
             try:
                 await self._ws.close()
@@ -328,6 +344,7 @@ class GeminiPipeline:
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
+                    await self._clear_audio_queue()
                     if self.on_clear_audio:
                         await self.on_clear_audio()
                     logger.info("Gemini: caller interrupted (barge-in)")
@@ -342,9 +359,7 @@ class GeminiPipeline:
                         if audio_b64:
                             self._log_response_start_latency()
                             pcm_24k = base64.b64decode(audio_b64)
-                            mulaw_chunk = pcm24k_to_mulaw(pcm_24k)
-                            await self.on_audio_out(mulaw_chunk)
-                            self._is_speaking = True
+                            await self._enqueue_model_audio(pcm_24k)
 
                 # Buffer Kevin's transcript fragments (sent word-by-word)
                 output_text = self._extract_transcript(server_content, "output")
@@ -365,11 +380,12 @@ class GeminiPipeline:
                 if model_turn.get("parts") and self._caller_transcript_buf:
                     await self._flush_caller_transcript()
 
-                # Handle turn completion — Kevin finished speaking
+                # Handle turn completion — Gemini finished generating. Audio
+                # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
-                    self._is_speaking = False
                     self._assistant_instruction_pending = False
                     if await self._flush_kevin_transcript(detect_goodbye=True):
+                        await self._wait_for_audio_playout()
                         logger.info("Kevin said goodbye — ending call in 2 seconds")
                         await asyncio.sleep(2)
                         if self.on_call_complete:
@@ -440,6 +456,70 @@ class GeminiPipeline:
         if isinstance(t, str):
             return t
         return ""
+
+    def _ensure_audio_playout_task(self):
+        """Ensure model audio is played to Twilio at roughly realtime speed."""
+        if self._audio_playout_task and not self._audio_playout_task.done():
+            return
+        self._audio_playout_task = asyncio.create_task(self._audio_playout_loop())
+
+    async def _enqueue_model_audio(self, pcm_24k: bytes):
+        """Convert Gemini PCM output and enqueue it for paced Twilio playback."""
+        mulaw_chunk = pcm24k_to_mulaw(pcm_24k)
+        if not mulaw_chunk:
+            return
+        duration_seconds = len(mulaw_chunk) / 8000.0
+        if not self._is_speaking and self._audio_queue.empty():
+            # A fresh model response after an interruption should be allowed to play.
+            self._interrupt_speaking = False
+        self._ensure_audio_playout_task()
+        await self._audio_queue.put((mulaw_chunk, duration_seconds))
+
+    async def _audio_playout_loop(self):
+        """Send Gemini audio to Twilio paced to playback duration.
+
+        Gemini server content may arrive faster than realtime. Twilio then buffers
+        media events, while the backend can mistakenly think Kevin is done talking.
+        Pacing keeps backend speaking state aligned with what the caller hears.
+        """
+        try:
+            while self._connected:
+                mulaw_chunk, duration_seconds = await self._audio_queue.get()
+                try:
+                    if self._interrupt_speaking:
+                        continue
+                    self._is_speaking = True
+                    await self.on_audio_out(mulaw_chunk)
+                    if duration_seconds > 0:
+                        await asyncio.sleep(duration_seconds * 0.9)
+                finally:
+                    self._audio_queue.task_done()
+                    if self._audio_queue.empty():
+                        self._is_speaking = False
+                        self._mark_kevin_activity()
+        except asyncio.CancelledError:
+            pass
+
+    async def _clear_audio_queue(self):
+        """Drop queued model audio after barge-in or shutdown."""
+        while True:
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._audio_queue.task_done()
+        self._is_speaking = False
+
+    async def _wait_for_audio_playout(self, timeout_seconds: float = 6.0):
+        """Wait briefly for paced audio to drain before final side effects."""
+        try:
+            await asyncio.wait_for(self._audio_queue.join(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out waiting for Gemini audio playout for %s",
+                self._call_sid[:8] or "unknown",
+            )
 
     def _build_reconnect_context(self, limit: int = 12) -> str:
         """Return recent transcript lines for a resumed Gemini session."""

@@ -421,6 +421,163 @@ async def test_gemini_reconnect_can_resume_without_repeating_greeting(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+
+    assert started
+    setup = sent_messages[0]["setup"]
+    realtime_config = setup["realtime_input_config"]
+    activity_detection = realtime_config["automatic_activity_detection"]
+    assert realtime_config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
+    assert realtime_config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
+    assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_HIGH"
+    assert activity_detection["end_of_speech_sensitivity"] == "END_SENSITIVITY_HIGH"
+    assert activity_detection["silence_duration_ms"] <= 500
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_audio_playout_is_paced_and_tracks_speaking(monkeypatch):
+    sent_chunks = []
+    sleep_calls = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.services.gemini_pipeline.asyncio.sleep", fake_sleep)
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append((len(chunk), pipeline._is_speaking))
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=record_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+
+    half_second_pcm_24k = b"\0\0" * 12_000
+    await pipeline._enqueue_model_audio(half_second_pcm_24k)
+    await pipeline._enqueue_model_audio(half_second_pcm_24k)
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    assert len(sent_chunks) == 2
+    assert all(was_speaking for _, was_speaking in sent_chunks)
+    assert any(delay >= 0.4 for delay in sleep_calls)
+    assert pipeline._is_speaking is False
+    assert pipeline._last_kevin_speech_time > 0
+
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_goodbye_waits_for_audio_playout_before_hangup(monkeypatch):
+    real_sleep = asyncio.sleep
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def fake_sleep(_delay: float):
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.services.gemini_pipeline.asyncio.sleep", fake_sleep)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        completed.set()
+
+    class FakeAudioQueue:
+        async def join(self):
+            join_started.set()
+            await release_join.wait()
+
+    class OneMessageWebSocket:
+        def __init__(self, message: dict):
+            self._messages = [json.dumps(message)]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._messages:
+                raise StopAsyncIteration
+            return self._messages.pop(0)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = OneMessageWebSocket({"serverContent": {"turnComplete": True}})
+    pipeline._audio_queue = FakeAudioQueue()
+
+    async def goodbye_flush(*_args, **_kwargs):
+        return True
+
+    pipeline._flush_kevin_transcript = goodbye_flush
+
+    task = asyncio.create_task(pipeline._receive_loop())
+
+    await asyncio.wait_for(join_started.wait(), timeout=1)
+    assert not completed.is_set()
+
+    release_join.set()
+    await asyncio.wait_for(completed.wait(), timeout=1)
+    await task
+
+
+@pytest.mark.asyncio
 async def test_gemini_receive_reconnect_preserves_context_without_greeting(monkeypatch):
     from websockets.exceptions import ConnectionClosedError
 

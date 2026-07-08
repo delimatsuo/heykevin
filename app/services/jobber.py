@@ -283,10 +283,39 @@ def _compact_text(value: object, limit: int = 240) -> str:
 
 
 def _last_four(value: object) -> str:
-    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    digits = _phone_digits(value)
     if len(digits) < 4:
         return ""
     return digits[-4:]
+
+
+def _phone_digits(value: object) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _phone_numbers_match(caller_phone: object, jobber_phone: object) -> bool:
+    caller_digits = _phone_digits(caller_phone)
+    jobber_digits = _phone_digits(jobber_phone)
+    if not caller_digits or not jobber_digits:
+        return False
+    if caller_digits == jobber_digits:
+        return True
+    if len(caller_digits) == 11 and caller_digits.startswith("1") and jobber_digits == caller_digits[1:]:
+        return True
+    if len(jobber_digits) == 11 and jobber_digits.startswith("1") and caller_digits == jobber_digits[1:]:
+        return True
+    return False
+
+
+def _client_phone_matches(client: dict, caller_phone: str) -> bool:
+    for phone in client.get("phones") or []:
+        if not isinstance(phone, dict):
+            continue
+        if _phone_numbers_match(caller_phone, phone.get("normalizedPhoneNumber")):
+            return True
+        if _phone_numbers_match(caller_phone, phone.get("number")):
+            return True
+    return False
 
 
 def _redact_phone_numbers(text: str) -> str:
@@ -325,7 +354,12 @@ def _normalize_customer_memory(client: dict | None) -> Optional[dict]:
         })
 
     notes = []
-    for note in _connection_nodes(client.get("notes")):
+    note_nodes = sorted(
+        _connection_nodes(client.get("notes")),
+        key=lambda note: note.get("createdAt") or "",
+        reverse=True,
+    )
+    for note in note_nodes:
         notes.append({
             "id": note.get("id", ""),
             "message": _compact_text(note.get("message"), 500),
@@ -434,7 +468,7 @@ async def lookup_customer_memory(auth: str | dict, phone: str) -> Optional[dict]
 
     query = """
     query LookupCustomerMemory($phone: String!) {
-        clients(searchTerm: $phone, searchFields: [PHONES], first: 1) {
+        clients(searchTerm: $phone, searchFields: [PHONES], first: 5) {
             nodes {
                 id
                 name
@@ -495,9 +529,10 @@ async def lookup_customer_memory(auth: str | dict, phone: str) -> Optional[dict]
     """
     data = await _graphql_request_with_refresh(auth, query, {"phone": phone})
     nodes = ((data or {}).get("clients") or {}).get("nodes") or []
-    if not nodes:
+    matched_client = next((node for node in nodes if _client_phone_matches(node, phone)), None)
+    if not matched_client:
         return None
-    return _normalize_customer_memory(nodes[0])
+    return _normalize_customer_memory(matched_client)
 
 
 def format_customer_memory_for_prompt(memory: Optional[dict], caller_phone: str = "") -> str:

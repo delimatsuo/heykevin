@@ -532,6 +532,65 @@ async def test_gemini_setup_includes_jobber_customer_memory_when_lookup_succeeds
 
 
 @pytest.mark.asyncio
+async def test_gemini_greeting_can_use_jobber_customer_name_when_memory_loaded(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    async def fake_lookup_customer_memory(_auth, _phone):
+        return {"client": {"id": "client-1", "name": "Jonathan Caller"}}
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.lookup_customer_memory",
+        fake_lookup_customer_memory,
+    )
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config={
+            **_plumbing_config(),
+            "jobber_access_token": "jobber-access-token",
+        },
+        caller_phone="+16506918667",
+    )
+
+    started = await pipeline.start(send_greeting=True, start_background_tasks=False)
+
+    assert started
+    greeting_text = sent_messages[1]["client_content"]["turns"][0]["parts"][0]["text"]
+    assert "If CUSTOMER MEMORY FROM JOBBER identifies the caller" in greeting_text
+    assert "use their first name naturally" in greeting_text
+    assert "Do not mention Jobber or private notes" in greeting_text
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
 async def test_gemini_setup_does_not_wait_long_for_jobber_memory(monkeypatch):
     sent_messages = []
 

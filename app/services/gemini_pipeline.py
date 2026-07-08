@@ -307,23 +307,32 @@ class GeminiPipeline:
             )
             owner_name = self._contractor_config.get("owner_name", settings.user_name)
             mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
+            memory_greeting_hint = ""
+            if memory_context:
+                memory_greeting_hint = (
+                    " If CUSTOMER MEMORY FROM JOBBER identifies the caller, use their first name naturally. "
+                    "Do not mention Jobber or private notes."
+                )
 
             if mode == "personal":
                 greeting_prompt = (
-                    f"Greet the caller now. Say: 'Hi, this is Kevin, "
+                    f"Greet the caller now.{memory_greeting_hint} If no customer name is known, say: "
+                    f"'Hi, this is Kevin, "
                     f"{owner_name.split()[0]}'s assistant. How can I help?'"
                 )
             elif self._after_hours:
                 hours_start = self._contractor_config.get("business_hours_start", "8:00")
                 hours_end = self._contractor_config.get("business_hours_end", "5:00")
                 greeting_prompt = (
-                    f"Greet the caller now. You are answering the phone for {business_name}. "
+                    f"Greet the caller now.{memory_greeting_hint} "
+                    f"You are answering the phone for {business_name}. "
                     f"The business is currently closed — hours are {hours_start} to {hours_end}. "
                     f"Offer to take a message."
                 )
             else:
                 greeting_prompt = (
-                    f"Greet the caller now. Say: 'Hi, thanks for calling {business_name}, "
+                    f"Greet the caller now.{memory_greeting_hint} If no customer name is known, say: "
+                    f"'Hi, thanks for calling {business_name}, "
                     f"this is Kevin. How can I help you?'"
                 )
 

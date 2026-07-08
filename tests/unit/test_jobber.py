@@ -501,6 +501,22 @@ def _customer_memory_response() -> dict:
     }
 
 
+def _client_node(name: str, phone: str, client_id: str = "client-1") -> dict:
+    client = _customer_memory_response()["clients"]["nodes"][0]
+    client = json.loads(json.dumps(client))
+    client["id"] = client_id
+    client["name"] = name
+    client["phones"] = [
+        {
+            "number": phone,
+            "normalizedPhoneNumber": phone,
+            "primary": True,
+            "smsAllowed": True,
+        }
+    ]
+    return client
+
+
 @pytest.mark.asyncio
 async def test_lookup_customer_memory_returns_recent_jobber_context(monkeypatch):
     calls = []
@@ -533,6 +549,55 @@ async def test_lookup_customer_memory_returns_recent_jobber_context(monkeypatch)
     assert "requests(first: 3)" in query
 
 
+@pytest.mark.asyncio
+async def test_lookup_customer_memory_selects_exact_returned_phone_match(monkeypatch):
+    calls = []
+
+    async def fake_graphql(auth, query, variables):
+        calls.append((auth, query, variables))
+        return {
+            "clients": {
+                "nodes": [
+                    _client_node("Wrong Person", "+16505550000", client_id="wrong-client"),
+                    _client_node("Jonathan Caller", "+16506918667", client_id="correct-client"),
+                ]
+            }
+        }
+
+    monkeypatch.setattr(jobber, "_graphql_request_with_refresh", fake_graphql)
+
+    memory = await jobber.lookup_customer_memory(
+        {"jobber_access_token": "access-token"},
+        "+16506918667",
+    )
+
+    assert memory["client"]["id"] == "correct-client"
+    assert memory["client"]["name"] == "Jonathan Caller"
+    assert "clients(searchTerm: $phone" in calls[0][1]
+    assert "first: 5" in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_lookup_customer_memory_rejects_unmatched_returned_phone(monkeypatch):
+    async def fake_graphql(_auth, _query, _variables):
+        return {
+            "clients": {
+                "nodes": [
+                    _client_node("Wrong Person", "+16505550000", client_id="wrong-client"),
+                ]
+            }
+        }
+
+    monkeypatch.setattr(jobber, "_graphql_request_with_refresh", fake_graphql)
+
+    memory = await jobber.lookup_customer_memory(
+        {"jobber_access_token": "access-token"},
+        "+16506918667",
+    )
+
+    assert memory is None
+
+
 def test_format_customer_memory_for_prompt_masks_phone_and_prefers_structured_context():
     memory = jobber._normalize_customer_memory(
         _customer_memory_response()["clients"]["nodes"][0],
@@ -553,6 +618,29 @@ def test_format_customer_memory_for_prompt_masks_phone_and_prefers_structured_co
     assert "Caller wants toilet replacement" in prompt_context
     assert "+16506918667" not in prompt_context
     assert "16506918667" not in prompt_context
+
+
+def test_customer_memory_notes_are_newest_first_for_conflict_resolution():
+    client = _customer_memory_response()["clients"]["nodes"][0]
+    client["notes"]["nodes"] = [
+        {
+            "id": "old-note",
+            "message": "Old note says the property is 100 Test Sink Ave in San Francisco.",
+            "createdAt": "2026-07-08T14:31:55Z",
+            "pinned": False,
+        },
+        {
+            "id": "new-note",
+            "message": "New correction says use 100 Market Street in Lynnfield.",
+            "createdAt": "2026-07-08T14:39:50Z",
+            "pinned": False,
+        },
+    ]
+
+    memory = jobber._normalize_customer_memory(client)
+
+    assert memory["notes"][0]["message"] == "New correction says use 100 Market Street in Lynnfield."
+    assert memory["notes"][1]["message"] == "Old note says the property is 100 Test Sink Ave in San Francisco."
 
 
 def test_format_customer_memory_returns_empty_without_match():

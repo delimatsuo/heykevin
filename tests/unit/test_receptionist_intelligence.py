@@ -115,7 +115,17 @@ def test_business_prompt_limits_pricing_turns_to_one_followup():
 
     assert "When answering pricing questions, answer first, then ask at most one short follow-up question" in prompt
     assert "Do not bundle multiple intake questions into the same pricing answer" in prompt
+    assert "Keep spoken turns brief" in prompt
+    assert "one short question at a time" in prompt
     assert "ask 1-2 smart follow-up questions" not in prompt
+
+
+def test_business_prompt_does_not_reask_known_fixture_category():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "If the caller already named the fixture, appliance, or object" in prompt
+    assert "do not ask which fixture or category it is" in prompt
+    assert "Is it a sink, toilet, water heater, or appliance connection?" not in prompt
 
 
 def test_business_prompt_restricts_live_owner_hold_to_emergencies_or_live_transfer():
@@ -470,6 +480,85 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
     assert activity_detection["end_of_speech_sensitivity"] == "END_SENSITIVITY_HIGH"
     assert activity_detection["silence_duration_ms"] <= 500
     await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+
+    assert started
+    generation_config = sent_messages[0]["setup"]["generation_config"]
+    assert generation_config["thinking_config"] == {"thinking_budget": 0}
+    assert generation_config["temperature"] <= 0.5
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_process_audio_uses_current_realtime_audio_field():
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = FakeWebSocket()
+
+    await pipeline.process_audio_in(b"\xff" * 160)
+
+    realtime_input = sent_messages[0]["realtime_input"]
+    assert "audio" in realtime_input
+    assert realtime_input["audio"]["mime_type"] == "audio/pcm;rate=16000"
+    assert "data" in realtime_input["audio"]
+    assert "media_chunks" not in realtime_input
 
 
 @pytest.mark.asyncio

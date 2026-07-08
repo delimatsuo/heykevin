@@ -1,6 +1,7 @@
 """Application configuration. Loads from .env locally, Secret Manager in production."""
 
-import os
+import json as _json
+from typing import Optional as _Optional
 
 from pydantic_settings import BaseSettings
 
@@ -56,6 +57,9 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
+    gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
+    gemini_live_thinking_budget: int = 0
+    gemini_live_temperature: float = 0.4
 
     # Twilio Voice SDK (for iOS app)
     twilio_api_key_sid: str = ""      # API Key SID (not the Account SID)
@@ -165,8 +169,6 @@ def validate_runtime_safety() -> None:
     if errors:
         raise RuntimeError("Unsafe runtime configuration: " + "; ".join(errors))
 
-import json as _json
-from typing import Optional as _Optional
 _dial_in_cache: _Optional[dict] = None
 
 

@@ -530,6 +530,56 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_gemini_setup_uses_minimal_thinking_for_gemini_3_models(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.settings.gemini_live_model",
+        "gemini-3-flash-native-audio-latest",
+    )
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+
+    assert started
+    generation_config = sent_messages[0]["setup"]["generation_config"]
+    assert generation_config["thinking_config"] == {"thinking_level": "minimal"}
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
 async def test_gemini_process_audio_uses_current_realtime_audio_field():
     sent_messages = []
 

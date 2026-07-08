@@ -14,6 +14,7 @@ import websockets
 
 from app.config import settings
 from app.services.entitlements import effective_mode
+from app.services.jobber import format_customer_memory_for_prompt, lookup_customer_memory
 from app.services.voice_pipeline import (
     _log_tool_execution_failure,
     _tool_execution_error_response,
@@ -37,6 +38,7 @@ GEMINI_VOICES = {
 GEMINI_VOICE_DEFAULT = "Puck"
 
 GEMINI_MODEL = "gemini-2.5-flash-native-audio-latest"
+JOBBER_MEMORY_TIMEOUT_SECONDS = 0.9
 
 
 def _gemini_ws_url() -> str:
@@ -122,6 +124,7 @@ class GeminiPipeline:
 
         # Transcript accumulation (for post-call processing)
         self._transcript_lines: list[str] = []
+        self._jobber_customer_memory_context = ""
 
         # Buffers for streaming transcript fragments (Gemini sends word-by-word)
         self._kevin_transcript_buf: list[str] = []
@@ -175,6 +178,55 @@ class GeminiPipeline:
 
         return config
 
+    def _start_jobber_customer_memory_lookup(self) -> tuple[asyncio.Task, float] | None:
+        """Start Jobber customer memory lookup without blocking Gemini connection."""
+        if self._jobber_customer_memory_context:
+            return None
+        if not self._caller_phone or not self._contractor_config.get("jobber_access_token"):
+            return None
+        return (
+            asyncio.create_task(lookup_customer_memory(self._contractor_config, self._caller_phone)),
+            time.monotonic(),
+        )
+
+    async def _resolve_jobber_customer_memory_context(
+        self,
+        lookup: tuple[asyncio.Task, float] | None,
+    ) -> str:
+        """Return formatted Jobber memory context when it is available inside the latency budget."""
+        if self._jobber_customer_memory_context:
+            return self._jobber_customer_memory_context
+        if not lookup:
+            return ""
+
+        task, started_at = lookup
+        elapsed = max(0.0, time.monotonic() - started_at)
+        remaining = max(0.001, JOBBER_MEMORY_TIMEOUT_SECONDS - elapsed)
+        try:
+            memory = await asyncio.wait_for(task, timeout=remaining)
+        except asyncio.TimeoutError:
+            logger.info(
+                "Jobber customer memory lookup timed out for call %s",
+                self._call_sid[:8] or "unknown",
+            )
+            return ""
+        except Exception as e:
+            logger.warning(
+                "Jobber customer memory lookup failed for call %s: exception_type=%s",
+                self._call_sid[:8] or "unknown",
+                type(e).__name__,
+            )
+            return ""
+
+        context = format_customer_memory_for_prompt(memory, caller_phone=self._caller_phone)
+        if context:
+            self._jobber_customer_memory_context = context
+            logger.info(
+                "Jobber customer memory loaded for call %s",
+                self._call_sid[:8] or "unknown",
+            )
+        return context
+
     async def start(
         self,
         send_greeting: bool = True,
@@ -182,7 +234,9 @@ class GeminiPipeline:
         reconnect_context: str = "",
     ) -> bool:
         """Connect to Gemini Live API and send setup message."""
+        memory_lookup = None
         try:
+            memory_lookup = self._start_jobber_customer_memory_lookup()
             self._ws = await websockets.connect(
                 _gemini_ws_url(),
                 max_size=10 * 1024 * 1024,  # 10MB max message
@@ -190,6 +244,9 @@ class GeminiPipeline:
 
             # Build setup message
             system_prompt = self._system_prompt_with_reconnect_context(reconnect_context)
+            memory_context = await self._resolve_jobber_customer_memory_context(memory_lookup)
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n{memory_context}"
             setup = {
                 "setup": {
                     "model": f"models/{self._model}",
@@ -282,6 +339,8 @@ class GeminiPipeline:
             return True
 
         except Exception as e:
+            if memory_lookup:
+                memory_lookup[0].cancel()
             logger.error(f"Gemini connect failed: {e}", exc_info=True)
             return False
 

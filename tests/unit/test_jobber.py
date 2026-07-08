@@ -387,6 +387,179 @@ async def test_lookup_customer_preserves_billing_address_street_compatibility(mo
     assert customer["billingAddress"]["street2"] == "Suite 4"
 
 
+def _customer_memory_response() -> dict:
+    return {
+        "clients": {
+            "nodes": [
+                {
+                    "id": "client-1",
+                    "name": "Jonathan Caller",
+                    "firstName": "Jonathan",
+                    "lastName": "Caller",
+                    "jobberWebUri": "https://secure.getjobber.com/clients/145587198",
+                    "phones": [
+                        {
+                            "number": "+16506918667",
+                            "normalizedPhoneNumber": "+16506918667",
+                            "primary": True,
+                            "smsAllowed": True,
+                        }
+                    ],
+                    "clientProperties": {
+                        "nodes": [
+                            {
+                                "id": "property-1",
+                                "name": "Jonathan Test Residence",
+                                "jobberWebUri": "https://secure.getjobber.com/properties/152178712",
+                                "address": {
+                                    "street": "100 Market Street",
+                                    "street1": "100 Market Street",
+                                    "street2": "",
+                                    "city": "Lynnfield",
+                                    "province": "Massachusetts",
+                                    "postalCode": "01940",
+                                    "country": "United States",
+                                },
+                            }
+                        ]
+                    },
+                    "notes": {
+                        "nodes": [
+                            {
+                                "id": "note-2",
+                                "message": (
+                                    "TEST MEMORY SEED UPDATE: Structured Jobber property address is now "
+                                    "Jonathan Test Residence, 100 Market Street, Lynnfield, MA 01940. "
+                                    "Prior completed service remains kitchen sink drain/P-trap repair; "
+                                    "future scenario remains toilet replacement / comfort-height toilet."
+                                ),
+                                "createdAt": "2026-07-08T12:00:00Z",
+                                "pinned": False,
+                            }
+                        ]
+                    },
+                    "jobs": {
+                        "nodes": [
+                            {
+                                "id": "job-1",
+                                "title": "Completed sink repair - Hey Kevin memory test",
+                                "jobNumber": "2",
+                                "jobStatus": "requires_invoicing",
+                                "completedAt": None,
+                                "instructions": "Kitchen sink drain and P-trap repaired.",
+                                "jobberWebUri": "https://secure.getjobber.com/jobs/150272337",
+                                "property": {
+                                    "id": "property-1",
+                                    "name": "Jonathan Test Residence",
+                                    "address": {
+                                        "street1": "100 Market Street",
+                                        "city": "Lynnfield",
+                                        "province": "Massachusetts",
+                                        "postalCode": "01940",
+                                        "country": "United States",
+                                    },
+                                },
+                                "visits": {
+                                    "nodes": [
+                                        {
+                                            "title": "Sink repair visit",
+                                            "completedAt": "2026-06-20T15:00:00Z",
+                                            "isComplete": True,
+                                            "visitStatus": "COMPLETED",
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                    "requests": {
+                        "nodes": [
+                            {
+                                "id": "request-1",
+                                "title": "Caller wants toilet replacement for an upgrade and asked for pricing",
+                                "requestStatus": "new",
+                                "createdAt": "2026-07-07T15:18:00Z",
+                                "updatedAt": "2026-07-07T15:18:00Z",
+                                "jobberWebUri": "https://secure.getjobber.com/requests/31483314",
+                                "property": {
+                                    "id": "property-1",
+                                    "name": "Jonathan Test Residence",
+                                    "address": {
+                                        "street1": "100 Market Street",
+                                        "city": "Lynnfield",
+                                        "province": "Massachusetts",
+                                        "postalCode": "01940",
+                                        "country": "United States",
+                                    },
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_lookup_customer_memory_returns_recent_jobber_context(monkeypatch):
+    calls = []
+
+    async def fake_graphql(auth, query, variables):
+        calls.append((auth, query, variables))
+        return _customer_memory_response()
+
+    monkeypatch.setattr(jobber, "_graphql_request_with_refresh", fake_graphql)
+
+    memory = await jobber.lookup_customer_memory(
+        {"jobber_access_token": "access-token"},
+        "+16506918667",
+    )
+
+    assert memory["client"]["name"] == "Jonathan Caller"
+    assert memory["properties"][0]["address"]["street1"] == "100 Market Street"
+    assert memory["properties"][0]["address"]["city"] == "Lynnfield"
+    assert "Prior completed service remains kitchen sink" in memory["notes"][0]["message"]
+    assert memory["jobs"][0]["title"] == "Completed sink repair - Hey Kevin memory test"
+    assert memory["jobs"][0]["visits"][0]["visitStatus"] == "COMPLETED"
+    assert memory["requests"][0]["title"].startswith("Caller wants toilet replacement")
+    assert calls[0][2] == {"phone": "+16506918667"}
+    query = calls[0][1]
+    assert "clients(searchTerm: $phone" in query
+    assert "searchFields: [PHONES]" in query
+    assert "clientProperties(first: 3)" in query
+    assert "notes(first: 3)" in query
+    assert "jobs(first: 3)" in query
+    assert "requests(first: 3)" in query
+
+
+def test_format_customer_memory_for_prompt_masks_phone_and_prefers_structured_context():
+    memory = jobber._normalize_customer_memory(
+        _customer_memory_response()["clients"]["nodes"][0],
+    )
+
+    prompt_context = jobber.format_customer_memory_for_prompt(
+        memory,
+        caller_phone="+16506918667",
+    )
+
+    assert "CUSTOMER MEMORY FROM JOBBER" in prompt_context
+    assert "Jonathan Caller" in prompt_context
+    assert "caller ID ending in 8667" in prompt_context
+    assert "100 Market Street" in prompt_context
+    assert "Lynnfield" in prompt_context
+    assert "Completed sink repair - Hey Kevin memory test" in prompt_context
+    assert "Prior completed service remains kitchen sink" in prompt_context
+    assert "Caller wants toilet replacement" in prompt_context
+    assert "+16506918667" not in prompt_context
+    assert "16506918667" not in prompt_context
+
+
+def test_format_customer_memory_returns_empty_without_match():
+    assert jobber.format_customer_memory_for_prompt(None, caller_phone="+16506918667") == ""
+    assert jobber.format_customer_memory_for_prompt({}, caller_phone="+16506918667") == ""
+
+
 @pytest.mark.asyncio
 async def test_create_client_builds_jobber_client_payload(monkeypatch):
     calls = []

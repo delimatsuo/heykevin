@@ -431,6 +431,166 @@ async def test_gemini_reconnect_can_resume_without_repeating_greeting(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_gemini_setup_includes_jobber_customer_memory_when_lookup_succeeds(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    async def fake_lookup_customer_memory(auth, phone):
+        assert auth["jobber_access_token"] == "jobber-access-token"
+        assert phone == "+16506918667"
+        return {
+            "client": {"id": "client-1", "name": "Jonathan Caller"},
+            "properties": [
+                {
+                    "name": "Jonathan Test Residence",
+                    "address": {
+                        "street1": "100 Market Street",
+                        "city": "Lynnfield",
+                        "province": "Massachusetts",
+                        "postalCode": "01940",
+                    },
+                }
+            ],
+            "notes": [
+                {
+                    "message": (
+                        "TEST MEMORY SEED UPDATE: Prior completed service remains "
+                        "kitchen sink drain/P-trap repair."
+                    )
+                }
+            ],
+            "jobs": [
+                {
+                    "title": "Completed sink repair - Hey Kevin memory test",
+                    "jobNumber": "2",
+                    "jobStatus": "requires_invoicing",
+                    "visits": [{"visitStatus": "COMPLETED", "isComplete": True}],
+                }
+            ],
+            "requests": [
+                {
+                    "title": "Caller wants toilet replacement for an upgrade and asked for pricing",
+                    "requestStatus": "new",
+                }
+            ],
+        }
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.lookup_customer_memory",
+        fake_lookup_customer_memory,
+    )
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config={
+            **_plumbing_config(),
+            "jobber_access_token": "jobber-access-token",
+        },
+        caller_phone="+16506918667",
+    )
+
+    started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+
+    assert started
+    setup_text = sent_messages[0]["setup"]["system_instruction"]["parts"][0]["text"]
+    assert "CUSTOMER MEMORY FROM JOBBER" in setup_text
+    assert "Jonathan Caller" in setup_text
+    assert "100 Market Street" in setup_text
+    assert "Completed sink repair - Hey Kevin memory test" in setup_text
+    assert "Prior completed service remains kitchen sink" in setup_text
+    assert "Caller wants toilet replacement" in setup_text
+    assert "+16506918667" not in setup_text
+    assert "16506918667" not in setup_text
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_setup_does_not_wait_long_for_jobber_memory(monkeypatch):
+    sent_messages = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str):
+            sent_messages.append(json.loads(payload))
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    async def slow_lookup_customer_memory(_auth, _phone):
+        await asyncio.sleep(0.1)
+        return {"client": {"name": "Jonathan Caller"}}
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.lookup_customer_memory",
+        slow_lookup_customer_memory,
+    )
+    monkeypatch.setattr("app.services.gemini_pipeline.JOBBER_MEMORY_TIMEOUT_SECONDS", 0.01)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config={
+            **_plumbing_config(),
+            "jobber_access_token": "jobber-access-token",
+        },
+        caller_phone="+16506918667",
+    )
+
+    started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+
+    assert started
+    setup_text = sent_messages[0]["setup"]["system_instruction"]["parts"][0]["text"]
+    assert "CUSTOMER MEMORY FROM JOBBER" not in setup_text
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
 async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
     sent_messages = []
 

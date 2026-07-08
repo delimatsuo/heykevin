@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import time
 import httpx
 from typing import Optional
@@ -267,6 +268,139 @@ def _normalize_client_address(client: dict) -> dict:
     return client
 
 
+def _connection_nodes(connection: dict | None) -> list[dict]:
+    if not isinstance(connection, dict):
+        return []
+    nodes = connection.get("nodes") or []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def _compact_text(value: object, limit: int = 240) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 3)].rstrip()}..."
+
+
+def _last_four(value: object) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) < 4:
+        return ""
+    return digits[-4:]
+
+
+def _redact_phone_numbers(text: str) -> str:
+    return re.sub(r"\+?\d[\d\s().-]{7,}\d", "[phone redacted]", text)
+
+
+def _format_address(address: dict | None) -> str:
+    if not isinstance(address, dict):
+        return ""
+
+    street = address.get("street") or " ".join(
+        part for part in [address.get("street1"), address.get("street2")] if part
+    )
+    city = address.get("city", "")
+    province = address.get("province", "")
+    postal_code = address.get("postalCode", "")
+    country = address.get("country", "")
+
+    locality = " ".join(part for part in [province, postal_code] if part)
+    parts = [part for part in [street, city, locality, country] if part]
+    return ", ".join(parts)
+
+
+def _normalize_customer_memory(client: dict | None) -> Optional[dict]:
+    """Return the small Jobber customer slice Kevin can safely use as context."""
+    if not isinstance(client, dict) or not client.get("id"):
+        return None
+
+    properties = []
+    for prop in _connection_nodes(client.get("clientProperties")):
+        properties.append({
+            "id": prop.get("id", ""),
+            "name": prop.get("name", ""),
+            "jobberWebUri": prop.get("jobberWebUri", ""),
+            "address": prop.get("address") or {},
+        })
+
+    notes = []
+    for note in _connection_nodes(client.get("notes")):
+        notes.append({
+            "id": note.get("id", ""),
+            "message": _compact_text(note.get("message"), 500),
+            "createdAt": note.get("createdAt", ""),
+            "pinned": bool(note.get("pinned", False)),
+        })
+
+    jobs = []
+    for job in _connection_nodes(client.get("jobs")):
+        visits = []
+        for visit in _connection_nodes(job.get("visits")):
+            visits.append({
+                "title": visit.get("title", ""),
+                "completedAt": visit.get("completedAt", ""),
+                "isComplete": bool(visit.get("isComplete", False)),
+                "visitStatus": visit.get("visitStatus", ""),
+            })
+        job_property = job.get("property") if isinstance(job.get("property"), dict) else {}
+        jobs.append({
+            "id": job.get("id", ""),
+            "title": job.get("title", ""),
+            "jobNumber": job.get("jobNumber", ""),
+            "jobStatus": job.get("jobStatus", ""),
+            "completedAt": job.get("completedAt", ""),
+            "instructions": _compact_text(job.get("instructions"), 280),
+            "jobberWebUri": job.get("jobberWebUri", ""),
+            "property": {
+                "id": job_property.get("id", ""),
+                "name": job_property.get("name", ""),
+                "address": job_property.get("address") or {},
+            },
+            "visits": visits,
+        })
+
+    requests = []
+    for request in _connection_nodes(client.get("requests")):
+        request_property = request.get("property") if isinstance(request.get("property"), dict) else {}
+        requests.append({
+            "id": request.get("id", ""),
+            "title": request.get("title", ""),
+            "requestStatus": request.get("requestStatus", ""),
+            "createdAt": request.get("createdAt", ""),
+            "updatedAt": request.get("updatedAt", ""),
+            "jobberWebUri": request.get("jobberWebUri", ""),
+            "property": {
+                "id": request_property.get("id", ""),
+                "name": request_property.get("name", ""),
+                "address": request_property.get("address") or {},
+            },
+        })
+
+    phone_last4s = []
+    for phone in client.get("phones") or []:
+        last4 = _last_four((phone or {}).get("normalizedPhoneNumber") or (phone or {}).get("number"))
+        if last4 and last4 not in phone_last4s:
+            phone_last4s.append(last4)
+
+    return {
+        "client": {
+            "id": client.get("id", ""),
+            "name": client.get("name", ""),
+            "firstName": client.get("firstName", ""),
+            "lastName": client.get("lastName", ""),
+            "isLead": client.get("isLead", False),
+            "leadSource": client.get("leadSource", ""),
+            "jobberWebUri": client.get("jobberWebUri", ""),
+        },
+        "phone_last4s": phone_last4s,
+        "properties": properties,
+        "notes": notes,
+        "jobs": jobs,
+        "requests": requests,
+    }
+
+
 async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:
     """Look up a Jobber client by phone number."""
     if not phone:
@@ -291,6 +425,145 @@ async def lookup_customer(auth: str | dict, phone: str) -> Optional[dict]:
     if data and data.get("clients", {}).get("nodes"):
         return _normalize_client_address(data["clients"]["nodes"][0])
     return None
+
+
+async def lookup_customer_memory(auth: str | dict, phone: str) -> Optional[dict]:
+    """Look up a Jobber client and recent context for receptionist memory."""
+    if not phone:
+        return None
+
+    query = """
+    query LookupCustomerMemory($phone: String!) {
+        clients(searchTerm: $phone, searchFields: [PHONES], first: 1) {
+            nodes {
+                id
+                name
+                firstName
+                lastName
+                isLead
+                leadSource
+                jobberWebUri
+                phones { number normalizedPhoneNumber primary smsAllowed }
+                clientProperties(first: 3) {
+                    nodes {
+                        id
+                        name
+                        jobberWebUri
+                        address { street street1 street2 city province postalCode country }
+                    }
+                }
+                notes(first: 3) {
+                    nodes { id message createdAt pinned }
+                }
+                jobs(first: 3) {
+                    nodes {
+                        id
+                        title
+                        jobNumber
+                        jobStatus
+                        completedAt
+                        instructions
+                        jobberWebUri
+                        property {
+                            id
+                            name
+                            address { street street1 street2 city province postalCode country }
+                        }
+                        visits(first: 2) {
+                            nodes { title completedAt isComplete visitStatus }
+                        }
+                    }
+                }
+                requests(first: 3) {
+                    nodes {
+                        id
+                        title
+                        requestStatus
+                        createdAt
+                        updatedAt
+                        jobberWebUri
+                        property {
+                            id
+                            name
+                            address { street street1 street2 city province postalCode country }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    """
+    data = await _graphql_request_with_refresh(auth, query, {"phone": phone})
+    nodes = ((data or {}).get("clients") or {}).get("nodes") or []
+    if not nodes:
+        return None
+    return _normalize_customer_memory(nodes[0])
+
+
+def format_customer_memory_for_prompt(memory: Optional[dict], caller_phone: str = "") -> str:
+    """Format Jobber memory as private, compact prompt context for Kevin."""
+    if not isinstance(memory, dict):
+        return ""
+    client = memory.get("client") if isinstance(memory.get("client"), dict) else {}
+    client_name = _compact_text(client.get("name"), 120)
+    if not client_name:
+        return ""
+
+    caller_last4 = _last_four(caller_phone)
+    if not caller_last4:
+        phone_last4s = memory.get("phone_last4s") or []
+        caller_last4 = phone_last4s[0] if phone_last4s else ""
+
+    lines = [
+        "CUSTOMER MEMORY FROM JOBBER (background context only):",
+        "Use this private context to avoid asking for known name/address details. Do not recite it.",
+    ]
+    phone_suffix = f"; caller ID ending in {caller_last4}" if caller_last4 else ""
+    lines.append(f"- Matched existing Jobber client: {client_name}{phone_suffix}.")
+
+    for prop in (memory.get("properties") or [])[:2]:
+        prop_name = _compact_text(prop.get("name"), 80)
+        address = _format_address(prop.get("address"))
+        if prop_name and address:
+            lines.append(f"- Known property: {prop_name}, {address}.")
+        elif address:
+            lines.append(f"- Known property address: {address}.")
+        elif prop_name:
+            lines.append(f"- Known property: {prop_name}.")
+
+    for job in (memory.get("jobs") or [])[:2]:
+        title = _compact_text(job.get("title"), 140)
+        if not title:
+            continue
+        number = f"#{job.get('jobNumber')} " if job.get("jobNumber") else ""
+        status = f"; status {job.get('jobStatus')}" if job.get("jobStatus") else ""
+        visits = job.get("visits") or []
+        visit_status = ""
+        if visits:
+            status_text = visits[0].get("visitStatus") or ("complete" if visits[0].get("isComplete") else "")
+            if status_text:
+                visit_status = f"; visit {status_text}"
+        lines.append(f"- Recent job: {number}{title}{status}{visit_status}.")
+
+    for note in (memory.get("notes") or [])[:2]:
+        message = _compact_text(note.get("message"), 260)
+        if message:
+            lines.append(f"- Recent note: {message}")
+
+    for request in (memory.get("requests") or [])[:3]:
+        title = _compact_text(request.get("title"), 150)
+        if not title:
+            continue
+        status = f"; status {request.get('requestStatus')}" if request.get("requestStatus") else ""
+        lines.append(f"- Recent request: {title}{status}.")
+
+    lines.append(
+        "If the caller asks for service, use this context naturally, but verify before assuming "
+        "the current issue is at the same property."
+    )
+
+    context = _redact_phone_numbers("\n".join(lines))
+    return context[:2500].rstrip()
 
 
 async def create_client(auth: str | dict, job_data: dict) -> Optional[dict]:

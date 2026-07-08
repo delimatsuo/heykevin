@@ -147,9 +147,33 @@ class GeminiPipeline:
         # Voice selection — pick the best voice for the contractor's language
         user_language = self._contractor_config.get("user_language", "en")
         self._voice = GEMINI_VOICES.get(user_language, GEMINI_VOICE_DEFAULT)
+        self._model = settings.gemini_live_model or GEMINI_MODEL
 
         # Language for post-call processing
         self._language = user_language or "en"
+
+    def _build_generation_config(self) -> dict:
+        """Return Gemini Live generation config tuned for phone-call latency."""
+        config = {
+            "response_modalities": ["AUDIO"],
+            "temperature": settings.gemini_live_temperature,
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": self._voice,
+                    }
+                }
+            },
+        }
+
+        if "2.5" in self._model:
+            config["thinking_config"] = {
+                "thinking_budget": settings.gemini_live_thinking_budget,
+            }
+        elif "3." in self._model:
+            config["thinking_config"] = {"thinking_level": "minimal"}
+
+        return config
 
     async def start(
         self,
@@ -168,17 +192,8 @@ class GeminiPipeline:
             system_prompt = self._system_prompt_with_reconnect_context(reconnect_context)
             setup = {
                 "setup": {
-                    "model": f"models/{GEMINI_MODEL}",
-                    "generation_config": {
-                        "response_modalities": ["AUDIO"],
-                        "speech_config": {
-                            "voice_config": {
-                                "prebuilt_voice_config": {
-                                    "voice_name": self._voice,
-                                }
-                            }
-                        },
-                    },
+                    "model": f"models/{self._model}",
+                    "generation_config": self._build_generation_config(),
                     "system_instruction": {
                         "parts": [{"text": system_prompt}]
                     },
@@ -211,7 +226,7 @@ class GeminiPipeline:
                 return False
 
             self._connected = True
-            logger.info(f"Gemini Live session established (voice={self._voice}, model={GEMINI_MODEL})")
+            logger.info(f"Gemini Live session established (voice={self._voice}, model={self._model})")
 
             # Start receiving audio/text from Gemini
             self._receive_task = asyncio.create_task(self._receive_loop())
@@ -294,10 +309,10 @@ class GeminiPipeline:
             audio_b64 = base64.b64encode(pcm_16k).decode("utf-8")
             await self._ws.send(json.dumps({
                 "realtime_input": {
-                    "media_chunks": [{
+                    "audio": {
                         "data": audio_b64,
                         "mime_type": "audio/pcm;rate=16000",
-                    }]
+                    }
                 }
             }))
         except Exception:

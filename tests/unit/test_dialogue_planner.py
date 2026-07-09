@@ -1,0 +1,111 @@
+"""Dialogue planner policy for receptionist next actions."""
+
+from app.services.dialogue_planner import ActionName, plan_next_action
+from app.services.receptionist_state import (
+    AddressNeed,
+    CallbackConfirmation,
+    CallbackIntent,
+    IntakeState,
+    Intent,
+    ServiceAction,
+)
+
+
+def test_planner_blocks_duplicate_service_action_and_object_questions():
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+        caller_name="Jonathan",
+        caller_source="customer_memory",
+        caller_confidence=0.92,
+    )
+    state.observe_caller_turn("How much to replace a toilet?")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.ANSWER_DIRECT_QUESTION
+    assert "service_action" in action.forbidden_slots
+    assert "service_object" in action.forbidden_slots
+    assert "callback_number" in action.forbidden_slots
+    assert "service_address" in action.forbidden_slots
+    assert action.allowed_slots == ("job_complexity",)
+    assert action.max_spoken_shape == "answer briefly, then ask one useful next question"
+    assert action.tool_calls_allowed is False
+
+
+def test_planner_forbids_slots_already_asked_even_when_unknown():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_action = ServiceAction.UNKNOWN
+    state.mark_slot_asked("service_action")
+
+    action = plan_next_action(state)
+
+    assert "service_action" in action.forbidden_slots
+    assert "service_action" not in action.allowed_slots
+
+
+def test_planner_confirms_callback_last_four_only_after_callback_intent():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.observe_caller_turn("Can someone call me back today?")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.CONFIRM_CALLBACK_LAST_FOUR
+    assert action.allowed_slots == ("callback_confirmation",)
+    assert "callback_number" not in action.forbidden_slots
+    assert "service_address" in action.forbidden_slots
+    assert "8667" in action.reason
+
+
+def test_planner_allows_callback_number_after_intent_when_caller_id_missing():
+    state = IntakeState.new(call_sid="CA_test")
+    state.observe_caller_turn("Please call me back.")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.ASK_CALLBACK_NUMBER
+    assert action.allowed_slots == ("callback_number",)
+    assert "callback_number" not in action.forbidden_slots
+
+
+def test_planner_asks_callback_number_when_caller_rejects_caller_id():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.callback_intent = CallbackIntent.REQUESTED
+    state.callback_confirmation = CallbackConfirmation.REJECTED
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.ASK_CALLBACK_NUMBER
+    assert action.allowed_slots == ("callback_number",)
+    assert "callback_number" not in action.forbidden_slots
+
+
+def test_planner_allows_address_only_when_state_requires_it():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.intent = Intent.SCHEDULING
+    state.address_need = AddressNeed.REQUIRED_NOW
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.ASK_ONE_CLARIFYING_QUESTION
+    assert action.allowed_slots == ("service_address",)
+    assert "service_address" not in action.forbidden_slots
+
+
+def test_planner_confirms_known_memory_instead_of_reasking_name():
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+        caller_name="Jonathan Caller",
+        caller_source="customer_memory",
+        caller_confidence=0.94,
+        memory_refs_used=("scoped-memory-ref-1",),
+    )
+    state.observe_caller_turn("I need help with a faucet repair.")
+
+    action = plan_next_action(state)
+
+    assert "caller_name" in action.forbidden_slots
+    assert "caller_name" not in action.allowed_slots
+    assert "caller_identity:Jonathan Caller" in action.memory_facts_safe_to_use

@@ -310,8 +310,8 @@ class GeminiPipeline:
             memory_greeting_hint = ""
             if memory_context:
                 memory_greeting_hint = (
-                    " If CUSTOMER MEMORY FROM JOBBER identifies the caller, use their first name naturally. "
-                    "Do not mention Jobber or private notes."
+                    " Private customer context may be available. Do not use remembered customer names, "
+                    "addresses, or job details in the greeting; use the standard greeting."
                 )
 
             if mode == "personal":

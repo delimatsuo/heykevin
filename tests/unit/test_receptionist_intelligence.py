@@ -527,11 +527,15 @@ async def test_gemini_setup_includes_jobber_customer_memory_when_lookup_succeeds
 
     assert started
     setup_text = sent_messages[0]["setup"]["system_instruction"]["parts"][0]["text"]
-    assert "CUSTOMER MEMORY FROM JOBBER" in setup_text
+    assert "PRIVATE CUSTOMER CONTEXT" in setup_text
+    assert "CUSTOMER MEMORY FROM JOBBER" not in setup_text
+    assert "Jobber" not in setup_text
     assert "Jonathan Caller" in setup_text
-    assert "100 Market Street" in setup_text
+    assert "service property on file" in setup_text
+    assert "100 Market Street" not in setup_text
+    assert "Lynnfield" not in setup_text
     assert "Completed sink repair - Hey Kevin memory test" in setup_text
-    assert "Prior completed service remains kitchen sink" in setup_text
+    assert "Prior completed service remains kitchen sink" not in setup_text
     assert "Caller wants toilet replacement" in setup_text
     assert "+16506918667" not in setup_text
     assert "16506918667" not in setup_text
@@ -539,7 +543,7 @@ async def test_gemini_setup_includes_jobber_customer_memory_when_lookup_succeeds
 
 
 @pytest.mark.asyncio
-async def test_gemini_greeting_can_use_jobber_customer_name_when_memory_loaded(monkeypatch):
+async def test_gemini_greeting_does_not_use_customer_memory_name_before_confirmation(monkeypatch):
     sent_messages = []
 
     class FakeWebSocket:
@@ -591,9 +595,10 @@ async def test_gemini_greeting_can_use_jobber_customer_name_when_memory_loaded(m
 
     assert started
     greeting_text = sent_messages[1]["client_content"]["turns"][0]["parts"][0]["text"]
-    assert "If CUSTOMER MEMORY FROM JOBBER identifies the caller" in greeting_text
-    assert "use their first name naturally" in greeting_text
-    assert "Do not mention Jobber or private notes" in greeting_text
+    assert "Jonathan" not in greeting_text
+    assert "Jobber" not in greeting_text
+    assert "remembered customer name" in greeting_text
+    assert "standard greeting" in greeting_text
     await pipeline.stop()
 
 
@@ -652,6 +657,7 @@ async def test_gemini_setup_does_not_wait_long_for_jobber_memory(monkeypatch):
 
     assert started
     setup_text = sent_messages[0]["setup"]["system_instruction"]["parts"][0]["text"]
+    assert "PRIVATE CUSTOMER CONTEXT" not in setup_text
     assert "CUSTOMER MEMORY FROM JOBBER" not in setup_text
     await pipeline.stop()
 

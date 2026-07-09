@@ -128,6 +128,13 @@ def test_business_prompt_does_not_reask_known_fixture_category():
     assert "Is it a sink, toilet, water heater, or appliance connection?" not in prompt
 
 
+def test_business_prompt_does_not_reask_known_service_action():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "If the caller already says replace, replacement, upgrade, install, or new installation" in prompt
+    assert "do not ask whether it is a repair, replacement, or new installation" in prompt
+
+
 def test_business_prompt_restricts_live_owner_hold_to_emergencies_or_live_transfer():
     prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
 

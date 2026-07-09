@@ -844,3 +844,22 @@ def test_vcard_ignores_generic_or_wrong_service_type_labels():
 
     assert "FN:Deli Matsuo\r\n" in vcard
     assert "personal" not in vcard
+
+
+def test_stateful_receptionist_controller_is_not_live_wired_in_this_slice():
+    """This slice keeps live-call behavior unchanged while controller tests define policy."""
+    import app.services.gemini_pipeline as gemini_pipeline
+    import app.services.voice_pipeline as voice_pipeline
+
+    assert not hasattr(gemini_pipeline.GeminiPipeline, "_receptionist_controller")
+    assert not hasattr(voice_pipeline.VoicePipeline, "_receptionist_controller")
+    live_sources = "\n".join(
+        [
+            inspect.getsource(gemini_pipeline),
+            inspect.getsource(voice_pipeline),
+        ]
+    )
+    assert "receptionist_state" not in live_sources
+    assert "dialogue_planner" not in live_sources
+    assert "instruction_composer" not in live_sources
+    assert "receptionist_replay" not in live_sources

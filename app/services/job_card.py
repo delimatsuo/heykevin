@@ -91,6 +91,15 @@ Urgency guide:
 <transcript>{transcript}</transcript>"""
 
 
+def _extract_response_text(data: dict) -> str:
+    """Return concatenated text blocks from an Anthropic Messages response."""
+    parts = []
+    for block in data.get("content") or []:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts).strip()
+
+
 async def extract_job_card(transcript: str, caller_phone: str, contractor: dict | None = None) -> dict:
     """Extract structured job information from a call transcript.
 
@@ -117,7 +126,15 @@ async def extract_job_card(transcript: str, caller_phone: str, contractor: dict 
 
             if response.status_code == 200:
                 data = response.json()
-                text = data["content"][0]["text"]
+                text = _extract_response_text(data)
+                if not text:
+                    block_types = [
+                        block.get("type", "unknown")
+                        for block in data.get("content") or []
+                        if isinstance(block, dict)
+                    ]
+                    logger.error(f"Job card extraction returned no text blocks: content_types={block_types}")
+                    raise ValueError("Anthropic response contained no text blocks")
                 # Handle markdown code blocks
                 if "```" in text:
                     text = text.split("```")[1]

@@ -356,6 +356,53 @@ async def test_gemini_owner_availability_hold_suppresses_caller_silence():
             pipeline._unavailable_task.cancel()
 
 
+@pytest.mark.asyncio
+async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatch):
+    class FakeWebSocket:
+        async def send(self, _payload: str):
+            return None
+
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self):
+            return None
+
+    async def fake_connect(*_args, **_kwargs):
+        return FakeWebSocket()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    try:
+        started = await pipeline.start(
+            send_greeting=False,
+            start_background_tasks=True,
+        )
+
+        assert started
+        assert pipeline._silence_check_task is None
+    finally:
+        await pipeline.stop()
+
+
 def test_gemini_pipeline_receives_caller_phone_context():
     async def noop_audio(_chunk: bytes):
         return None

@@ -364,13 +364,12 @@ class GeminiPipeline:
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._ensure_audio_playout_task()
 
-            if start_background_tasks:
-                # Start silence timeout check
-                self._silence_check_task = asyncio.create_task(self._silence_check_loop())
-
+            # Gemini already owns voice activity and turn detection. A separate
+            # transcript-based silence prompt races with callers whose speech is
+            # detected before its transcription arrives.
+            if start_background_tasks and self._call_sid:
                 # Start RTDB command polling (for decline/take_message from iOS app)
-                if self._call_sid:
-                    self._command_check_task = asyncio.create_task(self._command_check_loop())
+                self._command_check_task = asyncio.create_task(self._command_check_loop())
 
             if not send_greeting:
                 return True

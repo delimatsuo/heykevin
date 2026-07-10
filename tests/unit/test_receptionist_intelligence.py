@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import os
 
 import pytest
@@ -597,8 +598,12 @@ async def test_gemini_greeting_does_not_use_customer_memory_name_before_confirma
     greeting_text = sent_messages[1]["client_content"]["turns"][0]["parts"][0]["text"]
     assert "Jonathan" not in greeting_text
     assert "Jobber" not in greeting_text
-    assert "remembered customer name" in greeting_text
-    assert "standard greeting" in greeting_text
+    assert "remembered customer name" not in greeting_text
+    assert "standard greeting" not in greeting_text
+    assert greeting_text == (
+        'Say exactly this greeting and nothing else: "Hi, thanks for calling Matsuo Plumbing, '
+        'this is Kevin. How can I help you?"'
+    )
     await pipeline.stop()
 
 
@@ -1016,6 +1021,32 @@ async def test_gemini_transcript_flush_records_response_timing():
         ("Kevin", "Yes, we do."),
     ]
     assert pipeline._last_caller_transcript_flushed_at == 0.0
+
+
+@pytest.mark.asyncio
+async def test_gemini_voice_timing_logs_do_not_include_transcript_text(caplog):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def record_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=record_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._caller_transcript_buf = ["My private address is 100 Market Street."]
+
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._flush_caller_transcript()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=caller_transcript_flushed" in messages
+    assert "chars=" in messages
+    assert "100 Market Street" not in messages
 
 
 @pytest.mark.asyncio

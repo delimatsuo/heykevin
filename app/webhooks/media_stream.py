@@ -410,7 +410,19 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 caller_phone=active_call.caller_phone if active_call else "",
             )
             logger.info(f"Using ElevenLabs pipeline for call {call_sid}")
+        pipeline_start_at = time.monotonic()
+        logger.info(
+            "voice_timing event=pipeline_start call=%s voice_engine=%s",
+            call_sid[:8] or "unknown",
+            voice_engine,
+        )
         started = await pipeline.start()
+        logger.info(
+            "voice_timing event=pipeline_started call=%s elapsed_ms=%s started=%s",
+            call_sid[:8] or "unknown",
+            int((time.monotonic() - pipeline_start_at) * 1000),
+            started,
+        )
         if not started:
             logger.error("Failed to start voice pipeline — closing stream")
             await websocket.close()

@@ -133,6 +133,11 @@ class GeminiPipeline:
         self._last_caller_transcript_fragment_at = 0.0
         self._response_start_latency_logged = False
         self._audio_queue: asyncio.Queue[tuple[bytes, float]] = asyncio.Queue()
+        self._pipeline_started_at = time.monotonic()
+        self._first_outbound_audio_logged = False
+        self._first_caller_transcript_logged = False
+        self._audio_chunks_enqueued = 0
+        self._audio_chunks_sent = 0
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -177,6 +182,53 @@ class GeminiPipeline:
             config["thinking_config"] = {"thinking_level": "minimal"}
 
         return config
+
+    def _call_label(self) -> str:
+        """Return a short non-PII call label for operational logs."""
+        return self._call_sid[:8] or "unknown"
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(0, int((time.monotonic() - started_at) * 1000))
+
+    def _log_voice_timing(self, event: str, **metrics: object) -> None:
+        """Log voice timing without transcript, phone, token, or customer data."""
+        metric_text = " ".join(f"{key}={value}" for key, value in metrics.items())
+        suffix = f" {metric_text}" if metric_text else ""
+        logger.info("voice_timing event=%s call=%s%s", event, self._call_label(), suffix)
+
+    def _build_greeting_text(self) -> str:
+        """Build a short deterministic greeting instead of asking the model to choose one."""
+        business_name = self._contractor_config.get(
+            "business_name",
+            f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
+        )
+        owner_name = self._contractor_config.get("owner_name", settings.user_name)
+        mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
+
+        if mode == "personal":
+            return f"Hi, this is Kevin, {owner_name.split()[0]}'s assistant. How can I help?"
+        if self._after_hours:
+            return f"Hi, thanks for calling {business_name}. We're currently closed, but I can take a message. How can I help?"
+        return f"Hi, thanks for calling {business_name}, this is Kevin. How can I help you?"
+
+    async def _send_greeting(self) -> None:
+        """Ask Gemini to speak a fixed greeting and do nothing else."""
+        greeting_text = self._build_greeting_text()
+        prompt = f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
+        await self._ws.send(json.dumps({
+            "client_content": {
+                "turns": [
+                    {"role": "user", "parts": [{"text": prompt}]}
+                ],
+                "turn_complete": True,
+            }
+        }))
+        self._log_voice_timing(
+            "greeting_instruction_sent",
+            chars=len(greeting_text),
+            words=len(greeting_text.split()),
+        )
 
     def _start_jobber_customer_memory_lookup(self) -> tuple[asyncio.Task, float] | None:
         """Start Jobber customer memory lookup without blocking Gemini connection."""
@@ -235,16 +287,28 @@ class GeminiPipeline:
     ) -> bool:
         """Connect to Gemini Live API and send setup message."""
         memory_lookup = None
+        started_at = time.monotonic()
         try:
             memory_lookup = self._start_jobber_customer_memory_lookup()
+            connect_started_at = time.monotonic()
             self._ws = await websockets.connect(
                 _gemini_ws_url(),
                 max_size=10 * 1024 * 1024,  # 10MB max message
             )
+            self._log_voice_timing(
+                "gemini_ws_connected",
+                elapsed_ms=self._elapsed_ms(connect_started_at),
+            )
 
             # Build setup message
             system_prompt = self._system_prompt_with_reconnect_context(reconnect_context)
+            memory_started_at = time.monotonic()
             memory_context = await self._resolve_jobber_customer_memory_context(memory_lookup)
+            self._log_voice_timing(
+                "jobber_memory_wait_finished",
+                elapsed_ms=self._elapsed_ms(memory_started_at),
+                loaded=bool(memory_context),
+            )
             if memory_context:
                 system_prompt = f"{system_prompt}\n\n{memory_context}"
             setup = {
@@ -274,7 +338,9 @@ class GeminiPipeline:
             if tools:
                 setup["setup"]["tools"] = tools
 
+            setup_started_at = time.monotonic()
             await self._ws.send(json.dumps(setup))
+            self._log_voice_timing("gemini_setup_sent", elapsed_ms=self._elapsed_ms(started_at))
             response = await asyncio.wait_for(self._ws.recv(), timeout=10)
             data = json.loads(response)
 
@@ -283,6 +349,11 @@ class GeminiPipeline:
                 return False
 
             self._connected = True
+            self._log_voice_timing(
+                "gemini_setup_ack",
+                elapsed_ms=self._elapsed_ms(setup_started_at),
+                total_start_ms=self._elapsed_ms(started_at),
+            )
             logger.info(f"Gemini Live session established (voice={self._voice}, model={self._model})")
 
             # Start receiving audio/text from Gemini
@@ -300,51 +371,7 @@ class GeminiPipeline:
             if not send_greeting:
                 return True
 
-            # Send greeting prompt — Gemini will speak the greeting
-            business_name = self._contractor_config.get(
-                "business_name",
-                f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
-            )
-            owner_name = self._contractor_config.get("owner_name", settings.user_name)
-            mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
-            memory_greeting_hint = ""
-            if memory_context:
-                memory_greeting_hint = (
-                    " Private customer context may be available. Do not use remembered customer names, "
-                    "addresses, or job details in the greeting; use the standard greeting."
-                )
-
-            if mode == "personal":
-                greeting_prompt = (
-                    f"Greet the caller now.{memory_greeting_hint} If no customer name is known, say: "
-                    f"'Hi, this is Kevin, "
-                    f"{owner_name.split()[0]}'s assistant. How can I help?'"
-                )
-            elif self._after_hours:
-                hours_start = self._contractor_config.get("business_hours_start", "8:00")
-                hours_end = self._contractor_config.get("business_hours_end", "5:00")
-                greeting_prompt = (
-                    f"Greet the caller now.{memory_greeting_hint} "
-                    f"You are answering the phone for {business_name}. "
-                    f"The business is currently closed — hours are {hours_start} to {hours_end}. "
-                    f"Offer to take a message."
-                )
-            else:
-                greeting_prompt = (
-                    f"Greet the caller now.{memory_greeting_hint} If no customer name is known, say: "
-                    f"'Hi, thanks for calling {business_name}, "
-                    f"this is Kevin. How can I help you?'"
-                )
-
-            await self._ws.send(json.dumps({
-                "client_content": {
-                    "turns": [
-                        {"role": "user", "parts": [{"text": greeting_prompt}]}
-                    ],
-                    "turn_complete": True,
-                }
-            }))
-
+            await self._send_greeting()
             return True
 
         except Exception as e:
@@ -427,7 +454,12 @@ class GeminiPipeline:
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
-                    await self._clear_audio_queue()
+                    dropped_chunks = await self._clear_audio_queue()
+                    self._log_voice_timing(
+                        "barge_in_clear",
+                        dropped_chunks=dropped_chunks,
+                        sent_chunks=self._audio_chunks_sent,
+                    )
                     if self.on_clear_audio:
                         await self.on_clear_audio()
                     logger.info("Gemini: caller interrupted (barge-in)")
@@ -457,6 +489,13 @@ class GeminiPipeline:
                     self._caller_transcript_buf.append(input_text)
                     self._last_caller_transcript_fragment_at = time.time()
                     self._response_start_latency_logged = False
+                    if not self._first_caller_transcript_logged:
+                        self._first_caller_transcript_logged = True
+                        self._log_voice_timing(
+                            "first_caller_transcript_fragment",
+                            elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+                            chars=len(input_text),
+                        )
                     self._mark_caller_activity()
 
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
@@ -557,6 +596,7 @@ class GeminiPipeline:
             self._interrupt_speaking = False
         self._ensure_audio_playout_task()
         await self._audio_queue.put((mulaw_chunk, duration_seconds))
+        self._audio_chunks_enqueued += 1
 
     async def _audio_playout_loop(self):
         """Send Gemini audio to Twilio paced to playback duration.
@@ -572,7 +612,16 @@ class GeminiPipeline:
                     if self._interrupt_speaking:
                         continue
                     self._is_speaking = True
+                    if not self._first_outbound_audio_logged:
+                        self._first_outbound_audio_logged = True
+                        self._log_voice_timing(
+                            "first_outbound_audio",
+                            elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+                            chunk_bytes=len(mulaw_chunk),
+                            queue_depth=self._audio_queue.qsize(),
+                        )
                     await self.on_audio_out(mulaw_chunk)
+                    self._audio_chunks_sent += 1
                     if duration_seconds > 0:
                         await asyncio.sleep(duration_seconds * 0.9)
                 finally:
@@ -583,16 +632,19 @@ class GeminiPipeline:
         except asyncio.CancelledError:
             pass
 
-    async def _clear_audio_queue(self):
+    async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""
+        dropped_chunks = 0
         while True:
             try:
                 self._audio_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             else:
+                dropped_chunks += 1
                 self._audio_queue.task_done()
         self._is_speaking = False
+        return dropped_chunks
 
     async def _wait_for_audio_playout(self, timeout_seconds: float = 6.0):
         """Wait briefly for paced audio to drain before final side effects."""
@@ -618,6 +670,11 @@ class GeminiPipeline:
         self._transcript_lines.append(f"Caller: {full_text}")
         await self.on_transcript("Caller", full_text)
         self._last_caller_transcript_flushed_at = time.time()
+        self._log_voice_timing(
+            "caller_transcript_flushed",
+            chars=len(full_text),
+            elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+        )
         self._mark_caller_activity()
 
         # Urgency detection
@@ -649,6 +706,11 @@ class GeminiPipeline:
 
         self._transcript_lines.append(f"Kevin: {full_text}")
         await self.on_transcript("Kevin", full_text)
+        self._log_voice_timing(
+            "kevin_transcript_flushed",
+            chars=len(full_text),
+            elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+        )
         prompt_started = self._caller_silence_prompted_at
         self._mark_kevin_activity()
         self._log_response_turn_latency()

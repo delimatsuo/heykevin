@@ -48,6 +48,23 @@ def _pipeline(config):
     )
 
 
+class _OneMessageWebSocket:
+    def __init__(self, message):
+        self._messages = [json.dumps(message)]
+        self.sent_payloads = []
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+    async def send(self, payload):
+        self.sent_payloads.append(json.loads(payload))
+
+
 def test_shadow_decision_contains_metrics_only_not_private_turn_context():
     controller = ShadowReceptionistController.new(
         call_sid="test-call",
@@ -60,6 +77,7 @@ def test_shadow_decision_contains_metrics_only_not_private_turn_context():
     )
 
     assert decision.action_name == ActionName.ASK_ONE_CLARIFYING_QUESTION
+    assert decision.turn_id == 1
     assert decision.known_fact_count == 2
     assert decision.instruction_chars > 0
     assert controller.state.caller_phone_last_four == "8667"
@@ -68,6 +86,22 @@ def test_shadow_decision_contains_metrics_only_not_private_turn_context():
     assert "Private Caller" not in serialized
     assert "private address" not in serialized
     assert "8667" not in serialized
+
+
+def test_shadow_caller_continuation_amends_state_without_second_decision():
+    controller = ShadowReceptionistController.new(call_sid="test-call")
+
+    first = controller.observe_caller_turn("I need plumbing help.")
+    continuation = controller.observe_caller_turn("It is a toilet replacement.")
+
+    assert first is not None
+    assert first.turn_id == 1
+    assert continuation is None
+    assert controller.pending_turn_id == 1
+    assert controller.state.service_object == "toilet"
+    assert controller.state.service_action == ServiceAction.REPLACE
+    assert controller.pending_action is not None
+    assert controller.pending_action.allowed_slots == ("job_complexity",)
 
 
 @pytest.mark.parametrize(
@@ -205,6 +239,133 @@ async def test_shadow_observation_runs_after_live_urgency_detection(monkeypatch)
     await pipeline._flush_caller_transcript()
 
     assert urgency_state_at_observation == [True]
+
+
+@pytest.mark.asyncio
+async def test_completed_live_assistant_turn_commits_pending_shadow_slot(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(
+        settings,
+        "receptionist_controller_shadow_enabled",
+        True,
+        raising=False,
+    )
+    pipeline = _pipeline(_config(True))
+    pipeline._connected = True
+    pipeline._caller_transcript_buf = ["I need plumbing help."]
+    await pipeline._flush_caller_transcript()
+    pipeline._kevin_transcript_buf = ["Is this a repair or replacement?"]
+    pipeline._ws = _OneMessageWebSocket({"serverContent": {"turnComplete": True}})
+
+    with caplog.at_level(logging.INFO, logger="app.services.gemini_pipeline"):
+        await pipeline._receive_loop()
+
+    assert pipeline._receptionist_controller.state.asked_slots == {
+        "service_action"
+    }
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=controller_shadow_assistant_turn" in messages
+    assert "turn_id=1" in messages
+    assert "interrupted=False" in messages
+    assert "committed_slot_count=1" in messages
+    assert "repair or replacement" not in messages
+
+
+@pytest.mark.asyncio
+async def test_fragmented_live_caller_turn_emits_one_shadow_decision(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(
+        settings,
+        "receptionist_controller_shadow_enabled",
+        True,
+        raising=False,
+    )
+    pipeline = _pipeline(_config(True))
+    pipeline._connected = True
+
+    with caplog.at_level(logging.INFO, logger="app.services.gemini_pipeline"):
+        pipeline._caller_transcript_buf = ["I need plumbing help."]
+        await pipeline._flush_caller_transcript()
+        pipeline._caller_transcript_buf = ["It is a toilet replacement."]
+        await pipeline._flush_caller_transcript()
+
+    assert pipeline._receptionist_controller is not None
+    assert pipeline._receptionist_controller.pending_turn_id == 1
+    assert pipeline._receptionist_controller.state.service_object == "toilet"
+    assert (
+        pipeline._receptionist_controller.state.service_action
+        == ServiceAction.REPLACE
+    )
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("event=controller_shadow_decision") == 1
+    assert messages.count("event=controller_shadow_caller_amendment") == 1
+    assert "turn_id=1" in messages
+
+
+@pytest.mark.asyncio
+async def test_interrupted_live_assistant_turn_does_not_commit_shadow_slot(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(
+        settings,
+        "receptionist_controller_shadow_enabled",
+        True,
+        raising=False,
+    )
+    pipeline = _pipeline(_config(True))
+    pipeline._connected = True
+    pipeline._caller_transcript_buf = ["I need plumbing help."]
+    await pipeline._flush_caller_transcript()
+    pipeline._ws = _OneMessageWebSocket({"serverContent": {"interrupted": True}})
+
+    with caplog.at_level(logging.INFO, logger="app.services.gemini_pipeline"):
+        await pipeline._receive_loop()
+
+    assert pipeline._receptionist_controller.state.asked_slots == set()
+    assert pipeline._receptionist_controller.pending_turn_id is None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=controller_shadow_assistant_turn" in messages
+    assert "turn_id=1" in messages
+    assert "interrupted=True" in messages
+    assert "committed_slot_count=0" in messages
+
+
+@pytest.mark.asyncio
+async def test_overflowed_live_assistant_turn_does_not_commit_shadow_slot(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        settings,
+        "receptionist_controller_shadow_enabled",
+        True,
+        raising=False,
+    )
+    pipeline = _pipeline(_config(True))
+    pipeline._connected = True
+    pipeline._caller_transcript_buf = ["I need plumbing help."]
+    await pipeline._flush_caller_transcript()
+    pipeline._audio_backlog_overflowed = True
+    pipeline._interrupt_speaking = True
+    websocket = _OneMessageWebSocket(
+        {"serverContent": {"turnComplete": True}}
+    )
+    pipeline._ws = websocket
+
+    await pipeline._receive_loop()
+
+    assert pipeline._receptionist_controller.state.asked_slots == set()
+    assert pipeline._receptionist_controller.pending_turn_id is None
+    assert len(websocket.sent_payloads) == 1
+    assert "one short sentence" in (
+        websocket.sent_payloads[0]["client_content"]["turns"][0]["parts"][0][
+            "text"
+        ]
+    )
 
 
 @pytest.mark.asyncio

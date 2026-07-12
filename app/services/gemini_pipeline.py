@@ -238,8 +238,24 @@ class GeminiPipeline:
             return
 
         elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        if decision is None:
+            self._log_voice_timing(
+                "controller_shadow_caller_amendment",
+                turn_id=controller.pending_turn_id or 0,
+                action=(
+                    controller.pending_action.name.value
+                    if controller.pending_action
+                    else "none"
+                ),
+                elapsed_ms=elapsed_ms,
+                known_fact_count=len(controller.state.known_facts),
+                asked_slot_count=len(controller.state.asked_slots),
+            )
+            return
+
         self._log_voice_timing(
             "controller_shadow_decision",
+            turn_id=decision.turn_id,
             action=decision.action_name.value,
             elapsed_ms=elapsed_ms,
             known_fact_count=decision.known_fact_count,
@@ -248,6 +264,40 @@ class GeminiPipeline:
             forbidden_slot_count=decision.forbidden_slot_count,
             instruction_chars=decision.instruction_chars,
             tool_calls_allowed=decision.tool_calls_allowed,
+        )
+
+    def _observe_receptionist_assistant_turn(self, *, interrupted: bool) -> None:
+        """Apply one assistant completion event to shadow state only."""
+        controller = self._receptionist_controller
+        if controller is None:
+            return
+
+        try:
+            observation = controller.observe_assistant_turn(
+                interrupted=interrupted,
+            )
+        except Exception as error:
+            self._receptionist_controller = None
+            self._log_voice_timing(
+                "controller_shadow_error",
+                level=logging.ERROR,
+                exception_type=type(error).__name__,
+            )
+            return
+
+        if observation.turn_id is None:
+            return
+        self._log_voice_timing(
+            "controller_shadow_assistant_turn",
+            turn_id=observation.turn_id,
+            action=(
+                observation.action_name.value
+                if observation.action_name
+                else "none"
+            ),
+            interrupted=observation.interrupted,
+            committed_slot_count=observation.committed_slot_count,
+            asked_slot_count=observation.asked_slot_count,
         )
 
     def _build_generation_config(self) -> dict:
@@ -762,6 +812,7 @@ class GeminiPipeline:
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
+                    self._observe_receptionist_assistant_turn(interrupted=True)
                     async with self._audio_output_lock:
                         dropped_chunks = await self._clear_audio_queue()
                         clear_succeeded = await self._request_remote_audio_clear()
@@ -819,6 +870,10 @@ class GeminiPipeline:
                             self._interrupt_speaking = False
                         self._reset_response_metrics()
                     self._assistant_instruction_pending = False
+                    if interrupted_turn:
+                        self._observe_receptionist_assistant_turn(
+                            interrupted=True
+                        )
                     if overflowed_turn:
                         self._audio_backlog_overflowed = False
                         if (
@@ -846,6 +901,9 @@ class GeminiPipeline:
                     if not interrupted_turn:
                         said_goodbye = await self._flush_kevin_transcript(
                             detect_goodbye=True
+                        )
+                        self._observe_receptionist_assistant_turn(
+                            interrupted=False
                         )
                         if self._response_first_audio_at > 0:
                             self._log_response_turn_latency("")

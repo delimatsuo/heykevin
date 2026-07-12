@@ -18,6 +18,7 @@ from app.services.instruction_composer import (
     compose_turn_instructions,
 )
 from app.services.receptionist_state import IntakeState
+from app.services.receptionist_turns import ReceptionistTurnReducer
 
 
 @dataclass(frozen=True)
@@ -64,28 +65,37 @@ def load_replay_fixture(path: str | Path) -> Any:
 def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
     state = IntakeState.from_dict(scenario["initial_state"])
     private_memory_lines = tuple(scenario.get("private_memory_lines") or [])
+    reducer = ReceptionistTurnReducer(
+        state,
+        private_memory_lines=private_memory_lines,
+    )
     policy = dict(scenario.get("policy") or {})
     steps: list[ReplayStepResult] = []
     violations: list[str] = []
-    pending_action: NextAction | None = None
-    pending_instructions = ""
 
     for index, turn in enumerate(scenario.get("turns") or []):
         speaker = str(turn.get("speaker") or "")
         text = str(turn.get("text") or "")
         if speaker == "caller":
-            state.observe_caller_turn(text)
-            action = plan_next_action(state)
-            instructions = compose_turn_instructions(
-                state,
-                action,
-                private_memory_lines=private_memory_lines,
+            planned = reducer.complete_caller_turn(text)
+            action = (
+                planned.action
+                if planned
+                else reducer.pending_action or plan_next_action(state)
             )
-            pending_action = action
-            pending_instructions = instructions
+            instructions = (
+                planned.instructions
+                if planned
+                else reducer.pending_instructions
+                or compose_turn_instructions(
+                    state,
+                    action,
+                    private_memory_lines=private_memory_lines,
+                )
+            )
         elif speaker == "assistant":
-            action = pending_action or plan_next_action(state)
-            instructions = pending_instructions or compose_turn_instructions(
+            action = reducer.pending_action or plan_next_action(state)
+            instructions = reducer.pending_instructions or compose_turn_instructions(
                 state,
                 action,
                 private_memory_lines=private_memory_lines,
@@ -93,12 +103,15 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
             violations.extend(
                 _check_assistant_output(index, turn, action, text, policy)
             )
-            if not turn.get("interrupted"):
-                observed = turn.get("observed") or {}
-                for slot in observed.get("asked_slots") or []:
-                    state.mark_slot_asked(str(slot))
-            pending_action = None
-            pending_instructions = ""
+            observed = turn.get("observed") or {}
+            reducer.complete_assistant_turn(
+                interrupted=bool(turn.get("interrupted")),
+                asked_slots=(
+                    observed.get("asked_slots")
+                    if "asked_slots" in observed
+                    else None
+                ),
+            )
         else:
             action = plan_next_action(state)
             instructions = compose_turn_instructions(

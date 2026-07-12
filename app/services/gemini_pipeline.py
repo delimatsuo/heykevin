@@ -195,12 +195,31 @@ class GeminiPipeline:
             return
 
         elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        if decision is None:
+            logger.info(
+                "voice_event event=controller_shadow_caller_amendment call=%s "
+                "turn_id=%s action=%s elapsed_ms=%s known_fact_count=%s "
+                "asked_slot_count=%s",
+                self._call_sid[:8] or "unknown",
+                controller.pending_turn_id or 0,
+                (
+                    controller.pending_action.name.value
+                    if controller.pending_action
+                    else "none"
+                ),
+                elapsed_ms,
+                len(controller.state.known_facts),
+                len(controller.state.asked_slots),
+            )
+            return
+
         logger.info(
-            "voice_event event=controller_shadow_decision call=%s action=%s "
+            "voice_event event=controller_shadow_decision call=%s turn_id=%s action=%s "
             "elapsed_ms=%s known_fact_count=%s asked_slot_count=%s "
             "allowed_slot_count=%s forbidden_slot_count=%s instruction_chars=%s "
             "tool_calls_allowed=%s",
             self._call_sid[:8] or "unknown",
+            decision.turn_id,
             decision.action_name.value,
             elapsed_ms,
             decision.known_fact_count,
@@ -209,6 +228,39 @@ class GeminiPipeline:
             decision.forbidden_slot_count,
             decision.instruction_chars,
             decision.tool_calls_allowed,
+        )
+
+    def _observe_receptionist_assistant_turn(self, *, interrupted: bool) -> None:
+        """Apply one assistant completion event to shadow state only."""
+        controller = self._receptionist_controller
+        if controller is None:
+            return
+
+        try:
+            observation = controller.observe_assistant_turn(
+                interrupted=interrupted,
+            )
+        except Exception as error:
+            self._receptionist_controller = None
+            logger.error(
+                "voice_event event=controller_shadow_error call=%s exception_type=%s",
+                self._call_sid[:8] or "unknown",
+                type(error).__name__,
+            )
+            return
+
+        if observation.turn_id is None:
+            return
+        logger.info(
+            "voice_event event=controller_shadow_assistant_turn call=%s "
+            "turn_id=%s action=%s interrupted=%s committed_slot_count=%s "
+            "asked_slot_count=%s",
+            self._call_sid[:8] or "unknown",
+            observation.turn_id,
+            observation.action_name.value if observation.action_name else "none",
+            observation.interrupted,
+            observation.committed_slot_count,
+            observation.asked_slot_count,
         )
 
     def _build_generation_config(self) -> dict:
@@ -418,6 +470,7 @@ class GeminiPipeline:
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
+                    self._observe_receptionist_assistant_turn(interrupted=True)
                     await self._clear_audio_queue()
                     if self.on_clear_audio:
                         await self.on_clear_audio()
@@ -458,7 +511,11 @@ class GeminiPipeline:
                 # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
                     self._assistant_instruction_pending = False
-                    if await self._flush_kevin_transcript(detect_goodbye=True):
+                    said_goodbye = await self._flush_kevin_transcript(
+                        detect_goodbye=True
+                    )
+                    self._observe_receptionist_assistant_turn(interrupted=False)
+                    if said_goodbye:
                         await self._wait_for_audio_playout()
                         logger.info("Kevin said goodbye — ending call in 2 seconds")
                         await asyncio.sleep(2)

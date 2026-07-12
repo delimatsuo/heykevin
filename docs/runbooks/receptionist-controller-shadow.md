@@ -22,8 +22,18 @@ Do not enable the production service during shadow certification. Do not broaden
 Each final caller turn should emit one structured event:
 
 ```text
-voice_event event=controller_shadow_decision call=<short-label> action=<action> elapsed_ms=<ms> known_fact_count=<count> asked_slot_count=<count> allowed_slot_count=<count> forbidden_slot_count=<count> instruction_chars=<count> tool_calls_allowed=<bool>
+voice_event event=controller_shadow_decision call=<short-label> turn_id=<integer> action=<action> elapsed_ms=<ms> known_fact_count=<count> asked_slot_count=<count> allowed_slot_count=<count> forbidden_slot_count=<count> instruction_chars=<count> tool_calls_allowed=<bool>
 ```
+
+Later caller fragments received before that assistant turn finishes emit
+`controller_shadow_caller_amendment` with the same `turn_id`; they update state
+without creating a second decision. A completed or interrupted assistant turn
+emits `controller_shadow_assistant_turn`. Completed turns commit the pending
+controller action's allowed slots; interrupted turns commit none.
+
+These are counterfactual controller transitions. Shadow mode does not claim
+that Gemini asked the controller's planned slot because controller instructions
+are not sent to Gemini.
 
 The event must not contain caller speech, names, addresses, phone digits, prompt text, memory text, or planner reasons.
 
@@ -34,6 +44,8 @@ An unexpected controller exception emits `controller_shadow_error` with the exce
 - The exact candidate SHA is reported by `/health`.
 - Controller decisions appear only for the allowlisted staging contractor.
 - Every final caller turn has at most one decision event.
+- Decision and assistant events use the same integer `turn_id`.
+- Completed assistant turns commit pending slots; interrupted turns commit zero.
 - `controller_shadow_error` count is zero.
 - Decision latency remains bounded and does not regress first-audio or response-first-audio release gates.
 - Replayed state and planner decisions match the expected scenario outcome.

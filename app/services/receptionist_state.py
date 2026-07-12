@@ -169,6 +169,29 @@ CALLBACK_REJECTION_PATTERNS = (
     "no es el numero correcto",
 )
 
+CALLBACK_CONFIRMATION_PATTERNS = (
+    "yes, that number",
+    "that number works",
+    "that number is fine",
+    "use that number",
+    "correct number",
+    "call me back at that number",
+)
+
+CALLBACK_DECLINE_PATTERNS = (
+    "do not need a callback",
+    "don't need a callback",
+    "do not call me back",
+    "don't call me back",
+    "no callback",
+    "never mind the callback",
+)
+
+NEGATION_SUFFIX_PATTERN = re.compile(
+    r"(?:\bnot|\bno|\bdon't|\bdo not|\binstead of|\brather than)\s+"
+    r"(?:(?:a|an|the)\s+)?$"
+)
+
 
 def phone_last_four(phone: str) -> str:
     digits = "".join(ch for ch in phone if ch.isdigit())
@@ -180,18 +203,35 @@ def _contains_any(text: str, patterns: Iterable[str]) -> bool:
     return any(pattern in normalized for pattern in patterns)
 
 
+def _has_unnegated_pattern(text: str, pattern: str) -> bool:
+    for match in re.finditer(re.escape(pattern), text):
+        prefix = text[max(0, match.start() - 24):match.start()]
+        if not NEGATION_SUFFIX_PATTERN.search(prefix):
+            return True
+    return False
+
+
+def _contains_unnegated_any(text: str, patterns: Iterable[str]) -> bool:
+    return any(_has_unnegated_pattern(text, pattern) for pattern in patterns)
+
+
 def _extract_service_object(text: str) -> str:
     normalized = text.lower()
+    matches: list[str] = []
     for term in SERVICE_OBJECT_TERMS:
         if re.search(rf"\b{re.escape(term)}\b", normalized):
-            return term
-    return ""
+            matches.append(term)
+    if len(matches) == 1:
+        return matches[0]
+
+    unnegated = [term for term in matches if _has_unnegated_pattern(normalized, term)]
+    return unnegated[0] if len(unnegated) == 1 else ""
 
 
 def _extract_service_action(text: str) -> ServiceAction:
     normalized = text.lower()
     for action, patterns in SERVICE_ACTION_PATTERNS:
-        if any(pattern in normalized for pattern in patterns):
+        if _contains_unnegated_any(normalized, patterns):
             return action
     return ServiceAction.UNKNOWN
 
@@ -250,39 +290,76 @@ class IntakeState:
         if _contains_any(normalized, SPANISH_PATTERNS):
             self.language = "es"
 
-        if _contains_any(normalized, EMERGENCY_PATTERNS):
+        callback_declined = _contains_any(normalized, CALLBACK_DECLINE_PATTERNS)
+        callback_rejected = _contains_any(normalized, CALLBACK_REJECTION_PATTERNS)
+        callback_confirmed = _contains_any(normalized, CALLBACK_CONFIRMATION_PATTERNS)
+        if self.callback_intent in {CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED}:
+            if callback_declined:
+                self.callback_intent = CallbackIntent.DECLINED
+                self.callback_confirmation = CallbackConfirmation.REJECTED
+                self._remember_slot("callback_intent", CallbackIntent.DECLINED.value)
+                self._remember_slot(
+                    "callback_confirmation",
+                    CallbackConfirmation.REJECTED.value,
+                )
+            elif callback_rejected:
+                self.callback_confirmation = CallbackConfirmation.REJECTED
+                self._remember_slot(
+                    "callback_confirmation",
+                    CallbackConfirmation.REJECTED.value,
+                )
+            elif callback_confirmed:
+                self.callback_intent = CallbackIntent.ACCEPTED
+                self.callback_confirmation = CallbackConfirmation.CONFIRMED
+                self._remember_slot("callback_intent", CallbackIntent.ACCEPTED.value)
+                self._remember_slot(
+                    "callback_confirmation",
+                    CallbackConfirmation.CONFIRMED.value,
+                )
+
+        emergency_detected = _contains_unnegated_any(normalized, EMERGENCY_PATTERNS)
+        emergency_mentioned = _contains_any(normalized, EMERGENCY_PATTERNS)
+        if emergency_mentioned and not emergency_detected:
+            self.urgency = Urgency.ROUTINE
+            if self.intent == Intent.EMERGENCY:
+                self.intent = Intent.UNKNOWN
+            self._remember_slot("urgency", Urgency.ROUTINE.value)
+
+        if emergency_detected:
             self.intent = Intent.EMERGENCY
             self.urgency = Urgency.EMERGENCY
-            self._remember("urgency:emergency")
+            self._remember_slot("urgency", Urgency.EMERGENCY.value)
         elif _contains_any(normalized, SCHEDULING_PATTERNS):
             self.intent = Intent.SCHEDULING
             self.address_need = AddressNeed.MAYBE_LATER
-        elif _contains_any(normalized, CALLBACK_REQUEST_PATTERNS):
+        elif (
+            _contains_any(normalized, CALLBACK_REQUEST_PATTERNS)
+            and not callback_declined
+            and not callback_confirmed
+        ):
             self.intent = Intent.CALLBACK
         elif any(term in normalized for term in ("how much", "cost", "price", "pricing", "estimate", "quote")):
             self.intent = Intent.PRICING_QUESTION
         elif _extract_service_object(normalized) or _extract_service_action(normalized) != ServiceAction.UNKNOWN:
             self.intent = Intent.SERVICE_REQUEST
 
-        if _contains_any(normalized, CALLBACK_REQUEST_PATTERNS):
-            self.callback_intent = CallbackIntent.REQUESTED
-            self._remember("callback_intent:requested")
-        if self.callback_intent in {CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED} and _contains_any(
-            normalized,
-            CALLBACK_REJECTION_PATTERNS,
+        if (
+            _contains_any(normalized, CALLBACK_REQUEST_PATTERNS)
+            and not callback_declined
+            and not callback_confirmed
         ):
-            self.callback_confirmation = CallbackConfirmation.REJECTED
-            self._remember("callback_confirmation:rejected")
+            self.callback_intent = CallbackIntent.REQUESTED
+            self._remember_slot("callback_intent", CallbackIntent.REQUESTED.value)
 
         service_object = _extract_service_object(normalized)
         if service_object:
             self.service_object = service_object
-            self._remember(f"service_object:{service_object}")
+            self._remember_slot("service_object", service_object)
 
         service_action = _extract_service_action(normalized)
         if service_action != ServiceAction.UNKNOWN:
             self.service_action = service_action
-            self._remember(f"service_action:{service_action.value}")
+            self._remember_slot("service_action", service_action.value)
 
     def mark_slot_asked(self, slot: str) -> None:
         if slot:
@@ -291,6 +368,11 @@ class IntakeState:
     def _remember(self, fact: str) -> None:
         if fact not in self.known_facts:
             self.known_facts.append(fact)
+
+    def _remember_slot(self, slot: str, value: str) -> None:
+        prefix = f"{slot}:"
+        self.known_facts = [fact for fact in self.known_facts if not fact.startswith(prefix)]
+        self.known_facts.append(f"{prefix}{value}")
 
     def to_dict(self) -> dict[str, Any]:
         return {

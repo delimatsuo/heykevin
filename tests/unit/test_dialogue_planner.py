@@ -109,3 +109,18 @@ def test_planner_confirms_known_memory_instead_of_reasking_name():
     assert "caller_name" in action.forbidden_slots
     assert "caller_name" not in action.allowed_slots
     assert "caller_identity:Jonathan Caller" in action.memory_facts_safe_to_use
+
+
+def test_planner_does_not_repeat_callback_confirmation_after_acceptance():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.intent = Intent.CALLBACK
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.callback_intent = CallbackIntent.ACCEPTED
+    state.callback_confirmation = CallbackConfirmation.CONFIRMED
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.WRAP_UP
+    assert "callback_confirmation" not in action.allowed_slots
+    assert "callback_number" in action.forbidden_slots

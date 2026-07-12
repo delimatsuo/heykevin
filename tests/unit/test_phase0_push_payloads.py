@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import xml.etree.ElementTree as ET
 
@@ -113,6 +114,67 @@ async def test_twilio_audio_send_failure_returns_false_without_logging_payload(c
     assert "event=twilio_audio_send_error" in messages
     assert private_error not in messages
     assert private_audio.decode() not in messages
+
+
+@pytest.mark.asyncio
+async def test_call_completion_closes_stream_when_twilio_update_fails(monkeypatch, caplog):
+    private_error = "private Twilio failure with caller context"
+    close_codes = []
+
+    class FailingCall:
+        def update(self, **_kwargs):
+            raise RuntimeError(private_error)
+
+    class FakeClient:
+        def calls(self, _call_sid):
+            return FailingCall()
+
+    class FakeWebSocket:
+        async def close(self, *, code):
+            close_codes.append(code)
+
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: FakeClient())
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    completed = await media_stream._complete_twilio_call(
+        call_sid="CA_test",
+        websocket=FakeWebSocket(),
+    )
+
+    assert completed is False
+    assert close_codes == [1000]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=call_hangup_error" in messages
+    assert "event=call_stream_close_fallback" in messages
+    assert private_error not in messages
+
+
+@pytest.mark.asyncio
+async def test_call_completion_uses_twilio_update_without_closing_stream(monkeypatch):
+    updates = []
+
+    class SuccessfulCall:
+        def update(self, **kwargs):
+            updates.append(kwargs)
+
+    class FakeClient:
+        def calls(self, call_sid):
+            assert call_sid == "CA_test"
+            return SuccessfulCall()
+
+    class FakeWebSocket:
+        async def close(self, **_kwargs):
+            pytest.fail("successful Twilio update must not close the stream locally")
+
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: FakeClient())
+
+    completed = await media_stream._complete_twilio_call(
+        call_sid="CA_test",
+        websocket=FakeWebSocket(),
+    )
+
+    assert completed is True
+    assert updates == [{"twiml": "<Response><Hangup/></Response>"}]
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ Audio conversion at boundaries: mulaw 8kHz (Twilio) <-> PCM 16kHz/24kHz (Gemini)
 
 import asyncio
 import base64
+from collections import deque
 import json
 import time
 from typing import Callable, Awaitable, Optional
@@ -79,6 +80,7 @@ class GeminiPipeline:
     PING_TIMEOUT_SECONDS = 5.0
     CLOSE_TIMEOUT_SECONDS = 1.0
     MAX_RECONNECT_ATTEMPTS = 1
+    MAX_RECONNECT_AUDIO_BUFFER_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_QUEUE_CHUNKS = 128
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
@@ -115,6 +117,10 @@ class GeminiPipeline:
         self._tool_task: asyncio.Task[None] | None = None
         self._tool_epoch = 0
         self._audio_playout_task = None
+        self._inbound_audio_lock = asyncio.Lock()
+        self._reconnect_audio_buffer: deque[bytes] = deque()
+        self._reconnect_audio_buffer_bytes = 0
+        self._reconnect_audio_overflowed = False
         self._connected = False
 
         # State tracking
@@ -395,26 +401,19 @@ class GeminiPipeline:
 
     async def process_audio_in(self, mulaw_bytes: bytes):
         """Convert mulaw 8kHz -> PCM 16kHz and send to Gemini."""
-        if not self._connected or self._reconnecting or not self._ws:
+        if not self._connected:
             return
         try:
-            pcm_16k = mulaw_to_pcm16k(mulaw_bytes)
-            audio_b64 = base64.b64encode(pcm_16k).decode("utf-8")
-            await self._ws.send(json.dumps({
-                "realtime_input": {
-                    "audio": {
-                        "data": audio_b64,
-                        "mime_type": "audio/pcm;rate=16000",
-                    }
-                }
-            }))
-            if not self._first_inbound_audio_logged:
-                self._first_inbound_audio_logged = True
-                self._log_voice_timing(
-                    "first_inbound_audio_forwarded",
-                    elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
-                    chunk_bytes=len(mulaw_bytes),
-                )
+            async with self._inbound_audio_lock:
+                if not self._connected:
+                    return
+                if self._reconnecting:
+                    self._buffer_reconnect_audio(mulaw_bytes)
+                    return
+                websocket = self._ws
+                if not websocket:
+                    return
+                await self._forward_inbound_audio(websocket, mulaw_bytes)
         except Exception as e:
             if not self._inbound_audio_error_logged:
                 self._inbound_audio_error_logged = True
@@ -423,6 +422,101 @@ class GeminiPipeline:
                     exception_type=type(e).__name__,
                 )
             self._schedule_receive_recovery(close_websocket=True)
+
+    async def _forward_inbound_audio(self, websocket, mulaw_bytes: bytes) -> None:
+        """Send one caller audio frame to a specific Gemini session."""
+        pcm_16k = mulaw_to_pcm16k(mulaw_bytes)
+        audio_b64 = base64.b64encode(pcm_16k).decode("utf-8")
+        await websocket.send(json.dumps({
+            "realtime_input": {
+                "audio": {
+                    "data": audio_b64,
+                    "mime_type": "audio/pcm;rate=16000",
+                }
+            }
+        }))
+        if not self._first_inbound_audio_logged:
+            self._first_inbound_audio_logged = True
+            self._log_voice_timing(
+                "first_inbound_audio_forwarded",
+                elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+                chunk_bytes=len(mulaw_bytes),
+            )
+
+    def _buffer_reconnect_audio(self, mulaw_bytes: bytes) -> None:
+        """Buffer one immutable caller frame while a reconnect is in progress."""
+        if self._reconnect_audio_overflowed:
+            return
+        attempted_bytes = self._reconnect_audio_buffer_bytes + len(mulaw_bytes)
+        if attempted_bytes > self.MAX_RECONNECT_AUDIO_BUFFER_BYTES:
+            self._reconnect_audio_overflowed = True
+            self._reconnect_audio_buffer.clear()
+            self._reconnect_audio_buffer_bytes = 0
+            self._log_voice_timing(
+                "inbound_reconnect_audio_overflow",
+                attempted_ms=round(attempted_bytes / 8),
+                limit_ms=round(self.MAX_RECONNECT_AUDIO_BUFFER_BYTES / 8),
+            )
+            return
+        self._reconnect_audio_buffer.append(bytes(mulaw_bytes))
+        self._reconnect_audio_buffer_bytes = attempted_bytes
+
+    def _reset_reconnect_audio_buffer(self) -> tuple[int, int]:
+        """Clear buffered reconnect audio and return aggregate counts."""
+        chunk_count = len(self._reconnect_audio_buffer)
+        byte_count = self._reconnect_audio_buffer_bytes
+        self._reconnect_audio_buffer.clear()
+        self._reconnect_audio_buffer_bytes = 0
+        self._reconnect_audio_overflowed = False
+        return chunk_count, byte_count
+
+    async def _discard_reconnect_audio(
+        self,
+        reason: str,
+        *,
+        end_reconnect: bool = False,
+    ) -> None:
+        """Discard queued caller audio with payload-free aggregate telemetry."""
+        async with self._inbound_audio_lock:
+            chunk_count, byte_count = self._reset_reconnect_audio_buffer()
+            if end_reconnect:
+                self._reconnecting = False
+        if chunk_count or byte_count:
+            self._log_voice_timing(
+                "inbound_reconnect_audio_discarded",
+                reason=reason,
+                chunks=chunk_count,
+                buffered_ms=round(byte_count / 8),
+            )
+
+    async def _flush_reconnect_audio(self) -> bool:
+        """Replay buffered audio before allowing new live frames through."""
+        async with self._inbound_audio_lock:
+            if self._reconnect_audio_overflowed:
+                self._reset_reconnect_audio_buffer()
+                return False
+
+            chunk_count = len(self._reconnect_audio_buffer)
+            byte_count = self._reconnect_audio_buffer_bytes
+            if chunk_count:
+                websocket = self._ws
+                if not websocket or not self._connected:
+                    return False
+                while self._reconnect_audio_buffer:
+                    chunk = self._reconnect_audio_buffer.popleft()
+                    self._reconnect_audio_buffer_bytes -= len(chunk)
+                    await self._forward_inbound_audio(websocket, chunk)
+
+            self._reconnect_audio_buffer_bytes = 0
+            self._reconnecting = False
+
+        if chunk_count:
+            self._log_voice_timing(
+                "inbound_reconnect_audio_replayed",
+                chunks=chunk_count,
+                buffered_ms=round(byte_count / 8),
+            )
+        return True
 
     async def stop(self):
         """Close Gemini session and cancel background tasks."""
@@ -445,6 +539,7 @@ class GeminiPipeline:
         self._invalidate_tool_task("stop")
         if self._audio_playout_task:
             self._audio_playout_task.cancel()
+        await self._discard_reconnect_audio("stop", end_reconnect=True)
         await self._clear_audio_queue()
         if self._ws:
             try:
@@ -493,10 +588,10 @@ class GeminiPipeline:
 
     async def _recover_receive_loop(self, *, close_websocket: bool) -> None:
         """Clear stale output and make one bounded attempt to resume Gemini."""
-        if not self._connected or self._reconnecting:
-            return
-
-        self._reconnecting = True
+        async with self._inbound_audio_lock:
+            if not self._connected or self._reconnecting:
+                return
+            self._reconnecting = True
         try:
             self._invalidate_tool_task("reconnect")
             if self._caller_transcript_buf:
@@ -542,12 +637,23 @@ class GeminiPipeline:
                 start_background_tasks=False,
                 reconnect_context=reconnect_context,
             )
+            audio_replayed = False
+            if reconnected:
+                audio_replayed = await self._flush_reconnect_audio()
+            reconnect_succeeded = reconnected and audio_replayed
+            if reconnect_succeeded:
+                reconnect_reason = "connected"
+            elif reconnected:
+                reconnect_reason = "inbound_audio_overflow"
+            else:
+                reconnect_reason = "connect_failed"
             self._log_voice_timing(
                 "reconnect_result",
                 attempt=self._reconnect_attempts,
-                success=reconnected,
+                success=reconnect_succeeded,
+                reason=reconnect_reason,
             )
-            if not reconnected:
+            if not reconnect_succeeded:
                 logger.error("Gemini reconnection failed")
                 await self._close_current_websocket()
                 await self._complete_after_receive_failure()
@@ -564,7 +670,11 @@ class GeminiPipeline:
             await self._close_current_websocket()
             await self._complete_after_receive_failure()
         finally:
-            self._reconnecting = False
+            if self._reconnecting:
+                await self._discard_reconnect_audio(
+                    "reconnect_failed",
+                    end_reconnect=True,
+                )
 
     # --- Receive Loop ---
 

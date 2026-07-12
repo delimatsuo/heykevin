@@ -38,7 +38,7 @@ def _passing_messages() -> list[str]:
                     "response_first_audio",
                     call,
                     turn=turn,
-                    latency_ms=1100,
+                    speech_end_to_first_audio_ms=1100,
                 ),
                 _event(
                     "model_turn_complete",
@@ -58,7 +58,13 @@ def _passing_messages() -> list[str]:
 def test_extract_log_messages_accepts_cloud_logging_json_without_other_payloads():
     raw = json.dumps([
         {"jsonPayload": {"message": _event("first_outbound_audio", "call0001", call_elapsed_ms=2000)}},
-        {"textPayload": _event("response_first_audio", "call0001", latency_ms=900)},
+        {
+            "textPayload": _event(
+                "response_first_audio",
+                "call0001",
+                speech_end_to_first_audio_ms=900,
+            )
+        },
         {"jsonPayload": {"private_field": "must not be extracted"}},
     ])
 
@@ -97,6 +103,7 @@ def test_voice_release_evaluator_passes_certification_sample():
         "calls_with_inbound_media_ready": 10,
         "calls_with_first_inbound_audio": 10,
         "calls_with_caller_transcript": 10,
+        "response_turns_with_valid_latency": 30,
         "completed_response_turns": 30,
         "interrupted_response_turns": 0,
         "terminal_response_turns": 30,
@@ -110,6 +117,27 @@ def test_voice_release_evaluator_passes_certification_sample():
     serialized = json.dumps(report)
     assert "call0001" not in serialized
     assert "private-caller-sentinel" not in serialized
+
+
+def test_voice_release_evaluator_rejects_transcription_proxy_as_valid_latency():
+    messages = [
+        message.replace(
+            "speech_end_to_first_audio_ms=1100",
+            "transcript_to_audio_ms=1100",
+        )
+        for message in _passing_messages()
+    ]
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert report["sample"]["response_turns_with_valid_latency"] == 0
+    assert gates["validated_response_latency_coverage_rate"]["observed"] == 0.0
+    assert not gates["validated_response_latency_coverage_rate"]["passed"]
+    assert gates["response_first_audio_p95_ms"]["observed"] is None
+    assert report["diagnostics"]["transcript_to_audio_p95_ms"] == 1100
+    assert report["diagnostics"]["transcript_to_audio_max_ms"] == 1100
 
 
 def test_voice_release_evaluator_fails_any_barge_in_clear_failure():
@@ -311,7 +339,7 @@ def test_voice_release_evaluator_counts_unique_response_turns():
         "response_first_audio",
         "call0000",
         turn=1,
-        latency_ms=1100,
+        speech_end_to_first_audio_ms=1100,
     )
     duplicate_completion = _event(
         "model_turn_complete",
@@ -340,11 +368,21 @@ def test_voice_release_evaluator_uses_worst_latency_per_response_turn():
         )
     ]
     messages.extend(
-        _event("response_first_audio", call, turn=3, latency_ms=2000)
+        _event(
+            "response_first_audio",
+            call,
+            turn=3,
+            speech_end_to_first_audio_ms=2000,
+        )
         for call in slow_calls
     )
     messages.extend([
-        _event("response_first_audio", "call0000", turn=1, latency_ms=100)
+        _event(
+            "response_first_audio",
+            "call0000",
+            turn=1,
+            speech_end_to_first_audio_ms=100,
+        )
     ] * 100)
 
     report = evaluate_voice_release(messages)
@@ -403,7 +441,12 @@ def test_voice_release_evaluator_rejects_out_of_cohort_response_turns():
     for orphan_number in range(20):
         orphan_call = f"orphan{orphan_number:04d}"
         messages.extend([
-            _event("response_first_audio", orphan_call, turn=1, latency_ms=100),
+            _event(
+                "response_first_audio",
+                orphan_call,
+                turn=1,
+                speech_end_to_first_audio_ms=100,
+            ),
             _event(
                 "model_turn_complete",
                 orphan_call,
@@ -450,7 +493,12 @@ def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():
     messages = _passing_messages()
     messages.extend([
         _event("first_outbound_audio", "call0009", call_elapsed_ms=4000),
-        _event("response_first_audio", "call0009", turn=3, latency_ms=3000),
+        _event(
+            "response_first_audio",
+            "call0009",
+            turn=3,
+            speech_end_to_first_audio_ms=3000,
+        ),
         _event(
             "model_turn_complete",
             "call0009",
@@ -492,7 +540,11 @@ def test_voice_release_evaluator_rejects_insufficient_sample():
         _event("gemini_ws_connected", "onlycall", call_elapsed_ms=100),
         _event("greeting_instruction_sent", "onlycall", words=20),
         _event("first_outbound_audio", "onlycall", call_elapsed_ms=1000),
-        _event("response_first_audio", "onlycall", latency_ms=500),
+        _event(
+            "response_first_audio",
+            "onlycall",
+            speech_end_to_first_audio_ms=500,
+        ),
         _event("model_turn_complete", "onlycall", generated_audio_ms=2000),
     ]
 

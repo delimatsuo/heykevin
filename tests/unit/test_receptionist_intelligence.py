@@ -802,7 +802,7 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
-    assert generation_config["max_output_tokens"] == 150
+    assert generation_config["max_output_tokens"] == 120
     await pipeline.stop()
 
 
@@ -1415,7 +1415,8 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert sent_chunks == [generated_audio]
     assert messages.count("voice_timing event=response_first_audio") == 1
-    assert "latency_ms=" in messages
+    assert "transcript_to_audio_ms=" in messages
+    assert " latency_ms=" not in messages
     assert messages.count("voice_timing event=model_turn_complete") == 1
     assert "generated_audio_ms=1000" in messages
     assert "words=5" in messages
@@ -1455,6 +1456,62 @@ async def test_gemini_turn_complete_without_transcript_closes_response_metrics(c
     assert "chars=0 words=0" in messages
     assert pipeline._response_first_audio_at == 0.0
     assert pipeline._generated_audio_ms == 0
+
+
+@pytest.mark.asyncio
+async def test_gemini_usage_snapshots_are_numeric_payload_free_and_deduplicated(caplog):
+    private_payload = "private provider usage sentinel"
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    full_snapshot = {
+        "promptTokenCount": 100,
+        "responseTokenCount": 120,
+        "thoughtsTokenCount": 0,
+        "totalTokenCount": 220,
+        "responseTokensDetails": [
+            {"modality": "AUDIO", "tokenCount": 119},
+            {"modality": "TEXT", "tokenCount": 1},
+        ],
+        "privatePayload": private_payload,
+    }
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._usage_session_number = 2
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"usageMetadata": full_snapshot}),
+        json.dumps({"usageMetadata": full_snapshot}),
+        json.dumps({"usageMetadata": {"responseTokenCount": 80}}),
+        json.dumps({
+            "usageMetadata": {
+                "responseTokenCount": True,
+                "privatePayload": private_payload,
+            }
+        }),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=gemini_usage_snapshot") == 2
+    assert "session=2" in messages
+    assert "prompt_tokens=100" in messages
+    assert "response_tokens=120" in messages
+    assert "thought_tokens=0" in messages
+    assert "total_tokens=220" in messages
+    assert "response_audio_tokens=119" in messages
+    assert "response_tokens=80" in messages
+    assert private_payload not in messages
 
 
 @pytest.mark.asyncio

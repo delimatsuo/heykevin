@@ -85,7 +85,7 @@ class GeminiPipeline:
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_WORDS = 24
-    MAX_RESPONSE_OUTPUT_TOKENS = 150  # About 6 seconds of native audio.
+    MAX_RESPONSE_OUTPUT_TOKENS = 120
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -173,6 +173,8 @@ class GeminiPipeline:
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
+        self._usage_session_number = 0
+        self._last_usage_snapshot: tuple[tuple[str, int], ...] | None = None
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -238,6 +240,62 @@ class GeminiPipeline:
         metric_text = " ".join(f"{key}={value}" for key, value in metrics.items())
         suffix = f" {metric_text}" if metric_text else ""
         logger.log(level, "voice_timing event=%s call=%s%s", event, self._call_label(), suffix)
+
+    def _log_usage_metadata(self, usage: object) -> None:
+        """Log deduplicated numeric usage counters without provider payloads."""
+        if not isinstance(usage, dict):
+            return
+
+        def count(*keys: str) -> int | None:
+            for key in keys:
+                value = usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    return value
+            return None
+
+        metrics = {}
+        for metric, keys in (
+            ("prompt_tokens", ("promptTokenCount", "prompt_token_count")),
+            ("response_tokens", ("responseTokenCount", "response_token_count")),
+            ("thought_tokens", ("thoughtsTokenCount", "thoughts_token_count")),
+            ("total_tokens", ("totalTokenCount", "total_token_count")),
+        ):
+            if (value := count(*keys)) is not None:
+                metrics[metric] = value
+
+        details = usage.get(
+            "responseTokensDetails",
+            usage.get("response_tokens_details", []),
+        )
+        if isinstance(details, list):
+            audio_tokens = 0
+            found_audio = False
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+                modality = detail.get("modality")
+                token_count = detail.get("tokenCount", detail.get("token_count"))
+                if (
+                    isinstance(modality, str)
+                    and modality.upper() == "AUDIO"
+                    and isinstance(token_count, int)
+                    and not isinstance(token_count, bool)
+                    and token_count >= 0
+                ):
+                    audio_tokens += token_count
+                    found_audio = True
+            if found_audio:
+                metrics["response_audio_tokens"] = audio_tokens
+
+        snapshot = tuple(sorted(metrics.items()))
+        if not snapshot or snapshot == self._last_usage_snapshot:
+            return
+        self._last_usage_snapshot = snapshot
+        self._log_voice_timing(
+            "gemini_usage_snapshot",
+            session=self._usage_session_number,
+            **metrics,
+        )
 
     def _build_greeting_text(self) -> str:
         """Return the bounded default greeting and caller disclosure."""
@@ -379,6 +437,8 @@ class GeminiPipeline:
                 )
                 return False
 
+            self._usage_session_number += 1
+            self._last_usage_snapshot = None
             self._connected = True
             self._log_voice_timing(
                 "gemini_setup_ack",
@@ -722,6 +782,7 @@ class GeminiPipeline:
                     break
 
                 data = json.loads(message)
+                self._log_usage_metadata(data.get("usageMetadata"))
                 server_content = data.get("serverContent", {})
                 self._buffer_caller_transcript(data, server_content)
 
@@ -1122,7 +1183,7 @@ class GeminiPipeline:
         ):
             return
         now = time.monotonic()
-        latency_ms = max(
+        transcript_to_audio_ms = max(
             0,
             int((now - self._last_caller_transcript_fragment_monotonic) * 1000),
         )
@@ -1132,7 +1193,7 @@ class GeminiPipeline:
         self._log_voice_timing(
             "response_first_audio",
             turn=self._response_turn_number,
-            latency_ms=latency_ms,
+            transcript_to_audio_ms=transcript_to_audio_ms,
             call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
         )
         self._response_start_latency_logged = True

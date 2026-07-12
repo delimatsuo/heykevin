@@ -34,6 +34,7 @@ class VoiceReleaseThresholds:
     inbound_media_ready_coverage_rate: float = 1.0
     first_inbound_audio_coverage_rate: float = 1.0
     caller_transcript_coverage_rate: float = 1.0
+    validated_response_latency_coverage_rate: float = 1.0
     response_completion_rate: float = 1.0
     response_terminal_rate: float = 1.0
     greeting_max_words: int = 24
@@ -409,8 +410,18 @@ def evaluate_voice_release(
     )
     response_values = _worst_numeric_values(
         response_events,
-        "latency_ms",
+        "speech_end_to_first_audio_ms",
         ordinal="turn",
+    )
+    transcript_to_audio_values = _worst_numeric_values(
+        response_events,
+        "transcript_to_audio_ms",
+        ordinal="turn",
+    )
+    validated_response_latency_rate = (
+        len(response_values) / len(response_turn_keys)
+        if response_turn_keys
+        else 0.0
     )
     generated_audio_values = _worst_numeric_values(
         matched_completion_events,
@@ -583,6 +594,15 @@ def evaluate_voice_release(
             f">= {limits.min_response_turns}",
         ),
         _gate(
+            "validated_response_latency_coverage_rate",
+            (
+                validated_response_latency_rate
+                >= limits.validated_response_latency_coverage_rate
+            ),
+            round(validated_response_latency_rate, 4),
+            f">= {limits.validated_response_latency_coverage_rate}",
+        ),
+        _gate(
             "response_completion_rate",
             response_completion_rate >= limits.response_completion_rate,
             round(response_completion_rate, 4),
@@ -722,6 +742,7 @@ def evaluate_voice_release(
             "calls_with_caller_transcript": len(
                 caller_transcript_calls & attempted_calls
             ),
+            "response_turns_with_valid_latency": len(response_values),
             "completed_response_turns": len(completed_response_turn_keys),
             "interrupted_response_turns": len(interrupted_response_turn_keys),
             "terminal_response_turns": len(terminal_response_turn_keys),
@@ -730,6 +751,17 @@ def evaluate_voice_release(
             "receive_errors": receive_errors,
             "audio_backlog_overflows": audio_backlog_overflows,
             "outbound_audio_errors": outbound_audio_errors,
+        },
+        "diagnostics": {
+            "transcript_to_audio_p95_ms": _percentile(
+                transcript_to_audio_values,
+                0.95,
+            ),
+            "transcript_to_audio_max_ms": (
+                max(transcript_to_audio_values)
+                if transcript_to_audio_values
+                else None
+            ),
         },
         "gates": gates,
     }

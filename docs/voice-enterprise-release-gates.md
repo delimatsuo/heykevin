@@ -3,9 +3,9 @@
 ## Current Decision
 
 **Blocked for production.** The voice reliability stack is a draft candidate.
-Local tests pass, but its exact SHA has not completed the staging certification
-below. A production deploy also requires explicit owner authorization; merge or
-staging success is not authorization.
+No exact SHA has completed two independent staging certification windows below.
+A production deploy also requires explicit owner authorization; merge or staging
+success is not authorization.
 
 The voice-only candidate must not acquire PR #76 Jobber customer memory or live
 controller wiring. Customer-memory behavior and controller integration remain
@@ -42,13 +42,14 @@ not run the query without the exact revision filter.
 | Inbound media readiness coverage | 100% of Gemini connection attempts |
 | Inbound audio forwarding coverage | 100% of Gemini connection attempts |
 | Recognized caller speech coverage | 100% of Gemini connection attempts |
+| Validated response-latency coverage | 100% of response turns use a calibrated caller speech-end timestamp |
 | Non-interrupted response completion | 100% of unique non-interrupted `(call, turn)` starts have a completion |
 | Response terminal coverage | 100% of response starts explicitly complete or are interrupted |
 | Greeting length | at most 24 words |
 | Inbound media ready from Twilio media start | p95 <= 2,000 ms; max <= 3,000 ms |
 | First inbound audio forwarded | p95 <= 2,000 ms; max <= 3,000 ms |
 | First audio from Twilio media start | p95 <= 2,500 ms; max <= 3,500 ms |
-| Response first audio after caller transcript | p95 <= 1,500 ms; max <= 2,500 ms |
+| Response first audio after validated caller speech end | p95 <= 1,500 ms; max <= 2,500 ms |
 | Generated response audio | p95 <= 6,000 ms; max <= 8,000 ms |
 | Interruption to Twilio clear completion | p95 <= 250 ms; max <= 500 ms |
 | Twilio clear delivery failures | zero |
@@ -63,6 +64,18 @@ not run the query without the exact revision filter.
 These are release thresholds, not aspirations. A small or incomplete sample is
 a failure, not a waiver. Start the export window before the first canary call
 and end it after the last call so every event belongs to a complete cohort.
+
+Gemini input-transcription events arrive independently and have no guaranteed
+ordering relative to model audio. `transcript_to_audio_ms` is diagnostic only
+and cannot satisfy the response-latency gates. Until a prerecorded canary or a
+calibrated shadow VAD supplies `speech_end_to_first_audio_ms`, the evaluator
+must fail validated response-latency coverage.
+
+`gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
+session. It is payload-free, may be duplicated by the provider, and must not be
+attributed to an individual response turn. The 120-token output limit is an
+experiment to reduce long responses; it is not a duration guarantee and does
+not waive the generated-audio or audible-completeness gates.
 
 ## Staging Call Matrix
 
@@ -81,6 +94,7 @@ caller turns across this matrix:
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the voice-only candidate path. |
 | Reconnect simulation | Old Kevin output is absent; buffered caller audio replays in order before new live frames. |
 | Oversized response simulation | Queued audio stays bounded; stale output clears; one short retry is requested. |
+| Bounded normal responses | Generated audio stays within budget and no response ends mid-sentence. |
 | Inbound startup overflow simulation | Stream closes, no caller audio is logged, and the release evaluator fails. |
 | Normal hangup | Final audio drains before call completion; post-call processing runs once. |
 

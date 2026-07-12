@@ -62,6 +62,35 @@ def test_media_stream_active_call_fallback_requires_owner_context():
     assert media_stream._active_call_fallback("CA123", {"contractor_id": "contractor-1"}) is None
 
 
+@pytest.mark.asyncio
+async def test_media_stream_uses_authenticated_fallback_without_retry_delay(monkeypatch):
+    lookup_count = 0
+
+    async def miss_active_call(_call_sid: str):
+        nonlocal lookup_count
+        lookup_count += 1
+        return None
+
+    async def unexpected_sleep(_delay: float):
+        pytest.fail("authenticated stream context must not incur a retry delay")
+
+    monkeypatch.setattr(media_stream, "get_active_call", miss_active_call)
+    monkeypatch.setattr(media_stream.asyncio, "sleep", unexpected_sleep)
+
+    active_call = await media_stream._resolve_active_call(
+        "CA123",
+        {
+            "contractor_id": "contractor-1",
+            "caller_phone": "+15551234567",
+            "caller_name": "Pat Customer",
+        },
+    )
+
+    assert lookup_count == 1
+    assert active_call is not None
+    assert active_call.contractor_id == "contractor-1"
+
+
 def test_voip_push_body_does_not_include_arbitrary_reason():
     body = push_notification._safe_voip_push_body(
         reason="emergency from Pat Customer +15551234567"

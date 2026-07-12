@@ -749,8 +749,100 @@ async def test_gemini_audio_playout_is_paced_and_tracks_speaking(monkeypatch):
     assert any(delay >= 0.4 for delay in sleep_calls)
     assert pipeline._is_speaking is False
     assert pipeline._last_kevin_speech_time > 0
+    assert pipeline._queued_audio_bytes == 0
 
     await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    clear_calls = 0
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def clear_audio():
+        nonlocal clear_calls
+        clear_calls += 1
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline.MAX_AUDIO_BACKLOG_BYTES = 10
+    pipeline._ensure_audio_playout_task = lambda: None
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._enqueue_model_audio(b"12345678")
+    await pipeline._enqueue_model_audio(b"overflow")
+
+    assert pipeline._audio_queue.maxsize == pipeline.MAX_AUDIO_QUEUE_CHUNKS
+    assert pipeline._audio_queue.empty()
+    assert pipeline._queued_audio_bytes == 0
+    assert pipeline._audio_backlog_overflowed
+    assert pipeline._interrupt_speaking
+    assert clear_calls == 1
+
+    websocket = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    pipeline._ws = websocket
+    await pipeline._receive_loop()
+
+    assert not pipeline._audio_backlog_overflowed
+    assert not pipeline._interrupt_speaking
+    assert pipeline._audio_backlog_recoveries == 1
+    assert len(websocket.sent_payloads) == 1
+    retry_text = websocket.sent_payloads[0]["client_content"]["turns"][0]["parts"][0]["text"]
+    assert "one short sentence" in retry_text
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=audio_backlog_overflow" in messages
+    assert "12345678" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_second_audio_backlog_overflow_ends_call_without_retry():
+    call_completed = asyncio.Event()
+
+    async def noop(_arg1, _arg2=None):
+        return None
+
+    async def on_call_complete():
+        call_completed.set()
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop,
+        on_transcript=noop,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._interrupt_speaking = True
+    pipeline._audio_backlog_overflowed = True
+    pipeline._audio_backlog_recoveries = pipeline.MAX_AUDIO_BACKLOG_RECOVERIES
+    websocket = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    pipeline._ws = websocket
+
+    await pipeline._receive_loop()
+
+    assert call_completed.is_set()
+    assert websocket.sent_payloads == []
 
 
 @pytest.mark.asyncio
@@ -1281,7 +1373,7 @@ async def test_gemini_urgency_log_does_not_include_transcript_text(caplog):
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=urgency_detected" in messages
-    assert "keyword=fire" in messages
+    assert "keyword=fire" not in messages
     assert "100 Market Street" not in messages
 
 

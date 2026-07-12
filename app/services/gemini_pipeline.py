@@ -73,6 +73,9 @@ class GeminiPipeline:
     CALLER_SILENCE_GOODBYE_SECONDS = 3
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
     MAX_RECONNECT_ATTEMPTS = 1
+    MAX_AUDIO_QUEUE_CHUNKS = 128
+    MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
+    MAX_AUDIO_BACKLOG_RECOVERIES = 1
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -136,7 +139,12 @@ class GeminiPipeline:
         self._response_turn_number = 0
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
-        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue()
+        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue(
+            maxsize=self.MAX_AUDIO_QUEUE_CHUNKS
+        )
+        self._queued_audio_bytes = 0
+        self._audio_backlog_overflowed = False
+        self._audio_backlog_recoveries = 0
         self._audio_output_lock = asyncio.Lock()
         self._audio_epoch = 0
         self._pipeline_started_at = (
@@ -487,6 +495,7 @@ class GeminiPipeline:
                 # Handle turn completion — Gemini finished generating. Audio
                 # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
+                    overflowed_turn = self._audio_backlog_overflowed
                     interrupted_turn = self._interrupt_speaking
                     if interrupted_turn:
                         # Gemini sends interrupted -> turnComplete for a cut-off turn.
@@ -499,6 +508,29 @@ class GeminiPipeline:
                             self._interrupt_speaking = False
                         self._reset_response_metrics()
                     self._assistant_instruction_pending = False
+                    if overflowed_turn:
+                        self._audio_backlog_overflowed = False
+                        if (
+                            self._audio_backlog_recoveries
+                            >= self.MAX_AUDIO_BACKLOG_RECOVERIES
+                        ):
+                            self._log_voice_timing(
+                                "audio_backlog_recovery_exhausted",
+                                attempts=self._audio_backlog_recoveries,
+                            )
+                            if self.on_call_complete:
+                                await self.on_call_complete()
+                            return
+                        self._audio_backlog_recoveries += 1
+                        await self._send_client_instruction(
+                            "Your previous response was too long and was not played. "
+                            "Apologize briefly, then answer again in one short sentence."
+                        )
+                        self._log_voice_timing(
+                            "audio_backlog_recovery_requested",
+                            attempt=self._audio_backlog_recoveries,
+                        )
+                        continue
                     said_goodbye = False
                     if not interrupted_turn:
                         said_goodbye = await self._flush_kevin_transcript(
@@ -622,8 +654,54 @@ class GeminiPipeline:
             return
         duration_seconds = len(mulaw_chunk) / 8000.0
         self._generated_audio_ms += round(duration_seconds * 1000)
+        if self._audio_backlog_overflowed:
+            return
+        attempted_backlog_bytes = self._queued_audio_bytes + len(mulaw_chunk)
+        if attempted_backlog_bytes > self.MAX_AUDIO_BACKLOG_BYTES:
+            await self._handle_audio_backlog_overflow(
+                incoming_bytes=len(mulaw_chunk),
+                attempted_backlog_bytes=attempted_backlog_bytes,
+            )
+            return
         self._ensure_audio_playout_task()
-        await self._audio_queue.put((mulaw_chunk, duration_seconds, self._audio_epoch))
+        try:
+            self._audio_queue.put_nowait(
+                (mulaw_chunk, duration_seconds, self._audio_epoch)
+            )
+        except asyncio.QueueFull:
+            await self._handle_audio_backlog_overflow(
+                incoming_bytes=len(mulaw_chunk),
+                attempted_backlog_bytes=attempted_backlog_bytes,
+            )
+            return
+        self._queued_audio_bytes += len(mulaw_chunk)
+
+    async def _handle_audio_backlog_overflow(
+        self,
+        *,
+        incoming_bytes: int,
+        attempted_backlog_bytes: int,
+    ) -> None:
+        """Clear an oversized model turn without blocking Gemini receive events."""
+        if self._audio_backlog_overflowed:
+            return
+
+        self._audio_backlog_overflowed = True
+        self._interrupt_speaking = True
+        self._audio_epoch += 1
+        clear_started_at = time.monotonic()
+        async with self._audio_output_lock:
+            dropped_chunks = await self._clear_audio_queue()
+            if self.on_clear_audio:
+                await self.on_clear_audio()
+        self._log_voice_timing(
+            "audio_backlog_overflow",
+            attempted_backlog_ms=round(attempted_backlog_bytes / 8),
+            incoming_ms=round(incoming_bytes / 8),
+            limit_ms=round(self.MAX_AUDIO_BACKLOG_BYTES / 8),
+            clear_ms=self._elapsed_ms(clear_started_at),
+            dropped_chunks=dropped_chunks,
+        )
 
     async def _audio_playout_loop(self):
         """Send Gemini audio to Twilio paced to playback duration.
@@ -635,6 +713,10 @@ class GeminiPipeline:
         try:
             while self._connected:
                 mulaw_chunk, duration_seconds, audio_epoch = await self._audio_queue.get()
+                self._queued_audio_bytes = max(
+                    0,
+                    self._queued_audio_bytes - len(mulaw_chunk),
+                )
                 sent = False
                 try:
                     async with self._audio_output_lock:
@@ -681,6 +763,7 @@ class GeminiPipeline:
             else:
                 dropped_chunks += 1
                 self._audio_queue.task_done()
+        self._queued_audio_bytes = 0
         self._is_speaking = False
         return dropped_chunks
 
@@ -716,11 +799,7 @@ class GeminiPipeline:
             for keyword in self.URGENCY_KEYWORDS:
                 if keyword in text_lower:
                     self._urgency_detected = True
-                    self._log_voice_timing(
-                        "urgency_detected",
-                        keyword=keyword,
-                        chars=len(full_text),
-                    )
+                    self._log_voice_timing("urgency_detected")
                     asyncio.create_task(self.on_urgency_detected(full_text))
                     if self._unavailable_task and not self._unavailable_task.done():
                         self._unavailable_task.cancel()

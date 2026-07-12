@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import re
 
 import pytest
 
@@ -169,6 +170,8 @@ def test_rollback_workflow_is_main_only_least_privilege_and_serialized():
 
 def test_rollback_authentication_fails_closed_by_environment():
     workflow = Path(".github/workflows/rollback.yml").read_text()
+    staging_step = _named_step(workflow, "Validate staging control identities")
+    production_step = _named_step(workflow, "Validate production control identities")
 
     assert "Authenticate to staging GCP" in workflow
     assert "Authenticate to production GCP" in workflow
@@ -178,6 +181,9 @@ def test_rollback_authentication_fails_closed_by_environment():
     assert "&& vars.WIF_PRODUCTION_SERVICE_ACCOUNT ||" not in workflow
     assert 'WIF_SERVICE_ACCOUNT: ${{ vars.WIF_STAGING_SERVICE_ACCOUNT }}' in workflow
     assert 'WIF_SERVICE_ACCOUNT: ${{ vars.WIF_PRODUCTION_SERVICE_ACCOUNT }}' in workflow
+    assert "github-actions-staging@kevin-491315" in staging_step
+    assert "github-actions-(prod|production)@kevin-491315" in production_step
+    assert workflow.count("^projects/752910912062/locations/global/") == 2
 
 
 def test_rollback_does_not_depend_on_current_application_health():
@@ -251,3 +257,44 @@ def test_future_deploys_restore_latest_traffic_after_a_rollback():
     assert workflow.count("--to-latest") == 2
     assert workflow.count("verify_cloud_run_deployment.sh") == 2
     assert 'STATUS=$(curl' not in workflow
+
+
+def test_all_deploy_identities_fail_closed_before_authentication():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+
+    assert workflow.count("Validate staging federation identity") == 2
+    assert workflow.count("Validate production federation identity") == 1
+    assert workflow.count("Authenticate to staging GCP") == 2
+    assert workflow.count("Authenticate to production GCP") == 1
+    assert workflow.count("github-actions-staging@kevin-491315") == 2
+    assert workflow.count("github-actions-(prod|production)@kevin-491315") == 1
+    assert workflow.count("^projects/752910912062/locations/global/") == 3
+    assert workflow.count("workload_identity_provider: ${{ env.WIF_PROVIDER }}") == 3
+    assert workflow.count("service_account: ${{ env.WIF_SERVICE_ACCOUNT }}") == 3
+
+
+def test_privileged_workflows_do_not_interpolate_context_data_in_shell():
+    for path in (
+        Path(".github/workflows/deploy.yml"),
+        Path(".github/workflows/rollback.yml"),
+    ):
+        for block in _run_blocks(path.read_text()):
+            assert "${{ inputs." not in block
+            assert "${{ vars." not in block
+            assert "${{ github.event." not in block
+
+
+def test_release_workflow_actions_are_commit_pinned():
+    action_pattern = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+@[0-9a-f]{40}$")
+
+    for path in (
+        Path(".github/workflows/deploy.yml"),
+        Path(".github/workflows/rollback.yml"),
+    ):
+        actions = [
+            line.split("uses:", 1)[1].strip().split()[0]
+            for line in path.read_text().splitlines()
+            if "uses:" in line
+        ]
+        assert actions
+        assert all(action_pattern.fullmatch(action) for action in actions)

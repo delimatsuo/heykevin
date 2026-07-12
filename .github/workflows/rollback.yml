@@ -81,8 +81,8 @@ jobs:
           WIF_SERVICE_ACCOUNT: ${{ vars.WIF_STAGING_SERVICE_ACCOUNT }}
           RUNTIME_SERVICE_ACCOUNT: ${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}
         run: |
-          [[ "$WIF_PROVIDER" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$ ]]
-          [[ "$WIF_SERVICE_ACCOUNT" =~ ^[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]]
+          [[ "$WIF_PROVIDER" =~ ^projects/752910912062/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$ ]]
+          [[ "$WIF_SERVICE_ACCOUNT" == "github-actions-staging@kevin-491315.iam.gserviceaccount.com" ]]
           [[ "$RUNTIME_SERVICE_ACCOUNT" =~ ^[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]]
           printf 'EXPECTED_RUNTIME_SERVICE_ACCOUNT=%s\n' \
             "$RUNTIME_SERVICE_ACCOUNT" >> "$GITHUB_ENV"
@@ -94,8 +94,8 @@ jobs:
           WIF_SERVICE_ACCOUNT: ${{ vars.WIF_PRODUCTION_SERVICE_ACCOUNT }}
           RUNTIME_SERVICE_ACCOUNT: ${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}
         run: |
-          [[ "$WIF_PROVIDER" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$ ]]
-          [[ "$WIF_SERVICE_ACCOUNT" =~ ^[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]]
+          [[ "$WIF_PROVIDER" =~ ^projects/752910912062/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$ ]]
+          [[ "$WIF_SERVICE_ACCOUNT" =~ ^github-actions-(prod|production)@kevin-491315\.iam\.gserviceaccount\.com$ ]]
           [[ "$RUNTIME_SERVICE_ACCOUNT" =~ ^[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]]
           printf 'EXPECTED_RUNTIME_SERVICE_ACCOUNT=%s\n' \
             "$RUNTIME_SERVICE_ACCOUNT" >> "$GITHUB_ENV"

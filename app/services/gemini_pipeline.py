@@ -491,8 +491,20 @@ class GeminiPipeline:
                 logger.info("Attempting Gemini reconnection...")
                 if self._caller_transcript_buf:
                     await self._flush_caller_transcript()
-                if self._kevin_transcript_buf:
-                    await self._flush_kevin_transcript(apply_side_effects=False)
+                self._interrupt_speaking = True
+                self._audio_epoch += 1
+                self._assistant_instruction_pending = False
+                self._kevin_transcript_buf.clear()
+                async with self._audio_output_lock:
+                    dropped_chunks = await self._clear_audio_queue()
+                    if self.on_clear_audio:
+                        await self.on_clear_audio()
+                    self._interrupt_speaking = False
+                self._log_voice_timing(
+                    "reconnect_output_clear",
+                    dropped_chunks=dropped_chunks,
+                    sent_chunks=self._audio_chunks_sent,
+                )
                 reconnect_context = self._build_reconnect_context()
                 reconnected = await self.start(
                     send_greeting=False,

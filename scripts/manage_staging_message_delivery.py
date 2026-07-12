@@ -403,6 +403,35 @@ def _runtime_is_ready(runtime: Mapping[str, Any]) -> bool:
     return str(cpu_throttling).lower() == "false" and minimum >= 1
 
 
+def _index_collection_group(item: Mapping[str, Any]) -> str | None:
+    identifiers = [
+        value
+        for value in (item.get("collectionGroupId"), item.get("collectionGroup"))
+        if isinstance(value, str)
+    ]
+
+    name = item.get("name")
+    if name is not None:
+        if not isinstance(name, str):
+            return None
+        parts = name.split("/")
+        if (
+            len(parts) != 8
+            or parts[0] != "projects"
+            or parts[1] != FIRESTORE_PROJECT
+            or parts[2] != "databases"
+            or parts[3] != "(default)"
+            or parts[4] != "collectionGroups"
+            or not parts[5]
+            or parts[6] != "indexes"
+            or not parts[7]
+        ):
+            return None
+        identifiers.append(parts[5])
+
+    return identifiers[0] if identifiers and len(set(identifiers)) == 1 else None
+
+
 def _latest_receives_all_traffic(runtime: Mapping[str, Any]) -> bool:
     status = _nested_mapping(runtime, "status")
     latest_revision = status.get("latestReadyRevisionName")
@@ -425,7 +454,7 @@ def _latest_receives_all_traffic(runtime: Mapping[str, Any]) -> bool:
 def _parse_indexes(items: Sequence[Mapping[str, Any]]) -> dict[IndexSpec, str | None]:
     states: dict[IndexSpec, str | None] = {index: None for index in REQUIRED_INDEXES}
     for item in items:
-        if item.get("collectionGroup") != COLLECTION_GROUP:
+        if _index_collection_group(item) != COLLECTION_GROUP:
             continue
         if str(item.get("queryScope", "")).upper() != "COLLECTION":
             continue

@@ -153,6 +153,30 @@ def test_targets_are_immutable_and_staging_only():
             )
 
 
+def test_parse_indexes_accepts_current_gcloud_name_only_shape():
+    module = _load_module()
+    expected = module.REQUIRED_INDEXES[0]
+
+    parsed = module._parse_indexes(
+        (
+            {
+                "name": (
+                    f"projects/{module.FIRESTORE_PROJECT}/databases/(default)/"
+                    f"collectionGroups/{module.COLLECTION_GROUP}/indexes/index-1"
+                ),
+                "queryScope": "COLLECTION",
+                "state": "READY",
+                "fields": [
+                    {"fieldPath": field, "order": "ASCENDING"}
+                    for field in expected.fields
+                ],
+            },
+        )
+    )
+
+    assert parsed[expected] == "READY"
+
+
 def test_alert_policies_are_payload_free_and_cover_required_events():
     module = _load_module()
     channel = f"projects/{module.RUNTIME_PROJECT}/notificationChannels/channel-1"

@@ -11,11 +11,13 @@ Full-duplex architecture based on Deepgram best practices:
 
 import asyncio
 import json
+import logging
 import time
 from typing import Callable, Awaitable, Optional
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from app.config import settings
 from app.services.entitlements import effective_mode
@@ -28,6 +30,31 @@ from app.services.urgency import (
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _call_label(call_sid: str) -> str:
+    return call_sid[:8] or "unknown"
+
+
+def _log_voice_event(
+    event: str,
+    call_sid: str = "",
+    *,
+    level: int = logging.INFO,
+    **metrics: object,
+) -> None:
+    metric_text = " ".join(f"{key}={value}" for key, value in metrics.items())
+    suffix = f" {metric_text}" if metric_text else ""
+    logger.log(level, "voice_event event=%s call=%s%s", event, _call_label(call_sid), suffix)
+
+
+def _log_voice_exception(event: str, error: BaseException, call_sid: str = "") -> None:
+    _log_voice_event(
+        event,
+        call_sid,
+        level=logging.WARNING,
+        exception_type=type(error).__name__,
+    )
 
 
 def _tool_execution_error_response() -> str:
@@ -539,8 +566,8 @@ class VoicePipeline:
                     )}],
                 )
                 greeting = resp.content[0].text.strip()
-            except Exception as e:
-                logger.warning(f"Greeting translation failed: {e}")
+            except Exception as error:
+                _log_voice_exception("greeting_translation_error", error, self._call_sid)
 
         async with self._response_lock:
             self._conversation.append({"role": "assistant", "content": greeting})
@@ -590,7 +617,13 @@ class VoicePipeline:
                 f"But if you'd like, you can leave me a message and I'll make sure {pronoun} gets it."
             )
             self._conversation.append({"role": "assistant", "content": msg})
-            logger.info(f"Kevin (ignore triggered): {msg}")
+            _log_voice_event(
+                "assistant_message_ready",
+                self._call_sid,
+                source="ignore",
+                chars=len(msg),
+                words=len(msg.split()),
+            )
             await self.on_transcript("Kevin", msg)
             await self._speak(msg)
 
@@ -668,8 +701,8 @@ class VoicePipeline:
             logger.info("Deepgram STT connected (nova-3, mulaw 8kHz, interim+speech_final)")
             return True
 
-        except Exception as e:
-            logger.error(f"Deepgram connect failed: {e}")
+        except Exception as error:
+            _log_voice_exception("deepgram_connect_error", error, self._call_sid)
             return False
 
     async def _deepgram_receive_loop(self):
@@ -712,7 +745,7 @@ class VoicePipeline:
                         if self.on_call_complete:
                             await self.on_call_complete()
                     break  # This loop ends; _connect_deepgram starts a new receive loop
-                except websockets.exceptions.ConnectionClosed:
+                except ConnectionClosed:
                     logger.warning("Deepgram WebSocket closed")
                     break
 
@@ -757,7 +790,12 @@ class VoicePipeline:
                         await self._flush_utterance()
                     continue
 
-                logger.info(f"STT [final, speech_final={speech_final}]: {transcript}")
+                _log_voice_event(
+                    "stt_final",
+                    self._call_sid,
+                    speech_final=speech_final,
+                    chars=len(transcript),
+                )
 
                 # Language detection: check on first final transcript, lock after detection
                 # Only detect if contractor has language set to "auto"
@@ -794,8 +832,8 @@ class VoicePipeline:
 
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            logger.error(f"Deepgram receive error: {e}")
+        except Exception as error:
+            _log_voice_exception("deepgram_receive_error", error, self._call_sid)
 
     # Map of Deepgram language codes to human-readable names for the LLM prompt
     _LANG_NAMES = {
@@ -817,7 +855,7 @@ class VoicePipeline:
         """
         short_code = lang_code[:2]
         lang_name = self._LANG_NAMES.get(short_code, lang_code)
-        logger.info(f"Language detected: {lang_name} ({lang_code}) — switching Kevin")
+        _log_voice_event("language_switched", self._call_sid, language_code=short_code)
 
         self._language = short_code
         # Switch to multilingual TTS voice and model
@@ -836,10 +874,11 @@ class VoicePipeline:
         Runs in _deepgram_receive_loop (outside the response lock) so it
         doesn't block the conversation flow. The callback fires async.
         """
+        urgent_signal = find_urgent_signal(transcript)
         if (
             self._urgency_detected
             or not self.on_urgency_detected
-            or not find_urgent_signal(transcript)
+            or not urgent_signal
         ):
             return
 
@@ -870,13 +909,19 @@ class VoicePipeline:
         if not self._utterance_buffer:
             return
 
+        segment_count = len(self._utterance_buffer)
         combined = " ".join(self._utterance_buffer)
         self._utterance_buffer.clear()
 
         if not self._urgency_detected and self.on_urgency_detected:
             self._check_urgency(combined)
 
-        logger.info(f"Complete utterance: {combined}")
+        _log_voice_event(
+            "utterance_complete",
+            self._call_sid,
+            chars=len(combined),
+            segments=segment_count,
+        )
         asyncio.create_task(self._process_utterance(combined))
 
     async def _process_utterance(self, text: str):
@@ -982,12 +1027,12 @@ class VoicePipeline:
 
             # Prepend to system prompt before first caller speech
             self._system_prompt = self._system_prompt + crm_context
-            logger.info(f"Jobber CRM context injected for caller {self._caller_phone[:6]}***")
+            _log_voice_event("jobber_context_loaded", self._call_sid)
 
         except asyncio.TimeoutError:
             logger.debug("Jobber caller lookup timed out — proceeding without CRM context")
-        except Exception as e:
-            logger.warning(f"Jobber prefetch failed (non-critical): {e}")
+        except Exception as error:
+            _log_voice_exception("jobber_prefetch_error", error, self._call_sid)
 
     def _has_jobber(self) -> bool:
         """Check if the contractor has Jobber connected."""
@@ -1155,7 +1200,13 @@ class VoicePipeline:
                             break
                         logger.error(f"Claude error (attempt {attempt + 1}): {response.status_code}")
                     except Exception as api_err:
-                        logger.error(f"Claude API exception (attempt {attempt + 1}): {api_err}")
+                        _log_voice_event(
+                            "claude_request_error",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            attempt=attempt + 1,
+                            exception_type=type(api_err).__name__,
+                        )
                         response = None
 
                     if attempt == 0:
@@ -1250,7 +1301,11 @@ class VoicePipeline:
                                     "pauses", "pause", "holds", "listening", "quiet",
                                     "continues waiting", "remains silent", "stays quiet"}
                 if stripped in stage_directions or stripped == "..." or stripped.startswith("*") and stripped.endswith("*"):
-                    logger.info(f"Kevin output stage direction '{kevin_text.strip()}' — suppressing TTS")
+                    _log_voice_event(
+                        "assistant_stage_direction_suppressed",
+                        self._call_sid,
+                        chars=len(kevin_text.strip()),
+                    )
                     break
 
                 self._conversation.append({"role": "assistant", "content": kevin_text})
@@ -1259,7 +1314,12 @@ class VoicePipeline:
                 if len(self._conversation) > 30:
                     self._conversation = self._conversation[-30:]
 
-                logger.info(f"Kevin: {kevin_text}")
+                _log_voice_event(
+                    "assistant_response_ready",
+                    self._call_sid,
+                    chars=len(kevin_text),
+                    words=len(kevin_text.split()),
+                )
                 await self.on_transcript("Kevin", kevin_text)
                 await self._speak(kevin_text)
                 if is_owner_availability_hold(kevin_text):
@@ -1276,8 +1336,8 @@ class VoicePipeline:
 
                 break  # done — got a text response
 
-        except Exception as e:
-            logger.error(f"Claude error: {e}")
+        except Exception as error:
+            _log_voice_exception("claude_response_error", error, self._call_sid)
 
     def _start_owner_availability_wait(self):
         now = time.time()
@@ -1287,7 +1347,7 @@ class VoicePipeline:
         if self._unavailable_task and not self._unavailable_task.done():
             self._unavailable_task.cancel()
         self._unavailable_task = asyncio.create_task(self._unavailable_timer())
-        logger.info(f"Owner availability hold started for call {self._call_sid}")
+        _log_voice_event("owner_availability_hold_started", self._call_sid)
 
     def _finish_owner_availability_wait(self):
         self._waiting_for_owner_availability = False
@@ -1371,7 +1431,7 @@ class VoicePipeline:
             ):
                 return
             msg = "I'm going to hang up for now. Please call back when you're ready. Goodbye."
-            logger.info(f"Caller silence timeout for call {self._call_sid} — ending call")
+            _log_voice_event("caller_silence_timeout", self._call_sid)
             self._conversation.append({"role": "assistant", "content": msg})
             await self.on_transcript("Kevin", msg)
             await self._speak(msg)
@@ -1432,7 +1492,13 @@ class VoicePipeline:
                     f"But if you'd like, you can leave me a message and I'll make sure {pronoun} gets it."
                 )
                 self._conversation.append({"role": "assistant", "content": msg})
-                logger.info(f"Kevin (unavailable timer): {msg}")
+                _log_voice_event(
+                    "assistant_message_ready",
+                    self._call_sid,
+                    source="unavailable_timer",
+                    chars=len(msg),
+                    words=len(msg.split()),
+                )
                 await self.on_transcript("Kevin", msg)
                 await self._speak(msg)
         except asyncio.CancelledError:
@@ -1471,7 +1537,12 @@ class VoicePipeline:
                 if mulaw_data[:4] == b'RIFF':
                     mulaw_data = mulaw_data[44:]
 
-                logger.info(f"TTS: {len(mulaw_data)} bytes ({len(mulaw_data)/8000:.1f}s)")
+                _log_voice_event(
+                    "tts_audio_ready",
+                    self._call_sid,
+                    bytes=len(mulaw_data),
+                    duration_ms=round(len(mulaw_data) / 8),
+                )
 
                 # Send in large chunks for smooth playback
                 chunk_size = 4000  # 500ms of audio
@@ -1520,10 +1591,15 @@ class VoicePipeline:
                 if not delivery_failed:
                     self._mark_kevin_activity()
             else:
-                logger.error(f"ElevenLabs error: {response.status_code} {response.text[:100]}")
+                _log_voice_event(
+                    "tts_provider_error",
+                    self._call_sid,
+                    level=logging.WARNING,
+                    status_code=response.status_code,
+                )
 
-        except Exception as e:
-            logger.error(f"TTS error: {e}")
+        except Exception as error:
+            _log_voice_exception("tts_request_error", error, self._call_sid)
 
         self._is_speaking = False
         self._interrupt_speaking = False

@@ -1,0 +1,73 @@
+{
+  "version": 2,
+  "sources": {
+    "en_us": {
+      "source_pcm": "fleurs-en_us-test-row-0-trimmed.raw",
+      "source_sha256_chunks": [
+        "5747fe84",
+        "9a2c359f",
+        "060f7433",
+        "bf5f45ff",
+        "ca0b5d73",
+        "bf4aa9bb",
+        "eca2da30",
+        "2992d1c1"
+      ],
+      "source_sample_rate_hz": 8000,
+      "source_speech_start_ms": 500,
+      "source_speech_end_ms": 8100
+    },
+    "es_419": {
+      "source_pcm": "fleurs-es_419-test-row-0-trimmed.raw",
+      "source_sha256_chunks": [
+        "40c05ed2",
+        "8b55ac79",
+        "75aa81c5",
+        "5ebcdc1d",
+        "d482f6f8",
+        "cc71b0d5",
+        "0b24e671",
+        "84caed5b"
+      ],
+      "source_sample_rate_hz": 8000,
+      "source_speech_start_ms": 500,
+      "source_speech_end_ms": 10460
+    }
+  },
+  "cases": [
+    {
+      "name": "fleurs_en_us_clean",
+      "source": "en_us",
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "fleurs_en_us_quiet",
+      "source": "en_us",
+      "gain": 0.35,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "fleurs_en_us_fragmented",
+      "source": "en_us",
+      "frame_pattern_ms": [10, 30, 20]
+    },
+    {
+      "name": "fleurs_es_419_clean",
+      "source": "es_419",
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "fleurs_es_419_noise",
+      "source": "es_419",
+      "gain": 0.8,
+      "noise_peak": 400,
+      "noise_seed": 37,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "fleurs_es_419_fragmented",
+      "source": "es_419",
+      "frame_pattern_ms": [10, 30, 20]
+    }
+  ]
+}

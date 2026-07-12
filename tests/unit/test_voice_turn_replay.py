@@ -1,6 +1,8 @@
 """Offline paired replay tests for Gemini turn detection experiments."""
 
 import argparse
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -14,12 +16,14 @@ from app.services.voice_turn_replay import (
     evaluate_voice_turn_benchmark,
     load_voice_turn_cases,
     render_voice_turn_case,
+    voice_turn_manifest_identity,
 )
 from scripts.benchmark_gemini_turn_detection import run_benchmark
 
 
 FIXTURE_DIR = Path("tests/fixtures/voice_vad")
 MANIFEST = FIXTURE_DIR / "turn_replay_manifest.json"
+FLEURS_MANIFEST = FIXTURE_DIR / "fleurs_turn_replay_manifest.json"
 
 
 def test_voice_turn_manifest_renders_live_codec_conditions():
@@ -33,6 +37,35 @@ def test_voice_turn_manifest_renders_live_codec_conditions():
     assert rendered.speech_end_ms == 780
     assert rendered.duration_ms >= rendered.speech_end_ms + 500
     assert len(rendered.mulaw8) == rendered.duration_ms * 8
+
+
+def test_fleurs_manifest_renders_two_labeled_languages():
+    cases = load_voice_turn_cases(FLEURS_MANIFEST)
+
+    assert len(cases) == 6
+    assert {case.source_path.name for case in cases} == {
+        "fleurs-en_us-test-row-0-trimmed.raw",
+        "fleurs-es_419-test-row-0-trimmed.raw",
+    }
+    english = render_voice_turn_case(cases[0])
+    spanish = render_voice_turn_case(cases[3])
+    assert (english.speech_start_ms, english.speech_end_ms) == (500, 8_100)
+    assert (spanish.speech_start_ms, spanish.speech_end_ms) == (500, 10_460)
+    assert english.duration_ms == english.speech_end_ms + 500
+    assert spanish.duration_ms == spanish.speech_end_ms + 500
+
+
+def test_voice_turn_manifest_identity_is_stable_and_corpus_specific():
+    legacy = voice_turn_manifest_identity(MANIFEST)
+    fleurs = voice_turn_manifest_identity(FLEURS_MANIFEST)
+
+    assert fleurs == voice_turn_manifest_identity(FLEURS_MANIFEST)
+    assert fleurs["manifest_sha256"] == hashlib.sha256(
+        FLEURS_MANIFEST.read_bytes()
+    ).hexdigest()
+    assert len(fleurs["corpus_sha256"]) == 64
+    assert legacy["manifest_sha256"] != fleurs["manifest_sha256"]
+    assert legacy["corpus_sha256"] != fleurs["corpus_sha256"]
 
 
 def test_voice_turn_manifest_rejects_source_outside_fixture_directory(tmp_path):
@@ -52,6 +85,68 @@ def test_voice_turn_manifest_rejects_source_outside_fixture_directory(tmp_path):
     )
 
     with pytest.raises(ValueError, match="source_pcm"):
+        load_voice_turn_cases(manifest)
+
+
+def test_voice_turn_manifest_supports_path_confined_multi_source_v2(tmp_path):
+    sources = {}
+    for source_id in ("en_us", "es_419"):
+        source_path = tmp_path / f"{source_id}.raw"
+        source_path.write_bytes(b"\x00\x00" * 8_000)
+        sources[source_id] = {
+            "source_pcm": source_path.name,
+            "source_sha256_chunks": [
+                hashlib.sha256(source_path.read_bytes()).hexdigest()
+            ],
+            "source_sample_rate_hz": 8_000,
+            "source_speech_start_ms": 100,
+            "source_speech_end_ms": 500,
+        }
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "sources": sources,
+                "cases": [
+                    {"name": "english", "source": "en_us"},
+                    {"name": "spanish", "source": "es_419"},
+                ],
+            }
+        )
+    )
+
+    cases = load_voice_turn_cases(manifest)
+
+    assert [case.name for case in cases] == ["english", "spanish"]
+    assert [case.source_path.name for case in cases] == ["en_us.raw", "es_419.raw"]
+
+
+def test_voice_turn_manifest_v2_rejects_unknown_case_source(tmp_path):
+    source_path = tmp_path / "source.raw"
+    source_path.write_bytes(b"\x00\x00" * 8_000)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "sources": {
+                    "known": {
+                        "source_pcm": source_path.name,
+                        "source_sha256_chunks": [
+                            hashlib.sha256(source_path.read_bytes()).hexdigest()
+                        ],
+                        "source_sample_rate_hz": 8_000,
+                        "source_speech_start_ms": 100,
+                        "source_speech_end_ms": 500,
+                    }
+                },
+                "cases": [{"name": "unknown_source", "source": "missing"}],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="case source"):
         load_voice_turn_cases(manifest)
 
 
@@ -153,6 +248,51 @@ async def test_network_benchmark_fails_closed_without_provider_credential(monkey
     report = await run_benchmark(args)
 
     assert report == {"status": "fail", "error": "credential_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_network_benchmark_reports_corpus_identity(monkeypatch):
+    async def fake_attempt(*, attempt, **_kwargs):
+        return VoiceTurnObservation(
+            case_index=attempt.case_index,
+            trial=attempt.trial,
+            arm=attempt.arm,
+            first_audio_after_speech_end_ms=(
+                1_900 if attempt.arm == "automatic" else 1_200
+            ),
+            first_audio_after_activity_end_ms=(
+                None if attempt.arm == "automatic" else 700
+            ),
+            turn_complete=True,
+            interruption_events=0,
+        )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
+    monkeypatch.setattr(
+        "scripts.benchmark_gemini_turn_detection.run_attempt",
+        fake_attempt,
+    )
+    args = argparse.Namespace(
+        manifest=FLEURS_MANIFEST,
+        model="gemini-3.1-flash-live-preview",
+        trials_per_case=1,
+        seed=29,
+        min_attempts_per_arm=6,
+        min_paired_attempts=6,
+        manual_latency_p95_ms=1_500,
+        manual_latency_max_ms=2_500,
+        response_timeout_seconds=1.0,
+        terminal_timeout_seconds=1.0,
+    )
+
+    report = await run_benchmark(args)
+
+    assert report["status"] == "pass"
+    identity = voice_turn_manifest_identity(FLEURS_MANIFEST)
+    assert {
+        key: report["configuration"][key]
+        for key in identity
+    } == identity
 
 
 def _passing_observations() -> list[VoiceTurnObservation]:

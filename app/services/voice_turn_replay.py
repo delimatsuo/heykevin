@@ -31,6 +31,15 @@ MODEL_PATTERN = re.compile(r"gemini-[a-z0-9][a-z0-9.-]*")
 
 
 @dataclass(frozen=True, slots=True)
+class _VoiceTurnReplaySource:
+    path: Path
+    sha256: str
+    sample_rate_hz: int
+    speech_start_ms: int
+    speech_end_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceTurnReplayCase:
     name: str
     source_path: Path
@@ -102,37 +111,29 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
     manifest_path = Path(path)
     with manifest_path.open() as handle:
         manifest = json.load(handle)
-    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+    if not isinstance(manifest, dict) or manifest.get("version") not in {1, 2}:
         raise ValueError("unsupported voice replay manifest")
 
     fixture_root = manifest_path.resolve().parent
-    source_value = manifest.get("source_pcm")
-    if not isinstance(source_value, str) or not source_value:
-        raise ValueError("source_pcm is required")
-    source_path = (fixture_root / source_value).resolve()
-    if source_path.parent != fixture_root or not source_path.is_file():
-        raise ValueError("source_pcm must remain inside the fixture directory")
-
-    checksum_chunks = manifest.get("source_sha256_chunks")
-    if (
-        not isinstance(checksum_chunks, list)
-        or not checksum_chunks
-        or not all(isinstance(chunk, str) for chunk in checksum_chunks)
-    ):
-        raise ValueError("source_sha256_chunks is required")
-    source_sha256 = "".join(checksum_chunks)
-    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
-        raise ValueError("source checksum must be SHA-256")
-    if hashlib.sha256(source_path.read_bytes()).hexdigest() != source_sha256:
-        raise ValueError("source checksum mismatch")
-
-    source_rate = _required_int(manifest, "source_sample_rate_hz")
-    speech_start_ms = _required_int(manifest, "source_speech_start_ms")
-    speech_end_ms = _required_int(manifest, "source_speech_end_ms")
-    if source_rate != 8_000:
-        raise ValueError("source_sample_rate_hz must be 8000")
-    if speech_start_ms < 0 or speech_end_ms <= speech_start_ms:
-        raise ValueError("source speech boundaries are invalid")
+    version = manifest["version"]
+    if version == 1:
+        sources = {"default": _load_voice_turn_source(fixture_root, manifest)}
+    else:
+        raw_sources = manifest.get("sources")
+        if not isinstance(raw_sources, dict) or not raw_sources:
+            raise ValueError("sources must be a non-empty object")
+        sources = {}
+        for source_id, raw_source in raw_sources.items():
+            if not isinstance(source_id, str) or not re.fullmatch(
+                r"[a-z0-9_]+", source_id
+            ):
+                raise ValueError("source id must be a safe identifier")
+            if not isinstance(raw_source, dict):
+                raise ValueError("each source must be an object")
+            sources[source_id] = _load_voice_turn_source(
+                fixture_root,
+                raw_source,
+            )
 
     raw_cases = manifest.get("cases")
     if not isinstance(raw_cases, list) or not raw_cases:
@@ -145,6 +146,13 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
         name = raw_case.get("name")
         if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_]+", name):
             raise ValueError("case name must be a safe identifier")
+        if version == 1:
+            source = sources["default"]
+        else:
+            source_id = raw_case.get("source")
+            if not isinstance(source_id, str) or source_id not in sources:
+                raise ValueError("case source must identify a declared source")
+            source = sources[source_id]
         repetitions = _bounded_int(raw_case, "repetitions", 1, 1, 4)
         inter_silence = _bounded_int(
             raw_case,
@@ -183,11 +191,11 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
         cases.append(
             VoiceTurnReplayCase(
                 name=name,
-                source_path=source_path,
-                source_sha256=source_sha256,
-                source_sample_rate_hz=source_rate,
-                source_speech_start_ms=speech_start_ms,
-                source_speech_end_ms=speech_end_ms,
+                source_path=source.path,
+                source_sha256=source.sha256,
+                source_sample_rate_hz=source.sample_rate_hz,
+                source_speech_start_ms=source.speech_start_ms,
+                source_speech_end_ms=source.speech_end_ms,
                 repetitions=repetitions,
                 inter_repeat_silence_ms=inter_silence,
                 post_speech_silence_ms=post_silence,
@@ -198,6 +206,82 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
             )
         )
     return tuple(cases)
+
+
+def voice_turn_manifest_identity(
+    path: str | Path,
+    *,
+    cases: Iterable[VoiceTurnReplayCase] | None = None,
+) -> dict[str, str]:
+    """Return raw and semantic hashes for an auditable replay corpus."""
+    manifest_path = Path(path)
+    loaded_cases = tuple(cases) if cases is not None else load_voice_turn_cases(path)
+    semantic_cases = [
+        {
+            "name": case.name,
+            "source_sha256": case.source_sha256,
+            "source_sample_rate_hz": case.source_sample_rate_hz,
+            "source_speech_start_ms": case.source_speech_start_ms,
+            "source_speech_end_ms": case.source_speech_end_ms,
+            "repetitions": case.repetitions,
+            "inter_repeat_silence_ms": case.inter_repeat_silence_ms,
+            "post_speech_silence_ms": case.post_speech_silence_ms,
+            "gain": case.gain,
+            "noise_peak": case.noise_peak,
+            "noise_seed": case.noise_seed,
+            "frame_pattern_ms": case.frame_pattern_ms,
+        }
+        for case in loaded_cases
+    ]
+    canonical = json.dumps(
+        {"fingerprint_version": 1, "cases": semantic_cases},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return {
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "corpus_sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def _load_voice_turn_source(
+    fixture_root: Path,
+    raw_source: dict[str, Any],
+) -> _VoiceTurnReplaySource:
+    source_value = raw_source.get("source_pcm")
+    if not isinstance(source_value, str) or not source_value:
+        raise ValueError("source_pcm is required")
+    source_path = (fixture_root / source_value).resolve()
+    if source_path.parent != fixture_root or not source_path.is_file():
+        raise ValueError("source_pcm must remain inside the fixture directory")
+
+    checksum_chunks = raw_source.get("source_sha256_chunks")
+    if (
+        not isinstance(checksum_chunks, list)
+        or not checksum_chunks
+        or not all(isinstance(chunk, str) for chunk in checksum_chunks)
+    ):
+        raise ValueError("source_sha256_chunks is required")
+    source_sha256 = "".join(checksum_chunks)
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise ValueError("source checksum must be SHA-256")
+    if hashlib.sha256(source_path.read_bytes()).hexdigest() != source_sha256:
+        raise ValueError("source checksum mismatch")
+
+    source_rate = _required_int(raw_source, "source_sample_rate_hz")
+    speech_start_ms = _required_int(raw_source, "source_speech_start_ms")
+    speech_end_ms = _required_int(raw_source, "source_speech_end_ms")
+    if source_rate != 8_000:
+        raise ValueError("source_sample_rate_hz must be 8000")
+    if speech_start_ms < 0 or speech_end_ms <= speech_start_ms:
+        raise ValueError("source speech boundaries are invalid")
+    return _VoiceTurnReplaySource(
+        path=source_path,
+        sha256=source_sha256,
+        sample_rate_hz=source_rate,
+        speech_start_ms=speech_start_ms,
+        speech_end_ms=speech_end_ms,
+    )
 
 
 def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:

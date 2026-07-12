@@ -32,11 +32,14 @@ from app.services.voice_turn_replay import (  # noqa: E402
     evaluate_voice_turn_benchmark,
     load_voice_turn_cases,
     render_voice_turn_case,
+    voice_turn_manifest_identity,
 )
 from app.utils.audio import mulaw_to_pcm16k  # noqa: E402
 
 
-DEFAULT_MANIFEST = Path("tests/fixtures/voice_vad/turn_replay_manifest.json")
+DEFAULT_MANIFEST = Path(
+    "tests/fixtures/voice_vad/fleurs_turn_replay_manifest.json"
+)
 GEMINI_WS_BASE = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
@@ -248,6 +251,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "fail", "error": "credential_unavailable"}
 
     cases = load_voice_turn_cases(args.manifest)
+    corpus_identity = voice_turn_manifest_identity(args.manifest, cases=cases)
     schedule = build_paired_schedule(
         case_count=len(cases),
         trials_per_case=args.trials_per_case,
@@ -274,11 +278,12 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         ),
     )
     report["configuration"] = {
-        "scope": "synthetic_ground_truth_endpoint",
+        "scope": "labeled_fixture_endpoint",
         "model": args.model,
         "cases": len(cases),
         "trials_per_case": args.trials_per_case,
         "seed": args.seed,
+        **corpus_identity,
     }
     return report
 

@@ -102,6 +102,21 @@ round trip, the current tracker ends 20 ms after the upstream mode-2 label but
 starts 140 ms early. That fixture makes codec bias reproducible; one clean
 English sample is not the multi-condition corpus required for promotion.
 
+The default provider replay now uses a v2 multi-source manifest with pinned
+FLEURS English US and Latin American Spanish test rows. Both fixtures are
+resampled to 8 kHz PCM, manually labeled, trimmed to 500 ms before and after
+speech, checksum-pinned, and replayed through the Twilio mu-law path. No
+transcript field is stored. This is the first independent bilingual corpus
+increment, not a claim of broad language or speaker qualification; its paired
+results must be collected before it can affect a release decision.
+
+Every replay report includes the raw manifest SHA-256 and a semantic corpus
+SHA-256 over ordered case names, source hashes, speech boundaries, transforms,
+and frame patterns. Archive both hashes with aggregate results; a report with a
+missing or unexpected identity is invalid evidence even when its latency gates
+pass. `scripts/build_fleurs_voice_fixtures.py` also reproduces the committed
+fixture hashes from the pinned dataset revision and dependency versions.
+
 Ingress also emits one `inbound_audio_stream_gap` event after a full second
 without Twilio media and one `inbound_audio_stream_resumed` event if media
 returns. These are payload-free diagnostics and do not send Gemini
@@ -139,13 +154,39 @@ the actual send completion of the chunk containing labeled speech end, the
 not reproduce the pass: automatic measured 2,059/2,099 ms with one error and
 96.67% terminal/latency coverage, while manual measured 1,593/1,809 ms and
 missed the 1,500 ms p95 gate. The worse seed governs, so neither a model-only
-3.1 treatment nor live manual endpointing is qualified. All six cases also
-derive from one English source; a genuinely independent, multilingual labeled
-corpus remains required. `gemini-3.1-flash-live-preview` is an explicit
+3.1 treatment nor live manual endpointing is qualified. Those runs used six
+transformations of one English source. The new bilingual FLEURS corpus has not
+yet been run against the provider, so it does not supersede that evidence.
+`gemini-3.1-flash-live-preview` is an explicit
 non-`latest` model ID, but it is still a mutable preview rather than an
 immutable dated release; all qualification evidence must therefore be rerun
 immediately before any later staging decision.
+
+Observation-only revision `kevin-api-staging-00076-nug` then repeated the fixed
+two-turn and single-turn staging probes without changing the Gemini model or
+VAD. Across both calls, receipt-to-Gemini-send p95 was bounded at 5 ms, exact
+maximum was 155 ms, and there were no one-second ingress gaps, reconnects, or
+audio errors. The two-turn probe delivered both responses without overlap at
+1,845 ms and 2,349 ms from local speech end, while the single-turn control took
+5,271 ms. Prior unchanged-behavior probes did overlap. The large cross-call
+variance and negligible forwarding lag rule out the application ingress queue
+as the dominant cause; the voice candidate remains blocked on provider/model
+turn reliability and calibrated endpoint control.
 [Gemini 3.1 migration guidance](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview)
+
+The pinned bilingual FLEURS replay then ran against Gemini 3.1 with manifest
+SHA-256 `ae84a0428697119bc794e70d661bfda94e3cbc7fc5f396283b72e29995790e5c`
+and semantic corpus SHA-256
+`b0c23e5a964427d7e51193913c760e39143d957a0660e9fe8ae3ad47ea515636`.
+Seed 29 passed all gates: both arms completed 30/30 attempts with no errors,
+premature responses, or manual interruptions; manual speech-end p95/max was
+1,409/1,435 ms and activity-end p95/max was 898/915 ms. Seed 41 did not
+reproduce the pass: the automatic arm had one provider timeout and 96.67%
+completion, while manual speech-end p95/max was 1,503/1,553 ms. Manual
+activity-end p95/max was 983/1,035 ms with complete coverage and no manual
+errors, premature responses, or interruptions. The worse seed governs. This
+stronger corpus narrows the manual-endpoint uncertainty but still does not
+qualify a live model or activity-control change.
 
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
 session. It is payload-free, may be duplicated by the provider, and must not be

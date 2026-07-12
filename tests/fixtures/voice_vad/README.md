@@ -37,3 +37,18 @@ they do not turn one English source into a production VAD corpus. Promotion
 still requires independently labeled quiet speech, accents, multiple speakers,
 multiple languages, corrections, background conditions, and deliberate
 barge-in recordings under compatible redistribution licenses.
+
+`fleurs_turn_replay_manifest.json` is the default provider benchmark corpus.
+It adds pinned, independently sourced English US and Latin American Spanish
+FLEURS utterances with manually inspected endpoints. Each source has exactly
+500 ms of pre-roll and post-roll around the labeled speech, and the manifest
+derives clean, quiet/noisy, and fragmented-frame cases. Source revision,
+attribution, conversion, trimming, and labels are recorded in
+`FLEURS-ATTRIBUTION.md`; transcript text is not stored. The v2 manifest keeps
+sources separate so more languages and speakers can be added without changing
+the replay schema.
+
+This bilingual corpus is stronger endpoint evidence than the original single
+source, but it is not broad production qualification. Deliberate barge-in,
+corrections, more speakers, more languages, and real telephony conditions still
+belong in the release cohort.

@@ -1506,10 +1506,18 @@ async def test_gemini_logs_first_inbound_audio_forward_without_payload(caplog):
 
 
 @pytest.mark.asyncio
-async def test_gemini_logs_inbound_audio_error_once_without_exception_message(caplog):
+async def test_gemini_inbound_audio_error_reconnects_once_without_exception_message(
+    monkeypatch, caplog
+):
     class FailingWebSocket:
+        def __init__(self):
+            self.closed = False
+
         async def send(self, _payload: str):
             raise RuntimeError("private caller audio at 100 Market Street")
+
+        async def close(self):
+            self.closed = True
 
     async def noop_audio(_chunk: bytes):
         return None
@@ -1524,16 +1532,29 @@ async def test_gemini_logs_inbound_audio_error_once_without_exception_message(ca
         contractor_config=_plumbing_config(),
     )
     pipeline._connected = True
-    pipeline._ws = FailingWebSocket()
+    failing_ws = FailingWebSocket()
+    pipeline._ws = failing_ws
+    reconnect_calls = []
+
+    async def fake_start(**kwargs):
+        assert failing_ws.closed is True
+        reconnect_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
 
     caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
 
     await pipeline.process_audio_in(b"\xff" * 160)
     await pipeline.process_audio_in(b"\xff" * 160)
+    await asyncio.wait_for(pipeline._recovery_task, timeout=1)
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert messages.count("voice_timing event=inbound_audio_error") == 1
     assert "exception_type=RuntimeError" in messages
+    assert len(reconnect_calls) == 1
+    assert "voice_timing event=reconnect_result" in messages
+    assert "attempt=1 success=True" in messages
     assert "100 Market Street" not in messages
 
 
@@ -1608,15 +1629,23 @@ async def test_gemini_setup_failure_log_excludes_provider_payload(monkeypatch, c
 
 
 @pytest.mark.asyncio
-async def test_gemini_receive_error_log_excludes_exception_message(caplog):
+async def test_gemini_receive_error_reconnects_without_logging_exception_message(
+    monkeypatch, caplog
+):
     private_error = "private transcript fragment in receive exception"
 
     class FailingReceiveWebSocket:
+        def __init__(self):
+            self.closed = False
+
         def __aiter__(self):
             return self
 
         async def __anext__(self):
             raise RuntimeError(private_error)
+
+        async def close(self):
+            self.closed = True
 
     async def noop_audio(_chunk: bytes):
         return None
@@ -1631,15 +1660,106 @@ async def test_gemini_receive_error_log_excludes_exception_message(caplog):
         contractor_config=_plumbing_config(),
     )
     pipeline._connected = True
-    pipeline._ws = FailingReceiveWebSocket()
+    failing_ws = FailingReceiveWebSocket()
+    pipeline._ws = failing_ws
+    reconnect_calls = []
+
+    async def fake_start(**kwargs):
+        assert failing_ws.closed is True
+        reconnect_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
     caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
 
     await pipeline._receive_loop()
 
+    assert reconnect_calls == [
+        {
+            "send_greeting": False,
+            "start_background_tasks": False,
+            "reconnect_context": "",
+        }
+    ]
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=receive_error" in messages
     assert "exception_type=RuntimeError" in messages
+    assert "voice_timing event=reconnect_result" in messages
+    assert "attempt=1 success=True" in messages
     assert private_error not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_failed_receive_reconnect_disconnects_and_completes_call(monkeypatch):
+    completed = asyncio.Event()
+
+    class FailingReceiveWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("private receive failure")
+
+        async def close(self):
+            return None
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        completed.set()
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = FailingReceiveWebSocket()
+
+    async def failed_start(**_kwargs):
+        return False
+
+    monkeypatch.setattr(pipeline, "start", failed_start)
+
+    await pipeline._receive_loop()
+
+    assert completed.is_set()
+    assert pipeline._connected is False
+
+
+@pytest.mark.asyncio
+async def test_gemini_drops_inbound_audio_while_reconnecting():
+    sent = []
+
+    class RecordingWebSocket:
+        async def send(self, payload):
+            sent.append(payload)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._reconnecting = True
+    pipeline._ws = RecordingWebSocket()
+
+    await pipeline.process_audio_in(b"caller audio")
+
+    assert sent == []
 
 
 def test_live_voice_logger_calls_do_not_embed_sensitive_runtime_values():

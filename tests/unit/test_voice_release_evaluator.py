@@ -83,6 +83,7 @@ def test_voice_release_evaluator_passes_certification_sample():
         "response_turns": 30,
         "barge_in_events": 5,
         "reconnect_attempts": 0,
+        "receive_errors": 0,
         "audio_backlog_overflows": 0,
         "outbound_audio_errors": 0,
     }
@@ -100,6 +101,7 @@ def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():
         _event("model_turn_complete", "call0009", generated_audio_ms=9000),
         _event("barge_in_clear", "call0009", clear_ms=700),
         _event("inbound_audio_error", "call0009", exception_type="RuntimeError"),
+        _event("receive_error", "call0009", exception_type="RuntimeError"),
         _event("reconnect_result", "call0009", success=False),
         _event("audio_backlog_overflow", "call0009", attempted_backlog_ms=12001),
         _event("outbound_audio_error", "call0009"),
@@ -115,6 +117,7 @@ def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():
         "generated_audio_max_ms",
         "barge_in_clear_max_ms",
         "inbound_audio_errors",
+        "receive_errors",
         "reconnect_failures",
         "audio_backlog_overflows",
         "outbound_audio_errors",

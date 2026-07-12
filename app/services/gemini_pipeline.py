@@ -11,6 +11,7 @@ import time
 from typing import Callable, Awaitable, Optional
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from app.config import settings
 from app.services.entitlements import effective_mode
@@ -105,6 +106,7 @@ class GeminiPipeline:
 
         self._ws = None
         self._receive_task = None
+        self._recovery_task = None
         self._audio_playout_task = None
         self._connected = False
 
@@ -125,6 +127,7 @@ class GeminiPipeline:
         self._unavailable_said = False
         self._command_check_task = None
         self._reconnect_attempts = 0
+        self._reconnecting = False
 
         # Transcript accumulation (for post-call processing)
         self._transcript_lines: list[str] = []
@@ -378,7 +381,7 @@ class GeminiPipeline:
 
     async def process_audio_in(self, mulaw_bytes: bytes):
         """Convert mulaw 8kHz -> PCM 16kHz and send to Gemini."""
-        if not self._connected or not self._ws:
+        if not self._connected or self._reconnecting or not self._ws:
             return
         try:
             pcm_16k = mulaw_to_pcm16k(mulaw_bytes)
@@ -405,10 +408,12 @@ class GeminiPipeline:
                     "inbound_audio_error",
                     exception_type=type(e).__name__,
                 )
+            self._schedule_receive_recovery(close_websocket=True)
 
     async def stop(self):
         """Close Gemini session and cancel background tasks."""
         self._connected = False
+        self._reconnecting = False
         self._interrupt_speaking = True
         if self._silence_check_task:
             self._silence_check_task.cancel()
@@ -418,6 +423,11 @@ class GeminiPipeline:
             self._command_check_task.cancel()
         if self._receive_task:
             self._receive_task.cancel()
+        if (
+            self._recovery_task
+            and self._recovery_task is not asyncio.current_task()
+        ):
+            self._recovery_task.cancel()
         if self._audio_playout_task:
             self._audio_playout_task.cancel()
         await self._clear_audio_queue()
@@ -427,6 +437,118 @@ class GeminiPipeline:
             except Exception:
                 pass
         logger.info("Gemini pipeline stopped")
+
+    async def _close_current_websocket(self) -> None:
+        """Best-effort close of the current Gemini socket with a short bound."""
+        websocket = self._ws
+        self._ws = None
+        close = getattr(websocket, "close", None)
+        if not close:
+            return
+        try:
+            await asyncio.wait_for(close(), timeout=1.0)
+        except Exception as error:
+            self._log_voice_timing(
+                "websocket_close_error",
+                exception_type=type(error).__name__,
+            )
+
+    async def _complete_after_receive_failure(self) -> None:
+        """Mark the pipeline unavailable and terminate the call once."""
+        self._connected = False
+        if not self.on_call_complete:
+            return
+        try:
+            await self.on_call_complete()
+        except Exception as error:
+            self._log_voice_timing(
+                "call_complete_error",
+                exception_type=type(error).__name__,
+            )
+
+    def _schedule_receive_recovery(self, *, close_websocket: bool) -> None:
+        """Start at most one non-blocking recovery from the Twilio audio path."""
+        if not self._connected:
+            return
+        if self._recovery_task and not self._recovery_task.done():
+            return
+        self._recovery_task = asyncio.create_task(
+            self._recover_receive_loop(close_websocket=close_websocket)
+        )
+
+    async def _recover_receive_loop(self, *, close_websocket: bool) -> None:
+        """Clear stale output and make one bounded attempt to resume Gemini."""
+        if not self._connected or self._reconnecting:
+            return
+
+        self._reconnecting = True
+        try:
+            if self._caller_transcript_buf:
+                await self._flush_caller_transcript()
+            self._interrupt_speaking = True
+            self._audio_epoch += 1
+            self._assistant_instruction_pending = False
+            self._kevin_transcript_buf.clear()
+            clear_started_at = time.monotonic()
+            async with self._audio_output_lock:
+                dropped_chunks = await self._clear_audio_queue()
+                if self.on_clear_audio:
+                    await self.on_clear_audio()
+                self._interrupt_speaking = False
+            self._log_voice_timing(
+                "reconnect_output_clear",
+                clear_ms=self._elapsed_ms(clear_started_at),
+                dropped_chunks=dropped_chunks,
+                sent_chunks=self._audio_chunks_sent,
+            )
+
+            if close_websocket:
+                await self._close_current_websocket()
+            else:
+                self._ws = None
+
+            next_attempt = self._reconnect_attempts + 1
+            if next_attempt > self.MAX_RECONNECT_ATTEMPTS:
+                self._log_voice_timing(
+                    "reconnect_result",
+                    attempt=next_attempt,
+                    success=False,
+                    reason="limit",
+                )
+                await self._complete_after_receive_failure()
+                return
+
+            self._reconnect_attempts = next_attempt
+            logger.info("Attempting Gemini reconnection...")
+            reconnect_context = self._build_reconnect_context()
+            reconnected = await self.start(
+                send_greeting=False,
+                start_background_tasks=False,
+                reconnect_context=reconnect_context,
+            )
+            self._log_voice_timing(
+                "reconnect_result",
+                attempt=self._reconnect_attempts,
+                success=reconnected,
+            )
+            if not reconnected:
+                logger.error("Gemini reconnection failed")
+                await self._close_current_websocket()
+                await self._complete_after_receive_failure()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._log_voice_timing(
+                "reconnect_result",
+                attempt=self._reconnect_attempts,
+                success=False,
+                reason="recovery_error",
+                exception_type=type(error).__name__,
+            )
+            await self._close_current_websocket()
+            await self._complete_after_receive_failure()
+        finally:
+            self._reconnecting = False
 
     # --- Receive Loop ---
 
@@ -557,7 +679,7 @@ class GeminiPipeline:
 
         except asyncio.CancelledError:
             pass
-        except websockets.exceptions.ConnectionClosed as e:
+        except ConnectionClosed as e:
             # rcvd_then_sent: True = peer (Gemini) closed first, False = we closed first, None = abnormal
             peer_initiated = getattr(e, "rcvd_then_sent", None)
             received_close = getattr(e, "rcvd", None)
@@ -572,59 +694,13 @@ class GeminiPipeline:
                 code=close_code,
                 peer_initiated=peer_initiated,
             )
-            if self._connected:
-                if self._caller_transcript_buf:
-                    await self._flush_caller_transcript()
-                self._interrupt_speaking = True
-                self._audio_epoch += 1
-                self._assistant_instruction_pending = False
-                self._kevin_transcript_buf.clear()
-                clear_started_at = time.monotonic()
-                async with self._audio_output_lock:
-                    dropped_chunks = await self._clear_audio_queue()
-                    if self.on_clear_audio:
-                        await self.on_clear_audio()
-                    self._interrupt_speaking = False
-                self._log_voice_timing(
-                    "reconnect_output_clear",
-                    clear_ms=self._elapsed_ms(clear_started_at),
-                    dropped_chunks=dropped_chunks,
-                    sent_chunks=self._audio_chunks_sent,
-                )
-                next_attempt = self._reconnect_attempts + 1
-                if next_attempt > self.MAX_RECONNECT_ATTEMPTS:
-                    self._log_voice_timing(
-                        "reconnect_result",
-                        attempt=next_attempt,
-                        success=False,
-                        reason="limit",
-                    )
-                    if self.on_call_complete:
-                        await self.on_call_complete()
-                    return
-
-                self._reconnect_attempts = next_attempt
-                logger.info("Attempting Gemini reconnection...")
-                reconnect_context = self._build_reconnect_context()
-                reconnected = await self.start(
-                    send_greeting=False,
-                    start_background_tasks=False,
-                    reconnect_context=reconnect_context,
-                )
-                self._log_voice_timing(
-                    "reconnect_result",
-                    attempt=self._reconnect_attempts,
-                    success=reconnected,
-                )
-                if not reconnected:
-                    logger.error("Gemini reconnection failed")
-                    if self.on_call_complete:
-                        await self.on_call_complete()
+            await self._recover_receive_loop(close_websocket=False)
         except Exception as e:
             self._log_voice_timing(
                 "receive_error",
                 exception_type=type(e).__name__,
             )
+            await self._recover_receive_loop(close_websocket=True)
 
     @staticmethod
     def _extract_transcript(obj: dict, direction: str) -> str:

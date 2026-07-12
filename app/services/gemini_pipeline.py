@@ -130,6 +130,7 @@ class GeminiPipeline:
         self._last_caller_transcript_fragment_at = 0.0
         self._response_start_latency_logged = False
         self._audio_queue: asyncio.Queue[tuple[bytes, float]] = asyncio.Queue()
+        self._receptionist_controller = self._build_receptionist_controller()
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -151,6 +152,64 @@ class GeminiPipeline:
 
         # Language for post-call processing
         self._language = user_language or "en"
+
+    def _build_receptionist_controller(self):
+        """Create the shadow controller only after global and account opt-in."""
+        if not settings.receptionist_controller_shadow_enabled:
+            return None
+        if self._contractor_config.get("receptionist_controller_shadow_enabled") is not True:
+            return None
+
+        try:
+            from app.services.receptionist_controller import ShadowReceptionistController
+
+            return ShadowReceptionistController.new(
+                call_sid=self._call_sid,
+                caller_phone=self._caller_phone,
+                contractor_config=self._contractor_config,
+            )
+        except Exception as error:
+            logger.error(
+                "voice_event event=controller_shadow_init_error call=%s exception_type=%s",
+                self._call_sid[:8] or "unknown",
+                type(error).__name__,
+            )
+            return None
+
+    def _observe_receptionist_controller(self, text: str) -> None:
+        """Compute and log a shadow decision without sending it to Gemini."""
+        controller = self._receptionist_controller
+        if controller is None:
+            return
+
+        started_at = time.monotonic()
+        try:
+            decision = controller.observe_caller_turn(text)
+        except Exception as error:
+            self._receptionist_controller = None
+            logger.error(
+                "voice_event event=controller_shadow_error call=%s exception_type=%s",
+                self._call_sid[:8] or "unknown",
+                type(error).__name__,
+            )
+            return
+
+        elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        logger.info(
+            "voice_event event=controller_shadow_decision call=%s action=%s "
+            "elapsed_ms=%s known_fact_count=%s asked_slot_count=%s "
+            "allowed_slot_count=%s forbidden_slot_count=%s instruction_chars=%s "
+            "tool_calls_allowed=%s",
+            self._call_sid[:8] or "unknown",
+            decision.action_name.value,
+            elapsed_ms,
+            decision.known_fact_count,
+            decision.asked_slot_count,
+            decision.allowed_slot_count,
+            decision.forbidden_slot_count,
+            decision.instruction_chars,
+            decision.tool_calls_allowed,
+        )
 
     def _build_generation_config(self) -> dict:
         """Return Gemini Live generation config tuned for phone-call latency."""
@@ -551,6 +610,7 @@ class GeminiPipeline:
         await self.on_transcript("Caller", full_text)
         self._last_caller_transcript_flushed_at = time.time()
         self._mark_caller_activity()
+        self._observe_receptionist_controller(full_text)
 
         # Urgency detection
         if not self._urgency_detected and self.on_urgency_detected:

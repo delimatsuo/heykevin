@@ -10,14 +10,17 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Environment to deploy'
+        description: 'Release operation'
         required: true
         type: choice
-        options: [staging, production]
+        options: [staging, staging-audit, staging-prepare, production]
 
 permissions:
-  id-token: write
   contents: read
+
+concurrency:
+  group: deploy-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GCP_PROJECT_ID: kevin-491315
@@ -38,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -51,10 +56,90 @@ jobs:
       - name: Run tests
         run: pytest --tb=short -q
 
+  prepare-staging-message-delivery:
+    name: Audit or Prepare Staging Message Delivery
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # Required for staging Workload Identity Federation.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/enterprise-voice-integration' && (inputs.target == 'staging-audit' || inputs.target == 'staging-prepare') }}
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Authenticate to staging GCP
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_STAGING_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Refuse non-staging control-plane targets
+        env:
+          STAGING_FIRESTORE_PROJECT_ID: ${{ vars.FIRESTORE_PROJECT_ID }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/codex/enterprise-voice-integration" || exit 1
+          test "$STAGING_SERVICE" = "kevin-api-staging" || exit 1
+          test "$STAGING_FIRESTORE_PROJECT_ID" = "kevin-staging-491315" || exit 1
+
+      - name: Audit or prepare staging controls
+        env:
+          RELEASE_OPERATION: ${{ inputs.target }}
+          STAGING_ALERT_NOTIFICATION_CHANNELS: ${{ vars.STAGING_ALERT_NOTIFICATION_CHANNELS }}
+        run: |
+          case "$RELEASE_OPERATION" in
+            staging-audit) mode=audit ;;
+            staging-prepare) mode=apply ;;
+            *) exit 1 ;;
+          esac
+          python3 scripts/manage_staging_message_delivery.py "$mode"
+
+      - name: Health check after staging preparation
+        if: inputs.target == 'staging-prepare'
+        run: |
+          SERVICE_JSON=$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format=json)
+          jq -e '
+            .status.latestReadyRevisionName as $latest
+            | ([.status.traffic[]?
+                | select(.revisionName == $latest)
+                | (.percent // 0)] | add // 0) == 100
+          ' <<<"$SERVICE_JSON" >/dev/null
+          STAGING_HEALTH_URL=$(jq -r '.status.url' <<<"$SERVICE_JSON")
+          HEALTH=$(curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 20 --retry 3 --retry-all-errors \
+            "$STAGING_HEALTH_URL/health")
+          jq -e --arg service "$STAGING_SERVICE" '
+            .status == "ok"
+            and .environment == "staging"
+            and .service == $service
+            and (.revision | type == "string" and length > 0)
+            and (.deploy_sha | type == "string" and length == 40)
+          ' <<<"$HEALTH" >/dev/null
+
   deploy-staging:
     name: Deploy to Staging
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for staging Workload Identity Federation.
     if: ${{ github.ref == 'refs/heads/staging' && ((github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')) }}
     environment: staging
     concurrency:
@@ -62,6 +147,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -114,6 +201,9 @@ jobs:
     name: Deploy to Production
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for production Workload Identity Federation.
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production' && github.ref == 'refs/heads/main'
     environment: production
     concurrency:
@@ -121,6 +211,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Refuse non-main production deploy
         run: |

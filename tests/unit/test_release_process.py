@@ -32,3 +32,37 @@ def test_deploy_workflow_gates_background_worker_runtime():
     assert "run.googleapis.com/minScale" in content
     assert "autoscaling.knative.dev/minScale" in content
     assert "gcloud run services update" not in content
+
+
+def test_deploy_workflow_has_branch_restricted_staging_preparation():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+
+    assert "staging-audit" in workflow
+    assert "staging-prepare" in workflow
+    assert "prepare-staging-message-delivery:" in workflow
+
+    prepare_job = workflow.split("prepare-staging-message-delivery:", 1)[1].split(
+        "deploy-staging:", 1
+    )[0]
+    assert "refs/heads/codex/enterprise-voice-integration" in prepare_job
+    assert "WIF_STAGING_SERVICE_ACCOUNT" in prepare_job
+    assert "manage_staging_message_delivery.py" in prepare_job
+    assert "gcloud run deploy" not in prepare_job
+    assert "WIF_PRODUCTION_SERVICE_ACCOUNT" not in prepare_job
+    assert "PRODUCTION_SERVICE" not in prepare_job
+    assert 'case "${{ inputs.target }}"' not in prepare_job
+    assert "RELEASE_OPERATION: ${{ inputs.target }}" in prepare_job
+    assert "STAGING_FIRESTORE_PROJECT_ID: ${{ vars.FIRESTORE_PROJECT_ID }}" in prepare_job
+    assert "Health check after staging preparation" in prepare_job
+
+
+def test_deploy_workflow_uses_least_privilege_and_nonpersistent_checkout():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    workflow_header = workflow.split("jobs:", 1)[0]
+
+    assert "id-token: write" not in workflow_header
+    assert workflow.count("id-token: write") == 3
+    assert "concurrency:" in workflow_header
+    checkout_count = workflow.count("uses: actions/checkout@")
+    assert checkout_count == 4
+    assert workflow.count("persist-credentials: false") == checkout_count

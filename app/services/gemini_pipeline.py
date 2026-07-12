@@ -75,6 +75,11 @@ class GeminiPipeline:
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
     CALLER_SILENCE_GOODBYE_SECONDS = 3
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
+    OPEN_TIMEOUT_SECONDS = 5.0
+    SETUP_TIMEOUT_SECONDS = 5.0
+    PING_INTERVAL_SECONDS = 10.0
+    PING_TIMEOUT_SECONDS = 5.0
+    CLOSE_TIMEOUT_SECONDS = 1.0
     MAX_RECONNECT_ATTEMPTS = 1
     MAX_AUDIO_QUEUE_CHUNKS = 128
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
@@ -280,6 +285,10 @@ class GeminiPipeline:
             self._ws = await websockets.connect(
                 _gemini_ws_url(),
                 max_size=10 * 1024 * 1024,  # 10MB max message
+                open_timeout=self.OPEN_TIMEOUT_SECONDS,
+                ping_interval=self.PING_INTERVAL_SECONDS,
+                ping_timeout=self.PING_TIMEOUT_SECONDS,
+                close_timeout=self.CLOSE_TIMEOUT_SECONDS,
             )
             self._log_voice_timing(
                 "gemini_ws_connected",
@@ -324,7 +333,10 @@ class GeminiPipeline:
                 session_elapsed_ms=self._elapsed_ms(session_started_at),
                 call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
             )
-            response = await asyncio.wait_for(self._ws.recv(), timeout=10)
+            response = await asyncio.wait_for(
+                self._ws.recv(),
+                timeout=self.SETUP_TIMEOUT_SECONDS,
+            )
             data = json.loads(response)
 
             if "setupComplete" not in data:

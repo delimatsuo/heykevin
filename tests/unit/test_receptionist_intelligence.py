@@ -526,8 +526,10 @@ async def test_gemini_start_sends_exact_greeting_and_safe_startup_metrics(
     caplog,
 ):
     websocket = _FakeGeminiWebSocket()
+    connect_kwargs = {}
 
     async def fake_connect(*_args, **_kwargs):
+        connect_kwargs.update(_kwargs)
         return websocket
 
     async def noop_audio(_chunk: bytes):
@@ -553,6 +555,13 @@ async def test_gemini_start_sends_exact_greeting_and_safe_startup_metrics(
         started = await pipeline.start(start_background_tasks=False)
 
         assert started
+        assert connect_kwargs == {
+            "max_size": 10 * 1024 * 1024,
+            "open_timeout": 5.0,
+            "ping_interval": 10.0,
+            "ping_timeout": 5.0,
+            "close_timeout": 1.0,
+        }
         greeting_text = pipeline._build_greeting_text()
         greeting_prompt = websocket.sent_payloads[1]["client_content"]["turns"][0][
             "parts"

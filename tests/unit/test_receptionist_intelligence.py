@@ -1,5 +1,6 @@
 """Receptionist prompt, call-state, and post-call scope guardrails."""
 
+import ast
 import asyncio
 import base64
 import inspect
@@ -1345,6 +1346,149 @@ async def test_gemini_logs_inbound_audio_error_once_without_exception_message(ca
     assert messages.count("voice_timing event=inbound_audio_error") == 1
     assert "exception_type=RuntimeError" in messages
     assert "100 Market Street" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_connect_error_log_excludes_exception_message(monkeypatch, caplog):
+    private_error = "provider URL has a private API key and caller details"
+
+    async def failing_connect(*_args, **_kwargs):
+        raise RuntimeError(private_error)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", failing_connect)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert started is False
+    assert "voice_timing event=connect_error" in messages
+    assert "exception_type=RuntimeError" in messages
+    assert private_error not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_setup_failure_log_excludes_provider_payload(monkeypatch, caplog):
+    private_payload = "private provider payload with caller details"
+
+    class SetupFailureWebSocket(_FakeGeminiWebSocket):
+        async def recv(self):
+            return json.dumps({"error": {"message": private_payload}})
+
+    websocket = SetupFailureWebSocket()
+
+    async def fake_connect(*_args, **_kwargs):
+        return websocket
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    try:
+        started = await pipeline.start(send_greeting=False, start_background_tasks=False)
+    finally:
+        await pipeline.stop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert started is False
+    assert "voice_timing event=setup_error" in messages
+    assert private_payload not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_receive_error_log_excludes_exception_message(caplog):
+    private_error = "private transcript fragment in receive exception"
+
+    class FailingReceiveWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError(private_error)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = FailingReceiveWebSocket()
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=receive_error" in messages
+    assert "exception_type=RuntimeError" in messages
+    assert private_error not in messages
+
+
+def test_live_voice_logger_calls_do_not_embed_sensitive_runtime_values():
+    from app.services import gemini_pipeline
+    from app.webhooks import media_stream
+
+    forbidden_names = {
+        "api_err",
+        "caller_name",
+        "caller_phone",
+        "close_reason",
+        "e",
+        "exc",
+        "payload",
+        "transcript",
+        "ws_token",
+    }
+
+    for module in (gemini_pipeline, media_stream):
+        tree = ast.parse(inspect.getsource(module))
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            function = call.func
+            if not (
+                isinstance(function, ast.Attribute)
+                and isinstance(function.value, ast.Name)
+                and function.value.id == "logger"
+            ):
+                continue
+
+            assert not any(keyword.arg == "exc_info" for keyword in call.keywords)
+            referenced_names = {
+                node.id
+                for argument in call.args
+                for node in ast.walk(argument)
+                if isinstance(node, ast.Name)
+            }
+            assert referenced_names.isdisjoint(forbidden_names), ast.unparse(call)
+            assert "json.dumps(data)" not in ast.unparse(call)
 
 
 @pytest.mark.asyncio

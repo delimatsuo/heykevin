@@ -560,10 +560,29 @@ def test_gemini_greetings_are_bounded_and_disclose_ai_transcription():
     )
     after_hours._after_hours = True
 
+    long_name_config = _plumbing_config() | {
+        "business_name": "Matsuo Plumbing Heating Cooling Drain Sewer and Rooter Services",
+        "owner_name": "Deli Alexandra Matsuo",
+    }
+    long_name_business = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=long_name_config,
+    )
+    long_name_business._after_hours = False
+    long_name_after_hours = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=long_name_config,
+    )
+    long_name_after_hours._after_hours = True
+
     greetings = [
         business._build_greeting_text(),
         personal._build_greeting_text(),
         after_hours._build_greeting_text(),
+        long_name_business._build_greeting_text(),
+        long_name_after_hours._build_greeting_text(),
     ]
 
     assert all("AI assistant" in greeting for greeting in greetings)
@@ -895,7 +914,7 @@ async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
     await pipeline._enqueue_model_audio(b"12345678")
     await pipeline._enqueue_model_audio(b"overflow")
 
-    assert pipeline._audio_queue.maxsize == pipeline.MAX_AUDIO_QUEUE_CHUNKS
+    assert pipeline._audio_queue.maxsize == 0
     assert pipeline._audio_queue.empty()
     assert pipeline._queued_audio_bytes == 0
     assert pipeline._audio_backlog_overflowed
@@ -918,6 +937,30 @@ async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=audio_backlog_overflow" in messages
     assert "12345678" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_audio_queue_uses_byte_budget_not_chunk_count(monkeypatch):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def noop(_arg1, _arg2=None):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop,
+        on_transcript=noop,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._ensure_audio_playout_task = lambda: None
+    chunk = b"x" * 320
+
+    for _ in range(200):
+        await pipeline._enqueue_model_audio(chunk)
+
+    assert pipeline._queued_audio_bytes == 64_000
+    assert pipeline._audio_queue.qsize() == 200
+    assert pipeline._audio_backlog_overflowed is False
 
 
 @pytest.mark.asyncio

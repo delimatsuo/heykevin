@@ -82,9 +82,9 @@ class GeminiPipeline:
     CLOSE_TIMEOUT_SECONDS = 1.0
     MAX_RECONNECT_ATTEMPTS = 1
     MAX_RECONNECT_AUDIO_BUFFER_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
-    MAX_AUDIO_QUEUE_CHUNKS = 128
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
+    MAX_GREETING_WORDS = 24
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -158,9 +158,7 @@ class GeminiPipeline:
         self._barge_in_number = 0
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
-        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue(
-            maxsize=self.MAX_AUDIO_QUEUE_CHUNKS
-        )
+        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue()
         self._queued_audio_bytes = 0
         self._audio_backlog_overflowed = False
         self._audio_backlog_recoveries = 0
@@ -253,20 +251,37 @@ class GeminiPipeline:
         )
 
         if mode == "personal":
-            return (
+            greeting = (
                 f"Hi, this is Kevin, {owner_first}'s AI assistant. This call may be "
-                f"transcribed and summarized for {owner_first}. How can I help?"
+                "transcribed and summarized. How can I help?"
             )
-        if self._after_hours:
-            return (
+            fallback = (
+                "Hi, this is Kevin, the owner's AI assistant. This call may be "
+                "transcribed and summarized. How can I help?"
+            )
+        elif self._after_hours:
+            greeting = (
                 f"{business_name} is currently closed. I'm Kevin, an AI assistant. "
-                "This call may be transcribed and summarized for the business. "
-                "How can I help?"
+                "This call may be transcribed and summarized. How can I help?"
             )
+            fallback = (
+                "The office is currently closed. I'm Kevin, an AI assistant. "
+                "This call may be transcribed and summarized. How can I help?"
+            )
+        else:
+            greeting = (
+                f"Hi, you've reached {business_name}. I'm Kevin, an AI assistant. "
+                "This call may be transcribed and summarized. How can I help?"
+            )
+            fallback = (
+                "Hi, you've reached the office. I'm Kevin, an AI assistant. "
+                "This call may be transcribed and summarized. How can I help?"
+            )
+
         return (
-            f"Hi, you've reached {business_name}. I'm Kevin, an AI assistant. "
-            "This call may be transcribed and summarized for the business. "
-            "How can I help?"
+            greeting
+            if len(greeting.split()) <= self.MAX_GREETING_WORDS
+            else fallback
         )
 
     async def _send_greeting(self) -> None:

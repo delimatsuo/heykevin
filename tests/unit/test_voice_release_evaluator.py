@@ -260,6 +260,45 @@ def test_shadow_diagnostics_detect_independent_lifecycle_integrity_errors():
     assert diagnostics["shadow_speech_end_to_twilio_p95_ms"] is None
 
 
+def test_voice_release_evaluator_reports_inbound_audio_stream_gaps():
+    messages = _passing_messages()
+    messages.extend([
+        _event(
+            "inbound_audio_stream_gap",
+            "call0000",
+            gap=1,
+            gap_ms=1005,
+            call_elapsed_ms=8000,
+        ),
+        _event(
+            "inbound_audio_stream_resumed",
+            "call0000",
+            gap=1,
+            gap_ms=5000,
+            call_elapsed_ms=12000,
+        ),
+        _event(
+            "inbound_audio_stream_gap",
+            "call0000",
+            gap=2,
+            gap_ms=1010,
+            call_elapsed_ms=16000,
+        ),
+    ])
+
+    report = evaluate_voice_release(messages)
+    diagnostics = report["diagnostics"]
+
+    assert report["status"] == "pass"
+    assert diagnostics["inbound_audio_stream_gaps"] == 2
+    assert diagnostics["inbound_audio_stream_resumes"] == 1
+    assert diagnostics["inbound_audio_stream_unresumed_gaps"] == 1
+    assert diagnostics["inbound_audio_gap_detection_p95_ms"] == 1010
+    assert diagnostics["inbound_audio_gap_detection_max_ms"] == 1010
+    assert diagnostics["inbound_audio_resumed_gap_p95_ms"] == 5000
+    assert diagnostics["inbound_audio_resumed_gap_max_ms"] == 5000
+
+
 def test_voice_release_evaluator_fails_any_barge_in_clear_failure():
     messages = _passing_messages()
     messages.append(

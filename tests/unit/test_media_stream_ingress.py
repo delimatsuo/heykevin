@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import time
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
 from app.webhooks.media_stream import (
     _TwilioMediaIngress,
+    _consume_twilio_ingress,
     _serve_pipeline_ingress,
 )
 
@@ -42,6 +44,18 @@ class _IngressWebSocket:
 
     async def close(self, code: int = 1000):
         self.close_codes.append(code)
+
+
+class _ControlledIngressWebSocket:
+    def __init__(self):
+        self.messages: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def iter_text(self):
+        while (message := await self.messages.get()) is not None:
+            yield message
+
+    async def close(self, code: int = 1000):
+        return None
 
 
 @pytest.mark.asyncio
@@ -169,6 +183,108 @@ async def test_pipeline_start_and_ingress_consumption_run_concurrently():
     assert len(pipeline.received_at) == 1
     assert pipeline.received_at[0] > 0
     assert stops == [True]
+
+
+@pytest.mark.asyncio
+async def test_ingress_logs_one_audio_gap_and_resume_without_payload(caplog):
+    private_frame = b"private gap calibration audio"
+    websocket = _ControlledIngressWebSocket()
+    ingress = _TwilioMediaIngress(websocket, call_sid="CA_private_identifier")
+
+    class ReadyPipeline:
+        def __init__(self):
+            self.processed: list[bytes] = []
+            self.processed_event = asyncio.Event()
+
+        async def wait_until_audio_ready(self):
+            return True
+
+        async def process_audio_in(
+            self,
+            audio: bytes,
+            *,
+            received_at: float | None = None,
+        ):
+            self.processed.append(audio)
+            self.processed_event.set()
+
+    pipeline = ReadyPipeline()
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+    ingress_task = asyncio.create_task(ingress.run())
+    consume_task = asyncio.create_task(
+        _consume_twilio_ingress(
+            pipeline,
+            ingress,
+            call_sid="CA_private_identifier",
+            media_stream_started_at=asyncio.get_running_loop().time(),
+            call_started_at=time.time(),
+            max_call_duration_seconds=60,
+            on_stream_stop=_noop,
+            on_max_duration=_noop,
+            audio_stream_gap_seconds=0.02,
+        )
+    )
+
+    await websocket.messages.put(_media_message(private_frame))
+    await asyncio.wait_for(pipeline.processed_event.wait(), timeout=1)
+    for _ in range(50):
+        if any(
+            "event=inbound_audio_stream_gap" in record.getMessage()
+            for record in caplog.records
+        ):
+            break
+        await asyncio.sleep(0.005)
+    else:
+        pytest.fail("audio gap was not observed")
+
+    pipeline.processed_event.clear()
+    await websocket.messages.put(_media_message(private_frame))
+    await asyncio.wait_for(pipeline.processed_event.wait(), timeout=1)
+    await websocket.messages.put(json.dumps({"event": "stop"}))
+
+    assert await asyncio.wait_for(consume_task, timeout=1) == "stop"
+    await asyncio.wait_for(ingress_task, timeout=1)
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert pipeline.processed == [private_frame, private_frame]
+    assert messages.count("voice_timing event=inbound_audio_stream_gap") == 1
+    assert messages.count("voice_timing event=inbound_audio_stream_resumed") == 1
+    assert "gap=1" in messages
+    assert private_frame.decode("ascii") not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_ingress_max_duration_fires_without_more_media():
+    ingress = _TwilioMediaIngress(
+        _ControlledIngressWebSocket(),
+        call_sid="CA_test",
+    )
+    max_duration_fired = asyncio.Event()
+
+    class ReadyPipeline:
+        async def wait_until_audio_ready(self):
+            return True
+
+    async def on_max_duration():
+        max_duration_fired.set()
+
+    result = await asyncio.wait_for(
+        _consume_twilio_ingress(
+            ReadyPipeline(),
+            ingress,
+            call_sid="CA_test",
+            media_stream_started_at=asyncio.get_running_loop().time(),
+            call_started_at=0.0,
+            max_call_duration_seconds=1,
+            on_stream_stop=_noop,
+            on_max_duration=on_max_duration,
+            audio_stream_gap_seconds=0.01,
+        ),
+        timeout=1,
+    )
+
+    assert result == "max_duration"
+    assert max_duration_fired.is_set()
 
 
 @pytest.mark.asyncio

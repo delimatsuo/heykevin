@@ -102,6 +102,13 @@ round trip, the current tracker ends 20 ms after the upstream mode-2 label but
 starts 140 ms early. That fixture makes codec bias reproducible; one clean
 English sample is not the multi-condition corpus required for promotion.
 
+Ingress also emits one `inbound_audio_stream_gap` event after a full second
+without Twilio media and one `inbound_audio_stream_resumed` event if media
+returns. These are payload-free diagnostics and do not send Gemini
+`audioStreamEnd`. [Google documents `audioStreamEnd`](https://ai.google.dev/api/live)
+as the automatic-VAD signal for a paused audio stream; using it is a separate
+control experiment that requires repeated gap/endpoint correlation first.
+
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
 session. It is payload-free, may be duplicated by the provider, and must not be
 attributed to an individual response turn. The 120-token output limit is an

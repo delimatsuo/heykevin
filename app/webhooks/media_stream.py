@@ -152,6 +152,7 @@ def _log_task_exception(task: asyncio.Task):
 WS_MAX_MESSAGE_SIZE = 65_536
 MAX_MEDIA_INGRESS_AUDIO_BYTES = 96_000  # 12 seconds of 8 kHz mulaw
 MAX_MEDIA_INGRESS_AUDIO_CHUNKS = 600
+INBOUND_AUDIO_STREAM_GAP_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +324,7 @@ async def _consume_twilio_ingress(
     max_call_duration_seconds: int,
     on_stream_stop,
     on_max_duration,
+    audio_stream_gap_seconds: float = INBOUND_AUDIO_STREAM_GAP_SECONDS,
 ) -> str:
     ready = await pipeline.wait_until_audio_ready()
     if not ready:
@@ -342,10 +344,46 @@ async def _consume_twilio_ingress(
         ingress.buffered_audio_chunks,
     )
 
+    gap_timeout = max(0.001, audio_stream_gap_seconds)
+    audio_stream_open = False
+    last_media_received_at = 0.0
+    gap_number = 0
+
     while True:
         if ingress.overflowed:
             return "overflow"
-        event = await ingress.receive()
+        remaining_seconds = max_call_duration_seconds - (
+            time.time() - call_started_at
+        )
+        if remaining_seconds <= 0:
+            await on_max_duration()
+            return "max_duration"
+        try:
+            event = await asyncio.wait_for(
+                ingress.receive(),
+                timeout=min(gap_timeout, remaining_seconds),
+            )
+        except asyncio.TimeoutError:
+            if time.time() - call_started_at >= max_call_duration_seconds:
+                await on_max_duration()
+                return "max_duration"
+            if audio_stream_open:
+                gap_number += 1
+                now = time.monotonic()
+                logger.info(
+                    "voice_timing event=inbound_audio_stream_gap call=%s "
+                    "gap=%s gap_ms=%s call_elapsed_ms=%s",
+                    _call_label(call_sid),
+                    gap_number,
+                    max(0, round((now - last_media_received_at) * 1000)),
+                    (
+                        max(0, round((now - media_stream_started_at) * 1000))
+                        if media_stream_started_at > 0
+                        else 0
+                    ),
+                )
+                audio_stream_open = False
+            continue
         if ingress.overflowed:
             return "overflow"
         if event is None:
@@ -354,6 +392,22 @@ async def _consume_twilio_ingress(
             await on_max_duration()
             return "max_duration"
         if event.kind == "media":
+            if not audio_stream_open and last_media_received_at > 0:
+                now = time.monotonic()
+                logger.info(
+                    "voice_timing event=inbound_audio_stream_resumed call=%s "
+                    "gap=%s gap_ms=%s call_elapsed_ms=%s",
+                    _call_label(call_sid),
+                    gap_number,
+                    max(0, round((now - last_media_received_at) * 1000)),
+                    (
+                        max(0, round((now - media_stream_started_at) * 1000))
+                        if media_stream_started_at > 0
+                        else 0
+                    ),
+                )
+            audio_stream_open = True
+            last_media_received_at = event.received_at
             await pipeline.process_audio_in(
                 event.audio,
                 received_at=event.received_at,

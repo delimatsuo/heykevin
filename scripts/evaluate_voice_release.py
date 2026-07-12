@@ -355,6 +355,19 @@ def evaluate_voice_release(
         by_name.get("reconnect_result", []),
         attempted_calls,
     )
+    inbound_audio_gap_events = _events_for_calls(
+        by_name.get("inbound_audio_stream_gap", []),
+        attempted_calls,
+    )
+    inbound_audio_resume_events = _events_for_calls(
+        by_name.get("inbound_audio_stream_resumed", []),
+        attempted_calls,
+    )
+    inbound_audio_gap_keys = _event_keys(inbound_audio_gap_events, "gap")
+    inbound_audio_resume_keys = _event_keys(
+        inbound_audio_resume_events,
+        "gap",
+    )
 
     startup_rate = (
         len(first_audio_calls & attempted_calls) / len(attempted_calls)
@@ -527,6 +540,16 @@ def evaluate_voice_release(
         barge_events,
         "clear_ms",
         ordinal="barge",
+    )
+    inbound_audio_gap_values = _worst_numeric_values(
+        inbound_audio_gap_events,
+        "gap_ms",
+        ordinal="gap",
+    )
+    inbound_audio_resumed_gap_values = _worst_numeric_values(
+        inbound_audio_resume_events,
+        "gap_ms",
+        ordinal="gap",
     )
     greeting_word_values = _worst_numeric_values(
         greeting_events,
@@ -848,6 +871,29 @@ def evaluate_voice_release(
             "outbound_audio_errors": outbound_audio_errors,
         },
         "diagnostics": {
+            "inbound_audio_stream_gaps": len(inbound_audio_gap_keys),
+            "inbound_audio_stream_resumes": len(inbound_audio_resume_keys),
+            "inbound_audio_stream_unresumed_gaps": len(
+                inbound_audio_gap_keys - inbound_audio_resume_keys
+            ),
+            "inbound_audio_gap_detection_p95_ms": _percentile(
+                inbound_audio_gap_values,
+                0.95,
+            ),
+            "inbound_audio_gap_detection_max_ms": (
+                max(inbound_audio_gap_values)
+                if inbound_audio_gap_values
+                else None
+            ),
+            "inbound_audio_resumed_gap_p95_ms": _percentile(
+                inbound_audio_resumed_gap_values,
+                0.95,
+            ),
+            "inbound_audio_resumed_gap_max_ms": (
+                max(inbound_audio_resumed_gap_values)
+                if inbound_audio_resumed_gap_values
+                else None
+            ),
             "transcript_to_audio_p95_ms": _percentile(
                 transcript_to_audio_values,
                 0.95,

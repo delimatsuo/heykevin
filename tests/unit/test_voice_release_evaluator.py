@@ -84,6 +84,7 @@ def test_voice_release_evaluator_passes_certification_sample():
         "barge_in_events": 5,
         "reconnect_attempts": 0,
         "audio_backlog_overflows": 0,
+        "outbound_audio_errors": 0,
     }
     assert all(gate["passed"] for gate in report["gates"])
     serialized = json.dumps(report)
@@ -101,6 +102,7 @@ def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():
         _event("inbound_audio_error", "call0009", exception_type="RuntimeError"),
         _event("reconnect_result", "call0009", success=False),
         _event("audio_backlog_overflow", "call0009", attempted_backlog_ms=12001),
+        _event("outbound_audio_error", "call0009"),
     ])
 
     report = evaluate_voice_release(messages)
@@ -115,6 +117,7 @@ def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():
         "inbound_audio_errors",
         "reconnect_failures",
         "audio_backlog_overflows",
+        "outbound_audio_errors",
     } <= failed
 
 

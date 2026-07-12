@@ -899,6 +899,45 @@ async def test_gemini_first_outbound_audio_metric_uses_twilio_start_clock(
 
 
 @pytest.mark.asyncio
+async def test_gemini_outbound_delivery_failure_is_not_counted_as_sent(monkeypatch, caplog):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+    call_completed = asyncio.Event()
+
+    async def failed_audio_delivery(_chunk: bytes):
+        return False
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        call_completed.set()
+
+    pipeline = GeminiPipeline(
+        on_audio_out=failed_audio_delivery,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+
+    try:
+        await pipeline._enqueue_model_audio(b"model audio")
+        await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+        assert call_completed.is_set()
+        assert pipeline._audio_chunks_sent == 0
+        assert not pipeline._connected
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "voice_timing event=outbound_audio_error" in messages
+        assert "model audio" not in messages
+    finally:
+        await pipeline.stop()
+
+
+@pytest.mark.asyncio
 async def test_gemini_goodbye_waits_for_audio_playout_before_hangup(monkeypatch):
     real_sleep = asyncio.sleep
     join_started = asyncio.Event()

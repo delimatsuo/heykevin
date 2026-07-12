@@ -36,6 +36,45 @@ def _safe_urgent_push_body(caller_name: str = "", caller_phone: str = "") -> str
     return "Urgent call needs review. Open Kevin for details."
 
 
+async def _send_twilio_audio(
+    websocket: WebSocket,
+    *,
+    stream_sid: str,
+    mulaw_chunk: bytes,
+    call_sid: str,
+) -> bool:
+    """Send one audio chunk and report whether Twilio accepted the frame."""
+    if not stream_sid:
+        logger.warning(
+            "media_event event=twilio_audio_send_skipped call=%s reason=missing_stream",
+            _call_label(call_sid),
+        )
+        return False
+    try:
+        payload_b64 = base64.b64encode(mulaw_chunk).decode("utf-8")
+        await websocket.send_json({
+            "event": "media",
+            "streamSid": stream_sid,
+            "media": {"payload": payload_b64},
+        })
+    except Exception as error:
+        _log_safe_exception("twilio_audio_send_error", error, call_sid)
+        return False
+    return True
+
+
+async def _finish_max_call_duration(on_call_complete) -> None:
+    """Play a provider-independent limit message, then hang up the call."""
+    from twilio.twiml.voice_response import VoiceResponse
+
+    response = VoiceResponse()
+    response.say(
+        "This call has reached the maximum duration. Please call back to continue."
+    )
+    response.hangup()
+    await on_call_complete(twiml=str(response))
+
+
 def _log_task_exception(task: asyncio.Task):
     if task.cancelled():
         return
@@ -275,17 +314,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     async def on_audio_out(mulaw_chunk: bytes):
         """Voice pipeline produced audio — send to Twilio."""
         nonlocal stream_sid
-        if not stream_sid:
-            return
-        try:
-            payload_b64 = base64.b64encode(mulaw_chunk).decode("utf-8")
-            await websocket.send_json({
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {"payload": payload_b64},
-            })
-        except Exception as error:
-            _log_safe_exception("twilio_audio_send_error", error, call_sid)
+        return await _send_twilio_audio(
+            websocket,
+            stream_sid=stream_sid or "",
+            mulaw_chunk=mulaw_chunk,
+            call_sid=call_sid,
+        )
 
     async def on_clear_audio():
         """Clear Twilio's outbound audio buffer (used during barge-in)."""
@@ -303,7 +337,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     call_redirected = False  # Set when call is accepted/redirected to conference
 
-    async def on_call_complete():
+    async def on_call_complete(*, twiml: str | None = None):
         """Hang up the call after Kevin says goodbye.
 
         Skip hangup if the call was redirected to a conference (user picked up).
@@ -321,7 +355,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, lambda: client.calls(call_sid).update(
-                    twiml="<Response><Hangup/></Response>"
+                    twiml=twiml or "<Response><Hangup/></Response>"
                 )
             )
             logger.info("media_event event=call_hung_up call=%s", _call_label(call_sid))
@@ -471,11 +505,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                     _call_label(call_sid),
                     MAX_CALL_DURATION,
                 )
-                try:
-                    await pipeline._speak("I'm sorry, we've reached the maximum call duration. Goodbye.")
-                except Exception as error:
-                    _log_safe_exception("max_duration_speech_error", error, call_sid)
-                await on_call_complete()
+                await _finish_max_call_duration(on_call_complete)
                 break
 
             data = json.loads(message)

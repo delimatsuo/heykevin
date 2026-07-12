@@ -66,3 +66,24 @@ def test_deploy_workflow_uses_least_privilege_and_nonpersistent_checkout():
     checkout_count = workflow.count("uses: actions/checkout@")
     assert checkout_count == 4
     assert workflow.count("persist-credentials: false") == checkout_count
+
+
+def test_deploy_workflow_scopes_service_names_to_their_environment_jobs():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    workflow_header = workflow.split("jobs:", 1)[0]
+    prepare_job = workflow.split("prepare-staging-message-delivery:", 1)[1].split(
+        "deploy-staging:", 1
+    )[0]
+    staging_job = workflow.split("deploy-staging:", 1)[1].split(
+        "deploy-production:", 1
+    )[0]
+    production_job = workflow.split("deploy-production:", 1)[1]
+
+    assert "STAGING_SERVICE" not in workflow_header
+    assert "PRODUCTION_SERVICE" not in workflow_header
+    assert "PRODUCTION_SERVICE" not in prepare_job
+    assert "PRODUCTION_URL" not in prepare_job
+    assert "PRODUCTION_SERVICE" not in staging_job
+    assert "PRODUCTION_URL" not in staging_job
+    assert "STAGING_SERVICE" not in production_job
+    assert "STAGING_URL" not in production_job

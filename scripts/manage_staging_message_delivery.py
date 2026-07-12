@@ -123,7 +123,9 @@ class Snapshot:
 class Gcloud:
     """Run gcloud without forwarding provider output into release logs."""
 
-    def _execute(self, args: Sequence[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    def _execute(
+        self, args: Sequence[str], timeout: int, operation: str
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
         try:
@@ -138,23 +140,36 @@ class Gcloud:
         except FileNotFoundError as exc:
             raise PreparationError("gcloud is unavailable") from exc
         except subprocess.TimeoutExpired as exc:
-            raise PreparationError("gcloud command timed out") from exc
+            raise PreparationError(f"{operation} timed out") from exc
 
         if result.returncode != 0:
-            raise PreparationError("gcloud command failed")
+            raise PreparationError(f"{operation} failed")
         return result
 
-    def json(self, *args: str, timeout: int = READ_TIMEOUT_SECONDS) -> Any:
-        result = self._execute((*args, "--format=json", "--quiet"), timeout)
+    def json(
+        self,
+        *args: str,
+        timeout: int = READ_TIMEOUT_SECONDS,
+        operation: str = "gcloud read",
+    ) -> Any:
+        result = self._execute(
+            (*args, "--format=json", "--quiet"), timeout, operation
+        )
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
-            raise PreparationError("gcloud returned invalid JSON") from exc
+            raise PreparationError(f"{operation} returned invalid JSON") from exc
 
-    def run(self, *args: str, timeout: int | None = None) -> None:
+    def run(
+        self,
+        *args: str,
+        timeout: int | None = None,
+        operation: str = "gcloud mutation",
+    ) -> None:
         self._execute(
             (*args, "--quiet"),
             timeout if timeout is not None else MUTATION_TIMEOUT_SECONDS,
+            operation,
         )
 
 
@@ -291,6 +306,7 @@ def apply_runtime_configuration(gcloud: Gcloud) -> None:
         "--no-cpu-throttling",
         "--min=1",
         "--deploy-health-check",
+        operation="staging Cloud Run runtime update",
     )
 
 
@@ -303,6 +319,7 @@ def restore_latest_traffic(gcloud: Gcloud) -> None:
         f"--project={RUNTIME_PROJECT}",
         f"--region={REGION}",
         "--to-latest",
+        operation="staging Cloud Run traffic update",
     )
 
 
@@ -321,6 +338,7 @@ def create_index(gcloud: Gcloud, index: IndexSpec) -> None:
         f"--collection-group={COLLECTION_GROUP}",
         "--query-scope=collection",
         *field_flags,
+        operation="staging Firestore index create",
     )
 
 
@@ -335,6 +353,7 @@ def enable_ttl(gcloud: Gcloud) -> None:
         "--database=(default)",
         f"--project={FIRESTORE_PROJECT}",
         "--enable-ttl",
+        operation="staging Firestore TTL update",
     )
 
 
@@ -496,6 +515,7 @@ def read_snapshot(gcloud: Gcloud) -> Snapshot:
             SERVICE,
             f"--project={RUNTIME_PROJECT}",
             f"--region={REGION}",
+            operation="staging Cloud Run read",
         ),
         "Cloud Run",
     )
@@ -507,6 +527,7 @@ def read_snapshot(gcloud: Gcloud) -> Snapshot:
             "list",
             f"--project={FIRESTORE_PROJECT}",
             "--database=(default)",
+            operation="staging Firestore index read",
         ),
         "Firestore index",
     )
@@ -519,6 +540,7 @@ def read_snapshot(gcloud: Gcloud) -> Snapshot:
             f"--project={FIRESTORE_PROJECT}",
             "--database=(default)",
             f"--collection-group={COLLECTION_GROUP}",
+            operation="staging Firestore TTL read",
         ),
         "Firestore TTL",
     )
@@ -528,6 +550,7 @@ def read_snapshot(gcloud: Gcloud) -> Snapshot:
             "policies",
             "list",
             f"--project={RUNTIME_PROJECT}",
+            operation="staging Monitoring policy read",
         ),
         "Monitoring policy",
     )
@@ -538,6 +561,7 @@ def read_snapshot(gcloud: Gcloud) -> Snapshot:
             "channels",
             "list",
             f"--project={RUNTIME_PROJECT}",
+            operation="staging Monitoring channel read",
         ),
         "Monitoring channel",
     )
@@ -684,7 +708,12 @@ def _write_policy(
             path = Path(handle.name)
             os.chmod(path, 0o600)
             json.dump(payload, handle, sort_keys=True)
-        gcloud.run(*command, f"--policy-from-file={path}")
+        action = "create" if existing is None else "update"
+        gcloud.run(
+            *command,
+            f"--policy-from-file={path}",
+            operation=f"staging Monitoring policy {action}",
+        )
     finally:
         if path is not None:
             path.unlink(missing_ok=True)

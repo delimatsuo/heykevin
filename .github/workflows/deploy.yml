@@ -25,10 +25,6 @@ concurrency:
 env:
   GCP_PROJECT_ID: kevin-491315
   GCP_REGION: us-central1
-  STAGING_SERVICE: kevin-api-staging
-  STAGING_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
-  PRODUCTION_SERVICE: kevin-api
-  PRODUCTION_URL: https://kevin-api-752910912062.us-central1.run.app
 
 jobs:
   test:
@@ -64,6 +60,8 @@ jobs:
     permissions:
       contents: read
       id-token: write # Required for staging Workload Identity Federation.
+    env:
+      STAGING_SERVICE: kevin-api-staging
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/enterprise-voice-integration' && (inputs.target == 'staging-audit' || inputs.target == 'staging-prepare') }}
     environment: staging
     concurrency:
@@ -140,6 +138,9 @@ jobs:
     permissions:
       contents: read
       id-token: write # Required for staging Workload Identity Federation.
+    env:
+      STAGING_SERVICE: kevin-api-staging
+      STAGING_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
     if: ${{ github.ref == 'refs/heads/staging' && ((github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')) }}
     environment: staging
     concurrency:
@@ -204,6 +205,9 @@ jobs:
     permissions:
       contents: read
       id-token: write # Required for production Workload Identity Federation.
+    env:
+      PRODUCTION_SERVICE: kevin-api
+      PRODUCTION_URL: https://kevin-api-752910912062.us-central1.run.app
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production' && github.ref == 'refs/heads/main'
     environment: production
     concurrency:

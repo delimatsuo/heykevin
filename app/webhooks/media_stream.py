@@ -75,6 +75,41 @@ async def _finish_max_call_duration(on_call_complete) -> None:
     await on_call_complete(twiml=str(response))
 
 
+async def _complete_twilio_call(
+    *,
+    call_sid: str,
+    websocket: WebSocket,
+    twiml: str | None = None,
+) -> bool:
+    """End the call through Twilio REST, closing the stream as a fallback."""
+    try:
+        from twilio.rest import Client
+
+        client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: client.calls(call_sid).update(
+                twiml=twiml or "<Response><Hangup/></Response>"
+            ),
+        )
+    except Exception as error:
+        _log_safe_exception("call_hangup_error", error, call_sid)
+        try:
+            await websocket.close(code=1000)
+        except Exception as close_error:
+            _log_safe_exception("call_stream_close_error", close_error, call_sid)
+        else:
+            logger.info(
+                "media_event event=call_stream_close_fallback call=%s",
+                _call_label(call_sid),
+            )
+        return False
+
+    logger.info("media_event event=call_hung_up call=%s", _call_label(call_sid))
+    return True
+
+
 def _log_task_exception(task: asyncio.Task):
     if task.cancelled():
         return
@@ -349,18 +384,11 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 _call_label(call_sid),
             )
             return
-        try:
-            from twilio.rest import Client
-            client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, lambda: client.calls(call_sid).update(
-                    twiml=twiml or "<Response><Hangup/></Response>"
-                )
-            )
-            logger.info("media_event event=call_hung_up call=%s", _call_label(call_sid))
-        except Exception as error:
-            _log_safe_exception("call_hangup_error", error, call_sid)
+        await _complete_twilio_call(
+            call_sid=call_sid,
+            websocket=websocket,
+            twiml=twiml,
+        )
 
     async def on_transcript(speaker: str, text: str):
         """Transcript update — both Kevin and Caller sides."""

@@ -307,6 +307,10 @@ def test_staging_runbook_records_least_privilege_iam_boundary():
     assert "roles/datastore.indexAdmin" in runbook
     assert "roles/monitoring.alertPolicyEditor" in runbook
     assert "roles/monitoring.notificationChannelViewer" in runbook
+    assert "kevinStagingLogAlertPolicyEditor" in runbook
+    assert "logging.notificationRules.create" in runbook
+    assert "logging.notificationRules.update" in runbook
+    assert "do not substitute the broader `roles/logging.configWriter`" in runbook
     assert "kevin-staging-491315" in runbook
     assert "Do not grant `Owner`, `Editor`" in runbook
     assert iam_section.index("staging-audit") < iam_section.index("staging-prepare")

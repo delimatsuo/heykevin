@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import logging
 import os
 
 import pytest
@@ -374,7 +375,10 @@ async def test_worker_hydrates_pending_handoff_from_durable_records(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_worker_mirrors_stale_uncertain_handoff_without_replaying(monkeypatch):
+async def test_worker_mirrors_stale_uncertain_handoff_without_replaying(
+    monkeypatch,
+    caplog,
+):
     mirrored = []
 
     async def list_ids(status, *, limit):
@@ -398,6 +402,7 @@ async def test_worker_mirrors_stale_uncertain_handoff_without_replaying(monkeypa
     monkeypatch.setattr(post_call_handoff.handoff_db, "claim_handoff", claim)
     monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", get_handoff)
     monkeypatch.setattr(post_call_handoff.call_db, "save_call", save_call)
+    caplog.set_level(logging.INFO, logger="app.services.post_call_handoff")
 
     await post_call_handoff.run_pending_post_calls_once(limit=3)
 
@@ -409,6 +414,13 @@ async def test_worker_mirrors_stale_uncertain_handoff_without_replaying(monkeypa
             "post_call_failed_effects": [],
         }
     ]
+    alerts = [
+        record
+        for record in caplog.records
+        if "event=attention_required" in record.getMessage()
+    ]
+    assert len(alerts) == 1
+    assert alerts[0].levelno == logging.ERROR
 
 
 @pytest.mark.asyncio

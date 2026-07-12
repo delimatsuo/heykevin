@@ -72,6 +72,7 @@ class GeminiPipeline:
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
     CALLER_SILENCE_GOODBYE_SECONDS = 3
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
+    MAX_RECONNECT_ATTEMPTS = 1
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -120,6 +121,7 @@ class GeminiPipeline:
         self._unavailable_task = None
         self._unavailable_said = False
         self._command_check_task = None
+        self._reconnect_attempts = 0
 
         # Transcript accumulation (for post-call processing)
         self._transcript_lines: list[str] = []
@@ -129,7 +131,11 @@ class GeminiPipeline:
         self._caller_transcript_buf: list[str] = []
         self._last_caller_transcript_flushed_at = 0.0
         self._last_caller_transcript_fragment_at = 0.0
+        self._last_caller_transcript_fragment_monotonic = 0.0
         self._response_start_latency_logged = False
+        self._response_turn_number = 0
+        self._response_first_audio_at = 0.0
+        self._generated_audio_ms = 0
         self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue()
         self._audio_output_lock = asyncio.Lock()
         self._audio_epoch = 0
@@ -422,6 +428,7 @@ class GeminiPipeline:
 
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):
+                    clear_started_at = time.monotonic()
                     self._interrupt_speaking = True
                     self._audio_epoch += 1
                     self._assistant_instruction_pending = False
@@ -433,6 +440,7 @@ class GeminiPipeline:
                             await self.on_clear_audio()
                     self._log_voice_timing(
                         "barge_in_clear",
+                        clear_ms=self._elapsed_ms(clear_started_at),
                         dropped_chunks=dropped_chunks,
                         sent_chunks=self._audio_chunks_sent,
                     )
@@ -462,6 +470,7 @@ class GeminiPipeline:
                 if input_text:
                     self._caller_transcript_buf.append(input_text)
                     self._last_caller_transcript_fragment_at = time.time()
+                    self._last_caller_transcript_fragment_monotonic = time.monotonic()
                     self._response_start_latency_logged = False
                     self._mark_caller_activity()
 
@@ -482,11 +491,16 @@ class GeminiPipeline:
                         async with self._audio_output_lock:
                             await self._clear_audio_queue()
                             self._interrupt_speaking = False
+                        self._reset_response_metrics()
                     self._assistant_instruction_pending = False
-                    if (
-                        not interrupted_turn
-                        and await self._flush_kevin_transcript(detect_goodbye=True)
-                    ):
+                    said_goodbye = False
+                    if not interrupted_turn:
+                        said_goodbye = await self._flush_kevin_transcript(
+                            detect_goodbye=True
+                        )
+                        if self._response_first_audio_at > 0:
+                            self._log_response_turn_latency("")
+                    if said_goodbye:
                         await self._wait_for_audio_playout()
                         logger.info("Kevin said goodbye — ending call in 2 seconds")
                         await asyncio.sleep(2)
@@ -524,15 +538,14 @@ class GeminiPipeline:
                 f"Gemini WebSocket closed: code={close_code} reason={close_reason!r} "
                 f"peer_initiated={peer_initiated}"
             )
-            # Attempt one reconnect
             if self._connected:
-                logger.info("Attempting Gemini reconnection...")
                 if self._caller_transcript_buf:
                     await self._flush_caller_transcript()
                 self._interrupt_speaking = True
                 self._audio_epoch += 1
                 self._assistant_instruction_pending = False
                 self._kevin_transcript_buf.clear()
+                clear_started_at = time.monotonic()
                 async with self._audio_output_lock:
                     dropped_chunks = await self._clear_audio_queue()
                     if self.on_clear_audio:
@@ -540,14 +553,34 @@ class GeminiPipeline:
                     self._interrupt_speaking = False
                 self._log_voice_timing(
                     "reconnect_output_clear",
+                    clear_ms=self._elapsed_ms(clear_started_at),
                     dropped_chunks=dropped_chunks,
                     sent_chunks=self._audio_chunks_sent,
                 )
+                next_attempt = self._reconnect_attempts + 1
+                if next_attempt > self.MAX_RECONNECT_ATTEMPTS:
+                    self._log_voice_timing(
+                        "reconnect_result",
+                        attempt=next_attempt,
+                        success=False,
+                        reason="limit",
+                    )
+                    if self.on_call_complete:
+                        await self.on_call_complete()
+                    return
+
+                self._reconnect_attempts = next_attempt
+                logger.info("Attempting Gemini reconnection...")
                 reconnect_context = self._build_reconnect_context()
                 reconnected = await self.start(
                     send_greeting=False,
                     start_background_tasks=False,
                     reconnect_context=reconnect_context,
+                )
+                self._log_voice_timing(
+                    "reconnect_result",
+                    attempt=self._reconnect_attempts,
+                    success=reconnected,
                 )
                 if not reconnected:
                     logger.error("Gemini reconnection failed")
@@ -583,6 +616,7 @@ class GeminiPipeline:
         if not mulaw_chunk:
             return
         duration_seconds = len(mulaw_chunk) / 8000.0
+        self._generated_audio_ms += round(duration_seconds * 1000)
         self._ensure_audio_playout_task()
         await self._audio_queue.put((mulaw_chunk, duration_seconds, self._audio_epoch))
 
@@ -706,7 +740,7 @@ class GeminiPipeline:
         await self.on_transcript("Kevin", full_text)
         prompt_started = self._caller_silence_prompted_at
         self._mark_kevin_activity()
-        self._log_response_turn_latency()
+        self._log_response_turn_latency(full_text)
         if (
             prompt_started is not None
             and "are you still there" in full_text.lower()
@@ -726,26 +760,40 @@ class GeminiPipeline:
     def _log_response_start_latency(self):
         if (
             self._response_start_latency_logged
-            or self._last_caller_transcript_fragment_at <= 0
+            or self._last_caller_transcript_fragment_monotonic <= 0
         ):
             return
-        latency = max(0.0, time.time() - self._last_caller_transcript_fragment_at)
-        logger.info(
-            "Gemini response start latency %.2fs for %s",
-            latency,
-            self._call_sid[:8] or "unknown",
+        now = time.monotonic()
+        latency_ms = max(
+            0,
+            int((now - self._last_caller_transcript_fragment_monotonic) * 1000),
+        )
+        self._response_turn_number += 1
+        self._response_first_audio_at = now
+        self._generated_audio_ms = 0
+        self._log_voice_timing(
+            "response_first_audio",
+            turn=self._response_turn_number,
+            latency_ms=latency_ms,
+            call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
         )
         self._response_start_latency_logged = True
 
-    def _log_response_turn_latency(self):
-        if self._last_caller_transcript_flushed_at <= 0:
-            return
-        latency = max(0.0, time.time() - self._last_caller_transcript_flushed_at)
-        logger.info(
-            "Gemini response turn latency %.2fs for %s",
-            latency,
-            self._call_sid[:8] or "unknown",
-        )
+    def _log_response_turn_latency(self, response_text: str) -> None:
+        if self._response_first_audio_at > 0:
+            self._log_voice_timing(
+                "model_turn_complete",
+                turn=self._response_turn_number,
+                model_stream_ms=self._elapsed_ms(self._response_first_audio_at),
+                generated_audio_ms=self._generated_audio_ms,
+                chars=len(response_text),
+                words=len(response_text.split()),
+            )
+        self._reset_response_metrics()
+
+    def _reset_response_metrics(self) -> None:
+        self._response_first_audio_at = 0.0
+        self._generated_audio_ms = 0
         self._last_caller_transcript_flushed_at = 0.0
 
     # --- Tool Calling ---

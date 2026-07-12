@@ -1,0 +1,238 @@
+[
+  {
+    "scenario": "ambiguous_service_object_requires_clarification",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "I need toilet replacement in the sink.",
+        "expect": {"service_object": "", "service_action": "replace", "action_name": "ask_one_clarifying_question", "allowed_slots": ["service_object"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Which fixture needs to be replaced?",
+        "observed": {"asked_slots": ["service_object"]},
+        "metrics": {"response_first_audio_ms": 820, "generated_audio_ms": 1700},
+        "expect": {"asked_slots_state": ["service_object"]}
+      }
+    ]
+  },
+  {
+    "scenario": "caller_correction_replaces_stale_facts",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "I need to replace a toilet.",
+        "expect": {"service_object": "toilet", "service_action": "replace", "known_facts_include": ["service_object:toilet", "service_action:replace"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Can you briefly describe what is happening?",
+        "observed": {"asked_slots": ["job_complexity"]},
+        "metrics": {"response_first_audio_ms": 900, "generated_audio_ms": 1900}
+      },
+      {
+        "speaker": "caller",
+        "text": "Actually, it is the sink, and it needs repair, not replacement.",
+        "expect": {"service_object": "sink", "service_action": "repair", "allowed_slots": ["urgency"], "known_facts_include": ["service_object:sink", "service_action:repair"], "known_facts_exclude": ["service_object:toilet", "service_action:replace"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Is the sink repair urgent?",
+        "observed": {"asked_slots": ["urgency"]},
+        "metrics": {"response_first_audio_ms": 760, "generated_audio_ms": 1300}
+      }
+    ]
+  },
+  {
+    "scenario": "interrupted_question_is_not_committed",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {"speaker": "caller", "text": "I need plumbing help.", "expect": {"allowed_slots": ["service_action"]}},
+      {
+        "speaker": "assistant",
+        "text": "Is this a repair, replacement, installation, or inspection?",
+        "interrupted": true,
+        "observed": {"asked_slots": ["service_action"]},
+        "metrics": {"response_first_audio_ms": 700, "generated_audio_ms": 1100},
+        "expect": {"unasked_slots_state": ["service_action"]}
+      },
+      {"speaker": "caller", "text": "Sorry, go ahead.", "expect": {"allowed_slots": ["service_action"], "unasked_slots_state": ["service_action"]}},
+      {
+        "speaker": "assistant",
+        "text": "Is this a repair, replacement, installation, or inspection?",
+        "observed": {"asked_slots": ["service_action"]},
+        "metrics": {"response_first_audio_ms": 740, "generated_audio_ms": 1200},
+        "expect": {"asked_slots_state": ["service_action"]}
+      }
+    ]
+  },
+  {
+    "scenario": "callback_number_confirmation_terminates_loop",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted", "caller_phone_last_four": "8667", "intent": "callback", "service_object": "faucet", "service_action": "repair", "callback_intent": "requested"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Yes, please call me back at that number.",
+        "expect": {"callback_intent": "accepted", "callback_confirmation": "confirmed", "action_name": "wrap_up", "forbidden_slots": ["callback_number", "callback_confirmation"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Got it. The business will call you back.",
+        "metrics": {"response_first_audio_ms": 680, "generated_audio_ms": 1800}
+      }
+    ]
+  },
+  {
+    "scenario": "callback_decline_returns_to_service_intake",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted", "caller_phone_last_four": "8667", "intent": "callback", "service_object": "faucet", "service_action": "repair", "callback_intent": "requested"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Please do not call me back.",
+        "expect": {"callback_intent": "declined", "callback_confirmation": "rejected", "allowed_slots": ["job_complexity"], "forbidden_slots": ["callback_number"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Can you briefly describe the faucet problem?",
+        "observed": {"asked_slots": ["job_complexity"]},
+        "metrics": {"response_first_audio_ms": 790, "generated_audio_ms": 1900}
+      }
+    ]
+  },
+  {
+    "scenario": "negated_emergency_stays_routine",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "This is not an emergency, just a routine leaking faucet.",
+        "expect": {"intent": "service_request", "urgency": "routine", "service_object": "faucet", "service_action": "repair", "allowed_slots": ["job_complexity"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Can you describe how badly the faucet is leaking?",
+        "observed": {"asked_slots": ["job_complexity"]},
+        "metrics": {"response_first_audio_ms": 830, "generated_audio_ms": 2200}
+      }
+    ]
+  },
+  {
+    "scenario": "private_memory_is_bounded_and_source_free",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted", "caller_identity": {"name": "Known Caller", "confidence": 0.92, "source": "customer_memory", "confirmed": false}, "caller_phone_last_four": "8667", "memory_refs_used": ["scoped-memory-ref"]},
+    "private_memory_lines": ["Jobber note: caller-id-ending-8667 SENSITIVE_SENTINEL. Prior sink repair."],
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "I need a faucet repair.",
+        "expect": {"forbidden_slots": ["caller_name", "service_object", "service_action"], "instruction_excludes": ["Jobber", "SENSITIVE_SENTINEL", "caller-id-ending-8667"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Can you briefly describe the faucet problem?",
+        "observed": {"asked_slots": ["job_complexity"]},
+        "metrics": {"response_first_audio_ms": 910, "generated_audio_ms": 2000}
+      }
+    ]
+  },
+  {
+    "scenario": "exact_price_request_avoids_guarantee",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Can you guarantee the exact price to replace a toilet?",
+        "expect": {"intent": "pricing_question", "service_object": "toilet", "service_action": "replace", "action_name": "answer_direct_question", "allowed_slots": ["job_complexity"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "The final price depends on the installation, so I cannot guarantee it without an assessment. Is the existing toilet already removed?",
+        "observed": {"asked_slots": ["job_complexity"]},
+        "metrics": {"response_first_audio_ms": 1490, "generated_audio_ms": 5900},
+        "expect": {"output_includes": ["cannot guarantee"]}
+      }
+    ]
+  },
+  {
+    "scenario": "mixed_language_keeps_single_question",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Hola, necesito precio para reemplazar un bano.",
+        "expect": {"language": "es", "service_action": "replace", "allowed_slots": ["service_object"], "instruction_includes": ["Language: es"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Que accesorio necesita reemplazar?",
+        "observed": {"asked_slots": ["service_object"]},
+        "metrics": {"response_first_audio_ms": 980, "generated_audio_ms": 1600}
+      }
+    ]
+  },
+  {
+    "scenario": "blocked_caller_id_requests_callback_number_once",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Please call me back.",
+        "expect": {"callback_intent": "requested", "action_name": "ask_callback_number", "allowed_slots": ["callback_number"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "What is the best callback number?",
+        "observed": {"asked_slots": ["callback_number"]},
+        "metrics": {"response_first_audio_ms": 720, "generated_audio_ms": 1500},
+        "expect": {"asked_slots_state": ["callback_number"]}
+      }
+    ]
+  },
+  {
+    "scenario": "caller_id_callback_uses_last_four_only",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted", "caller_phone_last_four": "8667", "service_object": "sink", "service_action": "repair"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Please call me back.",
+        "expect": {"action_name": "confirm_callback_last_four", "allowed_slots": ["callback_confirmation"], "instruction_includes": ["Caller ID ending: 8667"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "Should the business call you at the number ending in 8667?",
+        "observed": {"asked_slots": ["callback_confirmation"]},
+        "metrics": {"response_first_audio_ms": 750, "generated_audio_ms": 2300}
+      }
+    ]
+  },
+  {
+    "scenario": "routine_inspection_stays_within_response_budget",
+    "policy": {"require_metrics": true, "max_questions": 1, "max_words": 40, "max_response_first_audio_ms": 1500, "max_generated_audio_ms": 6000},
+    "initial_state": {"call_sid": "CA_redacted"},
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "I need someone to inspect a water heater.",
+        "expect": {"intent": "service_request", "service_object": "water heater", "service_action": "inspect", "allowed_slots": ["job_complexity"]}
+      },
+      {
+        "speaker": "assistant",
+        "text": "What problem are you noticing with the water heater?",
+        "observed": {"asked_slots": ["job_complexity"]},
+        "metrics": {"response_first_audio_ms": 1400, "generated_audio_ms": 3100}
+      }
+    ]
+  }
+]

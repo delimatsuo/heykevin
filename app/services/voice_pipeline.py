@@ -21,6 +21,10 @@ from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
+from app.services.urgency import (
+    URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
+    find_urgent_signal,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -380,14 +384,7 @@ class VoicePipeline:
     - Barge-in stops TTS playback when caller interrupts
     """
 
-    # Emergency keywords for urgency detection
-    URGENCY_KEYWORDS = {
-        "emergency", "flood", "flooding", "fire", "gas leak", "pipe burst",
-        "no water", "sewage", "sparking", "smoke", "hospital", "accident",
-        "burst pipe", "water everywhere", "electrical fire", "carbon monoxide",
-        "burning smell", "smell burning", "electrical panel", "electric panel",
-        "breaker tripped", "tripped breaker",
-    }
+    URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
     CALLER_SILENCE_PROMPT_SECONDS = 10
     CALLER_SILENCE_HANGUP_SECONDS = 10
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
@@ -778,10 +775,6 @@ class VoicePipeline:
                 # Show each segment in transcript immediately (real-time feel)
                 await self.on_transcript("Caller", transcript)
 
-                # URGENCY CHECK: scan for emergency keywords (outside lock, non-blocking)
-                if not self._urgency_detected and self.on_urgency_detected:
-                    self._check_urgency(transcript)
-
                 # BARGE-IN: if Kevin is speaking and caller talks, interrupt
                 if self._is_speaking:
                     logger.info("BARGE-IN: caller interrupted Kevin")
@@ -837,27 +830,34 @@ class VoicePipeline:
         Runs in _deepgram_receive_loop (outside the response lock) so it
         doesn't block the conversation flow. The callback fires async.
         """
-        text_lower = transcript.lower()
-        for keyword in self.URGENCY_KEYWORDS:
-            if keyword in text_lower:
-                self._urgency_detected = True
-                logger.info(f"URGENCY DETECTED: keyword '{keyword}' in '{transcript}'")
+        if (
+            self._urgency_detected
+            or not self.on_urgency_detected
+            or not find_urgent_signal(transcript)
+        ):
+            return
 
-                # Fire callback non-blocking
-                asyncio.create_task(self.on_urgency_detected(transcript))
+        self._urgency_detected = True
+        logger.info(
+            "voice_event event=urgency_detected call=%s chars=%s",
+            self._call_sid[:8] or "unknown",
+            len(transcript),
+        )
 
-                # Cancel the owner availability timer (give contractor time to respond)
-                if self._unavailable_task and not self._unavailable_task.done():
-                    self._unavailable_task.cancel()
-                    self._unavailable_task = None
-                    logger.info("Unavailability timer cancelled due to urgency")
+        # Fire callback non-blocking
+        asyncio.create_task(self.on_urgency_detected(transcript))
 
-                # Interrupt current TTS if Kevin is speaking
-                if self._is_speaking:
-                    self._interrupt_speaking = True
-                    if self.on_clear_audio:
-                        asyncio.create_task(self.on_clear_audio())
-                break
+        # Cancel the owner availability timer (give contractor time to respond)
+        if self._unavailable_task and not self._unavailable_task.done():
+            self._unavailable_task.cancel()
+            self._unavailable_task = None
+            logger.info("Unavailability timer cancelled due to urgency")
+
+        # Interrupt current TTS if Kevin is speaking
+        if self._is_speaking:
+            self._interrupt_speaking = True
+            if self.on_clear_audio:
+                asyncio.create_task(self.on_clear_audio())
 
     async def _flush_utterance(self):
         """Combine accumulated segments and process as one complete utterance."""
@@ -866,6 +866,9 @@ class VoicePipeline:
 
         combined = " ".join(self._utterance_buffer)
         self._utterance_buffer.clear()
+
+        if not self._urgency_detected and self.on_urgency_detected:
+            self._check_urgency(combined)
 
         logger.info(f"Complete utterance: {combined}")
         asyncio.create_task(self._process_utterance(combined))

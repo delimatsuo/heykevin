@@ -84,6 +84,9 @@ jobs:
           esac
           test -n "${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}" || (echo "Missing staging PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
 
+      - name: Verify background worker runtime
+        run: bash scripts/verify_cloud_run_worker_runtime.sh "$STAGING_SERVICE" "$GCP_PROJECT_ID" "$GCP_REGION"
+
       - name: Deploy to Cloud Run (Staging)
         run: |
           gcloud run deploy $STAGING_SERVICE \
@@ -136,6 +139,9 @@ jobs:
         run: |
           test -n "${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
           test -n "${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_BUILD_SERVICE_ACCOUNT" && exit 1)
+
+      - name: Verify background worker runtime
+        run: bash scripts/verify_cloud_run_worker_runtime.sh "$PRODUCTION_SERVICE" "$GCP_PROJECT_ID" "$GCP_REGION"
 
       - name: Deploy to Cloud Run (Production)
         run: |

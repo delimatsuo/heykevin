@@ -8,9 +8,6 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-_validator = RequestValidator(settings.twilio_auth_token)
-
-
 async def verify_twilio_signature(request: Request):
     """Validate that a request actually came from Twilio.
 
@@ -32,6 +29,7 @@ async def verify_twilio_signature(request: Request):
     form_data = await request.form()
     params = dict(form_data)
 
-    if not _validator.validate(url, params, signature):
-        logger.warning("Invalid Twilio signature", extra={"url": url})
+    validator = RequestValidator(settings.twilio_auth_token)
+    if not validator.validate(url, params, signature):
+        logger.warning("Invalid Twilio signature")
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")

@@ -178,6 +178,8 @@ async def test_allowed_service_request_confirmation_sms_uses_caller_confirmation
     assert len(caller_sends) == 1
     assert caller_sends[0][1]["action"] == ActionKey.CALLER_CONFIRMATION_SMS
     assert caller_sends[0][1]["gate_context"].idempotency_key == "CA123:caller_confirmation_sms"
+    assert caller_sends[0][1]["delivery_context"].call_sid == "CA123"
+    assert caller_sends[0][1]["delivery_context"].effect == "caller_confirmation"
 
 
 @pytest.mark.asyncio
@@ -213,6 +215,8 @@ async def test_allowed_service_request_confirmation_mms_uses_caller_confirmation
     assert len(caller_sends) == 1
     assert caller_sends[0][1]["action"] == ActionKey.CALLER_CONFIRMATION_MMS
     assert caller_sends[0][1]["gate_context"].idempotency_key == "CA123:caller_confirmation_mms"
+    assert caller_sends[0][1]["delivery_context"].call_sid == "CA123"
+    assert caller_sends[0][1]["delivery_context"].effect == "caller_confirmation"
 
 
 @pytest.mark.asyncio
@@ -248,6 +252,8 @@ async def test_allowed_non_service_vcard_mms_uses_caller_vcard_mms_action(monkey
     assert len(caller_sends) == 1
     assert caller_sends[0][1]["action"] == ActionKey.CALLER_VCARD_MMS
     assert caller_sends[0][1]["gate_context"].idempotency_key == "CA123:caller_vcard_mms"
+    assert caller_sends[0][1]["delivery_context"].call_sid == "CA123"
+    assert caller_sends[0][1]["delivery_context"].effect == "caller_vcard"
 
 
 @pytest.mark.asyncio
@@ -308,6 +314,8 @@ async def test_allowed_auto_reply_sends_with_caller_auto_reply_action_and_contex
     assert len(sent_sms) == 1
     assert sent_sms[0][1]["action"] == ActionKey.CALLER_AUTO_REPLY
     assert sent_sms[0][1]["gate_context"].idempotency_key == "CA123:caller_auto_reply"
+    assert sent_sms[0][1]["delivery_context"].call_sid == "CA123"
+    assert sent_sms[0][1]["delivery_context"].effect == "caller_auto_reply"
 
 
 @pytest.mark.asyncio

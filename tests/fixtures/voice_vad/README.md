@@ -52,3 +52,15 @@ This bilingual corpus is stronger endpoint evidence than the original single
 source, but it is not broad production qualification. Deliberate barge-in,
 corrections, more speakers, more languages, and real telephony conditions still
 belong in the release cohort.
+
+Run the local WebRTC segmentation gate with:
+
+```bash
+uv run --python 3.12 --with '.[dev]' \
+  python scripts/evaluate_caller_activity_replay.py
+```
+
+The default command intentionally exits nonzero on the current mode-2 tracker.
+It reports aggregate segment, false-start, premature-end, boundary-error, and
+confirmation-delay metrics plus the manifest and semantic corpus hashes. It
+does not output case-level events or audio-derived text.

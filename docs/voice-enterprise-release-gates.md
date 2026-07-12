@@ -188,6 +188,24 @@ errors, premature responses, or interruptions. The worse seed governs. This
 stronger corpus narrows the manual-endpoint uncertainty but still does not
 qualify a live model or activity-control change.
 
+The deterministic local mode-2 WebRTC tracker also fails the same corpus as a
+control source. It preserved full start/final-boundary coverage with start
+absolute error p95/max of 40/40 ms, final-end absolute error p95/max of 80/80
+ms, and a 300 ms confirmation delay. However, zero of six transformed cases
+remained one segment: the tracker emitted three pre-roll false starts and nine
+premature end events across natural within-turn pauses. A bounded diagnostic
+grid across WebRTC modes 0-3, 3-15 speech-confirmation frames, and 300-1,500 ms
+end silence found no setting that passed even both clean sources within the
+150 ms boundary and 500 ms confirmation gates. Therefore the shadow tracker
+must not send Gemini manual activity signals.
+
+A one-trial provider-only probe of the legacy Deepgram `speech_final` settings
+was also unsuitable for direct control. The English clean fixture produced one
+final about 6.4 seconds before the labeled endpoint and no post-end final; the
+Spanish clean fixture produced two post-end finals. No transcript content was
+printed or stored. This is discovery evidence, not a calibrated Deepgram
+benchmark, but it blocks wiring `speech_final` into Gemini as the next shortcut.
+
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
 session. It is payload-free, may be duplicated by the provider, and must not be
 attributed to an individual response turn. The 120-token output limit is an

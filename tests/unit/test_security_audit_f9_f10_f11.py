@@ -356,7 +356,8 @@ async def test_protected_save_never_writes_plaintext_when_encryption_unavailable
     monkeypatch.setattr(calls, "get_firestore_client", lambda: FakeDatabase())
 
     with caplog.at_level("ERROR"):
-        await calls.save_call("CA_redacted", {"transcript": "private transcript"})
+        with pytest.raises(calls.TranscriptEncryptionUnavailableError):
+            await calls.save_call("CA_redacted", {"transcript": "private transcript"})
 
     assert writes == []
     assert "exception_type=TranscriptEncryptionUnavailableError" in caplog.text

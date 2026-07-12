@@ -315,7 +315,10 @@ class GeminiPipeline:
             data = json.loads(response)
 
             if "setupComplete" not in data:
-                logger.error(f"Gemini setup failed: {json.dumps(data)[:200]}")
+                self._log_voice_timing(
+                    "setup_error",
+                    response_type=type(data).__name__,
+                )
                 return False
 
             self._connected = True
@@ -344,7 +347,10 @@ class GeminiPipeline:
             return True
 
         except Exception as e:
-            logger.error(f"Gemini connect failed: {e}", exc_info=True)
+            self._log_voice_timing(
+                "connect_error",
+                exception_type=type(e).__name__,
+            )
             return False
 
     def _system_prompt_with_reconnect_context(self, reconnect_context: str = "") -> str:
@@ -529,14 +535,10 @@ class GeminiPipeline:
                 or getattr(sent_close, "code", None)
                 or 1006
             )
-            close_reason = (
-                getattr(received_close, "reason", None)
-                or getattr(sent_close, "reason", None)
-                or ""
-            )
-            logger.warning(
-                f"Gemini WebSocket closed: code={close_code} reason={close_reason!r} "
-                f"peer_initiated={peer_initiated}"
+            self._log_voice_timing(
+                "websocket_closed",
+                code=close_code,
+                peer_initiated=peer_initiated,
             )
             if self._connected:
                 if self._caller_transcript_buf:
@@ -587,7 +589,10 @@ class GeminiPipeline:
                     if self.on_call_complete:
                         await self.on_call_complete()
         except Exception as e:
-            logger.error(f"Gemini receive error: {e}", exc_info=True)
+            self._log_voice_timing(
+                "receive_error",
+                exception_type=type(e).__name__,
+            )
 
     @staticmethod
     def _extract_transcript(obj: dict, direction: str) -> str:
@@ -684,9 +689,9 @@ class GeminiPipeline:
         try:
             await asyncio.wait_for(self._audio_queue.join(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            logger.warning(
-                "Timed out waiting for Gemini audio playout for %s",
-                self._call_sid[:8] or "unknown",
+            self._log_voice_timing(
+                "audio_playout_timeout",
+                timeout_ms=round(timeout_seconds * 1000),
             )
 
     def _build_reconnect_context(self, limit: int = 12) -> str:
@@ -918,7 +923,7 @@ class GeminiPipeline:
         if self._unavailable_task and not self._unavailable_task.done():
             self._unavailable_task.cancel()
         self._unavailable_task = asyncio.create_task(self._unavailable_timer())
-        logger.info(f"Gemini owner availability hold started for {self._call_sid[:8]}")
+        self._log_voice_timing("owner_availability_hold_started")
 
     def _finish_owner_availability_wait(self):
         self._waiting_for_owner_availability = False
@@ -992,12 +997,12 @@ class GeminiPipeline:
             "The caller has been silent. Ask exactly: 'Are you still there?' "
             "Do not say anything else."
         )
-        logger.info(f"Gemini silence prompt injected for {self._call_sid[:8]}")
+        self._log_voice_timing("silence_prompt_injected")
 
     async def _hangup_for_caller_silence(self):
         if not self._ws or not self._connected or not self._waiting_on_caller():
             return
-        logger.info(f"Caller silence timeout for call {self._call_sid} — ending call")
+        self._log_voice_timing("caller_silence_timeout")
         await self._send_client_instruction(
             "The caller stayed silent. Say exactly: \"I'm going to hang up for now. "
             "Please call back when you're ready. Goodbye.\""
@@ -1029,7 +1034,10 @@ class GeminiPipeline:
                 )
                 logger.info("Gemini: unavailability message triggered (30s timer)")
             except Exception as e:
-                logger.error(f"Failed to send unavailability to Gemini: {e}")
+                self._log_voice_timing(
+                    "unavailability_instruction_error",
+                    exception_type=type(e).__name__,
+                )
                 self._unavailable_said = False  # allow retry
                 self._assistant_instruction_pending = False
         except asyncio.CancelledError:
@@ -1076,7 +1084,13 @@ class GeminiPipeline:
                         self._unavailable_said = True
                         logger.info(f"take_message injected into Gemini for {self._call_sid[:8]}")
                     except Exception as e:
-                        logger.error(f"Failed to inject take_message into Gemini: {e}")
+                        self._log_voice_timing(
+                            "take_message_instruction_error",
+                            exception_type=type(e).__name__,
+                        )
                         self._assistant_instruction_pending = False
         except Exception as e:
-            logger.warning(f"Command check error: {e}")
+            self._log_voice_timing(
+                "command_check_error",
+                exception_type=type(e).__name__,
+            )

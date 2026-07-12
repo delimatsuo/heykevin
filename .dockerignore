@@ -6,9 +6,11 @@ secrets/
 *.pem
 *.key
 *.cer
+!app/services/apple_certs/*.cer
 *.p12
 
 # Local credentials / IDE state.
+gha-creds-*.json
 .vscode/
 .idea/
 

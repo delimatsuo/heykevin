@@ -1327,7 +1327,7 @@ class GeminiPipeline:
                     segment=event.segment,
                     call_elapsed_ms=max(
                         0,
-                        int((event.at - self._pipeline_started_at) * 1000),
+                        round((event.at - self._pipeline_started_at) * 1000),
                     ),
                 )
         except Exception as exc:

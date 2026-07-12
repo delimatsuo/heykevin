@@ -127,9 +127,24 @@ itself, assign all delay to server VAD. A provider-only three-trial synthetic
 probe measured 1,993-3,806 ms on the current Gemini 2.5 `latest` alias and
 1,519-1,547 ms on `gemini-3.1-flash-live-preview`. Google identifies 3.1 as the
 low-latency migration target, but this small unpinned probe is discovery
-evidence, not release qualification. The next model/VAD comparison must use a
-pinned dated control, identical paced audio, ground-truth boundaries, and at
-least 30 randomized interleaved turns before any live control change.
+evidence, not release qualification. A subsequent explicit-model, paired six-case
+smoke used identical mu-law audio in automatic and ground-truth manual arms.
+Gemini 2.5 measured 5,195 ms automatic and 3,753 ms manual at the small-sample
+p95/max, so endpoint control alone still failed. Gemini 3.1 measured 1,936 ms
+automatic and 1,342 ms manual with complete terminals and no manual
+interruptions or premature responses. After correcting the latency anchor to
+the actual send completion of the chunk containing labeled speech end, the
+30-pair seed-29 run measured 2,094/2,309 ms automatic p95/max and
+1,408/1,544 ms manual p95/max with complete coverage. Independent seed 41 did
+not reproduce the pass: automatic measured 2,059/2,099 ms with one error and
+96.67% terminal/latency coverage, while manual measured 1,593/1,809 ms and
+missed the 1,500 ms p95 gate. The worse seed governs, so neither a model-only
+3.1 treatment nor live manual endpointing is qualified. All six cases also
+derive from one English source; a genuinely independent, multilingual labeled
+corpus remains required. `gemini-3.1-flash-live-preview` is an explicit
+non-`latest` model ID, but it is still a mutable preview rather than an
+immutable dated release; all qualification evidence must therefore be rerun
+immediately before any later staging decision.
 [Gemini 3.1 migration guidance](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview)
 
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini

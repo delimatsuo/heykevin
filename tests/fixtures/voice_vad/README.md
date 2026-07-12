@@ -23,3 +23,17 @@ claim that one English sample validates production VAD quality.
 
 The fixture is upstream test data, contains no Kevin customer audio or PII, and
 is redistributed under the notices in `LICENSE.py-webrtcvad`.
+
+`turn_replay_manifest.json` derives six deterministic cases from this pinned
+source: clean, quiet, bounded background noise, 500 ms and 800 ms within-turn
+pauses, and fragmented 10/20/30 ms ingress chunks. Every case passes through a
+Twilio mu-law round trip before Gemini replay. The manual arm sends one
+`activityStart` before all pre-roll audio and one `activityEnd` only after at
+least 500 ms beyond the labeled final speech boundary. The automatic arm gets
+identical paced audio and retains Gemini's 500 ms server-side silence setting.
+
+These transformations validate the benchmark and isolate provider endpointing;
+they do not turn one English source into a production VAD corpus. Promotion
+still requires independently labeled quiet speech, accents, multiple speakers,
+multiple languages, corrections, background conditions, and deliberate
+barge-in recordings under compatible redistribution licenses.

@@ -141,6 +141,12 @@ jobs:
     env:
       STAGING_SERVICE: kevin-api-staging
       STAGING_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
+      STAGING_RUNTIME_SERVICE_ACCOUNT: ${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}
+      STAGING_BUILD_SERVICE_ACCOUNT: ${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }}
+      STAGING_FIRESTORE_PROJECT_ID: ${{ vars.FIRESTORE_PROJECT_ID }}
+      STAGING_FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
+      STAGING_APNS_SANDBOX: ${{ vars.APNS_SANDBOX || 'false' }}
+      PRODUCTION_TWILIO_ACCOUNT_SID: ${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}
     if: ${{ github.ref == 'refs/heads/staging' && ((github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')) }}
     environment: staging
     concurrency:
@@ -162,41 +168,39 @@ jobs:
 
       - name: Check staging isolation variables
         run: |
-          test -n "${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_RUNTIME_SERVICE_ACCOUNT" && exit 1)
-          test -n "${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_BUILD_SERVICE_ACCOUNT" && exit 1)
-          test -n "${{ vars.FIRESTORE_PROJECT_ID }}" || (echo "Missing staging FIRESTORE_PROJECT_ID" && exit 1)
-          test "${{ vars.FIRESTORE_PROJECT_ID }}" != "$GCP_PROJECT_ID" || (echo "Staging must not use production Firestore project" && exit 1)
-          test -n "${{ vars.FIREBASE_DATABASE_URL }}" || (echo "Missing staging FIREBASE_DATABASE_URL" && exit 1)
-          case "${{ vars.FIREBASE_DATABASE_URL }}" in
-            *kevin-491315-rtdb*) echo "Staging must not use production RTDB" && exit 1 ;;
-          esac
-          test -n "${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}" || (echo "Missing staging PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
+          [[ "$STAGING_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]] || exit 1
+          [[ "$STAGING_BUILD_SERVICE_ACCOUNT" =~ ^projects/kevin-491315/serviceAccounts/[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]] || exit 1
+          test "$STAGING_FIRESTORE_PROJECT_ID" = "kevin-staging-491315" || exit 1
+          test "$STAGING_FIREBASE_DATABASE_URL" = "https://kevin-staging-491315-rtdb.firebaseio.com" || exit 1
+          [[ "$STAGING_APNS_SANDBOX" =~ ^(true|false)$ ]] || exit 1
+          [[ "$PRODUCTION_TWILIO_ACCOUNT_SID" =~ ^AC[0-9a-fA-F]{32}$ ]] || exit 1
 
       - name: Verify background worker runtime
         run: bash scripts/verify_cloud_run_worker_runtime.sh "$STAGING_SERVICE" "$GCP_PROJECT_ID" "$GCP_REGION"
 
       - name: Deploy to Cloud Run (Staging)
         run: |
-          gcloud run deploy $STAGING_SERVICE \
+          gcloud run deploy "$STAGING_SERVICE" \
             --source . \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
             --allow-unauthenticated \
-            --service-account ${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }} \
-            --build-service-account ${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }} \
-            --update-env-vars ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=${{ vars.FIRESTORE_PROJECT_ID }},FIREBASE_DATABASE_URL=${{ vars.FIREBASE_DATABASE_URL }},APNS_SANDBOX=${{ vars.APNS_SANDBOX || 'false' }},PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }},DEPLOY_SHA=$GITHUB_SHA \
+            --service-account "$STAGING_RUNTIME_SERVICE_ACCOUNT" \
+            --build-service-account "$STAGING_BUILD_SERVICE_ACCOUNT" \
+            --update-env-vars "ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=$STAGING_FIRESTORE_PROJECT_ID,FIREBASE_DATABASE_URL=$STAGING_FIREBASE_DATABASE_URL,APNS_SANDBOX=$STAGING_APNS_SANDBOX,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,DEPLOY_SHA=$GITHUB_SHA" \
             --tag staging
 
-      - name: Health check
+      - name: Route traffic to deployed staging revision
         run: |
-          sleep 15
-          STAGING_URL=$(gcloud run services describe $STAGING_SERVICE \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
-            --format='value(status.url)')
-          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$STAGING_URL/health" || echo "000")
-          echo "Staging health: HTTP $STATUS at $STAGING_URL"
-          [ "$STATUS" = "200" ] || exit 1
+          gcloud run services update-traffic "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --to-latest
+
+      - name: Verify deployed staging revision
+        run: |
+          bash scripts/verify_cloud_run_deployment.sh \
+            "$STAGING_SERVICE" "$GCP_PROJECT_ID" "$GCP_REGION" staging "$GITHUB_SHA"
 
   deploy-production:
     name: Deploy to Production
@@ -208,6 +212,9 @@ jobs:
     env:
       PRODUCTION_SERVICE: kevin-api
       PRODUCTION_URL: https://kevin-api-752910912062.us-central1.run.app
+      PRODUCTION_RUNTIME_SERVICE_ACCOUNT: ${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}
+      PRODUCTION_BUILD_SERVICE_ACCOUNT: ${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}
+      PRODUCTION_TWILIO_ACCOUNT_SID: ${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production' && github.ref == 'refs/heads/main'
     environment: production
     concurrency:
@@ -233,30 +240,32 @@ jobs:
 
       - name: Check production runtime variables
         run: |
-          test -n "${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
-          test -n "${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_BUILD_SERVICE_ACCOUNT" && exit 1)
+          [[ "$PRODUCTION_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]] || exit 1
+          [[ "$PRODUCTION_BUILD_SERVICE_ACCOUNT" =~ ^projects/kevin-491315/serviceAccounts/[a-z0-9-]+@kevin-491315\.iam\.gserviceaccount\.com$ ]] || exit 1
+          [[ "$PRODUCTION_TWILIO_ACCOUNT_SID" =~ ^AC[0-9a-fA-F]{32}$ ]] || exit 1
 
       - name: Verify background worker runtime
         run: bash scripts/verify_cloud_run_worker_runtime.sh "$PRODUCTION_SERVICE" "$GCP_PROJECT_ID" "$GCP_REGION"
 
       - name: Deploy to Cloud Run (Production)
         run: |
-          gcloud run deploy $PRODUCTION_SERVICE \
+          gcloud run deploy "$PRODUCTION_SERVICE" \
             --source . \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
             --allow-unauthenticated \
-            --service-account ${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }} \
-            --build-service-account ${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }} \
-            --update-env-vars ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=$PRODUCTION_URL,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }},DEPLOY_SHA=$GITHUB_SHA
+            --service-account "$PRODUCTION_RUNTIME_SERVICE_ACCOUNT" \
+            --build-service-account "$PRODUCTION_BUILD_SERVICE_ACCOUNT" \
+            --update-env-vars "ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=$PRODUCTION_URL,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,DEPLOY_SHA=$GITHUB_SHA"
 
-      - name: Health check
+      - name: Route traffic to deployed production revision
         run: |
-          sleep 15
-          PROD_URL=$(gcloud run services describe $PRODUCTION_SERVICE \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
-            --format='value(status.url)')
-          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$PROD_URL/health" || echo "000")
-          echo "Production health: HTTP $STATUS at $PROD_URL"
-          [ "$STATUS" = "200" ] || exit 1
+          gcloud run services update-traffic "$PRODUCTION_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --to-latest
+
+      - name: Verify deployed production revision
+        run: |
+          bash scripts/verify_cloud_run_deployment.sh \
+            "$PRODUCTION_SERVICE" "$GCP_PROJECT_ID" "$GCP_REGION" production "$GITHUB_SHA"

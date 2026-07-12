@@ -905,6 +905,68 @@ async def test_gemini_shadow_vad_receives_original_ingress_timestamp():
 
 
 @pytest.mark.asyncio
+async def test_gemini_records_original_ingress_to_provider_send_lag(monkeypatch):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    pipeline._caller_activity_tracker = None
+    observations = []
+    pipeline._record_inbound_audio_forwarding = (
+        lambda received_at, forwarded_at: observations.append(
+            (received_at, forwarded_at)
+        )
+    )
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.time.monotonic",
+        lambda: 200.025,
+    )
+
+    await pipeline.process_audio_in(b"\xff" * 160, received_at=200.0)
+
+    assert observations == [(200.0, 200.025)]
+
+
+@pytest.mark.asyncio
+async def test_gemini_logs_bounded_inbound_forwarding_summary_once(caplog):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    for frame in range(1, 51):
+        lag_seconds = 0.1 if frame == 50 else 0.025
+        pipeline._record_inbound_audio_forwarding(10.0, 10.0 + lag_seconds)
+    await pipeline.stop()
+    await pipeline.stop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=inbound_audio_forwarding_summary") == 1
+    assert "frames=50" in messages
+    assert "p95_upper_bound_ms=25" in messages
+    assert "max_ms=100" in messages
+
+
+@pytest.mark.asyncio
 async def test_gemini_shadow_vad_logs_only_payload_free_activity_events(caplog):
     async def noop_audio(_chunk: bytes):
         return None

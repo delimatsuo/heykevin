@@ -363,6 +363,10 @@ def evaluate_voice_release(
         by_name.get("inbound_audio_stream_resumed", []),
         attempted_calls,
     )
+    inbound_audio_forwarding_summary_events = _events_for_calls(
+        by_name.get("inbound_audio_forwarding_summary", []),
+        attempted_calls,
+    )
     inbound_audio_gap_keys = _event_keys(inbound_audio_gap_events, "gap")
     inbound_audio_resume_keys = _event_keys(
         inbound_audio_resume_events,
@@ -550,6 +554,18 @@ def evaluate_voice_release(
         inbound_audio_resume_events,
         "gap_ms",
         ordinal="gap",
+    )
+    inbound_audio_forwarding_frame_values = _worst_numeric_values(
+        inbound_audio_forwarding_summary_events,
+        "frames",
+    )
+    inbound_audio_forwarding_p95_upper_bound_values = _worst_numeric_values(
+        inbound_audio_forwarding_summary_events,
+        "p95_upper_bound_ms",
+    )
+    inbound_audio_forwarding_max_values = _worst_numeric_values(
+        inbound_audio_forwarding_summary_events,
+        "max_ms",
     )
     greeting_word_values = _worst_numeric_values(
         greeting_events,
@@ -871,6 +887,27 @@ def evaluate_voice_release(
             "outbound_audio_errors": outbound_audio_errors,
         },
         "diagnostics": {
+            "inbound_audio_forwarding_summary_calls": len({
+                str(event["call"])
+                for event in inbound_audio_forwarding_summary_events
+            }),
+            "inbound_audio_forwarding_frames": sum(
+                inbound_audio_forwarding_frame_values
+            ),
+            "inbound_audio_forwarding_call_p95_upper_bound_p95_ms": _percentile(
+                inbound_audio_forwarding_p95_upper_bound_values,
+                0.95,
+            ),
+            "inbound_audio_forwarding_call_p95_upper_bound_max_ms": (
+                max(inbound_audio_forwarding_p95_upper_bound_values)
+                if inbound_audio_forwarding_p95_upper_bound_values
+                else None
+            ),
+            "inbound_audio_forwarding_max_ms": (
+                max(inbound_audio_forwarding_max_values)
+                if inbound_audio_forwarding_max_values
+                else None
+            ),
             "inbound_audio_stream_gaps": len(inbound_audio_gap_keys),
             "inbound_audio_stream_resumes": len(inbound_audio_resume_keys),
             "inbound_audio_stream_unresumed_gaps": len(

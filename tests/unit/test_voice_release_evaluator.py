@@ -299,6 +299,36 @@ def test_voice_release_evaluator_reports_inbound_audio_stream_gaps():
     assert diagnostics["inbound_audio_resumed_gap_max_ms"] == 5000
 
 
+def test_voice_release_evaluator_reports_inbound_audio_forwarding_summaries():
+    messages = _passing_messages()
+    messages.extend([
+        _event(
+            "inbound_audio_forwarding_summary",
+            "call0000",
+            frames=1000,
+            p95_upper_bound_ms=10,
+            max_ms=25,
+        ),
+        _event(
+            "inbound_audio_forwarding_summary",
+            "call0001",
+            frames=1100,
+            p95_upper_bound_ms=50,
+            max_ms=120,
+        ),
+    ])
+
+    report = evaluate_voice_release(messages)
+    diagnostics = report["diagnostics"]
+
+    assert report["status"] == "pass"
+    assert diagnostics["inbound_audio_forwarding_summary_calls"] == 2
+    assert diagnostics["inbound_audio_forwarding_frames"] == 2100
+    assert diagnostics["inbound_audio_forwarding_call_p95_upper_bound_p95_ms"] == 50
+    assert diagnostics["inbound_audio_forwarding_call_p95_upper_bound_max_ms"] == 50
+    assert diagnostics["inbound_audio_forwarding_max_ms"] == 120
+
+
 def test_voice_release_evaluator_fails_any_barge_in_clear_failure():
     messages = _passing_messages()
     messages.append(

@@ -129,6 +129,20 @@ class GeminiPipeline:
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_WORDS = 24
     MAX_RESPONSE_OUTPUT_TOKENS = 120
+    INBOUND_FORWARDING_LAG_BUCKETS_MS = (
+        5,
+        10,
+        25,
+        50,
+        100,
+        250,
+        500,
+        1_000,
+        2_500,
+        5_000,
+        10_000,
+        60_000,
+    )
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -217,6 +231,12 @@ class GeminiPipeline:
         self._first_inbound_audio_logged = False
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
+        self._inbound_audio_forwarding_frames = 0
+        self._inbound_audio_forwarding_lag_buckets = [0] * (
+            len(self.INBOUND_FORWARDING_LAG_BUCKETS_MS) + 1
+        )
+        self._inbound_audio_forwarding_max_ms = 0
+        self._inbound_audio_forwarding_summary_logged = False
         self._audio_chunks_sent = 0
         self._usage_session_number = 0
         self._last_usage_snapshot: tuple[tuple[str, int], ...] | None = None
@@ -554,11 +574,12 @@ class GeminiPipeline:
         received_at: float | None = None,
     ):
         """Convert mulaw 8kHz -> PCM 16kHz and send to Gemini."""
+        ingress_received_at = (
+            time.monotonic() if received_at is None else received_at
+        )
         self._observe_caller_activity(
             mulaw_bytes,
-            received_at=(
-                time.monotonic() if received_at is None else received_at
-            ),
+            received_at=ingress_received_at,
         )
         if not self._connected:
             return
@@ -572,7 +593,11 @@ class GeminiPipeline:
                 websocket = self._ws
                 if not websocket:
                     return
-                await self._forward_inbound_audio(websocket, mulaw_bytes)
+                await self._forward_inbound_audio(
+                    websocket,
+                    mulaw_bytes,
+                    received_at=ingress_received_at,
+                )
         except Exception as e:
             if not self._inbound_audio_error_logged:
                 self._inbound_audio_error_logged = True
@@ -582,7 +607,13 @@ class GeminiPipeline:
                 )
             self._schedule_receive_recovery(close_websocket=True)
 
-    async def _forward_inbound_audio(self, websocket, mulaw_bytes: bytes) -> None:
+    async def _forward_inbound_audio(
+        self,
+        websocket,
+        mulaw_bytes: bytes,
+        *,
+        received_at: float | None = None,
+    ) -> None:
         """Send one caller audio frame to a specific Gemini session."""
         pcm_16k = mulaw_to_pcm16k(mulaw_bytes)
         audio_b64 = base64.b64encode(pcm_16k).decode("utf-8")
@@ -594,6 +625,11 @@ class GeminiPipeline:
                 }
             }
         }))
+        if received_at is not None:
+            self._record_inbound_audio_forwarding(
+                received_at,
+                time.monotonic(),
+            )
         if not self._first_inbound_audio_logged:
             self._first_inbound_audio_logged = True
             self._log_voice_timing(
@@ -601,6 +637,58 @@ class GeminiPipeline:
                 elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
                 chunk_bytes=len(mulaw_bytes),
             )
+
+    def _record_inbound_audio_forwarding(
+        self,
+        received_at: float,
+        forwarded_at: float,
+    ) -> None:
+        """Record bounded ingress-to-provider send lag without audio payloads."""
+        lag_ms = max(0, round((forwarded_at - received_at) * 1000))
+        self._inbound_audio_forwarding_frames += 1
+        self._inbound_audio_forwarding_max_ms = max(
+            self._inbound_audio_forwarding_max_ms,
+            lag_ms,
+        )
+        for index, upper_bound_ms in enumerate(
+            self.INBOUND_FORWARDING_LAG_BUCKETS_MS
+        ):
+            if lag_ms <= upper_bound_ms:
+                self._inbound_audio_forwarding_lag_buckets[index] += 1
+                break
+        else:
+            self._inbound_audio_forwarding_lag_buckets[-1] += 1
+
+    def _log_inbound_audio_forwarding_summary(self) -> None:
+        """Log one payload-free forwarding summary for this call."""
+        if (
+            self._inbound_audio_forwarding_summary_logged
+            or self._inbound_audio_forwarding_frames == 0
+        ):
+            return
+        self._inbound_audio_forwarding_summary_logged = True
+        percentile_target = (
+            95 * self._inbound_audio_forwarding_frames + 99
+        ) // 100
+        cumulative_frames = 0
+        p95_upper_bound_ms = self._inbound_audio_forwarding_max_ms
+        for index, frame_count in enumerate(
+            self._inbound_audio_forwarding_lag_buckets
+        ):
+            cumulative_frames += frame_count
+            if cumulative_frames < percentile_target:
+                continue
+            if index < len(self.INBOUND_FORWARDING_LAG_BUCKETS_MS):
+                p95_upper_bound_ms = self.INBOUND_FORWARDING_LAG_BUCKETS_MS[
+                    index
+                ]
+            break
+        self._log_voice_timing(
+            "inbound_audio_forwarding_summary",
+            frames=self._inbound_audio_forwarding_frames,
+            p95_upper_bound_ms=p95_upper_bound_ms,
+            max_ms=self._inbound_audio_forwarding_max_ms,
+        )
 
     def _buffer_reconnect_audio(self, mulaw_bytes: bytes) -> None:
         """Buffer one immutable caller frame while a reconnect is in progress."""
@@ -679,6 +767,7 @@ class GeminiPipeline:
 
     async def stop(self):
         """Close Gemini session and cancel background tasks."""
+        self._log_inbound_audio_forwarding_summary()
         self._connected = False
         self._audio_input_ready.set()
         self._reconnecting = False

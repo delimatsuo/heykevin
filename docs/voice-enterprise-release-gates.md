@@ -109,6 +109,29 @@ returns. These are payload-free diagnostics and do not send Gemini
 as the automatic-VAD signal for a paused audio stream; using it is a separate
 control experiment that requires repeated gap/endpoint correlation first.
 
+At pipeline shutdown, `inbound_audio_forwarding_summary` reports the count of
+ordinary live frames successfully sent to Gemini, an all-frame histogram-based
+`p95_upper_bound_ms`, and the exact maximum from the original Twilio ingress
+timestamp through WebSocket send completion. The fixed histogram bounds memory
+for long calls and intentionally reports an upper bound instead of claiming
+false millisecond precision. Reconnect-buffer replays do not retain a source
+timestamp and are excluded; their chunks and duration remain separately
+accounted by `inbound_reconnect_audio_replayed`. Forwarding summaries are
+diagnostic until a cohort establishes a release threshold.
+
+The latest controlled staging probes recorded no one-second ingress gaps or
+transport errors, but reproduced a two-turn overlap and measured 7,469 ms from
+the local completed speech endpoint to Twilio delivery in a single-turn
+control. This rejects `audioStreamEnd` as the next experiment but does not, by
+itself, assign all delay to server VAD. A provider-only three-trial synthetic
+probe measured 1,993-3,806 ms on the current Gemini 2.5 `latest` alias and
+1,519-1,547 ms on `gemini-3.1-flash-live-preview`. Google identifies 3.1 as the
+low-latency migration target, but this small unpinned probe is discovery
+evidence, not release qualification. The next model/VAD comparison must use a
+pinned dated control, identical paced audio, ground-truth boundaries, and at
+least 30 randomized interleaved turns before any live control change.
+[Gemini 3.1 migration guidance](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview)
+
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
 session. It is payload-free, may be duplicated by the provider, and must not be
 attributed to an individual response turn. The 120-token output limit is an

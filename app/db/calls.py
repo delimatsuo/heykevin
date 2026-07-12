@@ -187,6 +187,12 @@ async def save_call(call_sid: str, data: dict):
         data["call_sid"] = call_sid
         data = _maybe_encrypt_call_data(data)
         db.collection(COLLECTION).document(call_sid).set(data, merge=True)
+    except TranscriptEncryptionUnavailableError as error:
+        logger.error(
+            "Firestore call save failed: exception_type=%s",
+            type(error).__name__,
+        )
+        raise
     except Exception as e:
         logger.error(
             "Firestore call save failed: exception_type=%s",

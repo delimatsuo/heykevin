@@ -1429,6 +1429,50 @@ async def test_gemini_turn_complete_without_transcript_closes_response_metrics(c
 
 
 @pytest.mark.asyncio
+async def test_gemini_interrupted_response_logs_terminal_without_payload(caplog):
+    private_text = "private interrupted response sentinel"
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def clear_audio():
+        return True
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._response_turn_number = 2
+    pipeline._response_first_audio_at = time.monotonic()
+    pipeline._generated_audio_ms = 500
+    pipeline._kevin_transcript_buf = [private_text]
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"interrupted": True}}),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=model_turn_interrupted") == 1
+    assert "turn=2" in messages
+    assert "generated_audio_ms=500" in messages
+    assert "voice_timing event=barge_in_clear" in messages
+    assert "barge=1" in messages
+    assert private_text not in messages
+    assert pipeline._response_first_audio_at == 0.0
+    assert pipeline._generated_audio_ms == 0
+
+
+@pytest.mark.asyncio
 async def test_gemini_barge_in_resets_caller_silence_state():
     async def noop_audio(_chunk: bytes):
         return None
@@ -1569,6 +1613,33 @@ async def test_gemini_logs_first_inbound_audio_forward_without_payload(caplog):
     assert "chunk_bytes=160" in messages
     audio_payload = websocket.sent_payloads[0]["realtime_input"]["audio"]["data"]
     assert audio_payload not in messages
+
+
+def test_gemini_logs_first_caller_transcript_once_without_payload(caplog):
+    private_text = "private caller transcript sentinel"
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    event = {"inputTranscription": {"text": private_text}}
+    pipeline._buffer_caller_transcript(event, {})
+    pipeline._buffer_caller_transcript(event, {})
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=first_caller_transcript") == 1
+    assert "call_elapsed_ms=" in messages
+    assert private_text not in messages
 
 
 @pytest.mark.asyncio

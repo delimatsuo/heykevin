@@ -65,6 +65,21 @@ def _active_call_fallback(call_sid: str, call_data: dict | None):
     )
 
 
+async def _resolve_active_call(call_sid: str, call_data: dict | None):
+    """Load active call state without delaying an authenticated stream."""
+    active_call = await get_active_call(call_sid)
+    if active_call:
+        return active_call
+
+    active_call = _active_call_fallback(call_sid, call_data)
+    if active_call:
+        logger.warning(
+            "media_event event=active_call_fallback call=%s",
+            _call_label(call_sid),
+        )
+    return active_call
+
+
 async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid: str, contractor_id: str = ""):
     """Extract caller name/business from transcript and save to contacts.
 
@@ -241,15 +256,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     transcript_lines = []
     last_rtdb_update = 0.0
 
-    # Retry active call lookup — RTDB write from twilio_incoming may still be in-flight
-    active_call = await get_active_call(call_sid)
-    if not active_call:
-        await asyncio.sleep(1)
-        active_call = await get_active_call(call_sid)
-    if not active_call:
-        active_call = _active_call_fallback(call_sid, call_data)
-        if active_call:
-            logger.warning("Active call lookup missed; using authenticated stream context")
+    active_call = await _resolve_active_call(call_sid, call_data)
 
     # Load contractor config for this call
     contractor_config_loaded = {}

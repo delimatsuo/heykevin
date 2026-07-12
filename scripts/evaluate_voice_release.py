@@ -32,9 +32,15 @@ class VoiceReleaseThresholds:
     startup_completion_rate: float = 1.0
     greeting_coverage_rate: float = 1.0
     inbound_media_ready_coverage_rate: float = 1.0
+    first_inbound_audio_coverage_rate: float = 1.0
+    caller_transcript_coverage_rate: float = 1.0
+    response_completion_rate: float = 1.0
+    response_terminal_rate: float = 1.0
     greeting_max_words: int = 24
     inbound_media_ready_p95_ms: int = 2000
     inbound_media_ready_max_ms: int = 3000
+    first_inbound_audio_p95_ms: int = 2000
+    first_inbound_audio_max_ms: int = 3000
     first_audio_p95_ms: int = 2500
     first_audio_max_ms: int = 3500
     response_first_audio_p95_ms: int = 1500
@@ -51,6 +57,8 @@ class VoiceReleaseThresholds:
     max_reconnect_failures: int = 0
     max_audio_backlog_overflows: int = 0
     max_outbound_audio_errors: int = 0
+    max_out_of_cohort_events: int = 0
+    max_evidence_integrity_errors: int = 0
 
 
 def _messages_from_json(value: object) -> list[str]:
@@ -133,15 +141,53 @@ def parse_voice_timing_event(message: str) -> dict[str, object] | None:
     return event
 
 
-def _numeric_values(events: Iterable[dict[str, object]], key: str) -> list[int]:
-    values = []
+def _event_key(
+    event: dict[str, object],
+    ordinal: str,
+) -> tuple[str, str] | None:
+    value = event.get(ordinal)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return str(event["call"]), str(value)
+
+
+def _event_keys(
+    events: Iterable[dict[str, object]],
+    ordinal: str,
+) -> set[tuple[str, str]]:
+    return {
+        key
+        for event in events
+        if (key := _event_key(event, ordinal)) is not None
+    }
+
+
+def _worst_numeric_values(
+    events: Iterable[dict[str, object]],
+    metric: str,
+    *,
+    ordinal: str | None = None,
+) -> list[int]:
+    worst_by_event: dict[tuple[str, ...], int] = {}
     for event in events:
-        value = event.get(key)
-        if isinstance(value, bool):
+        identity = (
+            _event_key(event, ordinal)
+            if ordinal is not None
+            else (str(event["call"]),)
+        )
+        value = event.get(metric)
+        if identity is None or isinstance(value, bool):
             continue
-        if isinstance(value, (int, float)):
-            values.append(int(value))
-    return values
+        if not isinstance(value, (int, float)):
+            continue
+        numeric_value = int(value)
+        if numeric_value < 0:
+            continue
+        worst_by_event[identity] = max(
+            worst_by_event.get(identity, numeric_value),
+            numeric_value,
+        )
+    return list(worst_by_event.values())
 
 
 def _percentile(values: list[int], percentile: float) -> int | None:
@@ -176,6 +222,17 @@ def _max_gate(name: str, values: list[int], limit: int) -> dict[str, object]:
     return _gate(name, observed is not None and observed <= limit, observed, f"<= {limit}")
 
 
+def _turn_keys(events: Iterable[dict[str, object]]) -> set[tuple[str, str]]:
+    return _event_keys(events, "turn")
+
+
+def _events_for_calls(
+    events: Iterable[dict[str, object]],
+    calls: set[str],
+) -> list[dict[str, object]]:
+    return [event for event in events if str(event["call"]) in calls]
+
+
 def evaluate_voice_release(
     messages: Iterable[str],
     *,
@@ -197,26 +254,106 @@ def evaluate_voice_release(
         str(event["call"])
         for event in by_name.get("gemini_ws_connected", [])
     }
+    out_of_cohort_events = sum(
+        1
+        for event in events
+        if event["event"] != "gemini_ws_connected"
+        and str(event["call"]) not in attempted_calls
+    )
+    first_audio_events = _events_for_calls(
+        by_name.get("first_outbound_audio", []),
+        attempted_calls,
+    )
     first_audio_calls = {
         str(event["call"])
-        for event in by_name.get("first_outbound_audio", [])
+        for event in first_audio_events
     }
+    greeting_events = _events_for_calls(
+        by_name.get("greeting_instruction_sent", []),
+        attempted_calls,
+    )
     greeting_calls = {
         str(event["call"])
-        for event in by_name.get("greeting_instruction_sent", [])
+        for event in greeting_events
     }
-    inbound_media_ready_events = by_name.get("inbound_media_ready", [])
+    inbound_media_ready_events = _events_for_calls(
+        by_name.get("inbound_media_ready", []),
+        attempted_calls,
+    )
     inbound_media_ready_calls = {
         str(event["call"])
         for event in inbound_media_ready_events
     }
-    response_events = by_name.get("response_first_audio", [])
-    completion_events = by_name.get("model_turn_complete", [])
-    barge_events = by_name.get("barge_in_clear", [])
-    barge_failure_events = by_name.get("barge_in_clear_failed", [])
-    barge_in_attempts = len(barge_events) + len(barge_failure_events)
-    reconnect_clear_events = by_name.get("reconnect_output_clear", [])
-    reconnect_result_events = by_name.get("reconnect_result", [])
+    first_inbound_audio_events = _events_for_calls(
+        by_name.get("first_inbound_audio_forwarded", []),
+        attempted_calls,
+    )
+    first_inbound_audio_calls = {
+        str(event["call"])
+        for event in first_inbound_audio_events
+    }
+    caller_transcript_events = _events_for_calls(
+        by_name.get("first_caller_transcript", []),
+        attempted_calls,
+    )
+    caller_transcript_calls = {
+        str(event["call"])
+        for event in caller_transcript_events
+    }
+    response_events = _events_for_calls(
+        by_name.get("response_first_audio", []),
+        attempted_calls,
+    )
+    completion_events = _events_for_calls(
+        by_name.get("model_turn_complete", []),
+        attempted_calls,
+    )
+    interrupted_response_events = _events_for_calls(
+        by_name.get("model_turn_interrupted", []),
+        attempted_calls,
+    )
+    response_turn_keys = _turn_keys(response_events)
+    completion_turn_keys = _turn_keys(completion_events)
+    interrupted_turn_keys = _turn_keys(interrupted_response_events)
+    completed_response_turn_keys = response_turn_keys & completion_turn_keys
+    interrupted_response_turn_keys = response_turn_keys & interrupted_turn_keys
+    terminal_response_turn_keys = response_turn_keys & (
+        completion_turn_keys | interrupted_turn_keys
+    )
+    non_interrupted_turn_keys = response_turn_keys - interrupted_response_turn_keys
+    completed_non_interrupted_turn_keys = (
+        non_interrupted_turn_keys & completion_turn_keys
+    )
+    matched_completion_events = [
+        event
+        for event in completion_events
+        if _event_key(event, "turn") in completed_response_turn_keys
+    ]
+    matched_interrupted_response_events = [
+        event
+        for event in interrupted_response_events
+        if _event_key(event, "turn") in interrupted_response_turn_keys
+    ]
+    barge_events = _events_for_calls(
+        by_name.get("barge_in_clear", []),
+        attempted_calls,
+    )
+    all_barge_failure_events = by_name.get("barge_in_clear_failed", [])
+    barge_failure_events = _events_for_calls(
+        all_barge_failure_events,
+        attempted_calls,
+    )
+    barge_event_keys = _event_keys(barge_events, "barge")
+    barge_failure_keys = _event_keys(barge_failure_events, "barge")
+    barge_in_attempts = len(barge_event_keys | barge_failure_keys)
+    reconnect_clear_events = _events_for_calls(
+        by_name.get("reconnect_output_clear", []),
+        attempted_calls,
+    )
+    reconnect_result_events = _events_for_calls(
+        by_name.get("reconnect_result", []),
+        attempted_calls,
+    )
 
     startup_rate = (
         len(first_audio_calls & attempted_calls) / len(attempted_calls)
@@ -233,30 +370,124 @@ def evaluate_voice_release(
         if attempted_calls
         else 0.0
     )
+    first_inbound_audio_rate = (
+        len(attempted_calls & first_inbound_audio_calls) / len(attempted_calls)
+        if attempted_calls
+        else 0.0
+    )
+    caller_transcript_rate = (
+        len(attempted_calls & caller_transcript_calls) / len(attempted_calls)
+        if attempted_calls
+        else 0.0
+    )
+    response_completion_rate = (
+        len(completed_non_interrupted_turn_keys) / len(non_interrupted_turn_keys)
+        if non_interrupted_turn_keys
+        else (1.0 if response_turn_keys else 0.0)
+    )
+    response_terminal_rate = (
+        len(terminal_response_turn_keys) / len(response_turn_keys)
+        if response_turn_keys
+        else 0.0
+    )
     reconnect_attempts = max(len(reconnect_clear_events), len(reconnect_result_events))
     reconnect_failures = sum(
         event.get("success") is not True for event in reconnect_result_events
     )
 
-    first_audio_values = _numeric_values(
-        by_name.get("first_outbound_audio", []),
+    first_audio_values = _worst_numeric_values(
+        first_audio_events,
         "call_elapsed_ms",
     )
-    sampled_inbound_media_ready_events = [
-        event
-        for event in inbound_media_ready_events
-        if str(event["call"]) in attempted_calls
-    ]
-    inbound_media_ready_values = _numeric_values(
-        sampled_inbound_media_ready_events,
+    inbound_media_ready_values = _worst_numeric_values(
+        inbound_media_ready_events,
         "call_elapsed_ms",
     )
-    response_values = _numeric_values(response_events, "latency_ms")
-    generated_audio_values = _numeric_values(completion_events, "generated_audio_ms")
-    barge_clear_values = _numeric_values(barge_events, "clear_ms")
-    greeting_word_values = _numeric_values(
-        by_name.get("greeting_instruction_sent", []),
+    first_inbound_audio_values = _worst_numeric_values(
+        first_inbound_audio_events,
+        "elapsed_ms",
+    )
+    response_values = _worst_numeric_values(
+        response_events,
+        "latency_ms",
+        ordinal="turn",
+    )
+    generated_audio_values = _worst_numeric_values(
+        matched_completion_events,
+        "generated_audio_ms",
+        ordinal="turn",
+    )
+    barge_clear_values = _worst_numeric_values(
+        barge_events,
+        "clear_ms",
+        ordinal="barge",
+    )
+    greeting_word_values = _worst_numeric_values(
+        greeting_events,
         "words",
+    )
+    caller_transcript_time_values = _worst_numeric_values(
+        caller_transcript_events,
+        "call_elapsed_ms",
+    )
+    completed_model_stream_values = _worst_numeric_values(
+        matched_completion_events,
+        "model_stream_ms",
+        ordinal="turn",
+    )
+    interrupted_generated_audio_values = _worst_numeric_values(
+        matched_interrupted_response_events,
+        "generated_audio_ms",
+        ordinal="turn",
+    )
+    interrupted_model_stream_values = _worst_numeric_values(
+        matched_interrupted_response_events,
+        "model_stream_ms",
+        ordinal="turn",
+    )
+    unidentified_response_events = sum(
+        _event_key(event, "turn") is None
+        for event in (
+            response_events
+            + completion_events
+            + interrupted_response_events
+        )
+    )
+    unidentified_barge_events = sum(
+        _event_key(event, "barge") is None
+        for event in (barge_events + barge_failure_events)
+    )
+    unmatched_terminal_turns = len(
+        (completion_turn_keys | interrupted_turn_keys) - response_turn_keys
+    )
+    conflicting_terminal_turns = len(
+        completion_turn_keys & interrupted_turn_keys
+    )
+    missing_metric_evidence = sum([
+        len(first_audio_calls) - len(first_audio_values),
+        len(greeting_calls) - len(greeting_word_values),
+        len(inbound_media_ready_calls) - len(inbound_media_ready_values),
+        len(first_inbound_audio_calls) - len(first_inbound_audio_values),
+        len(caller_transcript_calls) - len(caller_transcript_time_values),
+        len(response_turn_keys) - len(response_values),
+        len(completed_response_turn_keys) - len(generated_audio_values),
+        len(completed_response_turn_keys) - len(completed_model_stream_values),
+        (
+            len(interrupted_response_turn_keys)
+            - len(interrupted_generated_audio_values)
+        ),
+        (
+            len(interrupted_response_turn_keys)
+            - len(interrupted_model_stream_values)
+        ),
+        len(barge_event_keys) - len(barge_clear_values),
+    ])
+    evidence_integrity_errors = (
+        unidentified_response_events
+        + unidentified_barge_events
+        + unmatched_terminal_turns
+        + conflicting_terminal_turns
+        + missing_metric_evidence
     )
     inbound_errors = len(by_name.get("inbound_audio_error", []))
     inbound_media_buffer_overflows = len(
@@ -275,6 +506,18 @@ def evaluate_voice_release(
             len(first_audio_calls) >= limits.min_calls,
             len(first_audio_calls),
             f">= {limits.min_calls}",
+        ),
+        _gate(
+            "out_of_cohort_events",
+            out_of_cohort_events <= limits.max_out_of_cohort_events,
+            out_of_cohort_events,
+            f"<= {limits.max_out_of_cohort_events}",
+        ),
+        _gate(
+            "evidence_integrity_errors",
+            evidence_integrity_errors <= limits.max_evidence_integrity_errors,
+            evidence_integrity_errors,
+            f"<= {limits.max_evidence_integrity_errors}",
         ),
         _gate(
             "startup_completion_rate",
@@ -311,10 +554,45 @@ def evaluate_voice_release(
             limits.inbound_media_ready_max_ms,
         ),
         _gate(
+            "first_inbound_audio_coverage_rate",
+            first_inbound_audio_rate >= limits.first_inbound_audio_coverage_rate,
+            round(first_inbound_audio_rate, 4),
+            f">= {limits.first_inbound_audio_coverage_rate}",
+        ),
+        _at_most_gate(
+            "first_inbound_audio_p95_ms",
+            first_inbound_audio_values,
+            limits.first_inbound_audio_p95_ms,
+            0.95,
+        ),
+        _max_gate(
+            "first_inbound_audio_max_ms",
+            first_inbound_audio_values,
+            limits.first_inbound_audio_max_ms,
+        ),
+        _gate(
+            "caller_transcript_coverage_rate",
+            caller_transcript_rate >= limits.caller_transcript_coverage_rate,
+            round(caller_transcript_rate, 4),
+            f">= {limits.caller_transcript_coverage_rate}",
+        ),
+        _gate(
             "minimum_response_turns",
-            len(response_events) >= limits.min_response_turns,
-            len(response_events),
+            len(response_turn_keys) >= limits.min_response_turns,
+            len(response_turn_keys),
             f">= {limits.min_response_turns}",
+        ),
+        _gate(
+            "response_completion_rate",
+            response_completion_rate >= limits.response_completion_rate,
+            round(response_completion_rate, 4),
+            f">= {limits.response_completion_rate}",
+        ),
+        _gate(
+            "response_terminal_rate",
+            response_terminal_rate >= limits.response_terminal_rate,
+            round(response_terminal_rate, 4),
+            f">= {limits.response_terminal_rate}",
         ),
         _gate(
             "minimum_barge_in_events",
@@ -364,8 +642,8 @@ def evaluate_voice_release(
         ),
         _gate(
             "barge_in_clear_failures",
-            len(barge_failure_events) <= limits.max_barge_in_clear_failures,
-            len(barge_failure_events),
+            len(all_barge_failure_events) <= limits.max_barge_in_clear_failures,
+            len(all_barge_failure_events),
             f"<= {limits.max_barge_in_clear_failures}",
         ),
         _gate(
@@ -429,13 +707,24 @@ def evaluate_voice_release(
         "sample": {
             "attempted_calls": len(attempted_calls),
             "calls_with_first_audio": len(first_audio_calls),
-            "response_turns": len(response_events),
+            "response_turns": len(response_turn_keys),
             "barge_in_events": barge_in_attempts,
-            "barge_in_clear_failures": len(barge_failure_events),
+            "barge_in_clear_failures": len(all_barge_failure_events),
             "reconnect_attempts": reconnect_attempts,
+            "out_of_cohort_events": out_of_cohort_events,
+            "evidence_integrity_errors": evidence_integrity_errors,
             "calls_with_inbound_media_ready": len(
                 inbound_media_ready_calls & attempted_calls
             ),
+            "calls_with_first_inbound_audio": len(
+                first_inbound_audio_calls & attempted_calls
+            ),
+            "calls_with_caller_transcript": len(
+                caller_transcript_calls & attempted_calls
+            ),
+            "completed_response_turns": len(completed_response_turn_keys),
+            "interrupted_response_turns": len(interrupted_response_turn_keys),
+            "terminal_response_turns": len(terminal_response_turn_keys),
             "inbound_media_buffer_overflows": inbound_media_buffer_overflows,
             "inbound_reconnect_audio_overflows": inbound_reconnect_audio_overflows,
             "receive_errors": receive_errors,

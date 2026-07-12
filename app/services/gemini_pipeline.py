@@ -152,6 +152,7 @@ class GeminiPipeline:
         self._last_caller_transcript_fragment_monotonic = 0.0
         self._response_start_latency_logged = False
         self._response_turn_number = 0
+        self._barge_in_number = 0
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
         self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue(
@@ -167,6 +168,7 @@ class GeminiPipeline:
         )
         self._first_outbound_audio_logged = False
         self._first_inbound_audio_logged = False
+        self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
 
@@ -699,6 +701,7 @@ class GeminiPipeline:
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):
                     clear_started_at = time.monotonic()
+                    self._barge_in_number += 1
                     self._invalidate_tool_task("barge_in")
                     self._interrupt_speaking = True
                     self._audio_epoch += 1
@@ -714,6 +717,7 @@ class GeminiPipeline:
                             if clear_succeeded
                             else "barge_in_clear_failed"
                         ),
+                        barge=self._barge_in_number,
                         clear_ms=self._elapsed_ms(clear_started_at),
                         dropped_chunks=dropped_chunks,
                         sent_chunks=self._audio_chunks_sent,
@@ -760,7 +764,7 @@ class GeminiPipeline:
                         async with self._audio_output_lock:
                             await self._clear_audio_queue()
                             self._interrupt_speaking = False
-                        self._reset_response_metrics()
+                        self._log_interrupted_response_turn()
                     self._assistant_instruction_pending = False
                     if overflowed_turn:
                         self._audio_backlog_overflowed = False
@@ -856,6 +860,12 @@ class GeminiPipeline:
             input_text = self._extract_transcript(data, "input")
         if not input_text:
             return
+        if not self._first_caller_transcript_logged:
+            self._first_caller_transcript_logged = True
+            self._log_voice_timing(
+                "first_caller_transcript",
+                call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+            )
         self._caller_transcript_buf.append(input_text)
         self._last_caller_transcript_fragment_at = time.time()
         self._last_caller_transcript_fragment_monotonic = time.monotonic()
@@ -1109,6 +1119,16 @@ class GeminiPipeline:
                 generated_audio_ms=self._generated_audio_ms,
                 chars=len(response_text),
                 words=len(response_text.split()),
+            )
+        self._reset_response_metrics()
+
+    def _log_interrupted_response_turn(self) -> None:
+        if self._response_first_audio_at > 0:
+            self._log_voice_timing(
+                "model_turn_interrupted",
+                turn=self._response_turn_number,
+                model_stream_ms=self._elapsed_ms(self._response_first_audio_at),
+                generated_audio_ms=self._generated_audio_ms,
             )
         self._reset_response_metrics()
 

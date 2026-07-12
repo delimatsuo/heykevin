@@ -31,7 +31,10 @@ class VoiceReleaseThresholds:
     min_barge_in_events: int = 5
     startup_completion_rate: float = 1.0
     greeting_coverage_rate: float = 1.0
+    inbound_media_ready_coverage_rate: float = 1.0
     greeting_max_words: int = 24
+    inbound_media_ready_p95_ms: int = 2000
+    inbound_media_ready_max_ms: int = 3000
     first_audio_p95_ms: int = 2500
     first_audio_max_ms: int = 3500
     response_first_audio_p95_ms: int = 1500
@@ -42,6 +45,7 @@ class VoiceReleaseThresholds:
     barge_in_clear_max_ms: int = 500
     max_barge_in_clear_failures: int = 0
     max_inbound_audio_errors: int = 0
+    max_inbound_media_buffer_overflows: int = 0
     max_inbound_reconnect_audio_overflows: int = 0
     max_receive_errors: int = 0
     max_reconnect_failures: int = 0
@@ -201,6 +205,11 @@ def evaluate_voice_release(
         str(event["call"])
         for event in by_name.get("greeting_instruction_sent", [])
     }
+    inbound_media_ready_events = by_name.get("inbound_media_ready", [])
+    inbound_media_ready_calls = {
+        str(event["call"])
+        for event in inbound_media_ready_events
+    }
     response_events = by_name.get("response_first_audio", [])
     completion_events = by_name.get("model_turn_complete", [])
     barge_events = by_name.get("barge_in_clear", [])
@@ -219,6 +228,11 @@ def evaluate_voice_release(
         if first_audio_calls
         else 0.0
     )
+    inbound_media_ready_rate = (
+        len(attempted_calls & inbound_media_ready_calls) / len(attempted_calls)
+        if attempted_calls
+        else 0.0
+    )
     reconnect_attempts = max(len(reconnect_clear_events), len(reconnect_result_events))
     reconnect_failures = sum(
         event.get("success") is not True for event in reconnect_result_events
@@ -226,6 +240,15 @@ def evaluate_voice_release(
 
     first_audio_values = _numeric_values(
         by_name.get("first_outbound_audio", []),
+        "call_elapsed_ms",
+    )
+    sampled_inbound_media_ready_events = [
+        event
+        for event in inbound_media_ready_events
+        if str(event["call"]) in attempted_calls
+    ]
+    inbound_media_ready_values = _numeric_values(
+        sampled_inbound_media_ready_events,
         "call_elapsed_ms",
     )
     response_values = _numeric_values(response_events, "latency_ms")
@@ -236,6 +259,9 @@ def evaluate_voice_release(
         "words",
     )
     inbound_errors = len(by_name.get("inbound_audio_error", []))
+    inbound_media_buffer_overflows = len(
+        by_name.get("inbound_media_buffer_overflow", [])
+    )
     inbound_reconnect_audio_overflows = len(
         by_name.get("inbound_reconnect_audio_overflow", [])
     )
@@ -262,10 +288,27 @@ def evaluate_voice_release(
             round(greeting_rate, 4),
             f">= {limits.greeting_coverage_rate}",
         ),
+        _gate(
+            "inbound_media_ready_coverage_rate",
+            inbound_media_ready_rate >= limits.inbound_media_ready_coverage_rate,
+            round(inbound_media_ready_rate, 4),
+            f">= {limits.inbound_media_ready_coverage_rate}",
+        ),
         _max_gate(
             "greeting_max_words",
             greeting_word_values,
             limits.greeting_max_words,
+        ),
+        _at_most_gate(
+            "inbound_media_ready_p95_ms",
+            inbound_media_ready_values,
+            limits.inbound_media_ready_p95_ms,
+            0.95,
+        ),
+        _max_gate(
+            "inbound_media_ready_max_ms",
+            inbound_media_ready_values,
+            limits.inbound_media_ready_max_ms,
         ),
         _gate(
             "minimum_response_turns",
@@ -332,6 +375,15 @@ def evaluate_voice_release(
             f"<= {limits.max_inbound_audio_errors}",
         ),
         _gate(
+            "inbound_media_buffer_overflows",
+            (
+                inbound_media_buffer_overflows
+                <= limits.max_inbound_media_buffer_overflows
+            ),
+            inbound_media_buffer_overflows,
+            f"<= {limits.max_inbound_media_buffer_overflows}",
+        ),
+        _gate(
             "inbound_reconnect_audio_overflows",
             (
                 inbound_reconnect_audio_overflows
@@ -381,6 +433,10 @@ def evaluate_voice_release(
             "barge_in_events": barge_in_attempts,
             "barge_in_clear_failures": len(barge_failure_events),
             "reconnect_attempts": reconnect_attempts,
+            "calls_with_inbound_media_ready": len(
+                inbound_media_ready_calls & attempted_calls
+            ),
+            "inbound_media_buffer_overflows": inbound_media_buffer_overflows,
             "inbound_reconnect_audio_overflows": inbound_reconnect_audio_overflows,
             "receive_errors": receive_errors,
             "audio_backlog_overflows": audio_backlog_overflows,

@@ -35,13 +35,16 @@ Do not save or paste the raw Cloud Logging export.
 | Deliberate barge-ins | at least 5 |
 | Gemini connection to first audio | 100% of sampled attempts |
 | Deterministic greeting coverage | 100% of calls with first audio |
+| Inbound media readiness coverage | 100% of Gemini connection attempts |
 | Greeting length | at most 24 words |
+| Inbound media ready from Twilio media start | p95 <= 2,000 ms; max <= 3,000 ms |
 | First audio from Twilio media start | p95 <= 2,500 ms; max <= 3,500 ms |
 | Response first audio after caller transcript | p95 <= 1,500 ms; max <= 2,500 ms |
 | Generated response audio | p95 <= 6,000 ms; max <= 8,000 ms |
 | Interruption to Twilio clear completion | p95 <= 250 ms; max <= 500 ms |
 | Twilio clear delivery failures | zero |
 | Inbound audio forwarding errors | zero |
+| Inbound media buffer overflows | zero |
 | Inbound reconnect audio buffer overflows | zero |
 | Outbound audio delivery errors | zero |
 | Outbound audio backlog overflows | zero |
@@ -61,13 +64,14 @@ caller turns across this matrix:
 | Business-hours greeting | Exact AI/transcription disclosure; no extra model-written preamble. |
 | After-hours greeting | Disclosure and closed status in at most 24 words. |
 | Personal greeting | Disclosure identifies Kevin as the owner's AI assistant. |
-| Fast caller start | Caller speech is captured; Kevin does not inject a silence prompt. |
+| Fast caller start | Caller speech is captured in order during authentication/provider startup; Kevin can be interrupted during the greeting. |
 | Five deliberate interruptions | Every Twilio clear is acknowledged and in budget; no stale words or transcript side effects survive. |
 | Short answers and corrections | Kevin accepts corrections and does not repeat answered questions. |
 | Background noise and pauses | No false hangup, duplicate prompt, or sustained talk-over. |
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the PR #79 path. |
 | Reconnect simulation | Old Kevin output is absent; buffered caller audio replays in order before new live frames. |
 | Oversized response simulation | Queued audio stays bounded; stale output clears; one short retry is requested. |
+| Inbound startup overflow simulation | Stream closes, no caller audio is logged, and the release evaluator fails. |
 | Normal hangup | Final audio drains before call completion; post-call processing runs once. |
 
 For each call, record only the scenario, pass/fail outcome, deployed SHA, and
@@ -118,6 +122,7 @@ in the release artifact.
 7. Production remains blocked until all gates pass and the owner explicitly
    authorizes a production release window.
 
-Immediate rollback triggers are first-audio p95 regression, missed caller
-speech, stale post-interruption audio, duplicate side effects, sensitive log
-content, transcript encryption failure, or any cross-tenant behavior.
+Immediate rollback triggers are inbound-media-ready or first-audio p95
+regression, inbound media overflow, missed caller speech, stale
+post-interruption audio, duplicate side effects, sensitive log content,
+transcript encryption failure, or any cross-tenant behavior.

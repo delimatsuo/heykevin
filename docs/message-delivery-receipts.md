@@ -77,6 +77,23 @@ staging or production deployment. It is read-only and fails before a revision
 or traffic changes instead of modifying service configuration or accepting an
 unreliable worker.
 
+The `Deploy` workflow also exposes `staging-audit` and `staging-prepare` manual
+operations from the enterprise integration branch. Both use only the staging
+WIF identity and immutable staging resource names. Preparation creates a
+staging-only configuration revision with background CPU and deploy health
+checks, sets a service-level minimum of one, creates missing indexes and TTL
+configuration in the isolated staging Firestore project, and reconciles four
+payload-free log alert policies. It preserves the normal latest-revision traffic
+mode, repairs a stale split to 100% latest when necessary, and verifies the
+public staging health contract. It performs every required read before its
+first mutation and is idempotent after partial failure. Audit is read-only.
+
+Alert policies preserve an existing managed route. On first setup, the workflow
+uses the sole enabled notification channel when exactly one exists; otherwise
+set the staging environment variable `STAGING_ALERT_NOTIFICATION_CHANNELS` to a
+comma-separated list of enabled channel resource names. Missing, disabled, or
+ambiguous routes fail before infrastructure changes.
+
 ## Admin Operations
 
 - `GET /api/admin/message-delivery-receipts?status=failed`

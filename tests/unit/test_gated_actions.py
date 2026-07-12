@@ -195,6 +195,31 @@ def test_automation_approval_allows_integration_write_when_status_and_flag_appro
     assert decision.reason == gated_actions.GateReason.ALLOWED
 
 
+def test_google_create_event_is_disabled_even_with_all_approvals(monkeypatch):
+    gated_actions = import_gated_actions_without_config_env(monkeypatch)
+    contractor = {
+        "contractor_id": "c1",
+        "gated_actions": {gated_actions.ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {gated_actions.ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "integration_write_status": "approved",
+    }
+
+    decision = gated_actions.check_gated_action(
+        contractor=contractor,
+        action=gated_actions.ActionKey.GOOGLE_CREATE_EVENT,
+        context=gated_actions.GateContext(
+            source="voice_tool",
+            actor="automation",
+            idempotency_key="call-1:google-create-event",
+            owner_confirmed=True,
+        ),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == gated_actions.GateReason.ENVIRONMENT_DISABLED
+    assert decision.message == "Live appointment booking is disabled in this release."
+
+
 def test_every_action_key_has_explicit_policy(monkeypatch):
     gated_actions = import_gated_actions_without_config_env(monkeypatch)
 

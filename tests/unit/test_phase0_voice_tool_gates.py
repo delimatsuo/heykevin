@@ -78,7 +78,7 @@ async def test_jobber_check_availability_is_unknown_tool_and_does_not_query_avai
 
 
 @pytest.mark.asyncio
-async def test_google_book_appointment_requires_automation_approval(monkeypatch):
+async def test_google_book_appointment_is_disabled_without_automation_approval(monkeypatch):
     created = []
 
     async def fake_book_appointment(*args, **kwargs):
@@ -95,12 +95,12 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
     })
     result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
 
-    assert result == {"success": False, "error": "Owner confirmation is required for this action."}
+    assert result == {"success": False, "error": "Live appointment booking is disabled in this release."}
     assert created == []
 
 
 @pytest.mark.asyncio
-async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
+async def test_google_book_appointment_stays_disabled_when_all_gates_allow(monkeypatch):
     created = []
 
     async def fake_book_appointment(token, *, title, start_time, end_time, description):
@@ -133,16 +133,8 @@ async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypa
         },
     ))
 
-    assert result == {"success": True, "event_id": "event-1"}
-    assert created == [
-        {
-            "token": "gcal-token",
-            "title": "Sink repair",
-            "start_time": "2026-07-01T13:00:00-04:00",
-            "end_time": "2026-07-01T14:00:00-04:00",
-            "description": "Caller asked for the upstairs sink.",
-        }
-    ]
+    assert result == {"success": False, "error": "Live appointment booking is disabled in this release."}
+    assert created == []
 
 
 @pytest.mark.asyncio
@@ -229,7 +221,7 @@ async def test_jobber_book_appointment_unknown_tool_does_not_call_create_job_or_
 
 
 @pytest.mark.asyncio
-async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
+async def test_google_read_tool_exception_returns_generic_error_and_sanitizes_logs(monkeypatch, caplog):
     sensitive_values = (
         "Jane Private",
         "123 Secret Lane",
@@ -237,13 +229,13 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
         "gate code 2468",
     )
 
-    async def fake_book_appointment(*_args, **_kwargs):
+    async def fake_get_available_slots(*_args, **_kwargs):
         raise ValueError(
-            "Calendar rejected appointment for Jane Private at 123 Secret Lane, "
+            "Calendar rejected lookup for Jane Private at 123 Secret Lane, "
             "callback +15551234567, gate code 2468."
         )
 
-    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+    monkeypatch.setattr("app.services.calendar.get_available_slots", fake_get_available_slots)
 
     pipeline = _pipeline({
         "contractor_id": "c1",
@@ -255,17 +247,12 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
 
     with caplog.at_level(logging.ERROR):
         result = json.loads(await pipeline._execute_tool(
-            "book_appointment",
-            {
-                "title": "Jane Private repair",
-                "start_time": "2026-07-01T13:00:00-04:00",
-                "end_time": "2026-07-01T14:00:00-04:00",
-                "description": "123 Secret Lane callback +15551234567",
-            },
+            "check_availability",
+            {"days_ahead": 7},
         ))
 
     assert result == {"success": False, "error": "Tool execution failed."}
-    assert "book_appointment" in caplog.text
+    assert "check_availability" in caplog.text
     assert "CA123" in caplog.text
     assert "ValueError" in caplog.text
     for sensitive_value in sensitive_values:

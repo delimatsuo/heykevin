@@ -652,7 +652,7 @@ class GeminiPipeline:
                 }
             )
         elif has_gcal:
-            declarations.extend([
+            declarations.append(
                 {
                     "name": "check_availability",
                     "description": "Check the business owner's calendar for available appointment slots.",
@@ -662,22 +662,8 @@ class GeminiPipeline:
                             "days_ahead": {"type": "INTEGER", "description": "Days ahead to check (default 7, max 14)"}
                         },
                     },
-                },
-                {
-                    "name": "book_appointment",
-                    "description": "Create an appointment on the business owner's calendar.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "title": {"type": "STRING", "description": "Short description of the appointment"},
-                            "start_time": {"type": "STRING", "description": "Start time in ISO 8601 format"},
-                            "end_time": {"type": "STRING", "description": "End time in ISO 8601 format"},
-                            "description": {"type": "STRING", "description": "Additional notes"},
-                        },
-                        "required": ["title", "start_time", "end_time"],
-                    },
-                },
-            ])
+                }
+            )
 
         return [{"function_declarations": declarations}]
 

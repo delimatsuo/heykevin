@@ -48,6 +48,8 @@ class GateContext:
 
 @dataclass(frozen=True)
 class GatePolicy:
+    enabled: bool = True
+    disabled_message: str = "This action is disabled in this release."
     requires_flag: bool = True
     requires_sms_compliance: bool = False
     requires_integration_approval: bool = False
@@ -97,7 +99,12 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
     ActionKey.ESTIMATE_RESULT_SMS: GatePolicy(requires_sms_compliance=True),
     ActionKey.JOBBER_CREATE_JOB: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
     ActionKey.JOBBER_CREATE_QUOTE: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
-    ActionKey.GOOGLE_CREATE_EVENT: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
+    ActionKey.GOOGLE_CREATE_EVENT: GatePolicy(
+        enabled=False,
+        disabled_message="Live appointment booking is disabled in this release.",
+        requires_integration_approval=True,
+        requires_owner_confirmation=True,
+    ),
     ActionKey.TWILIO_CALL_REDIRECT: GatePolicy(requires_owner_confirmation=True),
     ActionKey.TWILIO_CONFERENCE_MUTATION: GatePolicy(requires_owner_confirmation=True),
     ActionKey.TWILIO_NUMBER_PROVISION: GatePolicy(requires_owner_confirmation=True),
@@ -132,6 +139,9 @@ def check_gated_action(contractor: dict[str, Any] | None, action: ActionKey, con
 
     policy = GATE_POLICIES[action]
     env = _environment(context)
+
+    if not policy.enabled:
+        return _allowed_false(action, GateReason.ENVIRONMENT_DISABLED, policy.disabled_message)
 
     if env == "production" and policy.requires_flag and not _flag_enabled(contractor, action):
         return _allowed_false(action, GateReason.FEATURE_DISABLED, "This action is not enabled for this account.")

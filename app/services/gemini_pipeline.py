@@ -726,6 +726,13 @@ class GeminiPipeline:
                         ):
                             continue
                         self._is_speaking = True
+                        delivered = await self.on_audio_out(mulaw_chunk)
+                        if delivered is False:
+                            self._log_voice_timing("outbound_audio_error")
+                            self._connected = False
+                            if self.on_call_complete:
+                                await self.on_call_complete()
+                            return
                         if not self._first_outbound_audio_logged:
                             self._first_outbound_audio_logged = True
                             self._log_voice_timing(
@@ -734,7 +741,6 @@ class GeminiPipeline:
                                 chunk_bytes=len(mulaw_chunk),
                                 queue_depth=self._audio_queue.qsize(),
                             )
-                        await self.on_audio_out(mulaw_chunk)
                         self._audio_chunks_sent += 1
                         sent = True
                     if duration_seconds > 0:

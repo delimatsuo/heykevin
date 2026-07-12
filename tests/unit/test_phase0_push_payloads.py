@@ -1,5 +1,6 @@
 import json
 import os
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -89,6 +90,47 @@ async def test_media_stream_uses_authenticated_fallback_without_retry_delay(monk
     assert lookup_count == 1
     assert active_call is not None
     assert active_call.contractor_id == "contractor-1"
+
+
+@pytest.mark.asyncio
+async def test_twilio_audio_send_failure_returns_false_without_logging_payload(caplog):
+    private_error = "private provider failure with caller context"
+    private_audio = b"private outbound audio"
+
+    class FailingWebSocket:
+        async def send_json(self, _payload):
+            raise RuntimeError(private_error)
+
+    delivered = await media_stream._send_twilio_audio(
+        FailingWebSocket(),
+        stream_sid="stream-1",
+        mulaw_chunk=private_audio,
+        call_sid="CA123",
+    )
+
+    assert delivered is False
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=twilio_audio_send_error" in messages
+    assert private_error not in messages
+    assert private_audio.decode() not in messages
+
+
+@pytest.mark.asyncio
+async def test_max_duration_uses_provider_independent_message_and_hangup_twiml():
+    updates = []
+
+    async def complete_call(*, twiml: str):
+        updates.append(twiml)
+
+    await media_stream._finish_max_call_duration(complete_call)
+
+    assert len(updates) == 1
+    root = ET.fromstring(updates[0])
+    assert root.tag == "Response"
+    assert root.findtext("Say") == (
+        "This call has reached the maximum duration. Please call back to continue."
+    )
+    assert root.find("Hangup") is not None
 
 
 def test_voip_push_body_does_not_include_arbitrary_reason():

@@ -7,6 +7,7 @@ Audio conversion at boundaries: mulaw 8kHz (Twilio) <-> PCM 16kHz/24kHz (Gemini)
 import asyncio
 import base64
 import json
+import logging
 import time
 from typing import Callable, Awaitable, Optional
 
@@ -164,6 +165,7 @@ class GeminiPipeline:
         self._first_inbound_audio_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
+        self._receptionist_controller = self._build_receptionist_controller()
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -185,6 +187,60 @@ class GeminiPipeline:
 
         # Language for post-call processing
         self._language = user_language or "en"
+
+    def _build_receptionist_controller(self):
+        """Create the shadow controller only after global and account opt-in."""
+        if not settings.receptionist_controller_shadow_enabled:
+            return None
+        if self._contractor_config.get("receptionist_controller_shadow_enabled") is not True:
+            return None
+
+        try:
+            from app.services.receptionist_controller import ShadowReceptionistController
+
+            return ShadowReceptionistController.new(
+                call_sid=self._call_sid,
+                caller_phone=self._caller_phone,
+                contractor_config=self._contractor_config,
+            )
+        except Exception as error:
+            self._log_voice_timing(
+                "controller_shadow_init_error",
+                level=logging.ERROR,
+                exception_type=type(error).__name__,
+            )
+            return None
+
+    def _observe_receptionist_controller(self, text: str) -> None:
+        """Compute and log a shadow decision without sending it to Gemini."""
+        controller = self._receptionist_controller
+        if controller is None:
+            return
+
+        started_at = time.monotonic()
+        try:
+            decision = controller.observe_caller_turn(text)
+        except Exception as error:
+            self._receptionist_controller = None
+            self._log_voice_timing(
+                "controller_shadow_error",
+                level=logging.ERROR,
+                exception_type=type(error).__name__,
+            )
+            return
+
+        elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        self._log_voice_timing(
+            "controller_shadow_decision",
+            action=decision.action_name.value,
+            elapsed_ms=elapsed_ms,
+            known_fact_count=decision.known_fact_count,
+            asked_slot_count=decision.asked_slot_count,
+            allowed_slot_count=decision.allowed_slot_count,
+            forbidden_slot_count=decision.forbidden_slot_count,
+            instruction_chars=decision.instruction_chars,
+            tool_calls_allowed=decision.tool_calls_allowed,
+        )
 
     def _build_generation_config(self) -> dict:
         """Return Gemini Live generation config tuned for phone-call latency."""
@@ -217,11 +273,17 @@ class GeminiPipeline:
     def _elapsed_ms(started_at: float) -> int:
         return max(0, int((time.monotonic() - started_at) * 1000))
 
-    def _log_voice_timing(self, event: str, **metrics: object) -> None:
+    def _log_voice_timing(
+        self,
+        event: str,
+        *,
+        level: int = logging.INFO,
+        **metrics: object,
+    ) -> None:
         """Log voice timing without transcript, phone, token, or customer data."""
         metric_text = " ".join(f"{key}={value}" for key, value in metrics.items())
         suffix = f" {metric_text}" if metric_text else ""
-        logger.info("voice_timing event=%s call=%s%s", event, self._call_label(), suffix)
+        logger.log(level, "voice_timing event=%s call=%s%s", event, self._call_label(), suffix)
 
     def _build_greeting_text(self) -> str:
         """Return the bounded default greeting and caller disclosure."""
@@ -901,6 +963,8 @@ class GeminiPipeline:
                         self._unavailable_task.cancel()
                         self._unavailable_task = None
                     break
+
+        self._observe_receptionist_controller(full_text)
 
     async def _flush_kevin_transcript(
         self,

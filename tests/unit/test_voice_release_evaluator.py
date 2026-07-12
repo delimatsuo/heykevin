@@ -82,6 +82,7 @@ def test_voice_release_evaluator_passes_certification_sample():
         "calls_with_first_audio": 10,
         "response_turns": 30,
         "barge_in_events": 5,
+        "barge_in_clear_failures": 0,
         "reconnect_attempts": 0,
         "receive_errors": 0,
         "audio_backlog_overflows": 0,
@@ -91,6 +92,24 @@ def test_voice_release_evaluator_passes_certification_sample():
     serialized = json.dumps(report)
     assert "call0001" not in serialized
     assert "transcript" not in serialized
+
+
+def test_voice_release_evaluator_fails_any_barge_in_clear_failure():
+    messages = _passing_messages()
+    messages.append(
+        _event(
+            "barge_in_clear_failed",
+            "call0009",
+            reason="delivery_rejected",
+        )
+    )
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert gates["barge_in_clear_failures"]["observed"] == 1
+    assert not gates["barge_in_clear_failures"]["passed"]
 
 
 def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():

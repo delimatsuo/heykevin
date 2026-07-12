@@ -63,6 +63,34 @@ async def _send_twilio_audio(
     return True
 
 
+async def _send_twilio_clear(
+    websocket: WebSocket,
+    *,
+    stream_sid: str,
+    call_sid: str,
+) -> bool:
+    """Send a clear frame and report whether Twilio accepted it."""
+    if not stream_sid:
+        logger.warning(
+            "media_event event=twilio_audio_clear_skipped call=%s reason=missing_stream",
+            _call_label(call_sid),
+        )
+        return False
+    try:
+        await websocket.send_json({
+            "event": "clear",
+            "streamSid": stream_sid,
+        })
+    except Exception as error:
+        _log_safe_exception("twilio_audio_clear_error", error, call_sid)
+        return False
+    logger.info(
+        "media_event event=twilio_audio_cleared call=%s",
+        _call_label(call_sid),
+    )
+    return True
+
+
 async def _finish_max_call_duration(on_call_complete) -> None:
     """Play a provider-independent limit message, then hang up the call."""
     from twilio.twiml.voice_response import VoiceResponse
@@ -359,16 +387,11 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     async def on_clear_audio():
         """Clear Twilio's outbound audio buffer (used during barge-in)."""
         nonlocal stream_sid
-        if not stream_sid:
-            return
-        try:
-            await websocket.send_json({
-                "event": "clear",
-                "streamSid": stream_sid,
-            })
-            logger.info("Cleared Twilio audio buffer (barge-in)")
-        except Exception as error:
-            _log_safe_exception("twilio_audio_clear_error", error, call_sid)
+        return await _send_twilio_clear(
+            websocket,
+            stream_sid=stream_sid or "",
+            call_sid=call_sid,
+        )
 
     call_redirected = False  # Set when call is accepted/redirected to conference
 

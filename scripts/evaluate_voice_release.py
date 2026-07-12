@@ -40,6 +40,7 @@ class VoiceReleaseThresholds:
     generated_audio_max_ms: int = 8000
     barge_in_clear_p95_ms: int = 250
     barge_in_clear_max_ms: int = 500
+    max_barge_in_clear_failures: int = 0
     max_inbound_audio_errors: int = 0
     max_receive_errors: int = 0
     max_reconnect_failures: int = 0
@@ -202,6 +203,8 @@ def evaluate_voice_release(
     response_events = by_name.get("response_first_audio", [])
     completion_events = by_name.get("model_turn_complete", [])
     barge_events = by_name.get("barge_in_clear", [])
+    barge_failure_events = by_name.get("barge_in_clear_failed", [])
+    barge_in_attempts = len(barge_events) + len(barge_failure_events)
     reconnect_clear_events = by_name.get("reconnect_output_clear", [])
     reconnect_result_events = by_name.get("reconnect_result", [])
 
@@ -268,8 +271,8 @@ def evaluate_voice_release(
         ),
         _gate(
             "minimum_barge_in_events",
-            len(barge_events) >= limits.min_barge_in_events,
-            len(barge_events),
+            barge_in_attempts >= limits.min_barge_in_events,
+            barge_in_attempts,
             f">= {limits.min_barge_in_events}",
         ),
         _at_most_gate(
@@ -311,6 +314,12 @@ def evaluate_voice_release(
             "barge_in_clear_max_ms",
             barge_clear_values,
             limits.barge_in_clear_max_ms,
+        ),
+        _gate(
+            "barge_in_clear_failures",
+            len(barge_failure_events) <= limits.max_barge_in_clear_failures,
+            len(barge_failure_events),
+            f"<= {limits.max_barge_in_clear_failures}",
         ),
         _gate(
             "inbound_audio_errors",
@@ -356,7 +365,8 @@ def evaluate_voice_release(
             "attempted_calls": len(attempted_calls),
             "calls_with_first_audio": len(first_audio_calls),
             "response_turns": len(response_events),
-            "barge_in_events": len(barge_events),
+            "barge_in_events": barge_in_attempts,
+            "barge_in_clear_failures": len(barge_failure_events),
             "reconnect_attempts": reconnect_attempts,
             "receive_errors": receive_errors,
             "audio_backlog_overflows": audio_backlog_overflows,

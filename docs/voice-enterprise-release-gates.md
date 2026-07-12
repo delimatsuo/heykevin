@@ -40,6 +40,7 @@ Do not save or paste the raw Cloud Logging export.
 | Response first audio after caller transcript | p95 <= 1,500 ms; max <= 2,500 ms |
 | Generated response audio | p95 <= 6,000 ms; max <= 8,000 ms |
 | Interruption to Twilio clear completion | p95 <= 250 ms; max <= 500 ms |
+| Twilio clear delivery failures | zero |
 | Inbound audio forwarding errors | zero |
 | Outbound audio delivery errors | zero |
 | Outbound audio backlog overflows | zero |
@@ -60,7 +61,7 @@ caller turns across this matrix:
 | After-hours greeting | Disclosure and closed status in at most 24 words. |
 | Personal greeting | Disclosure identifies Kevin as the owner's AI assistant. |
 | Fast caller start | Caller speech is captured; Kevin does not inject a silence prompt. |
-| Five deliberate interruptions | Twilio clears in budget; no stale words or transcript side effects survive. |
+| Five deliberate interruptions | Every Twilio clear is acknowledged and in budget; no stale words or transcript side effects survive. |
 | Short answers and corrections | Kevin accepts corrections and does not repeat answered questions. |
 | Background noise and pauses | No false hangup, duplicate prompt, or sustained talk-over. |
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the PR #79 path. |

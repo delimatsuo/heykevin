@@ -2495,20 +2495,17 @@ def test_vcard_ignores_generic_or_wrong_service_type_labels():
     assert "personal" not in vcard
 
 
-def test_stateful_receptionist_controller_only_wires_shadow_gemini_adapter():
-    """The stacked slice observes Gemini turns without changing legacy voice behavior."""
+def test_stateful_receptionist_controller_stays_out_of_live_voice_pipelines():
+    """The offline controller slice must not alter either live voice path."""
     import app.services.gemini_pipeline as gemini_pipeline
     import app.services.voice_pipeline as voice_pipeline
 
-    gemini_source = inspect.getsource(gemini_pipeline)
-    legacy_source = inspect.getsource(voice_pipeline)
-
-    assert "receptionist_controller" in gemini_source
-    assert "_send_client_instruction" not in gemini_source.split(
-        "def _observe_receptionist_controller", 1
-    )[1].split("def ", 1)[0]
-    assert "receptionist_controller" not in legacy_source
-    assert "receptionist_state" not in legacy_source
-    assert "dialogue_planner" not in legacy_source
-    assert "instruction_composer" not in legacy_source
-    assert "receptionist_replay" not in legacy_source
+    for source in (
+        inspect.getsource(gemini_pipeline),
+        inspect.getsource(voice_pipeline),
+    ):
+        assert "receptionist_controller" not in source
+        assert "receptionist_state" not in source
+        assert "dialogue_planner" not in source
+        assert "instruction_composer" not in source
+        assert "receptionist_replay" not in source

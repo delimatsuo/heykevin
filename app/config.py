@@ -62,7 +62,6 @@ class Settings(BaseSettings):
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4
-    receptionist_controller_shadow_enabled: bool = False
 
     # Twilio Voice SDK (for iOS app)
     twilio_api_key_sid: str = ""      # API Key SID (not the Account SID)

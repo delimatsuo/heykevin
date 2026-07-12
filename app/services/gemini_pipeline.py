@@ -174,7 +174,6 @@ class GeminiPipeline:
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
-        self._receptionist_controller = self._build_receptionist_controller()
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -196,110 +195,6 @@ class GeminiPipeline:
 
         # Language for post-call processing
         self._language = user_language or "en"
-
-    def _build_receptionist_controller(self):
-        """Create the shadow controller only after global and account opt-in."""
-        if not settings.receptionist_controller_shadow_enabled:
-            return None
-        if self._contractor_config.get("receptionist_controller_shadow_enabled") is not True:
-            return None
-
-        try:
-            from app.services.receptionist_controller import ShadowReceptionistController
-
-            return ShadowReceptionistController.new(
-                call_sid=self._call_sid,
-                caller_phone=self._caller_phone,
-                contractor_config=self._contractor_config,
-            )
-        except Exception as error:
-            self._log_voice_timing(
-                "controller_shadow_init_error",
-                level=logging.ERROR,
-                exception_type=type(error).__name__,
-            )
-            return None
-
-    def _observe_receptionist_controller(self, text: str) -> None:
-        """Compute and log a shadow decision without sending it to Gemini."""
-        controller = self._receptionist_controller
-        if controller is None:
-            return
-
-        started_at = time.monotonic()
-        try:
-            decision = controller.observe_caller_turn(text)
-        except Exception as error:
-            self._receptionist_controller = None
-            self._log_voice_timing(
-                "controller_shadow_error",
-                level=logging.ERROR,
-                exception_type=type(error).__name__,
-            )
-            return
-
-        elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
-        if decision is None:
-            self._log_voice_timing(
-                "controller_shadow_caller_amendment",
-                turn_id=controller.pending_turn_id or 0,
-                action=(
-                    controller.pending_action.name.value
-                    if controller.pending_action
-                    else "none"
-                ),
-                elapsed_ms=elapsed_ms,
-                known_fact_count=len(controller.state.known_facts),
-                asked_slot_count=len(controller.state.asked_slots),
-            )
-            return
-
-        self._log_voice_timing(
-            "controller_shadow_decision",
-            turn_id=decision.turn_id,
-            action=decision.action_name.value,
-            elapsed_ms=elapsed_ms,
-            known_fact_count=decision.known_fact_count,
-            asked_slot_count=decision.asked_slot_count,
-            allowed_slot_count=decision.allowed_slot_count,
-            forbidden_slot_count=decision.forbidden_slot_count,
-            instruction_chars=decision.instruction_chars,
-            tool_calls_allowed=decision.tool_calls_allowed,
-        )
-
-    def _observe_receptionist_assistant_turn(self, *, interrupted: bool) -> None:
-        """Apply one assistant completion event to shadow state only."""
-        controller = self._receptionist_controller
-        if controller is None:
-            return
-
-        try:
-            observation = controller.observe_assistant_turn(
-                interrupted=interrupted,
-            )
-        except Exception as error:
-            self._receptionist_controller = None
-            self._log_voice_timing(
-                "controller_shadow_error",
-                level=logging.ERROR,
-                exception_type=type(error).__name__,
-            )
-            return
-
-        if observation.turn_id is None:
-            return
-        self._log_voice_timing(
-            "controller_shadow_assistant_turn",
-            turn_id=observation.turn_id,
-            action=(
-                observation.action_name.value
-                if observation.action_name
-                else "none"
-            ),
-            interrupted=observation.interrupted,
-            committed_slot_count=observation.committed_slot_count,
-            asked_slot_count=observation.asked_slot_count,
-        )
 
     def _build_generation_config(self) -> dict:
         """Return Gemini Live generation config tuned for phone-call latency."""
@@ -822,7 +717,6 @@ class GeminiPipeline:
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
-                    self._observe_receptionist_assistant_turn(interrupted=True)
                     async with self._audio_output_lock:
                         dropped_chunks = await self._clear_audio_queue()
                         clear_succeeded = await self._request_remote_audio_clear()
@@ -881,10 +775,6 @@ class GeminiPipeline:
                             self._interrupt_speaking = False
                         self._log_interrupted_response_turn()
                     self._assistant_instruction_pending = False
-                    if interrupted_turn:
-                        self._observe_receptionist_assistant_turn(
-                            interrupted=True
-                        )
                     if overflowed_turn:
                         self._audio_backlog_overflowed = False
                         if (
@@ -912,9 +802,6 @@ class GeminiPipeline:
                     if not interrupted_turn:
                         said_goodbye = await self._flush_kevin_transcript(
                             detect_goodbye=True
-                        )
-                        self._observe_receptionist_assistant_turn(
-                            interrupted=False
                         )
                         if self._response_first_audio_at > 0:
                             self._log_response_turn_latency("")
@@ -1174,8 +1061,6 @@ class GeminiPipeline:
                 if self._unavailable_task and not self._unavailable_task.done():
                     self._unavailable_task.cancel()
                     self._unavailable_task = None
-
-        self._observe_receptionist_controller(full_text)
 
     async def _flush_kevin_transcript(
         self,

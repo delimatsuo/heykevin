@@ -7,6 +7,8 @@ from enum import Enum
 import re
 from typing import Any, Iterable
 
+from app.services.urgency import URGENCY_KEYWORDS, find_urgent_signal
+
 
 class IntakePhase(str, Enum):
     GREETING = "greeting"
@@ -141,17 +143,7 @@ SCHEDULING_PATTERNS = (
     "send someone",
 )
 
-EMERGENCY_PATTERNS = (
-    "emergency",
-    "flood",
-    "flooding",
-    "burst pipe",
-    "gas leak",
-    "sewage",
-    "sparking",
-    "smoke",
-    "burning smell",
-)
+EMERGENCY_PATTERNS = tuple(sorted(URGENCY_KEYWORDS))
 
 SPANISH_PATTERNS = (
     "hola",
@@ -317,7 +309,7 @@ class IntakeState:
                     CallbackConfirmation.CONFIRMED.value,
                 )
 
-        emergency_detected = _contains_unnegated_any(normalized, EMERGENCY_PATTERNS)
+        emergency_detected = find_urgent_signal(normalized) is not None
         emergency_mentioned = _contains_any(normalized, EMERGENCY_PATTERNS)
         if emergency_mentioned and not emergency_detected:
             self.urgency = Urgency.ROUTINE

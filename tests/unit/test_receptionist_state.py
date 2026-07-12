@@ -175,3 +175,21 @@ def test_intake_state_does_not_escalate_explicitly_negated_emergency():
 
     assert state.intent == Intent.SERVICE_REQUEST
     assert state.urgency == Urgency.ROUTINE
+
+
+def test_intake_state_uses_live_resolved_urgency_semantics():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.observe_caller_turn("The flooding has stopped.")
+
+    assert state.intent != Intent.EMERGENCY
+    assert state.urgency == Urgency.ROUTINE
+
+
+def test_intake_state_uses_live_reactivated_urgency_semantics():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.observe_caller_turn("The flooding had stopped but has started again.")
+
+    assert state.intent == Intent.EMERGENCY
+    assert state.urgency == Urgency.EMERGENCY

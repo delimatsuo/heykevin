@@ -57,6 +57,8 @@ async def test_legacy_utterance_log_uses_counts_only(caplog):
     pipeline = VoicePipeline.__new__(VoicePipeline)
     pipeline._call_sid = "CA_test"
     pipeline._utterance_buffer = ["private caller", "request details"]
+    pipeline._urgency_detected = False
+    pipeline.on_urgency_detected = None
     pipeline._process_utterance = process_utterance
     caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
 

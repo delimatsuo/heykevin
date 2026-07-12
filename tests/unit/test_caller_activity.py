@@ -1,4 +1,6 @@
 import audioop
+import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,22 @@ from app.services.caller_activity import CallerActivityEvent, CallerActivityTrac
 FRAME_BYTES = 160
 SILENCE_FRAME = b"\xff" * FRAME_BYTES
 VOICED_FRAME = b"\x00" * FRAME_BYTES
+CALIBRATION_FIXTURE = (
+    Path(__file__).parents[1] / "fixtures" / "voice_vad" / "py-webrtcvad-test-audio.raw"
+)
+CALIBRATION_SHA256 = (
+    "3dbb730b90e0266d78d4fe03f00aba37a83780a6a5240d9084b5c01266194c1e"  # pragma: allowlist secret
+)
+UPSTREAM_MODE2_30MS_PATTERN = "".join(
+    [
+        "000000",
+        "11111",
+        "11111",
+        "11111",
+        "11111",
+        "0000",
+    ]
+)
 
 
 class RecordingClassifier:
@@ -188,3 +206,44 @@ def test_default_classifier_reports_unavailable_dependency(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="WebRTC VAD is unavailable"):
         CallerActivityTracker()
+
+
+def test_upstream_speech_fixture_calibrates_mulaw_endpoint_bias() -> None:
+    pcm = CALIBRATION_FIXTURE.read_bytes()
+    assert hashlib.sha256(pcm).hexdigest() == CALIBRATION_SHA256
+
+    upstream_frame_bytes = 8_000 * 2 * 30 // 1_000
+    upstream_frames = [
+        pcm[position : position + upstream_frame_bytes]
+        for position in range(0, len(pcm), upstream_frame_bytes)
+        if len(pcm[position : position + upstream_frame_bytes]) == upstream_frame_bytes
+    ]
+    vad = caller_activity_module.webrtcvad.Vad(2)
+    upstream_pattern = "".join(
+        "1" if vad.is_speech(frame, 8_000) else "0" for frame in upstream_frames
+    )
+    assert upstream_pattern == UPSTREAM_MODE2_30MS_PATTERN
+
+    mulaw = audioop.lin2ulaw(pcm, 2)
+    complete_mulaw_bytes = len(mulaw) // FRAME_BYTES * FRAME_BYTES
+    twilio_frames = [
+        mulaw[position : position + FRAME_BYTES]
+        for position in range(0, complete_mulaw_bytes, FRAME_BYTES)
+    ]
+    tracker = CallerActivityTracker()
+    events = []
+    for index, frame in enumerate(twilio_frames + [SILENCE_FRAME] * 20):
+        events.extend(
+            tracker.process_mulaw(
+                frame,
+                received_at=(index + 1) * 0.02,
+            )
+        )
+
+    assert events == [
+        CallerActivityEvent(kind="start", segment=1, at=pytest.approx(0.04)),
+        CallerActivityEvent(kind="end", segment=1, at=pytest.approx(0.80)),
+    ]
+    assert tracker.last_ended_segment == 1
+    assert tracker.last_ended_at == pytest.approx(0.80)
+    assert tracker.last_ended_at - 0.78 == pytest.approx(0.02)

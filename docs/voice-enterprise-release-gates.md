@@ -96,6 +96,12 @@ establish speech-boundary bias and false positive/negative rates across quiet
 speech, background noise, pauses, accents, languages, and Twilio frame
 fragmentation before the shadow metric can be renamed or used as a gate.
 
+The initial offline calibration fixture is the pinned, MIT-licensed upstream
+`py-webrtcvad` sample under `tests/fixtures/voice_vad/`. After a Twilio mu-law
+round trip, the current tracker ends 20 ms after the upstream mode-2 label but
+starts 140 ms early. That fixture makes codec bias reproducible; one clean
+English sample is not the multi-condition corpus required for promotion.
+
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
 session. It is payload-free, may be duplicated by the provider, and must not be
 attributed to an individual response turn. The 120-token output limit is an

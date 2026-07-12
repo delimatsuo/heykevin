@@ -22,6 +22,7 @@ def _passing_messages() -> list[str]:
         messages.extend([
             _event("gemini_ws_connected", call, call_elapsed_ms=350),
             _event("greeting_instruction_sent", call, words=24),
+            _event("inbound_media_ready", call, call_elapsed_ms=800),
             _event("first_outbound_audio", call, call_elapsed_ms=2100),
         ])
         for turn in range(1, 4):
@@ -84,6 +85,8 @@ def test_voice_release_evaluator_passes_certification_sample():
         "barge_in_events": 5,
         "barge_in_clear_failures": 0,
         "reconnect_attempts": 0,
+        "calls_with_inbound_media_ready": 10,
+        "inbound_media_buffer_overflows": 0,
         "inbound_reconnect_audio_overflows": 0,
         "receive_errors": 0,
         "audio_backlog_overflows": 0,
@@ -129,6 +132,58 @@ def test_voice_release_evaluator_fails_any_reconnect_audio_overflow():
     assert report["status"] == "fail"
     assert gates["inbound_reconnect_audio_overflows"]["observed"] == 1
     assert not gates["inbound_reconnect_audio_overflows"]["passed"]
+
+
+def test_voice_release_evaluator_fails_any_startup_media_overflow():
+    messages = _passing_messages()
+    messages.append(
+        _event(
+            "inbound_media_buffer_overflow",
+            "call0009",
+            attempted_audio_ms=12001,
+        )
+    )
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert gates["inbound_media_buffer_overflows"]["observed"] == 1
+    assert not gates["inbound_media_buffer_overflows"]["passed"]
+
+
+def test_voice_release_evaluator_rejects_missing_media_readiness():
+    messages = [
+        message
+        for message in _passing_messages()
+        if not (
+            "event=inbound_media_ready" in message
+            and "call=call0009" in message
+        )
+    ]
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert gates["inbound_media_ready_coverage_rate"]["observed"] == 0.9
+    assert not gates["inbound_media_ready_coverage_rate"]["passed"]
+
+
+def test_voice_release_evaluator_rejects_slow_media_readiness():
+    messages = _passing_messages()
+    messages.append(
+        _event("inbound_media_ready", "call0009", call_elapsed_ms=3501)
+    )
+
+    report = evaluate_voice_release(messages)
+    failed = {gate["name"] for gate in report["gates"] if not gate["passed"]}
+
+    assert report["status"] == "fail"
+    assert {
+        "inbound_media_ready_p95_ms",
+        "inbound_media_ready_max_ms",
+    } <= failed
 
 
 def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():

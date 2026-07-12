@@ -475,6 +475,7 @@ class VoicePipeline:
         self._deepgram_task = None
         self._conversation = []
         self._connected = False
+        self._audio_input_ready = asyncio.Event()
         self._greeting_done = False
         self._reconnecting = False
         self._reconnect_count = 0
@@ -586,12 +587,19 @@ class VoicePipeline:
             except Exception as error:
                 _log_voice_exception("greeting_translation_error", error, self._call_sid)
 
-        self._conversation.append({"role": "assistant", "content": greeting})
-        await self.on_transcript("Kevin", greeting)
-        await self._speak(greeting)
-        self._greeting_done = True
+        async with self._response_lock:
+            self._conversation.append({"role": "assistant", "content": greeting})
+            await self.on_transcript("Kevin", greeting)
+            self._audio_input_ready.set()
+            await self._speak(greeting)
+            self._greeting_done = True
 
         return True
+
+    async def wait_until_audio_ready(self) -> bool:
+        """Wait until Deepgram can accept caller audio during the greeting."""
+        await self._audio_input_ready.wait()
+        return self._connected
 
     async def process_audio_in(self, mulaw_bytes: bytes):
         """Feed caller audio to Deepgram. Always — full-duplex."""
@@ -639,6 +647,7 @@ class VoicePipeline:
 
     async def stop(self):
         self._connected = False
+        self._audio_input_ready.set()
         self._interrupt_speaking = True
         # Cancel RTDB command polling
         if self._command_check_task:
@@ -781,6 +790,18 @@ class VoicePipeline:
                 if transcript:
                     self._mark_caller_activity()
 
+                    # Clear TTS on the first speech evidence; final transcripts
+                    # still own state and response processing below.
+                    if self._is_speaking and not self._interrupt_speaking:
+                        _log_voice_event(
+                            "barge_in_detected",
+                            self._call_sid,
+                            final=is_final,
+                        )
+                        self._interrupt_speaking = True
+                        if self.on_clear_audio:
+                            await self.on_clear_audio()
+
                 # Skip interim results (not final) — we only use finals
                 if not is_final:
                     continue
@@ -789,10 +810,6 @@ class VoicePipeline:
                     # Empty final — Deepgram detected silence
                     if speech_final and self._utterance_buffer:
                         await self._flush_utterance()
-                    continue
-
-                # Before greeting is done, discard
-                if not self._greeting_done:
                     continue
 
                 _log_voice_event(
@@ -830,13 +847,6 @@ class VoicePipeline:
 
                 # Show each segment in transcript immediately (real-time feel)
                 await self.on_transcript("Caller", transcript)
-
-                # BARGE-IN: if Kevin is speaking and caller talks, interrupt
-                if self._is_speaking:
-                    logger.info("BARGE-IN: caller interrupted Kevin")
-                    self._interrupt_speaking = True
-                    if self.on_clear_audio:
-                        await self.on_clear_audio()
 
                 # If speech_final, the caller is done — process the full utterance
                 if speech_final:

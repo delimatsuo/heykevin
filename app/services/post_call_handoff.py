@@ -176,6 +176,7 @@ async def run_post_call_handoff(
         _log_handoff(
             "finished",
             call_sid,
+            level=logging.ERROR if status == "needs_attention" else logging.INFO,
             status=status,
             completed_count=len(result.completed_effects),
             failed_count=len(result.failed_effects),
@@ -283,10 +284,17 @@ async def run_pending_post_calls_once(*, limit: int = 10) -> None:
             )
         handoff = await handoff_db.get_handoff(call_sid) or {}
         if handoff.get("status") == "needs_attention":
+            failure_code = str(handoff.get("failure_code") or "uncertain")
             await _mirror_status(
                 call_sid,
                 "needs_attention",
-                failure_code=str(handoff.get("failure_code") or "uncertain"),
+                failure_code=failure_code,
+            )
+            _log_handoff(
+                "attention_required",
+                call_sid,
+                level=logging.ERROR,
+                failure_code=failure_code,
             )
 
 

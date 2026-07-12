@@ -298,3 +298,15 @@ def test_release_workflow_actions_are_commit_pinned():
         ]
         assert actions
         assert all(action_pattern.fullmatch(action) for action in actions)
+
+
+def test_staging_runbook_records_least_privilege_iam_boundary():
+    runbook = Path("docs/message-delivery-receipts.md").read_text()
+    iam_section = runbook.split("### Staging IAM Prerequisites", 1)[1]
+
+    assert "roles/datastore.indexAdmin" in runbook
+    assert "roles/monitoring.alertPolicyEditor" in runbook
+    assert "roles/monitoring.notificationChannelViewer" in runbook
+    assert "kevin-staging-491315" in runbook
+    assert "Do not grant `Owner`, `Editor`" in runbook
+    assert iam_section.index("staging-audit") < iam_section.index("staging-prepare")

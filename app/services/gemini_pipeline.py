@@ -129,7 +129,13 @@ class GeminiPipeline:
         self._last_caller_transcript_flushed_at = 0.0
         self._last_caller_transcript_fragment_at = 0.0
         self._response_start_latency_logged = False
-        self._audio_queue: asyncio.Queue[tuple[bytes, float]] = asyncio.Queue()
+        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue()
+        self._audio_output_lock = asyncio.Lock()
+        self._audio_epoch = 0
+        self._pipeline_started_at = time.monotonic()
+        self._first_inbound_audio_logged = False
+        self._inbound_audio_error_logged = False
+        self._audio_chunks_sent = 0
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -174,6 +180,20 @@ class GeminiPipeline:
             config["thinking_config"] = {"thinking_level": "minimal"}
 
         return config
+
+    def _call_label(self) -> str:
+        """Return a short non-PII call label for operational logs."""
+        return self._call_sid[:8] or "unknown"
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(0, int((time.monotonic() - started_at) * 1000))
+
+    def _log_voice_timing(self, event: str, **metrics: object) -> None:
+        """Log voice timing without transcript, phone, token, or customer data."""
+        metric_text = " ".join(f"{key}={value}" for key, value in metrics.items())
+        suffix = f" {metric_text}" if metric_text else ""
+        logger.info("voice_timing event=%s call=%s%s", event, self._call_label(), suffix)
 
     async def start(
         self,
@@ -232,13 +252,11 @@ class GeminiPipeline:
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._ensure_audio_playout_task()
 
-            if start_background_tasks:
-                # Start silence timeout check
-                self._silence_check_task = asyncio.create_task(self._silence_check_loop())
-
+            # Gemini owns voice activity and turn detection. A transcript-based
+            # silence timer races speech that Gemini detects before transcribing it.
+            if start_background_tasks and self._call_sid:
                 # Start RTDB command polling (for decline/take_message from iOS app)
-                if self._call_sid:
-                    self._command_check_task = asyncio.create_task(self._command_check_loop())
+                self._command_check_task = asyncio.create_task(self._command_check_loop())
 
             if not send_greeting:
                 return True
@@ -315,8 +333,20 @@ class GeminiPipeline:
                     }
                 }
             }))
-        except Exception:
-            pass  # Non-critical — audio will resume on next chunk
+            if not self._first_inbound_audio_logged:
+                self._first_inbound_audio_logged = True
+                self._log_voice_timing(
+                    "first_inbound_audio_forwarded",
+                    elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+                    chunk_bytes=len(mulaw_bytes),
+                )
+        except Exception as e:
+            if not self._inbound_audio_error_logged:
+                self._inbound_audio_error_logged = True
+                self._log_voice_timing(
+                    "inbound_audio_error",
+                    exception_type=type(e).__name__,
+                )
 
     async def stop(self):
         """Close Gemini session and cancel background tasks."""
@@ -355,13 +385,19 @@ class GeminiPipeline:
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):
                     self._interrupt_speaking = True
-                    self._is_speaking = False
+                    self._audio_epoch += 1
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
-                    await self._clear_audio_queue()
-                    if self.on_clear_audio:
-                        await self.on_clear_audio()
+                    async with self._audio_output_lock:
+                        dropped_chunks = await self._clear_audio_queue()
+                        if self.on_clear_audio:
+                            await self.on_clear_audio()
+                    self._log_voice_timing(
+                        "barge_in_clear",
+                        dropped_chunks=dropped_chunks,
+                        sent_chunks=self._audio_chunks_sent,
+                    )
                     logger.info("Gemini: caller interrupted (barge-in)")
                     continue
 
@@ -378,7 +414,7 @@ class GeminiPipeline:
 
                 # Buffer Kevin's transcript fragments (sent word-by-word)
                 output_text = self._extract_transcript(server_content, "output")
-                if output_text:
+                if output_text and not self._interrupt_speaking:
                     self._kevin_transcript_buf.append(output_text)
 
                 # Buffer caller's transcript fragments (sent word-by-word)
@@ -398,8 +434,21 @@ class GeminiPipeline:
                 # Handle turn completion — Gemini finished generating. Audio
                 # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
+                    interrupted_turn = self._interrupt_speaking
+                    if interrupted_turn:
+                        # Gemini sends interrupted -> turnComplete for a cut-off turn.
+                        # Invalidate output received between those two events before
+                        # allowing the next model turn to play.
+                        self._audio_epoch += 1
+                        self._kevin_transcript_buf.clear()
+                        async with self._audio_output_lock:
+                            await self._clear_audio_queue()
+                            self._interrupt_speaking = False
                     self._assistant_instruction_pending = False
-                    if await self._flush_kevin_transcript(detect_goodbye=True):
+                    if (
+                        not interrupted_turn
+                        and await self._flush_kevin_transcript(detect_goodbye=True)
+                    ):
                         await self._wait_for_audio_playout()
                         logger.info("Kevin said goodbye — ending call in 2 seconds")
                         await asyncio.sleep(2)
@@ -484,11 +533,8 @@ class GeminiPipeline:
         if not mulaw_chunk:
             return
         duration_seconds = len(mulaw_chunk) / 8000.0
-        if not self._is_speaking and self._audio_queue.empty():
-            # A fresh model response after an interruption should be allowed to play.
-            self._interrupt_speaking = False
         self._ensure_audio_playout_task()
-        await self._audio_queue.put((mulaw_chunk, duration_seconds))
+        await self._audio_queue.put((mulaw_chunk, duration_seconds, self._audio_epoch))
 
     async def _audio_playout_loop(self):
         """Send Gemini audio to Twilio paced to playback duration.
@@ -499,32 +545,47 @@ class GeminiPipeline:
         """
         try:
             while self._connected:
-                mulaw_chunk, duration_seconds = await self._audio_queue.get()
+                mulaw_chunk, duration_seconds, audio_epoch = await self._audio_queue.get()
+                sent = False
                 try:
-                    if self._interrupt_speaking:
-                        continue
-                    self._is_speaking = True
-                    await self.on_audio_out(mulaw_chunk)
+                    async with self._audio_output_lock:
+                        if (
+                            self._interrupt_speaking
+                            or audio_epoch != self._audio_epoch
+                        ):
+                            continue
+                        self._is_speaking = True
+                        await self.on_audio_out(mulaw_chunk)
+                        self._audio_chunks_sent += 1
+                        sent = True
                     if duration_seconds > 0:
                         await asyncio.sleep(duration_seconds * 0.9)
                 finally:
                     self._audio_queue.task_done()
                     if self._audio_queue.empty():
                         self._is_speaking = False
-                        self._mark_kevin_activity()
+                        if (
+                            sent
+                            and not self._interrupt_speaking
+                            and audio_epoch == self._audio_epoch
+                        ):
+                            self._mark_kevin_activity()
         except asyncio.CancelledError:
             pass
 
-    async def _clear_audio_queue(self):
+    async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""
+        dropped_chunks = 0
         while True:
             try:
                 self._audio_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             else:
+                dropped_chunks += 1
                 self._audio_queue.task_done()
         self._is_speaking = False
+        return dropped_chunks
 
     async def _wait_for_audio_playout(self, timeout_seconds: float = 6.0):
         """Wait briefly for paced audio to drain before final side effects."""
@@ -558,7 +619,11 @@ class GeminiPipeline:
             for keyword in self.URGENCY_KEYWORDS:
                 if keyword in text_lower:
                     self._urgency_detected = True
-                    logger.info(f"URGENCY DETECTED: '{keyword}' in '{full_text}'")
+                    self._log_voice_timing(
+                        "urgency_detected",
+                        keyword=keyword,
+                        chars=len(full_text),
+                    )
                     asyncio.create_task(self.on_urgency_detected(full_text))
                     if self._unavailable_task and not self._unavailable_task.done():
                         self._unavailable_task.cancel()

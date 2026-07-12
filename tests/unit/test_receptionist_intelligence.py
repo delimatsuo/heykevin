@@ -1,8 +1,10 @@
 """Receptionist prompt, call-state, and post-call scope guardrails."""
 
 import asyncio
+import base64
 import inspect
 import json
+import logging
 import os
 
 import pytest
@@ -38,6 +40,44 @@ def _plumbing_config() -> dict:
             {"name": "Faucet replacement", "price_min": 150, "price_max": 250},
         ],
     }
+
+
+class _FakeGeminiWebSocket:
+    def __init__(self, messages: list[str] | None = None):
+        self.messages = list(messages or [])
+        self.sent_payloads: list[dict] = []
+
+    async def send(self, payload: str):
+        self.sent_payloads.append(json.loads(payload))
+
+    async def recv(self):
+        return json.dumps({"setupComplete": {}})
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.messages:
+            raise StopAsyncIteration
+        return self.messages.pop(0)
+
+    async def close(self):
+        return None
+
+
+def _gemini_audio_message(chunk: bytes) -> str:
+    return json.dumps({
+        "serverContent": {
+            "modelTurn": {
+                "parts": [{
+                    "inlineData": {
+                        "mimeType": "audio/pcm;rate=24000",
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                    }
+                }]
+            }
+        }
+    })
 
 
 def test_business_prompt_rejects_out_of_scope_trade_work():
@@ -832,6 +872,245 @@ async def test_gemini_barge_in_resets_caller_silence_state():
     assert pipeline._caller_silence_prompted_at is None
     assert pipeline._last_caller_speech_time >= pipeline._last_kevin_speech_time
     assert not pipeline._waiting_on_caller()
+
+
+@pytest.mark.asyncio
+async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatch):
+    websocket = _FakeGeminiWebSocket()
+
+    async def fake_connect(*_args, **_kwargs):
+        return websocket
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    try:
+        started = await pipeline.start(send_greeting=False, start_background_tasks=True)
+
+        assert started
+        assert pipeline._silence_check_task is None
+    finally:
+        await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_urgency_log_does_not_include_transcript_text(caplog):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def noop_urgency(_text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_urgency_detected=noop_urgency,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._caller_transcript_buf = [
+        "There is a fire at my private address, 100 Market Street."
+    ]
+
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._flush_caller_transcript()
+    await asyncio.sleep(0)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=urgency_detected" in messages
+    assert "keyword=fire" in messages
+    assert "100 Market Street" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_logs_first_inbound_audio_forward_without_payload(caplog):
+    websocket = _FakeGeminiWebSocket()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = websocket
+
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline.process_audio_in(b"\xff" * 160)
+    await pipeline.process_audio_in(b"\xff" * 160)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=first_inbound_audio_forwarded") == 1
+    assert "chunk_bytes=160" in messages
+    audio_payload = websocket.sent_payloads[0]["realtime_input"]["audio"]["data"]
+    assert audio_payload not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_logs_inbound_audio_error_once_without_exception_message(caplog):
+    class FailingWebSocket:
+        async def send(self, _payload: str):
+            raise RuntimeError("private caller audio at 100 Market Street")
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = FailingWebSocket()
+
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline.process_audio_in(b"\xff" * 160)
+    await pipeline.process_audio_in(b"\xff" * 160)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=inbound_audio_error") == 1
+    assert "exception_type=RuntimeError" in messages
+    assert "100 Market Street" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch):
+    events = []
+    audio_send_started = asyncio.Event()
+    release_audio_send = asyncio.Event()
+    clear_completed = asyncio.Event()
+
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def blocked_audio_send(_chunk: bytes):
+        events.append("audio_started")
+        audio_send_started.set()
+        await release_audio_send.wait()
+        events.append("audio_sent")
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def clear_audio():
+        events.append("clear")
+        clear_completed.set()
+
+    pipeline = GeminiPipeline(
+        on_audio_out=blocked_audio_send,
+        on_transcript=noop_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+    await pipeline._enqueue_model_audio(b"model audio")
+    await asyncio.wait_for(audio_send_started.wait(), timeout=1)
+
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"interrupted": True}})
+    ])
+    receive_task = asyncio.create_task(pipeline._receive_loop())
+
+    for _ in range(10):
+        if pipeline._interrupt_speaking:
+            break
+        await asyncio.sleep(0)
+
+    assert pipeline._interrupt_speaking
+    assert not clear_completed.is_set()
+
+    release_audio_send.set()
+    await asyncio.wait_for(receive_task, timeout=1)
+    await asyncio.wait_for(clear_completed.wait(), timeout=1)
+
+    assert events == ["audio_started", "audio_sent", "clear"]
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_barge_in_discards_stale_output_until_turn_completes(monkeypatch):
+    sent_chunks = []
+    transcripts = []
+    call_completed = asyncio.Event()
+
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append(chunk)
+
+    async def record_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    async def on_call_complete():
+        call_completed.set()
+
+    async def noop_clear():
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=record_audio,
+        on_transcript=record_transcript,
+        on_clear_audio=noop_clear,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"interrupted": True}}),
+        _gemini_audio_message(b"stale audio"),
+        json.dumps({
+            "serverContent": {
+                "outputTranscription": {"text": "Goodbye from the interrupted response."}
+            }
+        }),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+        _gemini_audio_message(b"fresh audio"),
+        json.dumps({
+            "serverContent": {
+                "outputTranscription": {"text": "I heard your interruption."}
+            }
+        }),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    assert sent_chunks == [b"fresh audio"]
+    assert transcripts == [("Kevin", "I heard your interruption.")]
+    assert pipeline._transcript_lines == ["Kevin: I heard your interruption."]
+    assert not call_completed.is_set()
+    await pipeline.stop()
 
 
 def test_vcard_ignores_generic_or_wrong_service_type_labels():

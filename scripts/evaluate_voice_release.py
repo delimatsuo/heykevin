@@ -42,6 +42,7 @@ class VoiceReleaseThresholds:
     barge_in_clear_max_ms: int = 500
     max_barge_in_clear_failures: int = 0
     max_inbound_audio_errors: int = 0
+    max_inbound_reconnect_audio_overflows: int = 0
     max_receive_errors: int = 0
     max_reconnect_failures: int = 0
     max_audio_backlog_overflows: int = 0
@@ -235,6 +236,9 @@ def evaluate_voice_release(
         "words",
     )
     inbound_errors = len(by_name.get("inbound_audio_error", []))
+    inbound_reconnect_audio_overflows = len(
+        by_name.get("inbound_reconnect_audio_overflow", [])
+    )
     receive_errors = len(by_name.get("receive_error", []))
     audio_backlog_overflows = len(by_name.get("audio_backlog_overflow", []))
     outbound_audio_errors = len(by_name.get("outbound_audio_error", []))
@@ -328,6 +332,15 @@ def evaluate_voice_release(
             f"<= {limits.max_inbound_audio_errors}",
         ),
         _gate(
+            "inbound_reconnect_audio_overflows",
+            (
+                inbound_reconnect_audio_overflows
+                <= limits.max_inbound_reconnect_audio_overflows
+            ),
+            inbound_reconnect_audio_overflows,
+            f"<= {limits.max_inbound_reconnect_audio_overflows}",
+        ),
+        _gate(
             "receive_errors",
             receive_errors <= limits.max_receive_errors,
             receive_errors,
@@ -368,6 +381,7 @@ def evaluate_voice_release(
             "barge_in_events": barge_in_attempts,
             "barge_in_clear_failures": len(barge_failure_events),
             "reconnect_attempts": reconnect_attempts,
+            "inbound_reconnect_audio_overflows": inbound_reconnect_audio_overflows,
             "receive_errors": receive_errors,
             "audio_backlog_overflows": audio_backlog_overflows,
             "outbound_audio_errors": outbound_audio_errors,

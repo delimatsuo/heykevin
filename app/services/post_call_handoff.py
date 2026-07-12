@@ -6,6 +6,10 @@ import re
 
 from app.db import calls as call_db
 from app.db import post_call_handoffs as handoff_db
+from app.services.message_delivery import (
+    reconcile_pending_receipts_once,
+    repair_pending_call_projections_once,
+)
 from app.services.post_call import process_post_call
 from app.utils.logging import get_logger
 
@@ -302,7 +306,7 @@ async def post_call_worker_loop() -> None:
     """Continuously drain durable pending handoffs on active instances."""
     while True:
         try:
-            await run_pending_post_calls_once()
+            await run_post_call_operations_once()
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -313,3 +317,26 @@ async def post_call_worker_loop() -> None:
                 exception_type=type(error).__name__,
             )
         await asyncio.sleep(WORKER_INTERVAL_SECONDS)
+
+
+async def run_post_call_operations_once() -> None:
+    """Run independent operational queues without cross-queue starvation."""
+    async def _run_component(component, operation) -> None:
+        try:
+            await operation()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _log_handoff(
+                "worker_component_error",
+                "",
+                level=logging.ERROR,
+                component=component,
+                exception_type=type(error).__name__,
+            )
+
+    await asyncio.gather(
+        _run_component("handoffs", run_pending_post_calls_once),
+        _run_component("message_receipts", reconcile_pending_receipts_once),
+        _run_component("message_projections", repair_pending_call_projections_once),
+    )

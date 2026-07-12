@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.db import calls as call_db
+from app.db import message_delivery_receipts as receipt_db
 from app.db import post_call_handoffs as handoff_db
 from app.db.admin_audit import list_admin_audit_events, write_admin_audit_event
 from app.db.firestore_client import get_firestore_client
@@ -62,10 +63,25 @@ PostCallResolution = Literal[
     "no_action_required",
     "false_alarm",
 ]
+MessageDeliveryReceiptStatus = Literal[
+    "pending",
+    "delivered",
+    "failed",
+    "acknowledged",
+]
+MessageDeliveryResolution = Literal[
+    "customer_contacted_manually",
+    "no_action_required",
+    "provider_confirmed_delivery",
+]
 
 
 class AcknowledgePostCallHandoffRequest(BaseModel):
     resolution: PostCallResolution
+
+
+class AcknowledgeMessageDeliveryReceiptRequest(BaseModel):
+    resolution: MessageDeliveryResolution
 
 
 def _contractor_list_item(doc) -> dict:
@@ -295,6 +311,85 @@ async def admin_acknowledge_post_call_handoff(
         "resolution": body.resolution,
         "call_status_mirrored": call_status_mirrored,
     }
+
+
+@router.get("/message-delivery-receipts")
+async def admin_list_message_delivery_receipts(
+    request: Request,
+    status: MessageDeliveryReceiptStatus = "failed",
+    limit: int = 50,
+):
+    """Return a bounded payload-free message delivery queue."""
+    _require_admin(request)
+    bounded_limit = max(1, min(limit, 100))
+    page = await receipt_db.list_receipts(status, limit=bounded_limit + 1)
+    has_more = len(page) > bounded_limit
+    receipts = page[:bounded_limit]
+    return {
+        "status": status,
+        "count": len(receipts),
+        "limit": bounded_limit,
+        "has_more": has_more,
+        "receipts": receipts,
+    }
+
+
+@router.post("/message-delivery-receipts/{receipt_id}/acknowledge")
+async def admin_acknowledge_message_delivery_receipt(
+    receipt_id: str,
+    body: AcknowledgeMessageDeliveryReceiptRequest,
+    request: Request,
+):
+    """Acknowledge delivery evidence without retrying the message."""
+    _require_admin(request)
+    if not receipt_id or len(receipt_id) > 128 or "/" in receipt_id:
+        raise HTTPException(status_code=422, detail="Invalid receipt identifier")
+
+    current = await receipt_db.get_receipt(receipt_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Message delivery receipt not found")
+    if current.get("status") != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail="Only failed message delivery receipts can be acknowledged",
+        )
+
+    acknowledged = await receipt_db.acknowledge_receipt(
+        receipt_id,
+        body.resolution,
+    )
+    if not acknowledged:
+        raise HTTPException(
+            status_code=409,
+            detail="Message delivery receipt state changed; reload before acknowledging",
+        )
+
+    summary = receipt_db.safe_receipt_summary(receipt_id, current)
+    call_status_mirrored = await receipt_db.project_receipt_to_call(receipt_id)
+    await write_admin_audit_event(
+        request=request,
+        action="acknowledge_message_delivery_receipt",
+        target_type="message_delivery_receipt",
+        target_id=receipt_id,
+        reason=body.resolution,
+        before={
+            "status": "failed",
+            "effect": summary["effect"],
+            "failure_code": summary["failure_code"],
+        },
+        after={
+            "status": "acknowledged",
+            "resolution": body.resolution,
+        },
+        metadata={"call_status_mirrored": call_status_mirrored},
+    )
+    return {
+        "status": "acknowledged",
+        "receipt_id": receipt_id,
+        "resolution": body.resolution,
+        "call_status_mirrored": call_status_mirrored,
+    }
+
 
 @router.get("/overview")
 async def admin_overview(request: Request):

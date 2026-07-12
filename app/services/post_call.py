@@ -18,7 +18,7 @@ from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services import jobber as jobber_service
 from app.services.side_effect_audit import record_gate_decision
-from app.services.sms import send_sms, send_mms
+from app.services.sms import MessageDeliveryContext, send_sms, send_mms
 from app.config import settings
 from app.utils.logging import get_logger
 
@@ -363,7 +363,12 @@ async def _process_personal(
             except Exception as error:
                 _log_post_call_exception("personal_sms_translation_error", error, call_sid)
         try:
-            sent = await send_sms(owner_phone, sms, from_number=twilio_number)
+            sent = await send_sms(
+                owner_phone,
+                sms,
+                from_number=twilio_number,
+                delivery_context=MessageDeliveryContext(call_sid, "owner_sms"),
+            )
             _record_effect(tracker, "owner_sms", sent)
             if sent:
                 _log_post_call_event("personal_sms_sent", call_sid)
@@ -472,6 +477,7 @@ async def _process_business(
                 contractor_phone,
                 contractor_sms,
                 from_number=twilio_number,
+                delivery_context=MessageDeliveryContext(call_sid, "owner_sms"),
             )
             _record_effect(tracker, "owner_sms", sent)
             if sent:
@@ -521,6 +527,10 @@ async def _process_business(
                         contractor=contractor,
                         action=action,
                         gate_context=context,
+                        delivery_context=MessageDeliveryContext(
+                            call_sid,
+                            "caller_confirmation",
+                        ),
                     )
                 else:
                     logger.info("Caller confirmation MMS blocked by gate", extra={"reason": decision.reason.value})
@@ -535,6 +545,10 @@ async def _process_business(
                         contractor=contractor,
                         action=action,
                         gate_context=context,
+                        delivery_context=MessageDeliveryContext(
+                            call_sid,
+                            "caller_confirmation",
+                        ),
                     )
                 else:
                     logger.info("Caller confirmation SMS blocked by gate", extra={"reason": decision.reason.value})
@@ -572,6 +586,10 @@ async def _process_business(
                         contractor=contractor,
                         action=action,
                         gate_context=context,
+                        delivery_context=MessageDeliveryContext(
+                            call_sid,
+                            "caller_vcard",
+                        ),
                     )
                     _record_effect(tracker, "caller_vcard", vcard_sent)
                 else:
@@ -957,6 +975,10 @@ async def _send_auto_reply(
             contractor=contractor,
             action=ActionKey.CALLER_AUTO_REPLY,
             gate_context=gate_context,
+            delivery_context=MessageDeliveryContext(
+                call_sid,
+                "caller_auto_reply",
+            ),
         )
         if not sent:
             _log_post_call_event(

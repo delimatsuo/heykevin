@@ -15,6 +15,8 @@ from app.services import post_call
 
 @pytest.mark.asyncio
 async def test_personal_sms_false_return_produces_partial_result(monkeypatch):
+    delivery_contexts = []
+
     async def extract(*_args, **_kwargs):
         return {
             "caller_name": "Test Caller",
@@ -26,7 +28,8 @@ async def test_personal_sms_false_return_produces_partial_result(monkeypatch):
     async def save_call(*_args, **_kwargs):
         return True
 
-    async def send_sms(*_args, **_kwargs):
+    async def send_sms(*_args, **kwargs):
+        delivery_contexts.append(kwargs.get("delivery_context"))
         return False
 
     async def skip_push(*_args, **_kwargs):
@@ -49,6 +52,9 @@ async def test_personal_sms_false_return_produces_partial_result(monkeypatch):
     assert result.status == "partial"
     assert result.completed_effects == ("call_record",)
     assert result.failed_effects == ("owner_sms",)
+    assert len(delivery_contexts) == 1
+    assert delivery_contexts[0].call_sid == "CA_test"
+    assert delivery_contexts[0].effect == "owner_sms"
 
 
 @pytest.mark.asyncio
@@ -93,6 +99,7 @@ async def test_missing_tenant_delivery_config_never_uses_process_fallback(monkey
 @pytest.mark.asyncio
 async def test_failed_auto_reply_does_not_advance_rate_limit(monkeypatch):
     writes = []
+    delivery_contexts = []
 
     class Snapshot:
         exists = False
@@ -112,7 +119,8 @@ async def test_failed_auto_reply_does_not_advance_rate_limit(monkeypatch):
         def collection(self, _name):
             return Collection()
 
-    async def send_sms(*_args, **_kwargs):
+    async def send_sms(*_args, **kwargs):
+        delivery_contexts.append(kwargs.get("delivery_context"))
         return False
 
     monkeypatch.setattr(
@@ -130,6 +138,9 @@ async def test_failed_auto_reply_does_not_advance_rate_limit(monkeypatch):
 
     assert sent is False
     assert writes == []
+    assert len(delivery_contexts) == 1
+    assert delivery_contexts[0].call_sid == "CA_test"
+    assert delivery_contexts[0].effect == "caller_auto_reply"
 
 
 @pytest.mark.asyncio

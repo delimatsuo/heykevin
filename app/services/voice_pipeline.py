@@ -1472,13 +1472,25 @@ class VoicePipeline:
 
                 start_time = asyncio.get_event_loop().time()
                 chunk_index = 0
+                delivery_failed = False
                 for i in range(0, len(mulaw_data), chunk_size):
                     if not self._connected or self._interrupt_speaking:
                         logger.info("TTS interrupted (barge-in)")
                         break
 
                     chunk = mulaw_data[i:i + chunk_size]
-                    await self.on_audio_out(chunk)
+                    delivered = await self.on_audio_out(chunk)
+                    if delivered is False:
+                        delivery_failed = True
+                        self._connected = False
+                        logger.error(
+                            "voice_timing event=outbound_audio_error "
+                            "call=%s engine=elevenlabs",
+                            self._call_sid[:8] or "unknown",
+                        )
+                        if self.on_call_complete:
+                            await self.on_call_complete()
+                        break
                     chunk_index += 1
 
                     # Pace at ~real-time
@@ -1488,11 +1500,16 @@ class VoicePipeline:
                         await asyncio.sleep(delay)
 
                 # Brief wait for Twilio to finish playing
-                if not self._interrupt_speaking and chunk_duration > 0:
+                if (
+                    not delivery_failed
+                    and not self._interrupt_speaking
+                    and chunk_duration > 0
+                ):
                     await asyncio.sleep(min(chunk_duration, 0.5))
 
                 # Update silence timeout — Kevin spoke
-                self._mark_kevin_activity()
+                if not delivery_failed:
+                    self._mark_kevin_activity()
             else:
                 logger.error(f"ElevenLabs error: {response.status_code} {response.text[:100]}")
 

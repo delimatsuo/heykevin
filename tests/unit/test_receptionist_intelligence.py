@@ -378,6 +378,49 @@ async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_elevenlabs_outbound_delivery_failure_ends_call(caplog):
+    call_completed = asyncio.Event()
+
+    class FakeTTSResponse:
+        status_code = 200
+        content = b"x" * 4000
+
+    class FakeTTSClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeTTSResponse()
+
+    async def failed_audio_delivery(_chunk: bytes):
+        return False
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        call_completed.set()
+
+    pipeline = VoicePipeline(
+        on_audio_out=failed_audio_delivery,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeTTSClient()
+    pipeline._connected = True
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._speak("private closing message")
+
+    assert call_completed.is_set()
+    assert not pipeline._connected
+    assert not pipeline._is_speaking
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=outbound_audio_error" in messages
+    assert "private closing message" not in messages
+
+
+@pytest.mark.asyncio
 async def test_gemini_owner_availability_hold_suppresses_caller_silence():
     async def noop_audio(_chunk: bytes):
         return None

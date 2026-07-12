@@ -82,7 +82,7 @@ async def test_media_stream_uses_authenticated_fallback_without_retry_delay(monk
         "CA123",
         {
             "contractor_id": "contractor-1",
-            "caller_phone": "+15551234567",
+            "caller_phone": "test-caller-number",
             "caller_name": "Pat Customer",
         },
     )

@@ -10,6 +10,7 @@ from app.services.receptionist_state import (
     IntakeState,
     Intent,
     ServiceAction,
+    Urgency,
 )
 
 
@@ -105,3 +106,72 @@ def test_intake_state_log_dict_uses_last_four_only():
     assert "caller-id-ending-8667" not in serialized
     assert "Jonathan" not in serialized
     assert "scoped-memory-ref-1" not in serialized
+
+
+def test_intake_state_correction_replaces_stale_service_facts():
+    state = IntakeState.new(call_sid="CA_test")
+    state.observe_caller_turn("I need to replace a toilet.")
+
+    state.observe_caller_turn("Actually, it is the sink, and it needs repair, not replacement.")
+
+    assert state.service_object == "sink"
+    assert state.service_action == ServiceAction.REPAIR
+    assert "service_object:sink" in state.known_facts
+    assert "service_action:repair" in state.known_facts
+    assert "service_object:toilet" not in state.known_facts
+    assert "service_action:replace" not in state.known_facts
+
+
+def test_intake_state_leaves_conflicting_service_objects_unresolved():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.observe_caller_turn("I need toilet replacement in the sink.")
+
+    assert state.service_object == ""
+    assert state.service_action == ServiceAction.REPLACE
+
+
+def test_intake_state_tracks_callback_confirmation_and_decline():
+    confirmed = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    confirmed.callback_intent = CallbackIntent.REQUESTED
+
+    confirmed.observe_caller_turn("Yes, that number works for the callback.")
+
+    assert confirmed.callback_intent == CallbackIntent.ACCEPTED
+    assert confirmed.callback_confirmation == CallbackConfirmation.CONFIRMED
+
+    declined = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    declined.callback_intent = CallbackIntent.REQUESTED
+
+    declined.observe_caller_turn("Actually, I do not need a callback.")
+
+    assert declined.callback_intent == CallbackIntent.DECLINED
+    assert declined.callback_confirmation == CallbackConfirmation.REJECTED
+
+    natural_confirmation = IntakeState.new(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+    )
+    natural_confirmation.callback_intent = CallbackIntent.REQUESTED
+
+    natural_confirmation.observe_caller_turn("Yes, please call me back at that number.")
+
+    assert natural_confirmation.callback_intent == CallbackIntent.ACCEPTED
+    assert natural_confirmation.callback_confirmation == CallbackConfirmation.CONFIRMED
+
+    natural_decline = IntakeState.new(call_sid="CA_test")
+    natural_decline.callback_intent = CallbackIntent.REQUESTED
+
+    natural_decline.observe_caller_turn("Please do not call me back.")
+
+    assert natural_decline.callback_intent == CallbackIntent.DECLINED
+    assert natural_decline.callback_confirmation == CallbackConfirmation.REJECTED
+
+
+def test_intake_state_does_not_escalate_explicitly_negated_emergency():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.observe_caller_turn("This is not an emergency, just a routine leaking faucet.")
+
+    assert state.intent == Intent.SERVICE_REQUEST
+    assert state.urgency == Urgency.ROUTINE

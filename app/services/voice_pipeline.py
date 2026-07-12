@@ -977,32 +977,6 @@ class VoicePipeline:
                 "required": [],
             },
         },
-        {
-            "name": "book_appointment",
-            "description": "Create an appointment on the business owner's Google Calendar.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Short description of the appointment (e.g. 'Faucet repair - John Smith')",
-                    },
-                    "start_time": {
-                        "type": "string",
-                        "description": "Start time in ISO 8601 format (from check_availability results)",
-                    },
-                    "end_time": {
-                        "type": "string",
-                        "description": "End time in ISO 8601 format (from check_availability results)",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Additional notes about the appointment",
-                    },
-                },
-                "required": ["title", "start_time", "end_time"],
-            },
-        },
     ]
 
     async def _prefetch_jobber_context(self):

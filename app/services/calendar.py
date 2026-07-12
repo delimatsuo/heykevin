@@ -4,8 +4,15 @@ Provides free/busy lookup and event creation via Google Calendar API.
 Used as a fallback scheduling tool in the voice pipeline.
 """
 
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import time
+from datetime import datetime, time as dtime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
 import httpx
-from datetime import datetime, timedelta, timezone
 
 from app.utils.logging import get_logger
 
@@ -14,91 +21,346 @@ logger = get_logger(__name__)
 FREEBUSY_URL = "https://www.googleapis.com/calendar/v3/freeBusy"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+TOKEN_EXPIRY_LEEWAY_SECONDS = 120
+GOOGLE_HTTP_TIMEOUT_SECONDS = 2.5
+MAX_DAYS_AHEAD = 14
+MAX_RETURNED_SLOTS = 20
+DEFAULT_TIMEZONE = "UTC"
+DEFAULT_BUSINESS_HOURS_START = "09:00"
+DEFAULT_BUSINESS_HOURS_END = "17:00"
+_REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
 
-async def refresh_access_token(refresh_token: str) -> str | None:
-    """Exchange a refresh token for a new access token. Returns None on failure."""
-    from app.config import settings
+class GoogleCalendarAuthError(Exception):
+    """Raised when Google rejects the current Calendar access token."""
 
-    if not refresh_token or not settings.google_calendar_client_id:
-        return None
 
+class GoogleCalendarUnavailableError(Exception):
+    """Raised when Calendar availability cannot be determined reliably."""
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _epoch_now() -> float:
+    return time.time()
+
+
+def _token_expires_soon(contractor: dict, leeway_seconds: int = TOKEN_EXPIRY_LEEWAY_SECONDS) -> bool:
+    expires_at = contractor.get("google_calendar_token_expires_at")
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                TOKEN_URL,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                    "client_id": settings.google_calendar_client_id,
-                    "client_secret": settings.google_calendar_client_secret,
-                },
-                timeout=10.0,
-            )
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
-        logger.error(f"Google token refresh failed: {resp.status_code} {resp.text[:200]}")
-    except Exception as e:
-        logger.error(f"Google token refresh error: {e}")
-    return None
+        return expires_at is not None and float(expires_at) <= _epoch_now() + leeway_seconds
+    except (TypeError, ValueError):
+        return True
 
 
-async def get_available_slots(access_token: str, days_ahead: int = 7) -> list[dict]:
-    """Query Google Calendar free/busy and return available 1-hour slots.
+async def _write_google_tokens(contractor_id: str, updates: dict) -> None:
+    if not contractor_id:
+        return
+    from app.db.firestore_client import get_firestore_client
 
-    Returns list of dicts: [{"date": "Mon Jan 6", "start": "9:00 AM", "end": "10:00 AM"}, ...]
-    """
-    now = datetime.now(timezone.utc)
-    end = now + timedelta(days=min(days_ahead, 14))
+    db = get_firestore_client()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: db.collection("contractors").document(contractor_id).update(updates),
+    )
 
-    body = {
-        "timeMin": now.isoformat(),
-        "timeMax": end.isoformat(),
-        "items": [{"id": "primary"}],
+
+async def _read_google_tokens(contractor_id: str) -> dict:
+    if not contractor_id:
+        return {}
+    from app.db.firestore_client import get_firestore_client
+
+    db = get_firestore_client()
+    loop = asyncio.get_running_loop()
+    doc = await loop.run_in_executor(
+        None,
+        lambda: db.collection("contractors").document(contractor_id).get(),
+    )
+    if not doc.exists:
+        return {}
+    data = doc.to_dict() or {}
+    return {
+        "google_calendar_access_token": data.get("google_calendar_access_token", ""),
+        "google_calendar_refresh_token": data.get("google_calendar_refresh_token", ""),
+        "google_calendar_token_expires_at": data.get("google_calendar_token_expires_at"),
     }
 
+
+def _refresh_lock_key(contractor: dict) -> str:
+    contractor_id = str(contractor.get("contractor_id", ""))
+    if contractor_id:
+        return contractor_id
+    refresh_token = str(contractor.get("google_calendar_refresh_token", ""))
+    return hashlib.sha256(refresh_token.encode()).hexdigest()[:16]
+
+
+async def refresh_access_token(contractor: dict, *, force: bool = False) -> str | None:
+    """Refresh and persist Google Calendar credentials for a contractor."""
+    from app.config import settings
+
+    lock = _REFRESH_LOCKS.setdefault(_refresh_lock_key(contractor), asyncio.Lock())
+    async with lock:
+        stale_token = contractor.get("google_calendar_access_token", "")
+        contractor_id = contractor.get("contractor_id", "")
+
+        try:
+            latest = await _read_google_tokens(contractor_id)
+        except Exception as error:
+            logger.error(
+                "Google token state read failed: exception_type=%s",
+                type(error).__name__,
+            )
+            latest = {}
+        contractor.update({key: value for key, value in latest.items() if value not in (None, "")})
+
+        current_token = contractor.get("google_calendar_access_token", "")
+        if current_token and current_token != stale_token and not _token_expires_soon(contractor):
+            return current_token
+        if current_token and not force and not _token_expires_soon(contractor):
+            return current_token
+
+        refresh_token = contractor.get("google_calendar_refresh_token", "")
+        if not refresh_token or not settings.google_calendar_client_id or not settings.google_calendar_client_secret:
+            return None
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    TOKEN_URL,
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": settings.google_calendar_client_id,
+                        "client_secret": settings.google_calendar_client_secret,
+                    },
+                    timeout=GOOGLE_HTTP_TIMEOUT_SECONDS,
+                )
+            if response.status_code != 200:
+                logger.error(
+                    "Google token refresh failed: status_code=%s",
+                    response.status_code,
+                )
+                return None
+
+            tokens = response.json()
+            access_token = tokens.get("access_token", "")
+            if not access_token:
+                logger.error("Google token refresh returned no access token")
+                return None
+
+            now = _epoch_now()
+            new_refresh_token = tokens.get("refresh_token") or refresh_token
+            updates = {
+                "google_calendar_access_token": access_token,
+                "google_calendar_refresh_token": new_refresh_token,
+                "google_calendar_token_refreshed_at": now,
+            }
+            try:
+                expires_in = float(tokens["expires_in"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                updates["google_calendar_token_expires_at"] = now + max(0.0, expires_in)
+
+            contractor.update(updates)
+            try:
+                await _write_google_tokens(contractor_id, updates)
+            except Exception as error:
+                logger.error(
+                    "Google token persistence failed after refresh: exception_type=%s",
+                    type(error).__name__,
+                )
+            logger.info("Google Calendar token refreshed for contractor=%s", contractor_id[:8] or "unknown")
+            return access_token
+        except Exception as error:
+            logger.error(
+                "Google token refresh error: exception_type=%s",
+                type(error).__name__,
+            )
+            return None
+
+
+async def _resolve_access_token(auth: str | dict) -> str:
+    if not isinstance(auth, dict):
+        return auth
+
+    access_token = auth.get("google_calendar_access_token", "")
+    if not access_token or _token_expires_soon(auth):
+        refreshed = await refresh_access_token(auth)
+        if refreshed:
+            return refreshed
+    return access_token
+
+
+async def _freebusy_request(access_token: str, body: dict) -> dict | None:
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
+        response = await client.post(
             FREEBUSY_URL,
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
             },
             json=body,
-            timeout=8.0,
+            timeout=GOOGLE_HTTP_TIMEOUT_SECONDS,
         )
 
-    if resp.status_code != 200:
-        logger.error(f"Google FreeBusy error: {resp.status_code} {resp.text[:200]}")
-        return []
+    if response.status_code == 401:
+        raise GoogleCalendarAuthError("Google Calendar access token rejected")
+    if response.status_code != 200:
+        logger.error("Google FreeBusy error: status_code=%s", response.status_code)
+        return None
+    return response.json()
 
-    data = resp.json()
-    busy_periods = data.get("calendars", {}).get("primary", {}).get("busy", [])
 
-    # Convert busy periods to datetime objects
-    busy = []
+async def _freebusy_with_refresh(auth: str | dict, body: dict) -> dict | None:
+    access_token = await _resolve_access_token(auth)
+    if not access_token:
+        logger.error("Google FreeBusy unavailable: missing access token")
+        return None
+
+    try:
+        return await _freebusy_request(access_token, body)
+    except GoogleCalendarAuthError:
+        if not isinstance(auth, dict):
+            logger.error("Google FreeBusy error: status_code=401")
+            return None
+
+    refreshed = await refresh_access_token(auth, force=True)
+    if not refreshed:
+        logger.error("Google FreeBusy authorization refresh failed")
+        return None
+
+    try:
+        return await _freebusy_request(refreshed, body)
+    except GoogleCalendarAuthError:
+        logger.error("Google FreeBusy error after refresh: status_code=401")
+        return None
+
+
+def _calendar_configuration(auth: str | dict) -> tuple[ZoneInfo, dtime, dtime]:
+    if isinstance(auth, dict):
+        timezone_name = auth.get("timezone")
+        start_value = auth.get("business_hours_start")
+        end_value = auth.get("business_hours_end")
+        if not timezone_name or not start_value or not end_value:
+            raise ValueError("Contractor timezone and business hours are required")
+    else:
+        timezone_name = DEFAULT_TIMEZONE
+        start_value = DEFAULT_BUSINESS_HOURS_START
+        end_value = DEFAULT_BUSINESS_HOURS_END
+
+    local_timezone = ZoneInfo(timezone_name)
+    business_start = dtime.fromisoformat(start_value)
+    business_end = dtime.fromisoformat(end_value)
+    if business_start >= business_end:
+        raise ValueError("Business hours must be a same-day interval")
+    return local_timezone, business_start, business_end
+
+
+def _parse_provider_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Provider datetime is missing an offset")
+    return parsed
+
+
+def _busy_intervals(data: dict) -> list[tuple[datetime, datetime]]:
+    if not isinstance(data, dict):
+        raise ValueError("FreeBusy response must be an object")
+    calendars = data.get("calendars")
+    if not isinstance(calendars, dict):
+        raise ValueError("FreeBusy response is missing calendars")
+    primary = calendars.get("primary")
+    if not isinstance(primary, dict):
+        raise ValueError("FreeBusy response is missing the primary calendar")
+
+    errors = primary.get("errors") or []
+    if errors:
+        error_count = len(errors) if isinstance(errors, list) else 1
+        logger.error("Google FreeBusy calendar error: error_count=%s", error_count)
+        raise GoogleCalendarUnavailableError("Calendar provider rejected the calendar query")
+
+    busy_periods = primary.get("busy")
+    if not isinstance(busy_periods, list):
+        raise ValueError("FreeBusy response is missing busy intervals")
+
+    intervals = []
     for period in busy_periods:
-        busy.append((
-            datetime.fromisoformat(period["start"].replace("Z", "+00:00")),
-            datetime.fromisoformat(period["end"].replace("Z", "+00:00")),
-        ))
+        if not isinstance(period, dict):
+            raise ValueError("FreeBusy interval must be an object")
+        start = _parse_provider_datetime(period["start"])
+        end = _parse_provider_datetime(period["end"])
+        if end <= start:
+            raise ValueError("FreeBusy interval must have positive duration")
+        intervals.append((start, end))
+    return intervals
 
-    # Generate available 1-hour slots during business hours (9 AM - 5 PM local)
-    # We use UTC but label as local time — contractor's timezone would improve this
+
+async def get_available_slots(auth: str | dict, days_ahead: int = 7) -> list[dict]:
+    """Query Google Calendar free/busy and return available 1-hour slots.
+
+    Returns list of dicts: [{"date": "Mon Jan 6", "start": "9:00 AM", "end": "10:00 AM"}, ...]
+    """
+    try:
+        local_timezone, business_start, business_end = _calendar_configuration(auth)
+        days = max(1, min(int(days_ahead), MAX_DAYS_AHEAD))
+    except Exception as error:
+        logger.error(
+            "Google Calendar configuration invalid: exception_type=%s",
+            type(error).__name__,
+        )
+        raise GoogleCalendarUnavailableError("Calendar configuration is invalid") from error
+
+    now = _utc_now()
+    local_now = now.astimezone(local_timezone)
+    first_day = local_now.date() + timedelta(days=1)
+    end_day = first_day + timedelta(days=days)
+    query_end = datetime.combine(end_day, dtime.min, tzinfo=local_timezone)
+
+    body = {
+        "timeMin": now.isoformat(),
+        "timeMax": query_end.isoformat(),
+        "timeZone": local_timezone.key,
+        "items": [{"id": "primary"}],
+    }
+
+    try:
+        data = await _freebusy_with_refresh(auth, body)
+    except Exception as error:
+        logger.error(
+            "Google FreeBusy request failed: exception_type=%s",
+            type(error).__name__,
+        )
+        raise GoogleCalendarUnavailableError("Calendar provider request failed") from error
+    if data is None:
+        raise GoogleCalendarUnavailableError("Calendar provider is unavailable")
+
+    try:
+        busy = _busy_intervals(data)
+    except GoogleCalendarUnavailableError:
+        raise
+    except Exception as error:
+        logger.error(
+            "Google FreeBusy response invalid: exception_type=%s",
+            type(error).__name__,
+        )
+        raise GoogleCalendarUnavailableError("Calendar provider response is invalid") from error
+
     available = []
-    day = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    for day_offset in range(days):
+        local_day = first_day + timedelta(days=day_offset)
+        slot_start = datetime.combine(local_day, business_start, tzinfo=local_timezone)
+        closing_time = datetime.combine(local_day, business_end, tzinfo=local_timezone)
 
-    for _ in range(min(days_ahead, 14)):
-        for hour in range(9, 17):  # 9 AM to 5 PM
-            slot_start = day.replace(hour=hour)
+        while slot_start + timedelta(hours=1) <= closing_time:
             slot_end = slot_start + timedelta(hours=1)
-
-            # Check if slot overlaps any busy period
             is_busy = any(
                 slot_start < b_end and slot_end > b_start
                 for b_start, b_end in busy
             )
-
             if not is_busy:
                 available.append({
                     "date": slot_start.strftime("%a %b %d"),
@@ -107,11 +369,9 @@ async def get_available_slots(access_token: str, days_ahead: int = 7) -> list[di
                     "start_iso": slot_start.isoformat(),
                     "end_iso": slot_end.isoformat(),
                 })
+            slot_start = slot_end
 
-        day += timedelta(days=1)
-
-    # Cap at 20 slots to keep responses manageable
-    return available[:20]
+    return available[:MAX_RETURNED_SLOTS]
 
 
 async def book_appointment(

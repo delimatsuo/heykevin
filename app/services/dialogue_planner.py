@@ -59,7 +59,25 @@ def plan_next_action(state: IntakeState) -> NextAction:
             tool_calls_allowed=False,
         )
 
-    if state.callback_intent in {CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED}:
+    if (
+        state.callback_intent == CallbackIntent.ACCEPTED
+        and state.callback_confirmation == CallbackConfirmation.CONFIRMED
+        and state.service_action != ServiceAction.UNKNOWN
+        and state.service_object
+    ):
+        return NextAction(
+            name=ActionName.WRAP_UP,
+            reason="callback number and service request are confirmed",
+            forbidden_slots=tuple(sorted(forbidden)),
+            memory_facts_safe_to_use=memory_facts,
+            max_spoken_shape="briefly confirm the callback and close without another question",
+            tool_calls_allowed=False,
+        )
+
+    if (
+        state.callback_intent in {CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED}
+        and state.callback_confirmation != CallbackConfirmation.CONFIRMED
+    ):
         if state.callback_confirmation == CallbackConfirmation.REJECTED:
             return NextAction(
                 name=ActionName.ASK_CALLBACK_NUMBER,
@@ -155,6 +173,9 @@ def _forbidden_slots(state: IntakeState) -> set[str]:
     if state.caller_identity.name and state.caller_identity.confidence >= 0.8:
         forbidden.add("caller_name")
     if state.callback_intent in {CallbackIntent.NONE, CallbackIntent.DECLINED, CallbackIntent.OFFERED}:
+        forbidden.add("callback_number")
+    if state.callback_confirmation == CallbackConfirmation.CONFIRMED:
+        forbidden.add("callback_confirmation")
         forbidden.add("callback_number")
     if state.address_need in {
         AddressNeed.NONE,

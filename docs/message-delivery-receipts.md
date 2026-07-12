@@ -94,6 +94,22 @@ set the staging environment variable `STAGING_ALERT_NOTIFICATION_CHANNELS` to a
 comma-separated list of enabled channel resource names. Missing, disabled, or
 ambiguous routes fail before infrastructure changes.
 
+### Staging IAM Prerequisites
+
+The staging WIF service account must receive only these additional roles:
+
+- `roles/datastore.indexAdmin` on the isolated `kevin-staging-491315` project
+- `roles/monitoring.alertPolicyEditor` on the runtime `kevin-491315` project
+- `roles/monitoring.notificationChannelViewer` on the runtime
+  `kevin-491315` project
+
+Do not grant `Owner`, `Editor`, Datastore owner, Monitoring admin, production
+Firestore access, or any user-managed credential. After changing IAM, allow for
+policy propagation and run `staging-audit`. Run `staging-prepare` only after the
+audit completes successfully. The preparation job validates the expected WIF
+provider project and exact staging impersonation identity before requesting an
+OIDC token.
+
 ## Admin Operations
 
 - `GET /api/admin/message-delivery-receipts?status=failed`

@@ -2,6 +2,8 @@
 
 import asyncio
 import base64
+import binascii
+from dataclasses import dataclass
 import json
 import time
 from types import SimpleNamespace
@@ -144,6 +146,258 @@ def _log_task_exception(task: asyncio.Task):
     error = task.exception()
     if error:
         _log_safe_exception("background_task_error", error)
+
+
+WS_MAX_MESSAGE_SIZE = 65_536
+MAX_MEDIA_INGRESS_AUDIO_BYTES = 96_000  # 12 seconds of 8 kHz mulaw
+MAX_MEDIA_INGRESS_AUDIO_CHUNKS = 600
+
+
+@dataclass(frozen=True, slots=True)
+class _TwilioIngressEvent:
+    kind: str
+    audio: bytes = b""
+
+
+class _TwilioMediaIngress:
+    """Read Twilio media continuously into a bounded, ordered queue."""
+
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        call_sid: str,
+        max_buffered_audio_bytes: int = MAX_MEDIA_INGRESS_AUDIO_BYTES,
+        max_buffered_audio_chunks: int = MAX_MEDIA_INGRESS_AUDIO_CHUNKS,
+    ) -> None:
+        self._websocket = websocket
+        self._call_sid = call_sid
+        self._max_buffered_audio_bytes = max_buffered_audio_bytes
+        self._max_buffered_audio_chunks = max_buffered_audio_chunks
+        # Two reserved slots guarantee stop and close signals cannot be starved.
+        self._queue: asyncio.Queue[_TwilioIngressEvent | None] = asyncio.Queue(
+            maxsize=max_buffered_audio_chunks + 2
+        )
+        self.buffered_audio_bytes = 0
+        self.buffered_audio_chunks = 0
+        self.high_water_audio_bytes = 0
+        self.overflowed = False
+        self.stop_received = False
+        self.ended = False
+
+    async def _close(self, code: int) -> None:
+        try:
+            await self._websocket.close(code=code)
+        except Exception as error:
+            _log_safe_exception("ingress_close_error", error, self._call_sid)
+
+    async def run(self) -> None:
+        """Read until Twilio stops, disconnects, or violates a bound."""
+        try:
+            async for message in self._websocket.iter_text():
+                if len(message) > WS_MAX_MESSAGE_SIZE:
+                    logger.warning(
+                        "voice_timing event=inbound_media_message_oversize "
+                        "call=%s message_bytes=%s limit_bytes=%s",
+                        _call_label(self._call_sid),
+                        len(message),
+                        WS_MAX_MESSAGE_SIZE,
+                    )
+                    await self._close(1009)
+                    break
+
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "voice_timing event=inbound_media_invalid_json call=%s",
+                        _call_label(self._call_sid),
+                    )
+                    await self._close(1003)
+                    break
+                if not isinstance(data, dict):
+                    logger.warning(
+                        "voice_timing event=inbound_media_invalid_json call=%s",
+                        _call_label(self._call_sid),
+                    )
+                    await self._close(1003)
+                    break
+
+                kind = data.get("event", "")
+                if kind == "stop":
+                    self.stop_received = True
+                    self._queue.put_nowait(_TwilioIngressEvent(kind="stop"))
+                    break
+                if kind != "media":
+                    continue
+
+                media = data.get("media", {})
+                if not isinstance(media, dict):
+                    logger.warning(
+                        "voice_timing event=inbound_media_invalid_audio call=%s",
+                        _call_label(self._call_sid),
+                    )
+                    await self._close(1003)
+                    break
+                payload = media.get("payload", "")
+                if not payload:
+                    continue
+                try:
+                    audio = base64.b64decode(payload, validate=True)
+                except (binascii.Error, ValueError, TypeError):
+                    logger.warning(
+                        "voice_timing event=inbound_media_invalid_audio call=%s",
+                        _call_label(self._call_sid),
+                    )
+                    await self._close(1003)
+                    break
+                if not audio:
+                    continue
+
+                attempted_bytes = self.buffered_audio_bytes + len(audio)
+                attempted_chunks = self.buffered_audio_chunks + 1
+                if (
+                    attempted_bytes > self._max_buffered_audio_bytes
+                    or attempted_chunks > self._max_buffered_audio_chunks
+                ):
+                    self.overflowed = True
+                    logger.warning(
+                        "voice_timing event=inbound_media_buffer_overflow "
+                        "call=%s attempted_audio_ms=%s limit_audio_ms=%s",
+                        _call_label(self._call_sid),
+                        round(attempted_bytes / 8),
+                        round(self._max_buffered_audio_bytes / 8),
+                    )
+                    await self._close(1009)
+                    break
+
+                self._queue.put_nowait(
+                    _TwilioIngressEvent(kind="media", audio=audio)
+                )
+                self.buffered_audio_bytes = attempted_bytes
+                self.buffered_audio_chunks = attempted_chunks
+                self.high_water_audio_bytes = max(
+                    self.high_water_audio_bytes,
+                    self.buffered_audio_bytes,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _log_safe_exception("inbound_media_receive_error", error, self._call_sid)
+        finally:
+            self.ended = True
+            self._queue.put_nowait(None)
+
+    async def receive(self) -> _TwilioIngressEvent | None:
+        event = await self._queue.get()
+        if event and event.kind == "media":
+            self.buffered_audio_bytes -= len(event.audio)
+            self.buffered_audio_chunks -= 1
+        return event
+
+
+async def _cancel_task(task: asyncio.Task | None) -> None:
+    if not task:
+        return
+    if not task.done():
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _consume_twilio_ingress(
+    pipeline,
+    ingress: _TwilioMediaIngress,
+    *,
+    call_sid: str,
+    media_stream_started_at: float,
+    call_started_at: float,
+    max_call_duration_seconds: int,
+    on_stream_stop,
+    on_max_duration,
+) -> str:
+    ready = await pipeline.wait_until_audio_ready()
+    if not ready:
+        return "pipeline_unavailable"
+
+    elapsed_ms = (
+        max(0, round((time.monotonic() - media_stream_started_at) * 1000))
+        if media_stream_started_at > 0
+        else 0
+    )
+    logger.info(
+        "voice_timing event=inbound_media_ready call=%s "
+        "call_elapsed_ms=%s buffered_audio_ms=%s buffered_chunks=%s",
+        _call_label(call_sid),
+        elapsed_ms,
+        round(ingress.buffered_audio_bytes / 8),
+        ingress.buffered_audio_chunks,
+    )
+
+    while True:
+        if ingress.overflowed:
+            return "overflow"
+        event = await ingress.receive()
+        if ingress.overflowed:
+            return "overflow"
+        if event is None:
+            return "closed"
+        if time.time() - call_started_at > max_call_duration_seconds:
+            await on_max_duration()
+            return "max_duration"
+        if event.kind == "media":
+            await pipeline.process_audio_in(event.audio)
+        elif event.kind == "stop":
+            await on_stream_stop()
+            return "stop"
+
+
+async def _serve_pipeline_ingress(
+    pipeline,
+    ingress: _TwilioMediaIngress,
+    *,
+    call_sid: str,
+    media_stream_started_at: float,
+    call_started_at: float,
+    max_call_duration_seconds: int,
+    on_stream_stop,
+    on_max_duration,
+) -> bool:
+    """Start the pipeline while forwarding media as soon as it is ready."""
+    start_task = asyncio.create_task(pipeline.start())
+    consume_task = asyncio.create_task(
+        _consume_twilio_ingress(
+            pipeline,
+            ingress,
+            call_sid=call_sid,
+            media_stream_started_at=media_stream_started_at,
+            call_started_at=call_started_at,
+            max_call_duration_seconds=max_call_duration_seconds,
+            on_stream_stop=on_stream_stop,
+            on_max_duration=on_max_duration,
+        )
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {start_task, consume_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if start_task in done:
+            started = bool(start_task.result())
+            if not started:
+                return False
+            await consume_task
+            return True
+
+        outcome = consume_task.result()
+        if outcome == "pipeline_unavailable":
+            return bool(await start_task)
+
+        await _cancel_task(start_task)
+        await pipeline.stop()
+        return True
+    finally:
+        await _cancel_task(start_task)
+        await _cancel_task(consume_task)
 
 TRANSCRIPT_THROTTLE = 1.0
 
@@ -303,6 +557,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     ws_token = ""
     start_stream_sid = ""
     media_stream_started_at = None
+    call_started_at = time.time()
     try:
         # Read messages until we get the start event (should be the first message)
         for _ in range(5):
@@ -310,6 +565,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             msg = json.loads(raw)
             if msg.get("event") == "start":
                 media_stream_started_at = time.monotonic()
+                call_started_at = time.time()
                 ws_token = msg.get("start", {}).get("customParameters", {}).get("ws_token", "")
                 start_stream_sid = msg.get("streamSid", "")
                 break
@@ -318,12 +574,25 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         await websocket.close(code=1008)
         return
 
-    # Validate WebSocket token against RTDB
-    _init_firebase()
-    from firebase_admin import db as rtdb
+    if not ws_token or not start_stream_sid:
+        logger.warning(
+            "media_event event=stream_auth_rejected call=%s reason=invalid_start",
+            _call_label(call_sid),
+        )
+        await websocket.close(code=1008)
+        return
 
+    # Begin bounded reads before database/config startup so Twilio audio cannot
+    # sit unread while the call is authenticated and the provider connects.
+    ingress = _TwilioMediaIngress(websocket, call_sid=call_sid)
+    ingress_task = asyncio.create_task(ingress.run())
+
+    # Validate WebSocket token against RTDB
     call_data = None
     try:
+        _init_firebase()
+        from firebase_admin import db as rtdb
+
         ref = rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
         loop = asyncio.get_event_loop()
         for attempt in range(3):
@@ -340,6 +609,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             "media_event event=stream_auth_rejected call=%s reason=missing_record",
             _call_label(call_sid),
         )
+        await _cancel_task(ingress_task)
         await websocket.close(code=1008)
         return
     if not ws_token or ws_token != call_data["ws_token"]:
@@ -347,32 +617,48 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             "media_event event=stream_auth_rejected call=%s reason=invalid_token",
             _call_label(call_sid),
         )
+        await _cancel_task(ingress_task)
         await websocket.close(code=1008)
         return
 
-    # Payload size limit for incoming WebSocket messages (64KB)
-    WS_MAX_MESSAGE_SIZE = 65536
+    if ingress.ended:
+        await _cancel_task(ingress_task)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        return
 
-    stream_sid = None
+    stream_sid = start_stream_sid
     pipeline = None
     transcript_lines = []
     last_rtdb_update = 0.0
 
-    active_call = await _resolve_active_call(call_sid, call_data)
+    try:
+        active_call = await _resolve_active_call(call_sid, call_data)
 
-    # Load contractor config for this call
-    contractor_config_loaded = {}
-    if active_call:
-        _contractor_id = getattr(active_call, 'contractor_id', '') or ''
-        if _contractor_id:
-            from app.db.contractors import get_contractor
-            from app.services.entitlements import with_entitlement_flags
-            contractor_data = await get_contractor(_contractor_id)
-            if contractor_data:
-                contractor_config_loaded = with_entitlement_flags(contractor_data)
-        # Pass known caller name
-        if active_call.caller_name:
-            contractor_config_loaded["known_caller_name"] = active_call.caller_name
+        # Load contractor config for this call.
+        contractor_config_loaded = {}
+        _contractor_id = ""
+        if active_call:
+            _contractor_id = getattr(active_call, "contractor_id", "") or ""
+            if _contractor_id:
+                from app.db.contractors import get_contractor
+                from app.services.entitlements import with_entitlement_flags
+
+                contractor_data = await get_contractor(_contractor_id)
+                if contractor_data:
+                    contractor_config_loaded = with_entitlement_flags(contractor_data)
+            if active_call.caller_name:
+                contractor_config_loaded["known_caller_name"] = active_call.caller_name
+    except Exception as error:
+        _log_safe_exception("stream_setup_error", error, call_sid)
+        await _cancel_task(ingress_task)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+        return
 
     async def on_audio_out(mulaw_chunk: bytes):
         """Voice pipeline produced audio — send to Twilio."""
@@ -412,6 +698,33 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             websocket=websocket,
             twiml=twiml,
         )
+
+    async def on_stream_stop():
+        """Record whether Twilio stopped because the owner accepted the call."""
+        nonlocal call_redirected
+        try:
+            refreshed = await get_active_call(call_sid)
+            if refreshed and getattr(refreshed, "accepted", False):
+                call_redirected = True
+            elif refreshed:
+                raw = refreshed.__dict__ if hasattr(refreshed, "__dict__") else {}
+                call_redirected = raw.get("accepted") is True
+        except Exception as error:
+            _log_safe_exception("stream_stop_refresh_error", error, call_sid)
+
+        logger.info(
+            "media_event event=twilio_stream_stopped call=%s redirected=%s",
+            _call_label(call_sid),
+            call_redirected,
+        )
+
+    async def on_max_duration():
+        logger.info(
+            "media_event event=max_duration call=%s seconds=%s",
+            _call_label(call_sid),
+            MAX_CALL_DURATION,
+        )
+        await _finish_max_call_duration(on_call_complete)
 
     async def on_transcript(speaker: str, text: str):
         """Transcript update — both Kevin and Caller sides."""
@@ -490,12 +803,6 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     MAX_CALL_DURATION = 5400  # 90 minutes in seconds
 
     try:
-        # Use stream_sid from the start event we already consumed during auth
-        stream_sid = start_stream_sid
-        if not stream_sid:
-            logger.error("No stream_sid from Twilio start event")
-            await websocket.close()
-            return
         logger.info("media_event event=twilio_stream_started call=%s", _call_label(call_sid))
 
         # Select voice pipeline based on contractor config
@@ -533,75 +840,34 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 "media_event event=pipeline_selected call=%s engine=elevenlabs",
                 _call_label(call_sid),
             )
-        started = await pipeline.start()
+        started = await _serve_pipeline_ingress(
+            pipeline,
+            ingress,
+            call_sid=call_sid,
+            media_stream_started_at=media_stream_started_at or 0.0,
+            call_started_at=call_started_at,
+            max_call_duration_seconds=MAX_CALL_DURATION,
+            on_stream_stop=on_stream_stop,
+            on_max_duration=on_max_duration,
+        )
         if not started:
             logger.error("Failed to start voice pipeline — closing stream")
             await websocket.close()
             return
 
-        # Track call start time for max duration safeguard
-        call_start_time = time.time()
-
-        # Main loop: receive Twilio audio
-        async for message in websocket.iter_text():
-            if len(message) > WS_MAX_MESSAGE_SIZE:
-                logger.warning(f"WebSocket message too large ({len(message)} bytes) — closing")
-                await websocket.close(code=1009)
-                return
-
-            # Max call duration safeguard (90 minutes)
-            if time.time() - call_start_time > MAX_CALL_DURATION:
-                logger.info(
-                    "media_event event=max_duration call=%s seconds=%s",
-                    _call_label(call_sid),
-                    MAX_CALL_DURATION,
-                )
-                await _finish_max_call_duration(on_call_complete)
-                break
-
-            data = json.loads(message)
-            event = data.get("event", "")
-
-            if event == "media":
-                payload = data.get("media", {}).get("payload", "")
-                if not payload:
-                    continue
-
-                # Send raw mulaw directly to Deepgram — no conversion needed.
-                # Deepgram accepts mulaw 8kHz natively.
-                mulaw_bytes = base64.b64decode(payload)
-                await pipeline.process_audio_in(mulaw_bytes)
-
-            elif event == "stop":
-                # Check if the call was accepted (redirected to conference)
-                # If so, the stream stop is expected — don't trigger post-call processing
-                try:
-                    refreshed = await get_active_call(call_sid)
-                    if refreshed and getattr(refreshed, 'accepted', False):
-                        call_redirected = True
-                        logger.info("Twilio stream stopped — call accepted, skipping post-call")
-                    elif refreshed:
-                        raw = refreshed.__dict__ if hasattr(refreshed, '__dict__') else {}
-                        if raw.get("accepted"):
-                            call_redirected = True
-                            logger.info("Twilio stream stopped — call accepted (dict), skipping post-call")
-                except Exception:
-                    pass
-                if not call_redirected:
-                    logger.info("Twilio stream stopped")
-                break
-
     except Exception as error:
         _log_safe_exception("stream_error", error, call_sid)
 
     finally:
+        await _cancel_task(ingress_task)
+
+        if pipeline:
+            await pipeline.stop()
+
         try:
             await websocket.close()
         except Exception:
             pass  # Already closed or connection lost
-
-        if pipeline:
-            await pipeline.stop()
 
         # Save transcript to call record
         if transcript_lines:

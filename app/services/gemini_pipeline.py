@@ -120,6 +120,7 @@ class GeminiPipeline:
         self._reconnect_audio_buffer_bytes = 0
         self._reconnect_audio_overflowed = False
         self._connected = False
+        self._audio_input_ready = asyncio.Event()
 
         # State tracking
         self._is_speaking = False
@@ -370,9 +371,11 @@ class GeminiPipeline:
                 self._command_check_task = asyncio.create_task(self._command_check_loop())
 
             if not send_greeting:
+                self._audio_input_ready.set()
                 return True
 
             await self._send_greeting()
+            self._audio_input_ready.set()
             return True
 
         except Exception as e:
@@ -396,6 +399,11 @@ class GeminiPipeline:
             f"{context}\n"
             "Do not greet the caller again. Continue naturally when the caller speaks."
         )
+
+    async def wait_until_audio_ready(self) -> bool:
+        """Wait until inbound caller audio can be forwarded in order."""
+        await self._audio_input_ready.wait()
+        return self._connected
 
     async def process_audio_in(self, mulaw_bytes: bytes):
         """Convert mulaw 8kHz -> PCM 16kHz and send to Gemini."""
@@ -519,6 +527,7 @@ class GeminiPipeline:
     async def stop(self):
         """Close Gemini session and cancel background tasks."""
         self._connected = False
+        self._audio_input_ready.set()
         self._reconnecting = False
         self._interrupt_speaking = True
         if self._silence_check_task:

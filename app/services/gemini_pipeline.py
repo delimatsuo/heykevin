@@ -85,6 +85,7 @@ class GeminiPipeline:
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_WORDS = 24
+    MAX_RESPONSE_OUTPUT_TOKENS = 150  # About 6 seconds of native audio.
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -198,6 +199,7 @@ class GeminiPipeline:
         """Return Gemini Live generation config tuned for phone-call latency."""
         config = {
             "response_modalities": ["AUDIO"],
+            "max_output_tokens": self.MAX_RESPONSE_OUTPUT_TOKENS,
             "temperature": settings.gemini_live_temperature,
             "speech_config": {
                 "voice_config": {

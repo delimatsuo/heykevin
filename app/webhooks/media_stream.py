@@ -11,11 +11,24 @@ from fastapi import APIRouter, WebSocket
 from app.config import settings
 from app.services.voice_pipeline import VoicePipeline
 from app.db.cache import get_active_call, update_active_call, _init_firebase, ACTIVE_CALLS_PATH
-from app.utils.logging import get_logger, redact_phone
+from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _call_label(call_sid: str) -> str:
+    return call_sid[:8] or "unknown"
+
+
+def _log_safe_exception(event: str, error: BaseException, call_sid: str = "") -> None:
+    logger.warning(
+        "media_event event=%s call=%s exception_type=%s",
+        event,
+        _call_label(call_sid),
+        type(error).__name__,
+    )
 
 
 def _safe_urgent_push_body(caller_name: str = "", caller_phone: str = "") -> str:
@@ -26,9 +39,9 @@ def _safe_urgent_push_body(caller_name: str = "", caller_phone: str = "") -> str
 def _log_task_exception(task: asyncio.Task):
     if task.cancelled():
         return
-    exc = task.exception()
-    if exc:
-        logger.error(f"Background task failed: {exc}", exc_info=exc)
+    error = task.exception()
+    if error:
+        _log_safe_exception("background_task_error", error)
 
 TRANSCRIPT_THROTTLE = 1.0
 
@@ -105,8 +118,8 @@ async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid
                     # to drop the record than to write a tenant-leaking global doc.
                     if not contractor_id:
                         logger.warning(
-                            "Post-call extract has no contractor_id; skipping caller_contact upsert "
-                            f"({redact_phone(caller_phone)})"
+                            "media_event event=contact_upsert_skipped "
+                            "reason=missing_contractor"
                         )
                     else:
                         from app.db.contacts import (
@@ -151,14 +164,14 @@ async def _post_call_extract(transcript_lines: list, caller_phone: str, call_sid
                             }
                             await _upsert_caller_contact(contractor_id, caller_phone, new_contact, merge=False)
 
-                        logger.info(f"Contact saved: {caller_name[:1] if caller_name else ''}*** ({redact_phone(caller_phone)})")
+                        logger.info("media_event event=contact_saved")
 
                     # Also update RTDB active call with the name (for the iOS app to display)
                     if caller_name:
                         await update_active_call(call_sid, {"caller_name": caller_name})
 
-    except Exception as e:
-        logger.warning(f"Post-call extraction failed: {e}")
+    except Exception as error:
+        _log_safe_exception("post_call_extraction_error", error, call_sid)
 
 
 @router.websocket("/media-stream/{call_sid}")
@@ -167,7 +180,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     # Accept the WebSocket first — Twilio sends custom parameters in the `start` message
     await websocket.accept()
-    logger.info(f"Media stream connected: {call_sid}")
+    logger.info("media_event event=stream_connected call=%s", _call_label(call_sid))
 
     # Wait for the Twilio `start` event to get the ws_token from customParameters
     ws_token = ""
@@ -183,8 +196,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 ws_token = msg.get("start", {}).get("customParameters", {}).get("ws_token", "")
                 start_stream_sid = msg.get("streamSid", "")
                 break
-    except Exception as e:
-        logger.error(f"Failed to receive start event for {call_sid}: {e}")
+    except Exception as error:
+        _log_safe_exception("start_event_error", error, call_sid)
         await websocket.close(code=1008)
         return
 
@@ -201,16 +214,22 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             if call_data:
                 break
             await asyncio.sleep(0.5)
-    except Exception as e:
-        logger.error(f"RTDB lookup failed for {call_sid}: {e}")
+    except Exception as error:
+        _log_safe_exception("rtdb_lookup_error", error, call_sid)
 
     # Verify the token matches what we stored in RTDB for this call.
     if not call_data or not call_data.get("ws_token"):
-        logger.warning(f"WebSocket: no RTDB record or ws_token for {call_sid} — rejecting")
+        logger.warning(
+            "media_event event=stream_auth_rejected call=%s reason=missing_record",
+            _call_label(call_sid),
+        )
         await websocket.close(code=1008)
         return
     if not ws_token or ws_token != call_data["ws_token"]:
-        logger.warning(f"WebSocket: invalid token for {call_sid} — rejecting")
+        logger.warning(
+            "media_event event=stream_auth_rejected call=%s reason=invalid_token",
+            _call_label(call_sid),
+        )
         await websocket.close(code=1008)
         return
 
@@ -258,8 +277,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 "streamSid": stream_sid,
                 "media": {"payload": payload_b64},
             })
-        except Exception as e:
-            logger.warning(f"Error sending audio to Twilio: {e}")
+        except Exception as error:
+            _log_safe_exception("twilio_audio_send_error", error, call_sid)
 
     async def on_clear_audio():
         """Clear Twilio's outbound audio buffer (used during barge-in)."""
@@ -272,8 +291,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 "streamSid": stream_sid,
             })
             logger.info("Cleared Twilio audio buffer (barge-in)")
-        except Exception as e:
-            logger.warning(f"Error clearing Twilio audio: {e}")
+        except Exception as error:
+            _log_safe_exception("twilio_audio_clear_error", error, call_sid)
 
     call_redirected = False  # Set when call is accepted/redirected to conference
 
@@ -284,7 +303,10 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         """
         nonlocal call_redirected
         if call_redirected:
-            logger.info(f"Call {call_sid} redirected to conference — skipping hangup")
+            logger.info(
+                "media_event event=hangup_skipped call=%s reason=conference_redirect",
+                _call_label(call_sid),
+            )
             return
         try:
             from twilio.rest import Client
@@ -295,9 +317,9 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                     twiml="<Response><Hangup/></Response>"
                 )
             )
-            logger.info(f"Call {call_sid} hung up after goodbye")
-        except Exception as e:
-            logger.warning(f"Error hanging up call: {e}")
+            logger.info("media_event event=call_hung_up call=%s", _call_label(call_sid))
+        except Exception as error:
+            _log_safe_exception("call_hangup_error", error, call_sid)
 
     async def on_transcript(speaker: str, text: str):
         """Transcript update — both Kevin and Caller sides."""
@@ -371,7 +393,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 caller_name=caller_name,
             )
 
-        logger.info(f"Urgency escalation sent for call {call_sid}")
+        logger.info("media_event event=urgency_escalated call=%s", _call_label(call_sid))
 
     MAX_CALL_DURATION = 5400  # 90 minutes in seconds
 
@@ -382,7 +404,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             logger.error("No stream_sid from Twilio start event")
             await websocket.close()
             return
-        logger.info(f"Twilio stream started: {stream_sid}")
+        logger.info("media_event event=twilio_stream_started call=%s", _call_label(call_sid))
 
         # Select voice pipeline based on contractor config
         voice_engine = contractor_config_loaded.get("voice_engine", "elevenlabs")
@@ -400,7 +422,10 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 caller_phone=active_call.caller_phone if active_call else "",
                 call_started_at=media_stream_started_at,
             )
-            logger.info(f"Using Gemini Live pipeline for call {call_sid}")
+            logger.info(
+                "media_event event=pipeline_selected call=%s engine=gemini",
+                _call_label(call_sid),
+            )
         else:
             pipeline = VoicePipeline(
                 on_audio_out=on_audio_out,
@@ -412,7 +437,10 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 contractor_config=contractor_config_loaded,
                 caller_phone=active_call.caller_phone if active_call else "",
             )
-            logger.info(f"Using ElevenLabs pipeline for call {call_sid}")
+            logger.info(
+                "media_event event=pipeline_selected call=%s engine=elevenlabs",
+                _call_label(call_sid),
+            )
         started = await pipeline.start()
         if not started:
             logger.error("Failed to start voice pipeline — closing stream")
@@ -431,11 +459,15 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
             # Max call duration safeguard (90 minutes)
             if time.time() - call_start_time > MAX_CALL_DURATION:
-                logger.info(f"Max call duration ({MAX_CALL_DURATION}s) reached for {call_sid} — ending call")
+                logger.info(
+                    "media_event event=max_duration call=%s seconds=%s",
+                    _call_label(call_sid),
+                    MAX_CALL_DURATION,
+                )
                 try:
                     await pipeline._speak("I'm sorry, we've reached the maximum call duration. Goodbye.")
-                except Exception as e:
-                    logger.warning(f"Failed to speak max duration message: {e}")
+                except Exception as error:
+                    _log_safe_exception("max_duration_speech_error", error, call_sid)
                 await on_call_complete()
                 break
 
@@ -471,8 +503,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                     logger.info("Twilio stream stopped")
                 break
 
-    except Exception as e:
-        logger.error(f"Media stream error: {e}", exc_info=True)
+    except Exception as error:
+        _log_safe_exception("stream_error", error, call_sid)
 
     finally:
         try:
@@ -517,4 +549,4 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             ))
             task.add_done_callback(_log_task_exception)
 
-        logger.info(f"Media stream closed: {call_sid}")
+        logger.info("media_event event=stream_closed call=%s", _call_label(call_sid))

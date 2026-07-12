@@ -15,7 +15,9 @@ import websockets
 from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.voice_pipeline import (
+    _call_label,
     _log_tool_execution_failure,
+    _tool_label,
     _tool_execution_error_response,
     build_system_prompt,
     is_owner_availability_hold,
@@ -697,9 +699,9 @@ class GeminiPipeline:
             call_id = fc.get("id", "")
 
             logger.info(
-                "Gemini tool call: %s call_sid=%s",
-                tool_name,
-                self._call_sid,
+                "voice_event event=tool_call call=%s tool=%s",
+                _call_label(self._call_sid),
+                _tool_label(tool_name),
             )
 
             try:

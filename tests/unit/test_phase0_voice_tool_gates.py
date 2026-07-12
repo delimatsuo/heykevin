@@ -330,7 +330,8 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
         }
     ]
     assert created == []
-    assert "Gemini tool call: book_appointment call_sid=CA-GEMINI-PRIVACY" in caplog.text
+    assert "voice_event event=tool_call call=CA-GEMIN tool=book_appointment" in caplog.text
+    assert "CA-GEMINI-PRIVACY" not in caplog.text
     for sensitive_value in (
         "Jane Private",
         "123 Secret Lane",
@@ -339,6 +340,40 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
         "client-sensitive",
     ):
         assert sensitive_value not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gemini_tool_log_allowlists_provider_tool_name(monkeypatch, caplog):
+    from app.services.voice_pipeline import VoicePipeline
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    async def fake_execute_tool(_self, _tool_name, _tool_input):
+        return json.dumps({"error": "Unavailable"})
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute_tool)
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA-GEMINI-PRIVATE-LONG",
+        contractor_config={"contractor_id": "c1"},
+    )
+    pipeline._ws = FakeWebSocket()
+    provider_tool_name = "private_tool\nforged_event"
+
+    with caplog.at_level(logging.INFO):
+        await pipeline._handle_tool_calls(
+            [{"id": "tool-1", "name": provider_tool_name, "args": {}}]
+        )
+
+    assert "voice_event event=tool_call call=CA-GEMIN tool=unknown" in caplog.text
+    assert provider_tool_name not in caplog.text
+    assert "CA-GEMINI-PRIVATE-LONG" not in caplog.text
 
 
 @pytest.mark.asyncio

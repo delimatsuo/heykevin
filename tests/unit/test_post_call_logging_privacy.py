@@ -30,7 +30,7 @@ async def test_post_call_failure_log_excludes_transcript_and_exception_message(
     monkeypatch.setattr(post_call, "_process_business", fail_business)
     caplog.set_level(logging.INFO, logger="app.services.post_call")
 
-    await post_call.process_post_call(
+    result = await post_call.process_post_call(
         transcript_lines=[private_transcript],
         caller_phone="test-caller-number",
         call_sid="CA1234567890FULL",
@@ -44,7 +44,9 @@ async def test_post_call_failure_log_excludes_transcript_and_exception_message(
     assert "CA1234567890FULL" not in messages
     assert private_transcript not in messages
     assert private_error not in messages
-    assert caplog.records[-1].levelno == logging.ERROR
+    assert result.status == "failed"
+    assert result.failed_effects == ("processing",)
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
 def test_post_call_exception_helper_logs_type_only(caplog):

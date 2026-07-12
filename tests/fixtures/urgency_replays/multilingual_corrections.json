@@ -1,0 +1,184 @@
+[
+  {
+    "scenario": "english_active_smoke",
+    "language": "en",
+    "tags": ["active"],
+    "text": "There is smoke in the basement.",
+    "expected_signal": "smoke"
+  },
+  {
+    "scenario": "english_negated_fire",
+    "language": "en",
+    "tags": ["negation"],
+    "text": "There is no active fire.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "english_corrected_gas_report",
+    "language": "en",
+    "tags": ["correction"],
+    "text": "I thought there was a gas leak, but there is no gas leak.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "english_resolved_then_returned",
+    "language": "en",
+    "tags": ["correction", "reactivated"],
+    "text": "The gas leak was resolved but returned.",
+    "expected_signal": "gas leak"
+  },
+  {
+    "scenario": "english_negated_fire_active_smoke",
+    "language": "en",
+    "tags": ["negation", "active"],
+    "text": "There is no fire, but there is smoke.",
+    "expected_signal": "smoke"
+  },
+  {
+    "scenario": "english_fire_now_out",
+    "language": "en",
+    "tags": ["correction", "resolution"],
+    "text": "There was a fire, but it is out now.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_active_gas_leak",
+    "language": "es",
+    "tags": ["active"],
+    "text": "Hay una fuga de gas en la cocina.",
+    "expected_signal": "fuga de gas"
+  },
+  {
+    "scenario": "spanish_negated_gas_leak",
+    "language": "es",
+    "tags": ["negation"],
+    "text": "No hay fuga de gas.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_negated_emergency_active_smoke",
+    "language": "es",
+    "tags": ["negation", "active"],
+    "text": "No es una emergencia, pero hay humo en el s\u00f3tano.",
+    "expected_signal": "humo"
+  },
+  {
+    "scenario": "spanish_burst_pipe",
+    "language": "es",
+    "tags": ["active"],
+    "text": "Hay una tuber\u00eda reventada en el ba\u00f1o.",
+    "expected_signal": "tuber\u00eda reventada"
+  },
+  {
+    "scenario": "spanish_water_everywhere",
+    "language": "es",
+    "tags": ["active"],
+    "text": "Hay agua por todas partes.",
+    "expected_signal": "agua por todas partes"
+  },
+  {
+    "scenario": "spanish_electrical_sparks",
+    "language": "es",
+    "tags": ["active"],
+    "text": "El panel el\u00e9ctrico est\u00e1 echando chispas.",
+    "expected_signal": "echando chispas"
+  },
+  {
+    "scenario": "spanish_corrected_gas_report",
+    "language": "es",
+    "tags": ["correction"],
+    "text": "Pens\u00e9 que hab\u00eda una fuga de gas, pero no hay fuga de gas.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_resolved_gas_leak",
+    "language": "es",
+    "tags": ["correction", "resolution"],
+    "text": "La fuga de gas fue reparada.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_resolved_then_returned",
+    "language": "es",
+    "tags": ["correction", "reactivated"],
+    "text": "La fuga de gas fue reparada, pero ha vuelto.",
+    "expected_signal": "fuga de gas"
+  },
+  {
+    "scenario": "spanish_negated_smoke",
+    "language": "es",
+    "tags": ["negation"],
+    "text": "No hay humo.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_no_water",
+    "language": "es",
+    "tags": ["active"],
+    "text": "Estamos sin agua.",
+    "expected_signal": "sin agua"
+  },
+  {
+    "scenario": "spanish_carbon_monoxide",
+    "language": "es",
+    "tags": ["active"],
+    "text": "Hay monoxido de carbono en la casa.",
+    "expected_signal": "monoxido de carbono"
+  },
+  {
+    "scenario": "spanish_no_water_common_phrase",
+    "language": "es",
+    "tags": ["active"],
+    "text": "No hay agua.",
+    "expected_signal": "no hay agua"
+  },
+  {
+    "scenario": "spanish_not_without_water",
+    "language": "es",
+    "tags": ["negation"],
+    "text": "No estamos sin agua.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_active_gas_smell",
+    "language": "es",
+    "tags": ["active"],
+    "text": "Huele a gas en la cocina.",
+    "expected_signal": "huele a gas"
+  },
+  {
+    "scenario": "spanish_negated_gas_smell",
+    "language": "es",
+    "tags": ["negation"],
+    "text": "No huele a gas.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "spanish_controlled_fire_spreading",
+    "language": "es",
+    "tags": ["correction", "reactivated"],
+    "text": "El incendio est\u00e1 controlado, pero se est\u00e1 extendiendo.",
+    "expected_signal": "incendio"
+  },
+  {
+    "scenario": "spanish_no_signs_of_gas",
+    "language": "es",
+    "tags": ["negation"],
+    "text": "No hay indicios de fuga de gas.",
+    "expected_signal": null
+  },
+  {
+    "scenario": "english_cross_signal_negation",
+    "language": "en",
+    "tags": ["correction", "active"],
+    "text": "There is a gas leak, but there is no fire.",
+    "expected_signal": "gas leak"
+  },
+  {
+    "scenario": "spanish_cross_signal_negation",
+    "language": "es",
+    "tags": ["correction", "active"],
+    "text": "Hay una fuga de gas, pero no hay fuego.",
+    "expected_signal": "fuga de gas"
+  }
+]

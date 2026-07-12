@@ -1800,7 +1800,195 @@ async def test_gemini_failed_receive_reconnect_disconnects_and_completes_call(mo
 
 
 @pytest.mark.asyncio
-async def test_gemini_drops_inbound_audio_while_reconnecting():
+async def test_gemini_buffers_and_replays_inbound_audio_while_reconnecting(monkeypatch):
+    sent = []
+
+    class RecordingWebSocket:
+        async def send(self, payload):
+            sent.append(json.loads(payload))
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._reconnecting = True
+    pipeline._ws = RecordingWebSocket()
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.mulaw_to_pcm16k",
+        lambda chunk: chunk,
+    )
+
+    await pipeline.process_audio_in(b"first caller frame")
+    await pipeline.process_audio_in(b"second caller frame")
+
+    assert sent == []
+    assert pipeline._reconnect_audio_buffer_bytes == 37
+
+    flushed = await pipeline._flush_reconnect_audio()
+
+    assert flushed is True
+    assert pipeline._reconnecting is False
+    assert pipeline._reconnect_audio_buffer_bytes == 0
+    replayed_audio = [
+        base64.b64decode(payload["realtime_input"]["audio"]["data"])
+        for payload in sent
+    ]
+    assert replayed_audio == [b"first caller frame", b"second caller frame"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_reconnect_replays_buffered_audio_before_new_live_frames(monkeypatch):
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+    sent = []
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.mulaw_to_pcm16k",
+        lambda chunk: chunk,
+    )
+
+    class RecordingWebSocket:
+        async def send(self, payload):
+            data = base64.b64decode(
+                json.loads(payload)["realtime_input"]["audio"]["data"]
+            )
+            if data == b"buffered caller frame":
+                replay_started.set()
+                await release_replay.wait()
+            sent.append(data)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+
+    async def fake_start(**_kwargs):
+        pipeline._ws = RecordingWebSocket()
+        start_entered.set()
+        await release_start.wait()
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
+    recovery_task = asyncio.create_task(
+        pipeline._recover_receive_loop(close_websocket=False)
+    )
+    await asyncio.wait_for(start_entered.wait(), timeout=1)
+    await pipeline.process_audio_in(b"buffered caller frame")
+
+    release_start.set()
+    await asyncio.wait_for(replay_started.wait(), timeout=1)
+    live_send_task = asyncio.create_task(
+        pipeline.process_audio_in(b"new live caller frame")
+    )
+    await asyncio.sleep(0)
+
+    assert not live_send_task.done()
+
+    release_replay.set()
+    await asyncio.wait_for(recovery_task, timeout=1)
+    await asyncio.wait_for(live_send_task, timeout=1)
+
+    assert sent == [b"buffered caller frame", b"new live caller frame"]
+    assert pipeline._reconnecting is False
+
+
+@pytest.mark.asyncio
+async def test_gemini_reconnect_audio_overflow_fails_closed_without_payload_log(
+    caplog,
+):
+    private_frame = b"private caller frame"
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._reconnecting = True
+    pipeline.MAX_RECONNECT_AUDIO_BUFFER_BYTES = len(private_frame) - 1
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline.process_audio_in(private_frame)
+    replayed = await pipeline._flush_reconnect_audio()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert replayed is False
+    assert pipeline._reconnecting is True
+    assert pipeline._reconnect_audio_buffer_bytes == 0
+    assert list(pipeline._reconnect_audio_buffer) == []
+    assert "voice_timing event=inbound_reconnect_audio_overflow" in messages
+    assert private_frame.decode() not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_cancelled_reconnect_discards_buffer_before_resuming(monkeypatch):
+    start_entered = asyncio.Event()
+    hold_start = asyncio.Event()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+
+    async def blocked_start(**_kwargs):
+        start_entered.set()
+        await hold_start.wait()
+        return True
+
+    monkeypatch.setattr(pipeline, "start", blocked_start)
+    recovery_task = asyncio.create_task(
+        pipeline._recover_receive_loop(close_websocket=False)
+    )
+    await asyncio.wait_for(start_entered.wait(), timeout=1)
+    await pipeline.process_audio_in(b"buffered caller frame")
+
+    recovery_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await recovery_task
+
+    assert pipeline._reconnecting is False
+    assert pipeline._reconnect_audio_buffer_bytes == 0
+    assert list(pipeline._reconnect_audio_buffer) == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_waiting_inbound_frame_is_not_sent_after_disconnect():
     sent = []
 
     class RecordingWebSocket:
@@ -1820,10 +2008,14 @@ async def test_gemini_drops_inbound_audio_while_reconnecting():
         contractor_config=_plumbing_config(),
     )
     pipeline._connected = True
-    pipeline._reconnecting = True
     pipeline._ws = RecordingWebSocket()
+    await pipeline._inbound_audio_lock.acquire()
+    send_task = asyncio.create_task(pipeline.process_audio_in(b"caller frame"))
+    await asyncio.sleep(0)
 
-    await pipeline.process_audio_in(b"caller audio")
+    pipeline._connected = False
+    pipeline._inbound_audio_lock.release()
+    await asyncio.wait_for(send_task, timeout=1)
 
     assert sent == []
 

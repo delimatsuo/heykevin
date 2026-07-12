@@ -1501,6 +1501,40 @@ async def test_gemini_interrupted_response_logs_terminal_without_payload(caplog)
 
 
 @pytest.mark.asyncio
+async def test_gemini_stop_logs_inflight_response_terminal_once(caplog):
+    private_text = "private shutdown response sentinel"
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._response_turn_number = 3
+    pipeline._response_first_audio_at = time.monotonic()
+    pipeline._generated_audio_ms = 625
+    pipeline._kevin_transcript_buf = [private_text]
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline.stop()
+    await pipeline.stop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=model_turn_interrupted") == 1
+    assert "turn=3" in messages
+    assert "generated_audio_ms=625" in messages
+    assert private_text not in messages
+    assert pipeline._response_first_audio_at == 0.0
+    assert pipeline._generated_audio_ms == 0
+
+
+@pytest.mark.asyncio
 async def test_gemini_barge_in_resets_caller_silence_state():
     async def noop_audio(_chunk: bytes):
         return None

@@ -556,6 +556,7 @@ class GeminiPipeline:
         self._audio_input_ready.set()
         self._reconnecting = False
         self._interrupt_speaking = True
+        self._log_interrupted_response_turn()
         if self._silence_check_task:
             self._silence_check_task.cancel()
         if self._unavailable_task:

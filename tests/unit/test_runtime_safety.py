@@ -49,6 +49,23 @@ def test_staging_accepts_isolated_resources(monkeypatch):
     config.validate_runtime_safety()
 
 
+def test_staging_rejects_production_apns_endpoint(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setattr(config.settings, "environment", "staging")
+    monkeypatch.setattr(config.settings, "cloud_run_url", "https://kevin-api-staging.example.run.app")
+    monkeypatch.setattr(config.settings, "firestore_project_id", "kevin-staging")
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        "https://kevin-staging-rtdb.firebaseio.com",
+    )
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_STAGING")
+    monkeypatch.setattr(config.settings, "apns_sandbox", False)
+
+    with pytest.raises(RuntimeError, match="APNS_SANDBOX must be true"):
+        config.validate_runtime_safety()
+
+
 def test_production_requires_production_billing_and_push(monkeypatch):
     monkeypatch.setattr(config.settings, "environment", "production")
     monkeypatch.setattr(config.settings, "appstore_environment", "sandbox")
@@ -88,3 +105,21 @@ def test_development_allows_missing_transcript_encryption_key(monkeypatch):
     monkeypatch.setattr(config.settings, "transcript_encryption_key", "")
 
     config.validate_runtime_safety()
+
+
+def test_production_requires_explicit_twilio_account_boundary(monkeypatch):
+    monkeypatch.setattr(config.settings, "environment", "production")
+    monkeypatch.setattr(config.settings, "appstore_environment", "production")
+    monkeypatch.setattr(config.settings, "apns_sandbox", False)
+    monkeypatch.setattr(config.settings, "cloud_run_url", config.PRODUCTION_CLOUD_RUN_URL)
+    monkeypatch.setattr(config.settings, "firestore_project_id", config.PRODUCTION_GCP_PROJECT_ID)
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        config.PRODUCTION_FIREBASE_DATABASE_URL,
+    )
+    monkeypatch.setattr(config.settings, "production_twilio_account_sid", "")
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_ACTIVE")
+
+    with pytest.raises(RuntimeError, match="PRODUCTION_TWILIO_ACCOUNT_SID is required"):
+        config.validate_runtime_safety()

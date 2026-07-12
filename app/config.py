@@ -163,15 +163,16 @@ def validate_runtime_safety() -> None:
             errors.append("CLOUD_RUN_URL must not point at staging when ENVIRONMENT=production")
         if settings.firestore_project_id and settings.firestore_project_id != PRODUCTION_GCP_PROJECT_ID:
             errors.append("FIRESTORE_PROJECT_ID must be the production project when ENVIRONMENT=production")
-        if (
-            settings.production_twilio_account_sid
-            and settings.twilio_account_sid != settings.production_twilio_account_sid
-        ):
+        if not settings.production_twilio_account_sid:
+            errors.append("PRODUCTION_TWILIO_ACCOUNT_SID is required in production")
+        elif settings.twilio_account_sid != settings.production_twilio_account_sid:
             errors.append("TWILIO_ACCOUNT_SID must be the production account when ENVIRONMENT=production")
 
     if env in {"development", "staging"} and not settings.allow_production_resources_in_non_production:
         if settings.appstore_environment == "production":
             errors.append("APPSTORE_ENVIRONMENT must not be production outside ENVIRONMENT=production")
+        if not settings.apns_sandbox:
+            errors.append("APNS_SANDBOX must be true outside ENVIRONMENT=production")
         if settings.cloud_run_url == PRODUCTION_CLOUD_RUN_URL:
             errors.append("CLOUD_RUN_URL must not be the production URL outside ENVIRONMENT=production")
         if not settings.firestore_project_id:

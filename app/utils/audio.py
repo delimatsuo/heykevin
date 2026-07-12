@@ -8,6 +8,11 @@ Gemini outputs: PCM 16-bit 24kHz mono
 import audioop
 
 
+def mulaw_to_pcm8k(mulaw_8k: bytes) -> bytes:
+    """Decode mulaw 8kHz to 16-bit linear PCM at 8kHz."""
+    return audioop.ulaw2lin(mulaw_8k, 2)
+
+
 def mulaw_to_pcm16k(mulaw_8k: bytes) -> bytes:
     """Decode mulaw 8kHz to linear PCM 16kHz for Gemini input.
 
@@ -15,7 +20,7 @@ def mulaw_to_pcm16k(mulaw_8k: bytes) -> bytes:
     1. mulaw -> linear PCM 16-bit at 8kHz
     2. Upsample 8kHz -> 16kHz
     """
-    pcm_8k = audioop.ulaw2lin(mulaw_8k, 2)
+    pcm_8k = mulaw_to_pcm8k(mulaw_8k)
     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
     return pcm_16k
 

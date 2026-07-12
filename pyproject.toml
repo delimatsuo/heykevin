@@ -20,6 +20,7 @@ dependencies = [
     "google-cloud-tasks==2.21.0",
     "google-cloud-logging==3.12.1",
     "slowapi==0.1.9",
+    "webrtcvad-wheels==2.0.14",
     "websockets==15.0.1",
     "PyJWT[crypto]==2.10.1",
     "python-jose[cryptography]==3.5.0",

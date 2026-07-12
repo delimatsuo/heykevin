@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import binascii
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import time
@@ -157,6 +158,7 @@ MAX_MEDIA_INGRESS_AUDIO_CHUNKS = 600
 class _TwilioIngressEvent:
     kind: str
     audio: bytes = b""
+    received_at: float = 0.0
 
 
 class _TwilioMediaIngress:
@@ -169,11 +171,13 @@ class _TwilioMediaIngress:
         call_sid: str,
         max_buffered_audio_bytes: int = MAX_MEDIA_INGRESS_AUDIO_BYTES,
         max_buffered_audio_chunks: int = MAX_MEDIA_INGRESS_AUDIO_CHUNKS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._websocket = websocket
         self._call_sid = call_sid
         self._max_buffered_audio_bytes = max_buffered_audio_bytes
         self._max_buffered_audio_chunks = max_buffered_audio_chunks
+        self._clock = clock
         # Two reserved slots guarantee stop and close signals cannot be starved.
         self._queue: asyncio.Queue[_TwilioIngressEvent | None] = asyncio.Queue(
             maxsize=max_buffered_audio_chunks + 2
@@ -230,6 +234,7 @@ class _TwilioMediaIngress:
                     break
                 if kind != "media":
                     continue
+                received_at = self._clock()
 
                 media = data.get("media", {})
                 if not isinstance(media, dict):
@@ -272,7 +277,11 @@ class _TwilioMediaIngress:
                     break
 
                 self._queue.put_nowait(
-                    _TwilioIngressEvent(kind="media", audio=audio)
+                    _TwilioIngressEvent(
+                        kind="media",
+                        audio=audio,
+                        received_at=received_at,
+                    )
                 )
                 self.buffered_audio_bytes = attempted_bytes
                 self.buffered_audio_chunks = attempted_chunks
@@ -345,7 +354,10 @@ async def _consume_twilio_ingress(
             await on_max_duration()
             return "max_duration"
         if event.kind == "media":
-            await pipeline.process_audio_in(event.audio)
+            await pipeline.process_audio_in(
+                event.audio,
+                received_at=event.received_at,
+            )
         elif event.kind == "stop":
             await on_stream_stop()
             return "stop"

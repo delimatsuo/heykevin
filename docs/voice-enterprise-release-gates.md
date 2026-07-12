@@ -71,6 +71,31 @@ and cannot satisfy the response-latency gates. Until a prerecorded canary or a
 calibrated shadow VAD supplies `speech_end_to_first_audio_ms`, the evaluator
 must fail validated response-latency coverage.
 
+The current candidate also runs a local WebRTC VAD over bounded 20 ms Twilio
+audio frames. This path is shadow observability only: Gemini automatic activity
+detection remains authoritative, no manual activity signals are sent, and a
+classifier failure disables only shadow metrics. The pipeline preserves the
+original Twilio ingress timestamp and emits payload-free activity boundaries,
+overlap or association outcomes, and `speech_end_to_twilio_ms` only after the
+first response audio chunk is accepted by the Twilio callback.
+
+`shadow_response_start` has an independent ordinal created from the first model
+audio part, so provider transcription ordering cannot hide a response from the
+shadow denominator. The deterministic greeting is excluded. A timing outcome
+can bind only to `last_ended_segment` and `last_ended_at`; active or newer caller
+activity is reported as overlap instead of a completed endpoint.
+
+The evaluator reports shadow delivery and total-outcome coverage, p95/max
+timing, overlap, unassociated and missing outcomes, duplicate events,
+contradictory outcomes, orphan outcomes, invalid ordinals, and classifier errors
+under `diagnostics`. None of those fields satisfy
+`validated_response_latency_coverage_rate`. Treat coverage and integrity as
+calibration evidence; do not interpret a low-coverage timing percentile as
+representative performance. Promotion requires a labeled prerecorded corpus to
+establish speech-boundary bias and false positive/negative rates across quiet
+speech, background noise, pauses, accents, languages, and Twilio frame
+fragmentation before the shadow metric can be renamed or used as a gate.
+
 `gemini_usage_snapshot` contains cumulative numeric counters for one Gemini
 session. It is payload-free, may be duplicated by the provider, and must not be
 attributed to an individual response turn. The 120-token output limit is an
@@ -91,6 +116,7 @@ caller turns across this matrix:
 | Five deliberate interruptions | Every Twilio clear has a unique ordinal, is acknowledged and in budget, and any started response has an interrupted terminal marker; no stale words or transcript side effects survive. |
 | Short answers and corrections | Kevin accepts corrections and does not repeat answered questions. |
 | Background noise and pauses | No false hangup, duplicate prompt, or sustained talk-over. |
+| Shadow VAD calibration | Compare labeled caller speech boundaries with shadow delivery, overlap, unassociated, and error diagnostics; do not alter Gemini activity control. |
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the voice-only candidate path. |
 | Reconnect simulation | Old Kevin output is absent; buffered caller audio replays in order before new live frames. |
 | Oversized response simulation | Queued audio stays bounded; stale output clears; one short retry is requested. |

@@ -601,7 +601,12 @@ class VoicePipeline:
         await self._audio_input_ready.wait()
         return self._connected
 
-    async def process_audio_in(self, mulaw_bytes: bytes):
+    async def process_audio_in(
+        self,
+        mulaw_bytes: bytes,
+        *,
+        received_at: float | None = None,
+    ):
         """Feed caller audio to Deepgram. Always — full-duplex."""
         if self._deepgram_ws and self._connected:
             try:

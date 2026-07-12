@@ -7,10 +7,11 @@ Audio conversion at boundaries: mulaw 8kHz (Twilio) <-> PCM 16kHz/24kHz (Gemini)
 import asyncio
 import base64
 from collections import deque
+from dataclasses import dataclass
 import json
 import logging
 import time
-from typing import Callable, Awaitable, Optional
+from typing import Callable, Awaitable, Optional, Protocol
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -46,6 +47,48 @@ GEMINI_VOICES = {
 GEMINI_VOICE_DEFAULT = "Puck"
 
 GEMINI_MODEL = "gemini-2.5-flash-native-audio-latest"
+
+
+class _CallerActivityEvent(Protocol):
+    kind: str
+    segment: int
+    at: float
+
+
+class _CallerActivityTracker(Protocol):
+    @property
+    def segment(self) -> int: ...
+
+    @property
+    def last_voiced_at(self) -> float: ...
+
+    @property
+    def currently_voiced(self) -> bool: ...
+
+    @property
+    def active(self) -> bool: ...
+
+    @property
+    def last_ended_segment(self) -> int: ...
+
+    @property
+    def last_ended_at(self) -> float: ...
+
+    def process_mulaw(
+        self,
+        mulaw_bytes: bytes,
+        *,
+        received_at: float,
+    ) -> tuple[_CallerActivityEvent, ...]: ...
+
+    def reset(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ShadowResponseContext:
+    kind: str
+    segment: int
+    speech_end_at: float = 0.0
 
 
 def _gemini_ws_url() -> str:
@@ -159,7 +202,9 @@ class GeminiPipeline:
         self._barge_in_number = 0
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
-        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue()
+        self._audio_queue: asyncio.Queue[tuple[bytes, float, int, int]] = (
+            asyncio.Queue()
+        )
         self._queued_audio_bytes = 0
         self._audio_backlog_overflowed = False
         self._audio_backlog_recoveries = 0
@@ -175,6 +220,14 @@ class GeminiPipeline:
         self._audio_chunks_sent = 0
         self._usage_session_number = 0
         self._last_usage_snapshot: tuple[tuple[str, int], ...] | None = None
+        self._caller_activity_error_logged = False
+        self._caller_activity_tracker = self._create_caller_activity_tracker()
+        self._shadow_response_number = 0
+        self._shadow_active_response_turn: int | None = None
+        self._shadow_response_contexts: dict[int, _ShadowResponseContext] = {}
+        self._shadow_outcome_turns: set[int] = set()
+        self._last_shadow_segment_bound = 0
+        self._shadow_ignore_model_turn = False
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -348,6 +401,7 @@ class GeminiPipeline:
         """Ask Gemini to speak the deterministic greeting and nothing else."""
         greeting_text = self._build_greeting_text()
         prompt = f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
+        self._shadow_ignore_model_turn = True
         await self._ws.send(json.dumps({
             "client_content": {
                 "turns": [
@@ -493,8 +547,19 @@ class GeminiPipeline:
         await self._audio_input_ready.wait()
         return self._connected
 
-    async def process_audio_in(self, mulaw_bytes: bytes):
+    async def process_audio_in(
+        self,
+        mulaw_bytes: bytes,
+        *,
+        received_at: float | None = None,
+    ):
         """Convert mulaw 8kHz -> PCM 16kHz and send to Gemini."""
+        self._observe_caller_activity(
+            mulaw_bytes,
+            received_at=(
+                time.monotonic() if received_at is None else received_at
+            ),
+        )
         if not self._connected:
             return
         try:
@@ -635,6 +700,8 @@ class GeminiPipeline:
         self._invalidate_tool_task("stop")
         if self._audio_playout_task:
             self._audio_playout_task.cancel()
+        self._finish_shadow_model_turn(discard_pending=True)
+        self._reset_shadow_caller_activity()
         await self._discard_reconnect_audio("stop", end_reconnect=True)
         await self._clear_audio_queue()
         if self._ws:
@@ -701,6 +768,7 @@ class GeminiPipeline:
                 dropped_chunks = await self._clear_audio_queue()
                 clear_succeeded = await self._request_remote_audio_clear()
                 self._interrupt_speaking = False
+            self._finish_shadow_model_turn(discard_pending=True)
             self._log_voice_timing(
                 "reconnect_output_clear",
                 clear_ms=self._elapsed_ms(clear_started_at),
@@ -825,9 +893,13 @@ class GeminiPipeline:
                     if inline_data.get("mimeType", "").startswith("audio/"):
                         audio_b64 = inline_data.get("data", "")
                         if audio_b64:
+                            shadow_response_turn = self._start_shadow_response()
                             self._log_response_start_latency()
                             pcm_24k = base64.b64decode(audio_b64)
-                            await self._enqueue_model_audio(pcm_24k)
+                            await self._enqueue_model_audio(
+                                pcm_24k,
+                                shadow_response_turn=shadow_response_turn,
+                            )
 
                 # Buffer Kevin's transcript fragments (sent word-by-word)
                 output_text = self._extract_transcript(server_content, "output")
@@ -843,6 +915,9 @@ class GeminiPipeline:
                 if server_content.get("turnComplete"):
                     overflowed_turn = self._audio_backlog_overflowed
                     interrupted_turn = self._interrupt_speaking
+                    self._finish_shadow_model_turn(
+                        discard_pending=(overflowed_turn or interrupted_turn),
+                    )
                     if interrupted_turn:
                         # Gemini sends interrupted -> turnComplete for a cut-off turn.
                         # Invalidate output received between those two events before
@@ -966,7 +1041,12 @@ class GeminiPipeline:
             return
         self._audio_playout_task = asyncio.create_task(self._audio_playout_loop())
 
-    async def _enqueue_model_audio(self, pcm_24k: bytes):
+    async def _enqueue_model_audio(
+        self,
+        pcm_24k: bytes,
+        *,
+        shadow_response_turn: int = 0,
+    ):
         """Convert Gemini PCM output and enqueue it for paced Twilio playback."""
         mulaw_chunk = pcm24k_to_mulaw(pcm_24k)
         if not mulaw_chunk:
@@ -985,7 +1065,12 @@ class GeminiPipeline:
         self._ensure_audio_playout_task()
         try:
             self._audio_queue.put_nowait(
-                (mulaw_chunk, duration_seconds, self._audio_epoch)
+                (
+                    mulaw_chunk,
+                    duration_seconds,
+                    self._audio_epoch,
+                    shadow_response_turn,
+                )
             )
         except asyncio.QueueFull:
             await self._handle_audio_backlog_overflow(
@@ -1031,7 +1116,12 @@ class GeminiPipeline:
         """
         try:
             while self._connected:
-                mulaw_chunk, duration_seconds, audio_epoch = await self._audio_queue.get()
+                (
+                    mulaw_chunk,
+                    duration_seconds,
+                    audio_epoch,
+                    shadow_response_turn,
+                ) = await self._audio_queue.get()
                 self._queued_audio_bytes = max(
                     0,
                     self._queued_audio_bytes - len(mulaw_chunk),
@@ -1052,6 +1142,9 @@ class GeminiPipeline:
                             if self.on_call_complete:
                                 await self.on_call_complete()
                             return
+                        self._log_shadow_response_audio_delivery(
+                            shadow_response_turn
+                        )
                         if not self._first_outbound_audio_logged:
                             self._first_outbound_audio_logged = True
                             self._log_voice_timing(
@@ -1197,6 +1290,256 @@ class GeminiPipeline:
             call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
         )
         self._response_start_latency_logged = True
+
+    def _create_caller_activity_tracker(
+        self,
+    ) -> _CallerActivityTracker | None:
+        try:
+            from app.services.caller_activity import CallerActivityTracker
+
+            return CallerActivityTracker()
+        except Exception as exc:
+            self._caller_activity_error_logged = True
+            self._log_voice_timing(
+                "shadow_caller_activity_error",
+                level=logging.WARNING,
+                exception_type=type(exc).__name__,
+            )
+            return None
+
+    def _observe_caller_activity(
+        self,
+        mulaw_bytes: bytes,
+        *,
+        received_at: float,
+    ) -> None:
+        """Observe caller speech for diagnostics without controlling Gemini."""
+        tracker = self._caller_activity_tracker
+        if tracker is None:
+            return
+        try:
+            events = tracker.process_mulaw(mulaw_bytes, received_at=received_at)
+            for event in events:
+                if event.kind not in {"start", "end"}:
+                    continue
+                self._log_voice_timing(
+                    f"shadow_caller_activity_{event.kind}",
+                    segment=event.segment,
+                    call_elapsed_ms=max(
+                        0,
+                        int((event.at - self._pipeline_started_at) * 1000),
+                    ),
+                )
+        except Exception as exc:
+            self._disable_shadow_caller_activity(exc)
+
+    def _start_shadow_response(self) -> int:
+        if self._shadow_ignore_model_turn:
+            return 0
+        if self._shadow_active_response_turn is not None:
+            return self._shadow_active_response_turn
+
+        self._shadow_response_number += 1
+        turn = self._shadow_response_number
+        self._shadow_active_response_turn = turn
+        self._log_voice_timing("shadow_response_start", turn=turn)
+
+        tracker = self._caller_activity_tracker
+        if tracker is None:
+            self._log_shadow_unassociated(turn, "tracker_unavailable")
+            return turn
+        try:
+            if tracker.active:
+                segment = tracker.segment
+                if segment <= 0:
+                    self._log_shadow_unassociated(
+                        turn,
+                        "invalid_active_segment",
+                    )
+                    return turn
+                self._last_shadow_segment_bound = max(
+                    self._last_shadow_segment_bound,
+                    segment,
+                )
+                self._shadow_response_contexts[turn] = (
+                    _ShadowResponseContext(
+                        kind="active",
+                        segment=segment,
+                    )
+                )
+                return turn
+
+            if tracker.currently_voiced:
+                self._log_shadow_unassociated(
+                    turn,
+                    "unconfirmed_activity",
+                )
+                return turn
+
+            segment = tracker.last_ended_segment
+            speech_end_at = tracker.last_ended_at
+            if segment <= 0 or speech_end_at <= 0:
+                self._log_shadow_unassociated(
+                    turn,
+                    "no_completed_segment",
+                )
+                return turn
+            if tracker.last_voiced_at > speech_end_at:
+                self._log_shadow_unassociated(
+                    turn,
+                    "newer_unconfirmed_activity",
+                )
+                return turn
+            if segment <= self._last_shadow_segment_bound:
+                self._log_shadow_unassociated(turn, "segment_reused")
+                return turn
+
+            self._last_shadow_segment_bound = segment
+            self._shadow_response_contexts[turn] = _ShadowResponseContext(
+                kind="completed",
+                segment=segment,
+                speech_end_at=speech_end_at,
+            )
+        except Exception as exc:
+            self._disable_shadow_caller_activity(exc)
+            self._log_shadow_unassociated(turn, "tracker_error")
+        return turn
+
+    def _finish_shadow_model_turn(self, *, discard_pending: bool) -> None:
+        turn = self._shadow_active_response_turn
+        self._shadow_active_response_turn = None
+        self._shadow_ignore_model_turn = False
+        if discard_pending and turn is not None:
+            self._shadow_response_contexts.pop(turn, None)
+
+    def _claim_shadow_outcome(self, turn: int) -> bool:
+        if turn <= 0 or turn in self._shadow_outcome_turns:
+            return False
+        self._shadow_outcome_turns.add(turn)
+        self._shadow_response_contexts.pop(turn, None)
+        return True
+
+    def _log_shadow_unassociated(self, turn: int, reason: str) -> None:
+        if not self._claim_shadow_outcome(turn):
+            return
+        self._log_voice_timing(
+            "shadow_response_unassociated",
+            turn=turn,
+            reason=reason,
+        )
+
+    def _log_shadow_overlap(self, turn: int, segment: int, reason: str) -> None:
+        if not self._claim_shadow_outcome(turn):
+            return
+        self._log_voice_timing(
+            "shadow_response_overlap",
+            turn=turn,
+            segment=segment,
+            reason=reason,
+        )
+
+    def _log_shadow_response_audio_delivery(self, turn: int) -> None:
+        if turn <= 0 or turn in self._shadow_outcome_turns:
+            return
+        context = self._shadow_response_contexts.get(turn)
+        if context is None:
+            return
+
+        if context.kind == "active":
+            self._log_shadow_overlap(
+                turn,
+                context.segment,
+                "caller_segment_active",
+            )
+            return
+
+        tracker = self._caller_activity_tracker
+        if tracker is None:
+            self._log_shadow_unassociated(turn, "tracker_unavailable")
+            return
+        try:
+            if tracker.active:
+                self._log_shadow_overlap(
+                    turn,
+                    context.segment,
+                    "newer_caller_segment_active",
+                )
+                return
+            if tracker.currently_voiced:
+                self._log_shadow_overlap(
+                    turn,
+                    context.segment,
+                    "caller_candidate_at_delivery",
+                )
+                return
+            segment = tracker.segment
+            ended_segment = tracker.last_ended_segment
+            ended_at = tracker.last_ended_at
+            if tracker.last_voiced_at > context.speech_end_at:
+                self._log_shadow_overlap(
+                    turn,
+                    context.segment,
+                    "newer_unconfirmed_activity",
+                )
+                return
+            if (
+                segment != context.segment
+                or ended_segment != context.segment
+                or ended_at != context.speech_end_at
+            ):
+                self._log_shadow_overlap(
+                    turn,
+                    context.segment,
+                    "newer_caller_activity",
+                )
+                return
+        except Exception as exc:
+            self._disable_shadow_caller_activity(exc)
+            self._log_shadow_unassociated(turn, "tracker_error")
+            return
+
+        if not self._claim_shadow_outcome(turn):
+            return
+        self._log_voice_timing(
+            "shadow_response_audio_delivery",
+            turn=turn,
+            segment=context.segment,
+            speech_end_to_twilio_ms=max(
+                0,
+                int((time.monotonic() - context.speech_end_at) * 1000),
+            ),
+        )
+
+    def _disable_shadow_caller_activity(self, exc: Exception) -> None:
+        tracker = self._caller_activity_tracker
+        self._caller_activity_tracker = None
+        self._shadow_response_contexts.clear()
+        if tracker is not None:
+            try:
+                tracker.reset()
+            except Exception:
+                pass
+        if not self._caller_activity_error_logged:
+            self._caller_activity_error_logged = True
+            self._log_voice_timing(
+                "shadow_caller_activity_error",
+                level=logging.WARNING,
+                exception_type=type(exc).__name__,
+            )
+
+    def _reset_shadow_caller_activity(self) -> None:
+        tracker = self._caller_activity_tracker
+        if tracker is not None:
+            try:
+                tracker.reset()
+            except Exception as exc:
+                self._disable_shadow_caller_activity(exc)
+        self._shadow_response_contexts.clear()
+        self._shadow_outcome_turns.clear()
+        self._shadow_response_number = 0
+        self._shadow_active_response_turn = None
+        self._last_shadow_segment_bound = 0
+        self._shadow_ignore_model_turn = False
 
     def _log_response_turn_latency(self, response_text: str) -> None:
         if self._response_first_audio_at > 0:

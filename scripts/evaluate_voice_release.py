@@ -418,6 +418,101 @@ def evaluate_voice_release(
         "transcript_to_audio_ms",
         ordinal="turn",
     )
+    shadow_start_events = _events_for_calls(
+        by_name.get("shadow_response_start", []),
+        attempted_calls,
+    )
+    shadow_delivery_events = _events_for_calls(
+        by_name.get("shadow_response_audio_delivery", []),
+        attempted_calls,
+    )
+    shadow_overlap_events = _events_for_calls(
+        by_name.get("shadow_response_overlap", []),
+        attempted_calls,
+    )
+    shadow_unassociated_events = _events_for_calls(
+        by_name.get("shadow_response_unassociated", []),
+        attempted_calls,
+    )
+    shadow_event_groups = (
+        shadow_start_events,
+        shadow_delivery_events,
+        shadow_overlap_events,
+        shadow_unassociated_events,
+    )
+    shadow_response_turn_keys = _turn_keys(shadow_start_events)
+    shadow_delivery_keys = _turn_keys(shadow_delivery_events)
+    shadow_overlap_turn_keys = _turn_keys(shadow_overlap_events)
+    shadow_unassociated_turn_keys = _turn_keys(
+        shadow_unassociated_events
+    )
+    shadow_outcome_key_sets = (
+        shadow_delivery_keys,
+        shadow_overlap_turn_keys,
+        shadow_unassociated_turn_keys,
+    )
+    shadow_outcome_keys = set().union(*shadow_outcome_key_sets)
+    shadow_contradictory_outcomes = {
+        key
+        for key in shadow_outcome_keys
+        if sum(key in keys for keys in shadow_outcome_key_sets) > 1
+    }
+    shadow_orphan_outcomes = shadow_outcome_keys - shadow_response_turn_keys
+    clean_shadow_outcome_keys = (
+        (shadow_outcome_keys & shadow_response_turn_keys)
+        - shadow_contradictory_outcomes
+    )
+    clean_shadow_delivery_keys = (
+        (shadow_delivery_keys & shadow_response_turn_keys)
+        - shadow_contradictory_outcomes
+    )
+    shadow_missing_outcomes = shadow_response_turn_keys - shadow_outcome_keys
+    shadow_duplicate_events = 0
+    shadow_invalid_events = 0
+    for event_group in shadow_event_groups:
+        event_keys = [
+            key
+            for event in event_group
+            if (key := _event_key(event, "turn")) is not None
+        ]
+        shadow_duplicate_events += len(event_keys) - len(set(event_keys))
+        shadow_invalid_events += len(event_group) - len(event_keys)
+
+    matched_shadow_delivery_events = [
+        event
+        for event in shadow_delivery_events
+        if _event_key(event, "turn") in clean_shadow_delivery_keys
+    ]
+    shadow_latency_values = _worst_numeric_values(
+        matched_shadow_delivery_events,
+        "speech_end_to_twilio_ms",
+        ordinal="turn",
+    )
+    shadow_delivery_turn_keys_with_timing = {
+        key
+        for event in matched_shadow_delivery_events
+        if (key := _event_key(event, "turn")) is not None
+        and isinstance(event.get("speech_end_to_twilio_ms"), (int, float))
+        and not isinstance(event.get("speech_end_to_twilio_ms"), bool)
+        and event["speech_end_to_twilio_ms"] >= 0
+    }
+    shadow_activity_errors = len(
+        _events_for_calls(
+            by_name.get("shadow_caller_activity_error", []),
+            attempted_calls,
+        )
+    )
+    shadow_delivery_coverage_rate = (
+        len(shadow_delivery_turn_keys_with_timing)
+        / len(shadow_response_turn_keys)
+        if shadow_response_turn_keys
+        else 0.0
+    )
+    shadow_outcome_coverage_rate = (
+        len(clean_shadow_outcome_keys) / len(shadow_response_turn_keys)
+        if shadow_response_turn_keys
+        else 0.0
+    )
     validated_response_latency_rate = (
         len(response_values) / len(response_turn_keys)
         if response_turn_keys
@@ -762,6 +857,45 @@ def evaluate_voice_release(
                 if transcript_to_audio_values
                 else None
             ),
+            "shadow_response_turns": len(shadow_response_turn_keys),
+            "shadow_response_delivery_turns": len(
+                shadow_delivery_turn_keys_with_timing
+            ),
+            "shadow_response_delivery_coverage_rate": round(
+                shadow_delivery_coverage_rate,
+                4,
+            ),
+            "shadow_response_outcome_coverage_rate": round(
+                shadow_outcome_coverage_rate,
+                4,
+            ),
+            "shadow_speech_end_to_twilio_p95_ms": _percentile(
+                shadow_latency_values,
+                0.95,
+            ),
+            "shadow_speech_end_to_twilio_max_ms": (
+                max(shadow_latency_values)
+                if shadow_latency_values
+                else None
+            ),
+            "shadow_response_overlap_turns": len(
+                shadow_overlap_turn_keys
+            ),
+            "shadow_response_unassociated_turns": len(
+                shadow_unassociated_turn_keys
+            ),
+            "shadow_response_missing_outcomes": len(
+                shadow_missing_outcomes
+            ),
+            "shadow_response_duplicate_events": shadow_duplicate_events,
+            "shadow_response_contradictory_outcomes": len(
+                shadow_contradictory_outcomes
+            ),
+            "shadow_response_orphan_outcomes": len(
+                shadow_orphan_outcomes
+            ),
+            "shadow_response_invalid_events": shadow_invalid_events,
+            "shadow_caller_activity_errors": shadow_activity_errors,
         },
         "gates": gates,
     }

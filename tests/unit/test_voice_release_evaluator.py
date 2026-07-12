@@ -127,6 +127,41 @@ def test_voice_release_evaluator_rejects_transcription_proxy_as_valid_latency():
         )
         for message in _passing_messages()
     ]
+    for call_number in range(10):
+        call = f"call{call_number:04d}"
+        for turn in range(1, 4):
+            messages.append(_event("shadow_response_start", call, turn=turn))
+            if call_number == 0 and turn in {1, 2}:
+                continue
+            messages.append(
+                _event(
+                    "shadow_response_audio_delivery",
+                    call,
+                    turn=turn,
+                    segment=turn,
+                    speech_end_to_twilio_ms=900,
+                )
+            )
+    messages.extend([
+        _event(
+            "shadow_response_overlap",
+            "call0000",
+            turn=1,
+            segment=1,
+            reason="caller_voiced_at_delivery",
+        ),
+        _event(
+            "shadow_response_unassociated",
+            "call0000",
+            turn=2,
+            reason="segment_reused",
+        ),
+        _event(
+            "shadow_caller_activity_error",
+            "call0000",
+            exception_type="RuntimeError",
+        ),
+    ])
 
     report = evaluate_voice_release(messages)
     gates = {gate["name"]: gate for gate in report["gates"]}
@@ -138,6 +173,91 @@ def test_voice_release_evaluator_rejects_transcription_proxy_as_valid_latency():
     assert gates["response_first_audio_p95_ms"]["observed"] is None
     assert report["diagnostics"]["transcript_to_audio_p95_ms"] == 1100
     assert report["diagnostics"]["transcript_to_audio_max_ms"] == 1100
+    assert report["diagnostics"]["shadow_response_delivery_turns"] == 28
+    assert (
+        report["diagnostics"]["shadow_response_delivery_coverage_rate"]
+        == 0.9333
+    )
+    assert report["diagnostics"]["shadow_response_turns"] == 30
+    assert report["diagnostics"]["shadow_response_outcome_coverage_rate"] == 1.0
+    assert report["diagnostics"]["shadow_speech_end_to_twilio_p95_ms"] == 900
+    assert report["diagnostics"]["shadow_speech_end_to_twilio_max_ms"] == 900
+    assert report["diagnostics"]["shadow_response_overlap_turns"] == 1
+    assert report["diagnostics"]["shadow_response_unassociated_turns"] == 1
+    assert report["diagnostics"]["shadow_response_missing_outcomes"] == 0
+    assert report["diagnostics"]["shadow_response_duplicate_events"] == 0
+    assert report["diagnostics"]["shadow_response_contradictory_outcomes"] == 0
+    assert report["diagnostics"]["shadow_response_orphan_outcomes"] == 0
+    assert report["diagnostics"]["shadow_response_invalid_events"] == 0
+    assert report["diagnostics"]["shadow_caller_activity_errors"] == 1
+
+
+def test_shadow_diagnostics_detect_independent_lifecycle_integrity_errors():
+    messages = _passing_messages()
+    messages.extend([
+        _event("shadow_response_start", "call0000", turn=1),
+        _event("shadow_response_start", "call0000", turn=1),
+        _event(
+            "shadow_response_audio_delivery",
+            "call0000",
+            turn=1,
+            segment=1,
+            speech_end_to_twilio_ms=800,
+        ),
+        _event(
+            "shadow_response_audio_delivery",
+            "call0000",
+            turn=1,
+            segment=1,
+            speech_end_to_twilio_ms=900,
+        ),
+        _event(
+            "shadow_response_overlap",
+            "call0000",
+            turn=1,
+            segment=1,
+            reason="newer_caller_activity",
+        ),
+        _event("shadow_response_start", "call0000", turn=2),
+        _event(
+            "shadow_response_overlap",
+            "call0000",
+            turn=2,
+            segment=2,
+            reason="caller_segment_active",
+        ),
+        _event("shadow_response_start", "call0000", turn=3),
+        _event(
+            "shadow_response_unassociated",
+            "call0000",
+            turn=3,
+            reason="no_completed_segment",
+        ),
+        _event("shadow_response_start", "call0000", turn=4),
+        _event(
+            "shadow_response_audio_delivery",
+            "call0000",
+            turn=5,
+            segment=5,
+            speech_end_to_twilio_ms=100,
+        ),
+    ])
+
+    report = evaluate_voice_release(messages)
+    diagnostics = report["diagnostics"]
+
+    assert report["status"] == "pass"
+    assert diagnostics["shadow_response_turns"] == 4
+    assert diagnostics["shadow_response_delivery_turns"] == 0
+    assert diagnostics["shadow_response_delivery_coverage_rate"] == 0.0
+    assert diagnostics["shadow_response_outcome_coverage_rate"] == 0.5
+    assert diagnostics["shadow_response_overlap_turns"] == 2
+    assert diagnostics["shadow_response_unassociated_turns"] == 1
+    assert diagnostics["shadow_response_missing_outcomes"] == 1
+    assert diagnostics["shadow_response_duplicate_events"] == 2
+    assert diagnostics["shadow_response_contradictory_outcomes"] == 1
+    assert diagnostics["shadow_response_orphan_outcomes"] == 1
+    assert diagnostics["shadow_speech_end_to_twilio_p95_ms"] is None
 
 
 def test_voice_release_evaluator_fails_any_barge_in_clear_failure():

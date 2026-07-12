@@ -17,6 +17,7 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
+from app.services.caller_activity import CallerActivityEvent
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.job_card import _build_extraction_prompt
 from app.services.vcard import generate_vcard
@@ -66,6 +67,46 @@ class _FakeGeminiWebSocket:
 
     async def close(self):
         return None
+
+
+class _ShadowTracker:
+    def __init__(
+        self,
+        *,
+        segment: int = 1,
+        last_voiced_at: float | None = None,
+        currently_voiced: bool = False,
+        active: bool = False,
+        events: tuple = (),
+        last_ended_segment: int | None = None,
+        last_ended_at: float | None = None,
+    ):
+        self.segment = segment
+        self.last_voiced_at = (
+            time.monotonic() - 0.4
+            if last_voiced_at is None
+            else last_voiced_at
+        )
+        self.currently_voiced = currently_voiced
+        self.active = active
+        self.last_ended_segment = (
+            max(0, segment - 1) if active else segment
+        ) if last_ended_segment is None else last_ended_segment
+        self.last_ended_at = (
+            self.last_voiced_at
+            if last_ended_at is None
+            else last_ended_at
+        )
+        self.events = events
+        self.processed: list[tuple[bytes, float]] = []
+        self.reset_count = 0
+
+    def process_mulaw(self, audio: bytes, *, received_at: float):
+        self.processed.append((audio, received_at))
+        return self.events
+
+    def reset(self):
+        self.reset_count += 1
 
 
 @pytest.mark.asyncio
@@ -839,6 +880,158 @@ async def test_gemini_process_audio_uses_current_realtime_audio_field():
 
 
 @pytest.mark.asyncio
+async def test_gemini_shadow_vad_receives_original_ingress_timestamp():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    tracker = _ShadowTracker()
+    pipeline._caller_activity_tracker = tracker
+    audio = b"\xff" * 160
+
+    await pipeline.process_audio_in(audio, received_at=123.25)
+
+    assert tracker.processed == [(audio, 123.25)]
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_vad_logs_only_payload_free_activity_events(caplog):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._caller_activity_tracker = _ShadowTracker(events=(
+        CallerActivityEvent(
+            kind="start",
+            segment=3,
+            at=pipeline._pipeline_started_at + 0.1,
+        ),
+        CallerActivityEvent(
+            kind="end",
+            segment=3,
+            at=pipeline._pipeline_started_at + 0.5,
+        ),
+    ))
+    private_audio = b"private shadow activity sentinel"
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline.process_audio_in(private_audio, received_at=123.25)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=shadow_caller_activity_start" in messages
+    assert "voice_timing event=shadow_caller_activity_end" in messages
+    assert "segment=3" in messages
+    assert "call_elapsed_ms=100" in messages
+    assert "call_elapsed_ms=500" in messages
+    assert private_audio.decode("ascii") not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_vad_failure_is_sanitized_and_fails_open(caplog):
+    private_error = "private classifier failure sentinel"
+
+    class FailingTracker:
+        def __init__(self):
+            self.reset_count = 0
+
+        def process_mulaw(self, _audio: bytes, *, received_at: float):
+            raise RuntimeError(private_error)
+
+        def reset(self):
+            self.reset_count += 1
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    tracker = FailingTracker()
+    websocket = _FakeGeminiWebSocket()
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._caller_activity_tracker = tracker
+    pipeline._connected = True
+    pipeline._ws = websocket
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline.process_audio_in(b"\xff" * 160, received_at=123.25)
+    await pipeline.process_audio_in(b"\xff" * 160, received_at=123.50)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert len(websocket.sent_payloads) == 2
+    assert messages.count("voice_timing event=shadow_caller_activity_error") == 1
+    assert "exception_type=RuntimeError" in messages
+    assert private_error not in messages
+    assert tracker.reset_count == 1
+    assert pipeline._caller_activity_tracker is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_vad_constructor_failure_is_sanitized_and_fails_open(
+    monkeypatch,
+    caplog,
+):
+    private_error = "private classifier constructor sentinel"
+
+    def fail_tracker_construction():
+        raise RuntimeError(private_error)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.caller_activity.CallerActivityTracker",
+        fail_tracker_construction,
+    )
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    websocket = _FakeGeminiWebSocket()
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = websocket
+
+    await pipeline.process_audio_in(b"\xff" * 160, received_at=123.25)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert pipeline._caller_activity_tracker is None
+    assert len(websocket.sent_payloads) == 1
+    assert messages.count("voice_timing event=shadow_caller_activity_error") == 1
+    assert "exception_type=RuntimeError" in messages
+    assert private_error not in messages
+
+
+@pytest.mark.asyncio
 async def test_gemini_audio_playout_is_paced_and_tracks_speaking(monkeypatch):
     sent_chunks = []
     sleep_calls = []
@@ -1056,11 +1249,20 @@ async def test_gemini_outbound_delivery_failure_is_not_counted_as_sent(monkeypat
         contractor_config=_plumbing_config(),
     )
     pipeline._connected = True
+    speech_end_at = time.monotonic() - 0.4
+    pipeline._caller_activity_tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=speech_end_at,
+    )
     caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    shadow_response_turn = pipeline._start_shadow_response()
     pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
 
     try:
-        await pipeline._enqueue_model_audio(b"model audio")
+        await pipeline._enqueue_model_audio(
+            b"model audio",
+            shadow_response_turn=shadow_response_turn,
+        )
         await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
 
         assert call_completed.is_set()
@@ -1068,6 +1270,10 @@ async def test_gemini_outbound_delivery_failure_is_not_counted_as_sent(monkeypat
         assert not pipeline._connected
         messages = "\n".join(record.getMessage() for record in caplog.records)
         assert "voice_timing event=outbound_audio_error" in messages
+        assert "voice_timing event=shadow_response_start" in messages
+        assert "voice_timing event=shadow_response_audio_delivery" not in messages
+        assert "voice_timing event=shadow_response_overlap" not in messages
+        assert "voice_timing event=shadow_response_unassociated" not in messages
         assert "model audio" not in messages
     finally:
         await pipeline.stop()
@@ -1273,7 +1479,7 @@ async def test_gemini_reconnect_discards_stale_model_output_before_new_session(m
     pipeline._caller_transcript_buf = ["I need help with a leaking faucet."]
     pipeline._kevin_transcript_buf = ["This unfinished response must not survive."]
     original_epoch = pipeline._audio_epoch
-    await pipeline._audio_queue.put((b"stale model audio", 1.0, original_epoch))
+    await pipeline._audio_queue.put((b"stale model audio", 1.0, original_epoch, 0))
 
     reconnect_calls = []
 
@@ -1423,6 +1629,352 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     assert private_caller_text not in messages
     assert private_response_text not in messages
     await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_vad_times_first_twilio_accepted_response_audio(caplog):
+    private_caller_text = "private shadow caller sentinel"
+
+    async def accept_audio(_chunk: bytes):
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = _ShadowTracker(
+        segment=4,
+        last_voiced_at=time.monotonic() - 0.4,
+    )
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({
+            "serverContent": {
+                "inputTranscription": {"text": private_caller_text}
+            }
+        }),
+        _gemini_audio_message(b"a" * 8_000),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=shadow_response_audio_delivery" in messages
+    assert "turn=1" in messages
+    assert "segment=4" in messages
+    assert "speech_end_to_twilio_ms=" in messages
+    assert "voice_timing event=shadow_response_overlap" not in messages
+    assert private_caller_text not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_response_starts_without_input_transcription(caplog):
+    accepted_chunks = []
+
+    async def accept_audio(chunk: bytes):
+        accepted_chunks.append(chunk)
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=time.monotonic() - 0.4,
+    )
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"a" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert len(accepted_chunks) == 1
+    assert messages.count("voice_timing event=shadow_response_start") == 1
+    assert messages.count("voice_timing event=shadow_response_audio_delivery") == 1
+    assert "turn=1" in messages
+    assert "voice_timing event=response_first_audio" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_response_excludes_deterministic_greeting(caplog):
+    accepted_chunks = []
+
+    async def accept_audio(chunk: bytes):
+        accepted_chunks.append(chunk)
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._shadow_ignore_model_turn = True
+    pipeline._caller_activity_tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=time.monotonic() - 0.4,
+    )
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"g" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+        _gemini_audio_message(b"r" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert len(accepted_chunks) == 2
+    assert messages.count("voice_timing event=shadow_response_start") == 1
+    assert messages.count("voice_timing event=shadow_response_audio_delivery") == 1
+    assert "turn=1" in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_response_ordinals_reset_at_model_turn_boundary(caplog):
+    async def accept_audio(_chunk: bytes):
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=time.monotonic() - 0.4,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = tracker
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"a" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    tracker.segment = 2
+    tracker.last_voiced_at = time.monotonic() - 0.3
+    tracker.last_ended_segment = 2
+    tracker.last_ended_at = tracker.last_voiced_at
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"b" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("voice_timing event=shadow_response_start") == 2
+    assert messages.count("voice_timing event=shadow_response_audio_delivery") == 2
+    assert "shadow_response_start call=CA_test turn=1" in messages
+    assert "shadow_response_start call=CA_test turn=2" in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_delivery_is_not_delayed_by_late_transcription(caplog):
+    private_caller_text = "private late transcription sentinel"
+    accepted_chunks = []
+    tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=time.monotonic() - 0.4,
+    )
+
+    async def accept_audio(chunk: bytes):
+        accepted_chunks.append(chunk)
+        if len(accepted_chunks) == 2:
+            tracker.segment = 2
+            tracker.currently_voiced = True
+            tracker.active = True
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = tracker
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"a" * 800),
+        json.dumps({
+            "serverContent": {
+                "inputTranscription": {"text": private_caller_text}
+            }
+        }),
+        _gemini_audio_message(b"b" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert len(accepted_chunks) == 2
+    assert messages.count("voice_timing event=shadow_response_start") == 1
+    assert messages.count("voice_timing event=shadow_response_audio_delivery") == 1
+    assert "voice_timing event=shadow_response_overlap" not in messages
+    assert private_caller_text not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_rejects_candidate_before_response_binding(caplog):
+    async def accept_audio(_chunk: bytes):
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    completed_at = time.monotonic() - 0.6
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=time.monotonic() - 0.2,
+        currently_voiced=False,
+        active=False,
+        last_ended_segment=1,
+        last_ended_at=completed_at,
+    )
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"a" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=shadow_response_unassociated" in messages
+    assert "reason=newer_unconfirmed_activity" in messages
+    assert "voice_timing event=shadow_response_audio_delivery" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_rejects_candidate_before_twilio_acceptance(caplog):
+    completed_at = time.monotonic() - 0.6
+    tracker = _ShadowTracker(
+        segment=1,
+        last_voiced_at=completed_at,
+        currently_voiced=False,
+        active=False,
+        last_ended_segment=1,
+        last_ended_at=completed_at,
+    )
+
+    async def accept_audio(_chunk: bytes):
+        tracker.last_voiced_at = time.monotonic() - 0.1
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = tracker
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"a" * 800),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=shadow_response_overlap" in messages
+    assert "reason=newer_unconfirmed_activity" in messages
+    assert "voice_timing event=shadow_response_audio_delivery" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_shadow_vad_rejects_delivery_during_caller_speech(caplog):
+    async def accept_audio(_chunk: bytes):
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=accept_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._caller_activity_tracker = _ShadowTracker(
+        segment=2,
+        currently_voiced=False,
+        active=True,
+        last_ended_segment=1,
+    )
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({
+            "serverContent": {
+                "inputTranscription": {"text": "private overlap sentinel"}
+            }
+        }),
+        _gemini_audio_message(b"a" * 8_000),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=shadow_response_overlap" in messages
+    assert "turn=1" in messages
+    assert "segment=2" in messages
+    assert "voice_timing event=shadow_response_audio_delivery" not in messages
+    assert "private overlap sentinel" not in messages
 
 
 @pytest.mark.asyncio
@@ -1578,6 +2130,15 @@ async def test_gemini_stop_logs_inflight_response_terminal_once(caplog):
     pipeline._response_first_audio_at = time.monotonic()
     pipeline._generated_audio_ms = 625
     pipeline._kevin_transcript_buf = [private_text]
+    tracker = _ShadowTracker()
+    pipeline._caller_activity_tracker = tracker
+    pipeline._shadow_response_contexts[3] = (
+        1,
+        time.monotonic() - 0.2,
+        False,
+    )
+    pipeline._shadow_outcome_turns.add(2)
+    pipeline._last_shadow_segment_bound = 1
     caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
 
     await pipeline.stop()
@@ -1590,6 +2151,10 @@ async def test_gemini_stop_logs_inflight_response_terminal_once(caplog):
     assert private_text not in messages
     assert pipeline._response_first_audio_at == 0.0
     assert pipeline._generated_audio_ms == 0
+    assert tracker.reset_count == 2
+    assert pipeline._shadow_response_contexts == {}
+    assert pipeline._shadow_outcome_turns == set()
+    assert pipeline._last_shadow_segment_bound == 0
 
 
 @pytest.mark.asyncio

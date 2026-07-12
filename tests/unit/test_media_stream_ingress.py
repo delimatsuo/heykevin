@@ -48,10 +48,15 @@ class _IngressWebSocket:
 async def test_twilio_ingress_buffers_audio_in_order_under_a_byte_bound():
     first = b"first caller frame"
     second = b"second caller frame"
+    received_times = iter((100.25, 100.50))
     websocket = _IngressWebSocket(
         [_media_message(first), _media_message(second), json.dumps({"event": "stop"})]
     )
-    ingress = _TwilioMediaIngress(websocket, call_sid="CA_test")
+    ingress = _TwilioMediaIngress(
+        websocket,
+        call_sid="CA_test",
+        clock=lambda: next(received_times),
+    )
 
     await ingress.run()
 
@@ -66,6 +71,8 @@ async def test_twilio_ingress_buffers_audio_in_order_under_a_byte_bound():
 
     assert (first_event.kind, first_event.audio) == ("media", first)
     assert (second_event.kind, second_event.audio) == ("media", second)
+    assert first_event.received_at == 100.25
+    assert second_event.received_at == 100.50
     assert stop_event.kind == "stop"
     assert closed_event is None
     assert ingress.buffered_audio_bytes == 0
@@ -109,6 +116,7 @@ async def test_pipeline_start_and_ingress_consumption_run_concurrently():
             self.ready = asyncio.Event()
             self.audio_received = asyncio.Event()
             self.processed: list[bytes] = []
+            self.received_at: list[float] = []
             self.stopped = False
 
         async def start(self):
@@ -120,8 +128,14 @@ async def test_pipeline_start_and_ingress_consumption_run_concurrently():
             await self.ready.wait()
             return True
 
-        async def process_audio_in(self, audio: bytes):
+        async def process_audio_in(
+            self,
+            audio: bytes,
+            *,
+            received_at: float | None = None,
+        ):
             self.processed.append(audio)
+            self.received_at.append(received_at or 0.0)
             self.audio_received.set()
 
         async def stop(self):
@@ -152,6 +166,8 @@ async def test_pipeline_start_and_ingress_consumption_run_concurrently():
 
     assert started is True
     assert pipeline.processed == [frame]
+    assert len(pipeline.received_at) == 1
+    assert pipeline.received_at[0] > 0
     assert stops == [True]
 
 
@@ -170,7 +186,12 @@ async def test_failed_pipeline_start_cancels_readiness_waiter():
         async def wait_until_audio_ready(self):
             await asyncio.Event().wait()
 
-        async def process_audio_in(self, _audio: bytes):
+        async def process_audio_in(
+            self,
+            _audio: bytes,
+            *,
+            received_at: float | None = None,
+        ):
             raise AssertionError("audio must not be forwarded")
 
         async def stop(self):
@@ -220,7 +241,12 @@ async def test_stream_stop_cancels_blocked_greeting_startup():
             await self.ready.wait()
             return True
 
-        async def process_audio_in(self, _audio: bytes):
+        async def process_audio_in(
+            self,
+            _audio: bytes,
+            *,
+            received_at: float | None = None,
+        ):
             raise AssertionError("no media should be forwarded")
 
         async def stop(self):

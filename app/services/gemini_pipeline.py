@@ -88,6 +88,7 @@ class GeminiPipeline:
         call_sid: str = "",
         contractor_config: Optional[dict] = None,
         caller_phone: str = "",
+        call_started_at: Optional[float] = None,
     ):
         self.on_audio_out = on_audio_out
         self.on_transcript = on_transcript
@@ -132,7 +133,10 @@ class GeminiPipeline:
         self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue()
         self._audio_output_lock = asyncio.Lock()
         self._audio_epoch = 0
-        self._pipeline_started_at = time.monotonic()
+        self._pipeline_started_at = (
+            call_started_at if call_started_at is not None else time.monotonic()
+        )
+        self._first_outbound_audio_logged = False
         self._first_inbound_audio_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
@@ -195,6 +199,55 @@ class GeminiPipeline:
         suffix = f" {metric_text}" if metric_text else ""
         logger.info("voice_timing event=%s call=%s%s", event, self._call_label(), suffix)
 
+    def _build_greeting_text(self) -> str:
+        """Return the bounded default greeting and caller disclosure."""
+        business_name = self._contractor_config.get(
+            "business_name",
+            f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
+        )
+        owner_name = self._contractor_config.get("owner_name", settings.user_name)
+        owner_parts = owner_name.split()
+        owner_first = owner_parts[0] if owner_parts else "the owner"
+        mode = self._contractor_config.get("effective_mode") or effective_mode(
+            self._contractor_config
+        )
+
+        if mode == "personal":
+            return (
+                f"Hi, this is Kevin, {owner_first}'s AI assistant. This call may be "
+                f"transcribed and summarized for {owner_first}. How can I help?"
+            )
+        if self._after_hours:
+            return (
+                f"{business_name} is currently closed. I'm Kevin, an AI assistant. "
+                "This call may be transcribed and summarized for the business. "
+                "How can I help?"
+            )
+        return (
+            f"Hi, you've reached {business_name}. I'm Kevin, an AI assistant. "
+            "This call may be transcribed and summarized for the business. "
+            "How can I help?"
+        )
+
+    async def _send_greeting(self) -> None:
+        """Ask Gemini to speak the deterministic greeting and nothing else."""
+        greeting_text = self._build_greeting_text()
+        prompt = f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
+        await self._ws.send(json.dumps({
+            "client_content": {
+                "turns": [
+                    {"role": "user", "parts": [{"text": prompt}]}
+                ],
+                "turn_complete": True,
+            }
+        }))
+        self._log_voice_timing(
+            "greeting_instruction_sent",
+            chars=len(greeting_text),
+            words=len(greeting_text.split()),
+            call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+        )
+
     async def start(
         self,
         send_greeting: bool = True,
@@ -202,10 +255,18 @@ class GeminiPipeline:
         reconnect_context: str = "",
     ) -> bool:
         """Connect to Gemini Live API and send setup message."""
+        session_started_at = time.monotonic()
         try:
+            connect_started_at = time.monotonic()
             self._ws = await websockets.connect(
                 _gemini_ws_url(),
                 max_size=10 * 1024 * 1024,  # 10MB max message
+            )
+            self._log_voice_timing(
+                "gemini_ws_connected",
+                phase_ms=self._elapsed_ms(connect_started_at),
+                session_elapsed_ms=self._elapsed_ms(session_started_at),
+                call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
             )
 
             # Build setup message
@@ -237,7 +298,13 @@ class GeminiPipeline:
             if tools:
                 setup["setup"]["tools"] = tools
 
+            setup_started_at = time.monotonic()
             await self._ws.send(json.dumps(setup))
+            self._log_voice_timing(
+                "gemini_setup_sent",
+                session_elapsed_ms=self._elapsed_ms(session_started_at),
+                call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+            )
             response = await asyncio.wait_for(self._ws.recv(), timeout=10)
             data = json.loads(response)
 
@@ -246,6 +313,12 @@ class GeminiPipeline:
                 return False
 
             self._connected = True
+            self._log_voice_timing(
+                "gemini_setup_ack",
+                phase_ms=self._elapsed_ms(setup_started_at),
+                session_elapsed_ms=self._elapsed_ms(session_started_at),
+                call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+            )
             logger.info(f"Gemini Live session established (voice={self._voice}, model={self._model})")
 
             # Start receiving audio/text from Gemini
@@ -261,42 +334,7 @@ class GeminiPipeline:
             if not send_greeting:
                 return True
 
-            # Send greeting prompt — Gemini will speak the greeting
-            business_name = self._contractor_config.get(
-                "business_name",
-                f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
-            )
-            owner_name = self._contractor_config.get("owner_name", settings.user_name)
-            mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
-
-            if mode == "personal":
-                greeting_prompt = (
-                    f"Greet the caller now. Say: 'Hi, this is Kevin, "
-                    f"{owner_name.split()[0]}'s assistant. How can I help?'"
-                )
-            elif self._after_hours:
-                hours_start = self._contractor_config.get("business_hours_start", "8:00")
-                hours_end = self._contractor_config.get("business_hours_end", "5:00")
-                greeting_prompt = (
-                    f"Greet the caller now. You are answering the phone for {business_name}. "
-                    f"The business is currently closed — hours are {hours_start} to {hours_end}. "
-                    f"Offer to take a message."
-                )
-            else:
-                greeting_prompt = (
-                    f"Greet the caller now. Say: 'Hi, thanks for calling {business_name}, "
-                    f"this is Kevin. How can I help you?'"
-                )
-
-            await self._ws.send(json.dumps({
-                "client_content": {
-                    "turns": [
-                        {"role": "user", "parts": [{"text": greeting_prompt}]}
-                    ],
-                    "turn_complete": True,
-                }
-            }))
-
+            await self._send_greeting()
             return True
 
         except Exception as e:
@@ -567,6 +605,14 @@ class GeminiPipeline:
                         ):
                             continue
                         self._is_speaking = True
+                        if not self._first_outbound_audio_logged:
+                            self._first_outbound_audio_logged = True
+                            self._log_voice_timing(
+                                "first_outbound_audio",
+                                call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+                                chunk_bytes=len(mulaw_chunk),
+                                queue_depth=self._audio_queue.qsize(),
+                            )
                         await self.on_audio_out(mulaw_chunk)
                         self._audio_chunks_sent += 1
                         sent = True

@@ -311,7 +311,7 @@ async def jobber_disconnect(contractor_id: str = Query(...), request: Request = 
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.freebusy"
 GOOGLE_REDIRECT_URI = f"{settings.cloud_run_url}/api/integrations/google-calendar/callback"
 
 
@@ -366,35 +366,75 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
     contractor_id = state_data["contractor_id"]
     state_ref.delete()  # one-time use
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "client_id": settings.google_calendar_client_id,
-                "client_secret": settings.google_calendar_client_secret,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-            },
-            timeout=10.0,
+    contractor_ref = db.collection("contractors").document(contractor_id)
+    contractor_doc = contractor_ref.get()
+    if not contractor_doc.exists:
+        raise HTTPException(status_code=404, detail="Contractor not found")
+    contractor_data = contractor_doc.to_dict() or {}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                GOOGLE_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": settings.google_calendar_client_id,
+                    "client_secret": settings.google_calendar_client_secret,
+                    "redirect_uri": GOOGLE_REDIRECT_URI,
+                },
+                timeout=10.0,
+            )
+    except Exception as error:
+        logger.error(
+            "Google token exchange failed: exception_type=%s",
+            type(error).__name__,
         )
+        raise HTTPException(status_code=502, detail="Failed to exchange code with Google") from error
 
     if resp.status_code != 200:
-        logger.error(f"Google token exchange failed: {resp.status_code} {resp.text[:200]}")
+        logger.error("Google token exchange failed: status_code=%s", resp.status_code)
         raise HTTPException(status_code=502, detail="Failed to exchange code with Google")
 
-    tokens = resp.json()
+    try:
+        tokens = resp.json()
+    except Exception as error:
+        logger.error(
+            "Google token response invalid: exception_type=%s",
+            type(error).__name__,
+        )
+        raise HTTPException(status_code=502, detail="Invalid response from Google") from error
+    if not isinstance(tokens, dict):
+        logger.error(
+            "Google token response invalid: response_type=%s",
+            type(tokens).__name__,
+        )
+        raise HTTPException(status_code=502, detail="Invalid response from Google")
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
 
     if not access_token:
         raise HTTPException(status_code=502, detail="No access token in Google response")
 
-    db.collection("contractors").document(contractor_id).update({
+    existing_refresh_token = contractor_data.get("google_calendar_refresh_token", "")
+    if not refresh_token and not existing_refresh_token:
+        logger.error("Google token exchange returned no durable refresh credential")
+        raise HTTPException(status_code=502, detail="Google did not provide offline access")
+
+    now = time.time()
+    updates = {
         "google_calendar_access_token": access_token,
-        "google_calendar_refresh_token": refresh_token,
-        "google_calendar_connected_at": time.time(),
-    })
+        "google_calendar_connected_at": now,
+        "google_calendar_scope": tokens.get("scope") or GOOGLE_CALENDAR_SCOPE,
+    }
+    if refresh_token:
+        updates["google_calendar_refresh_token"] = refresh_token
+    try:
+        updates["google_calendar_token_expires_at"] = now + max(0.0, float(tokens["expires_in"]))
+    except (KeyError, TypeError, ValueError):
+        pass
+
+    contractor_ref.update(updates)
 
     logger.info(f"Google Calendar connected for contractor {contractor_id}")
 
@@ -452,6 +492,9 @@ async def google_calendar_disconnect(contractor_id: str = Query(...), request: R
         "google_calendar_access_token": DELETE_FIELD,
         "google_calendar_refresh_token": DELETE_FIELD,
         "google_calendar_connected_at": DELETE_FIELD,
+        "google_calendar_scope": DELETE_FIELD,
+        "google_calendar_token_expires_at": DELETE_FIELD,
+        "google_calendar_token_refreshed_at": DELETE_FIELD,
     })
 
     logger.info(f"Google Calendar disconnected for contractor {contractor_id}")

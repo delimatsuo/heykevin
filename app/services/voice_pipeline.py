@@ -12,6 +12,7 @@ Full-duplex architecture based on Deepgram best practices:
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Callable, Awaitable, Optional
 
@@ -27,9 +28,23 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+_SAFE_LOG_METRIC_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
+_KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
+
 
 def _call_label(call_sid: str) -> str:
     return call_sid[:8] or "unknown"
+
+
+def _safe_log_metric(value: object) -> str:
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    sanitized = _SAFE_LOG_METRIC_PATTERN.sub("_", str(value or "")[:40]).strip("_.:-")
+    return sanitized or "unknown"
+
+
+def _tool_label(tool_name: str) -> str:
+    return tool_name if tool_name in _KNOWN_TOOL_NAMES else "unknown"
 
 
 def _log_voice_event(
@@ -39,7 +54,9 @@ def _log_voice_event(
     level: int = logging.INFO,
     **metrics: object,
 ) -> None:
-    metric_text = " ".join(f"{key}={value}" for key, value in metrics.items())
+    metric_text = " ".join(
+        f"{key}={_safe_log_metric(value)}" for key, value in metrics.items()
+    )
     suffix = f" {metric_text}" if metric_text else ""
     logger.log(level, "voice_event event=%s call=%s%s", event, _call_label(call_sid), suffix)
 
@@ -58,11 +75,12 @@ def _tool_execution_error_response() -> str:
 
 
 def _log_tool_execution_failure(tool_name: str, call_sid: str, exc: Exception):
-    logger.error(
-        "Tool execution failed: tool_name=%s call_sid=%s exception_type=%s",
-        tool_name,
+    _log_voice_event(
+        "tool_execution_error",
         call_sid,
-        type(exc).__name__,
+        level=logging.ERROR,
+        tool=_tool_label(tool_name),
+        exception_type=type(exc).__name__,
     )
 
 
@@ -882,7 +900,6 @@ class VoicePipeline:
                 _log_voice_event(
                     "urgency_detected",
                     self._call_sid,
-                    keyword=keyword,
                     chars=len(transcript),
                 )
 
@@ -1103,10 +1120,11 @@ class VoicePipeline:
                     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
             except asyncio.TimeoutError:
-                logger.warning(
-                    "Tool timed out: tool_name=%s call_sid=%s",
-                    tool_name,
+                _log_voice_event(
+                    "tool_timeout",
                     getattr(self, "_call_sid", ""),
+                    level=logging.WARNING,
+                    tool=_tool_label(tool_name),
                 )
                 return json.dumps({"error": "Request timed out"})
             except Exception as e:
@@ -1138,10 +1156,11 @@ class VoicePipeline:
                 return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
         except asyncio.TimeoutError:
-            logger.warning(
-                "Tool timed out: tool_name=%s call_sid=%s",
-                tool_name,
+            _log_voice_event(
+                "tool_timeout",
                 getattr(self, "_call_sid", ""),
+                level=logging.WARNING,
+                tool=_tool_label(tool_name),
             )
             return json.dumps({"error": "Request timed out"})
         except Exception as e:
@@ -1237,10 +1256,10 @@ class VoicePipeline:
                             tool_name = block["name"]
                             tool_input = block.get("input", {})
                             tool_id = block["id"]
-                            logger.info(
-                                "Tool call: %s call_sid=%s",
-                                tool_name,
+                            _log_voice_event(
+                                "tool_call",
                                 getattr(self, "_call_sid", ""),
+                                tool=_tool_label(tool_name),
                             )
 
                             result_str = await self._execute_tool(tool_name, tool_input)
@@ -1255,10 +1274,11 @@ class VoicePipeline:
                                 pass
 
                             if tool_failed:
-                                logger.warning(
-                                    "Tool returned error: tool_name=%s call_sid=%s",
-                                    tool_name,
+                                _log_voice_event(
+                                    "tool_result_error",
                                     getattr(self, "_call_sid", ""),
+                                    level=logging.WARNING,
+                                    tool=_tool_label(tool_name),
                                 )
                                 # On failure, bail out with a graceful message
                                 fallback_msg = "I'm sorry, I can't check the schedule right now. Let me take a message instead."

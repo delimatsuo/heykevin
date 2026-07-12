@@ -172,12 +172,14 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     # Wait for the Twilio `start` event to get the ws_token from customParameters
     ws_token = ""
     start_stream_sid = ""
+    media_stream_started_at = None
     try:
         # Read messages until we get the start event (should be the first message)
         for _ in range(5):
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=5)
             msg = json.loads(raw)
             if msg.get("event") == "start":
+                media_stream_started_at = time.monotonic()
                 ws_token = msg.get("start", {}).get("customParameters", {}).get("ws_token", "")
                 start_stream_sid = msg.get("streamSid", "")
                 break
@@ -396,6 +398,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 call_sid=call_sid,
                 contractor_config=contractor_config_loaded,
                 caller_phone=active_call.caller_phone if active_call else "",
+                call_started_at=media_stream_started_at,
             )
             logger.info(f"Using Gemini Live pipeline for call {call_sid}")
         else:

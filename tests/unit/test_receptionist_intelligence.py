@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import os
+import time
 
 import pytest
 
@@ -418,6 +419,115 @@ def test_media_stream_passes_caller_phone_to_gemini_pipeline():
     assert "caller_phone=active_call.caller_phone if active_call else \"\"" in gemini_call
 
 
+def test_media_stream_passes_twilio_start_time_to_gemini_pipeline():
+    from app.webhooks import media_stream
+
+    source = inspect.getsource(media_stream.media_stream_ws)
+    gemini_call = source.split("pipeline = GeminiPipeline(", 1)[1].split(
+        "logger.info(f\"Using Gemini Live pipeline", 1
+    )[0]
+
+    assert "media_stream_started_at = time.monotonic()" in source
+    assert "call_started_at=media_stream_started_at" in gemini_call
+
+
+def test_gemini_greetings_are_bounded_and_disclose_ai_transcription():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    business = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+    business._after_hours = False
+
+    personal_config = _plumbing_config() | {
+        "mode": "personal",
+        "effective_mode": "personal",
+    }
+    personal = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=personal_config,
+    )
+
+    after_hours = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+    after_hours._after_hours = True
+
+    greetings = [
+        business._build_greeting_text(),
+        personal._build_greeting_text(),
+        after_hours._build_greeting_text(),
+    ]
+
+    assert all("AI assistant" in greeting for greeting in greetings)
+    assert all("may be transcribed and summarized" in greeting for greeting in greetings)
+    assert all(len(greeting.split()) <= 24 for greeting in greetings)
+    assert "Matsuo Plumbing" in greetings[0]
+    assert "Deli's AI assistant" in greetings[1]
+    assert "currently closed" in greetings[2]
+
+
+@pytest.mark.asyncio
+async def test_gemini_start_sends_exact_greeting_and_safe_startup_metrics(
+    monkeypatch,
+    caplog,
+):
+    websocket = _FakeGeminiWebSocket()
+
+    async def fake_connect(*_args, **_kwargs):
+        return websocket
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    call_started_at = time.monotonic() - 2
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        call_started_at=call_started_at,
+    )
+    pipeline._after_hours = False
+
+    try:
+        started = await pipeline.start(start_background_tasks=False)
+
+        assert started
+        greeting_text = pipeline._build_greeting_text()
+        greeting_prompt = websocket.sent_payloads[1]["client_content"]["turns"][0][
+            "parts"
+        ][0]["text"]
+        assert greeting_prompt == (
+            f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
+        )
+
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "voice_timing event=gemini_ws_connected" in messages
+        assert "voice_timing event=gemini_setup_sent" in messages
+        assert "voice_timing event=gemini_setup_ack" in messages
+        assert "call_elapsed_ms=2" in messages
+        assert "voice_timing event=greeting_instruction_sent" in messages
+        assert "Matsuo Plumbing" not in messages
+    finally:
+        await pipeline.stop()
+
+
 @pytest.mark.asyncio
 async def test_gemini_reconnect_can_resume_without_repeating_greeting(monkeypatch):
     sent_messages = []
@@ -639,6 +749,44 @@ async def test_gemini_audio_playout_is_paced_and_tracks_speaking(monkeypatch):
     assert pipeline._is_speaking is False
     assert pipeline._last_kevin_speech_time > 0
 
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_first_outbound_audio_metric_uses_twilio_start_clock(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    sent_chunks = []
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append(chunk)
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    pipeline = GeminiPipeline(
+        on_audio_out=record_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        call_started_at=time.monotonic() - 1,
+    )
+    pipeline._connected = True
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+
+    private_audio = b"private outbound audio"
+    await pipeline._enqueue_model_audio(private_audio)
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert sent_chunks == [private_audio]
+    assert messages.count("voice_timing event=first_outbound_audio") == 1
+    assert "call_elapsed_ms=1" in messages
+    assert base64.b64encode(private_audio).decode("ascii") not in messages
     await pipeline.stop()
 
 

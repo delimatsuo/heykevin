@@ -102,6 +102,16 @@ The staging WIF service account must receive only these additional roles:
 - `roles/monitoring.alertPolicyEditor` on the runtime `kevin-491315` project
 - `roles/monitoring.notificationChannelViewer` on the runtime
   `kevin-491315` project
+- `projects/kevin-491315/roles/kevinStagingLogAlertPolicyEditor` on the
+  runtime project, with exactly these permissions:
+  `logging.notificationRules.create`, `logging.notificationRules.delete`,
+  `logging.notificationRules.get`, `logging.notificationRules.list`, and
+  `logging.notificationRules.update`
+
+Log-matched alert policies require both Monitoring alert-policy permissions and
+Logging notification-rule permissions. Keep the latter in the project-scoped
+custom role above; do not substitute the broader `roles/logging.configWriter`
+role.
 
 Do not grant `Owner`, `Editor`, Datastore owner, Monitoring admin, production
 Firestore access, or any user-managed credential. After changing IAM, allow for

@@ -1,7 +1,6 @@
 """Post-call Jobber lead capture behavior."""
 
 import asyncio
-import inspect
 import os
 import time
 
@@ -186,7 +185,7 @@ def test_callback_last_four_confirmation_without_match_is_not_stored_as_number()
 
 
 @pytest.mark.asyncio
-async def test_process_business_schedules_jobber_lead_capture_when_enabled(monkeypatch):
+async def test_process_business_awaits_jobber_lead_capture_when_enabled(monkeypatch):
     captured = {}
 
     async def fake_extract_job_card(transcript_text, caller_phone, contractor=None):
@@ -196,11 +195,7 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
         captured["contractor"] = contractor
         captured["job_data"] = dict(job_data)
         captured["job_id"] = job_id
-
-    def fake_create_task(coro):
-        assert inspect.iscoroutine(coro)
-        captured["task"] = coro
-        return coro
+        return True
 
     async def fake_save_call(*args, **kwargs):
         return None
@@ -219,7 +214,11 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
     monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
     monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
     monkeypatch.setattr(post_call, "_capture_jobber_lead", fake_capture_jobber_lead)
-    monkeypatch.setattr(post_call.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(
+        post_call,
+        "_update_caller_contact",
+        lambda *_args, **_kwargs: _async_return(None),
+    )
 
     contractor = {
         "contractor_id": "contractor-1",
@@ -236,8 +235,6 @@ async def test_process_business_schedules_jobber_lead_capture_when_enabled(monke
         contractor,
     )
 
-    assert inspect.iscoroutine(captured["task"])
-    await captured["task"]
     assert captured["contractor"] is contractor
     assert captured["job_id"] == "job-1"
     assert captured["job_data"]["call_sid"] == "CA123"
@@ -266,6 +263,11 @@ async def test_process_business_mirrors_summary_and_call_type_to_call(monkeypatc
     monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
     monkeypatch.setattr(post_call, "send_sms", lambda *args, **kwargs: _async_return(True))
+    monkeypatch.setattr(
+        post_call,
+        "_update_caller_contact",
+        lambda *_args, **_kwargs: _async_return(None),
+    )
 
     await post_call._process_business(
         "Caller: My kitchen sink is leaking.",

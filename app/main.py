@@ -3,9 +3,10 @@
 FastAPI application entry point.
 """
 
-import signal
 import asyncio
+from contextlib import suppress
 import os
+import signal
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +40,7 @@ logger = get_logger(__name__)
 
 # Graceful shutdown flag
 _shutting_down = False
+_post_call_worker_task: asyncio.Task | None = None
 
 app = FastAPI(
     title="Kevin",
@@ -255,6 +257,8 @@ async def _expired_contractor_cleanup():
 
 @app.on_event("startup")
 async def startup():
+    global _post_call_worker_task
+
     # Validate required config
     required = ['twilio_account_sid', 'twilio_auth_token', 'anthropic_api_key',
                 'deepgram_api_key', 'elevenlabs_api_key', 'api_bearer_token']
@@ -271,6 +275,10 @@ async def startup():
     # Start orphan call cleanup background task
     asyncio.create_task(_orphan_call_cleanup())
     asyncio.create_task(_expired_contractor_cleanup())
+    from app.services.post_call_handoff import post_call_worker_loop
+
+    if _post_call_worker_task is None or _post_call_worker_task.done():
+        _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
 
     # F-21: drop the redacted Twilio number from startup logs entirely. Even
     # the last 4 digits are unnecessary signal in centralised logs and the
@@ -280,6 +288,13 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _post_call_worker_task
+
+    if _post_call_worker_task is not None:
+        _post_call_worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _post_call_worker_task
+        _post_call_worker_task = None
     logger.info("Kevin shutting down — finishing in-flight requests")
 
 

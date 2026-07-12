@@ -8,6 +8,7 @@ start; if unset, transcripts are written in plaintext (legacy behaviour)
 and reads remain backwards compatible with both formats.
 """
 
+import asyncio
 import base64
 import os
 import secrets as _secrets
@@ -147,23 +148,33 @@ def _maybe_decrypt_call_doc(doc: Optional[dict]) -> Optional[dict]:
     return out
 
 
-async def save_call(call_sid: str, data: dict):
+async def save_call(call_sid: str, data: dict) -> bool:
     """Save or update a call record. Transcripts are encrypted at rest (F-11)."""
     try:
         db = get_firestore_client()
         data = dict(data)
         data["call_sid"] = call_sid
         data = _maybe_encrypt_call_data(data)
-        db.collection(COLLECTION).document(call_sid).set(data, merge=True)
+        doc_ref = db.collection(COLLECTION).document(call_sid)
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: doc_ref.set(data, merge=True),
+        )
+        return True
     except Exception as e:
-        logger.error(f"Firestore call save failed: {e}", exc_info=True)
+        logger.error(
+            "Firestore call save failed exception_type=%s",
+            type(e).__name__,
+        )
+        return False
 
 
 async def get_call(call_sid: str) -> Optional[dict]:
     """Get a call record by SID, decrypting the transcript if needed (F-11)."""
     try:
         db = get_firestore_client()
-        doc = db.collection(COLLECTION).document(call_sid).get()
+        doc_ref = db.collection(COLLECTION).document(call_sid)
+        doc = await asyncio.get_running_loop().run_in_executor(None, doc_ref.get)
         if doc.exists:
             return _maybe_decrypt_call_doc(doc.to_dict())
     except Exception as e:

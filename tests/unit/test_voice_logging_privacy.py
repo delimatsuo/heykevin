@@ -160,3 +160,28 @@ def test_legacy_voice_logger_fstrings_do_not_embed_sensitive_values():
         }
         assert formatted_names.isdisjoint(forbidden_names), ast.unparse(call)
         assert "response.text" not in ast.unparse(call)
+
+
+def test_legacy_tool_failure_log_uses_short_call_label_and_safe_metadata(caplog):
+    private_error = "private caller payload at a full address"
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    voice_pipeline_module._log_tool_execution_failure(
+        "book_appointment\nprivate caller",
+        "CA1234567890FULL",
+        RuntimeError(private_error),
+    )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_event event=tool_execution_error" in messages
+    assert "call=CA123456" in messages
+    assert "CA1234567890FULL" not in messages
+    assert "exception_type=RuntimeError" in messages
+    assert private_error not in messages
+    assert "\nprivate caller" not in messages
+
+
+def test_legacy_voice_source_has_no_full_call_sid_log_templates():
+    source = inspect.getsource(voice_pipeline_module)
+
+    assert "call_sid=%s" not in source

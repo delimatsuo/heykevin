@@ -402,7 +402,8 @@ async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitiz
         }
     ]
     assert "book_appointment" in caplog.text
-    assert "CA-GEMINI-EXCEPTION" in caplog.text
+    assert "call=CA-GEMIN" in caplog.text
+    assert "CA-GEMINI-EXCEPTION" not in caplog.text
     assert "RuntimeError" in caplog.text
     response_payload = json.dumps(pipeline._ws.sent)
     for sensitive_value in sensitive_values:
@@ -529,7 +530,7 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
     with caplog.at_level(logging.INFO):
         await pipeline._handle_caller_speech("I need help with a leak.")
 
-    assert "Tool call: book_appointment call_sid=CA123" in caplog.text
+    assert "voice_event event=tool_call call=CA123 tool=book_appointment" in caplog.text
     for sensitive_value in (
         "Jane Private",
         "123 Secret Lane",

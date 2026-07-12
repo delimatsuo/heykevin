@@ -1,5 +1,7 @@
 """Application configuration. Loads from .env locally, Secret Manager in production."""
 
+import base64 as _base64
+import binascii as _binascii
 import json as _json
 from typing import Optional as _Optional
 
@@ -112,9 +114,8 @@ class Settings(BaseSettings):
 
     # Application-level encryption for call transcripts at rest (F-11).
     # 32-byte AES-256-GCM key, base64 encoded. Generate with
-    # `python scripts/gen_transcript_key.py`. When unset, transcripts are
-    # written in plaintext (legacy behaviour); reads remain backwards
-    # compatible with both formats.
+    # `python scripts/gen_transcript_key.py`. Staging and production require a
+    # valid key; development and tests retain legacy plaintext compatibility.
     transcript_encryption_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
@@ -127,6 +128,17 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 
+def decode_transcript_encryption_key(raw: str) -> bytes | None:
+    """Return a valid 32-byte transcript key without logging key material."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        key = _base64.b64decode(raw.strip(), validate=True)
+    except (_binascii.Error, ValueError):
+        return None
+    return key if len(key) == 32 else None
+
+
 def validate_runtime_safety() -> None:
     """Fail fast when an environment is pointed at the wrong runtime resources."""
     env = (settings.environment or "").strip().lower()
@@ -134,6 +146,13 @@ def validate_runtime_safety() -> None:
 
     if env not in {"development", "staging", "production", "test"}:
         errors.append("ENVIRONMENT must be one of development, staging, production, or test")
+
+    if env in {"staging", "production"} and decode_transcript_encryption_key(
+        settings.transcript_encryption_key
+    ) is None:
+        errors.append(
+            "TRANSCRIPT_ENCRYPTION_KEY must be valid 32-byte base64 in staging and production"
+        )
 
     if env == "production":
         if settings.appstore_environment != "production":

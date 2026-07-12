@@ -41,6 +41,7 @@ Do not save or paste the raw Cloud Logging export.
 | Generated response audio | p95 <= 6,000 ms; max <= 8,000 ms |
 | Interruption to Twilio clear completion | p95 <= 250 ms; max <= 500 ms |
 | Inbound audio forwarding errors | zero |
+| Outbound audio backlog overflows | zero |
 | Reconnect result coverage | every reconnect attempt has a result |
 | Reconnect failures | zero |
 
@@ -63,6 +64,7 @@ caller turns across this matrix:
 | Background noise and pauses | No false hangup, duplicate prompt, or sustained talk-over. |
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the PR #79 path. |
 | Reconnect simulation | Old queued audio and partial Kevin text are absent after recovery. |
+| Oversized response simulation | Queued audio stays bounded; stale output clears; one short retry is requested. |
 | Normal hangup | Final audio drains before call completion; post-call processing runs once. |
 
 For each call, record only the scenario, pass/fail outcome, deployed SHA, and

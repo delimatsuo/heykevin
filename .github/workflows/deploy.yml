@@ -156,7 +156,8 @@ jobs:
       PRODUCTION_TWILIO_ACCOUNT_SID: ${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}
       WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ vars.WIF_STAGING_SERVICE_ACCOUNT }}
-    if: ${{ github.ref == 'refs/heads/staging' && ((github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')) }}
+      RELEASE_OPERATION: ${{ inputs.target }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/staging') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && github.ref == 'refs/heads/codex/enterprise-voice-integration') }}
     environment: staging
     concurrency:
       group: deploy-staging
@@ -165,6 +166,14 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Validate staging deployment source
+        run: |
+          case "$GITHUB_EVENT_NAME:$RELEASE_OPERATION:$GITHUB_REF" in
+            push::refs/heads/staging) ;;
+            workflow_dispatch:staging:refs/heads/codex/enterprise-voice-integration) ;;
+            *) exit 1 ;;
+          esac
 
       - name: Validate staging federation identity
         run: |

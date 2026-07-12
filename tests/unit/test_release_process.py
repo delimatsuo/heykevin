@@ -56,6 +56,32 @@ def test_deploy_workflow_has_branch_restricted_staging_preparation():
     assert "Health check after staging preparation" in prepare_job
 
 
+def test_manual_staging_deploy_is_restricted_to_exact_integration_ref():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    staging_job = workflow.split("deploy-staging:", 1)[1].split(
+        "deploy-production:", 1
+    )[0]
+
+    assert (
+        "github.event_name == 'push' && github.ref == 'refs/heads/staging'"
+        in staging_job
+    )
+    assert (
+        "github.event_name == 'workflow_dispatch' && inputs.target == 'staging' "
+        "&& github.ref == 'refs/heads/codex/enterprise-voice-integration'"
+        in staging_job
+    )
+    assert "RELEASE_OPERATION: ${{ inputs.target }}" in staging_job
+    assert "Validate staging deployment source" in staging_job
+    assert (
+        "workflow_dispatch:staging:refs/heads/codex/enterprise-voice-integration"
+        in staging_job
+    )
+    assert staging_job.index("Validate staging deployment source") < staging_job.index(
+        "Authenticate to staging GCP"
+    )
+
+
 def test_deploy_workflow_uses_least_privilege_and_nonpersistent_checkout():
     workflow = Path(".github/workflows/deploy.yml").read_text()
     workflow_header = workflow.split("jobs:", 1)[0]

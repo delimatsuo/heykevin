@@ -610,7 +610,6 @@ class GeminiPipeline:
         await self.on_transcript("Caller", full_text)
         self._last_caller_transcript_flushed_at = time.time()
         self._mark_caller_activity()
-        self._observe_receptionist_controller(full_text)
 
         # Urgency detection
         if not self._urgency_detected and self.on_urgency_detected:
@@ -624,6 +623,8 @@ class GeminiPipeline:
                         self._unavailable_task.cancel()
                         self._unavailable_task = None
                     break
+
+        self._observe_receptionist_controller(full_text)
 
     async def _flush_kevin_transcript(
         self,

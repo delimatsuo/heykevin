@@ -173,6 +173,41 @@ async def test_enabled_shadow_observes_final_turn_without_sending_or_changing_pr
 
 
 @pytest.mark.asyncio
+async def test_shadow_observation_runs_after_live_urgency_detection(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "receptionist_controller_shadow_enabled",
+        True,
+        raising=False,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        on_urgency_detected=_noop,
+        call_sid="test-call",
+        contractor_config=_config(True),
+        caller_phone="caller-id-ending-8667",
+    )
+    urgency_state_at_observation = []
+    observe_caller_turn = pipeline._receptionist_controller.observe_caller_turn
+
+    def record_observation(text):
+        urgency_state_at_observation.append(pipeline._urgency_detected)
+        return observe_caller_turn(text)
+
+    monkeypatch.setattr(
+        pipeline._receptionist_controller,
+        "observe_caller_turn",
+        record_observation,
+    )
+    pipeline._caller_transcript_buf = ["This is an emergency."]
+
+    await pipeline._flush_caller_transcript()
+
+    assert urgency_state_at_observation == [True]
+
+
+@pytest.mark.asyncio
 async def test_shadow_error_disables_controller_for_call_without_logging_payload(monkeypatch, caplog):
     private_error = "controller failed for Private Caller at a private address"
     monkeypatch.setattr(

@@ -22,6 +22,7 @@ from app.services.job_card import _build_extraction_prompt
 from app.services.vcard import generate_vcard
 from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold, VoicePipeline
 from app.services import voice_pipeline as voice_pipeline_module
+from app.webhooks.media_stream import _send_twilio_clear
 
 
 def _plumbing_config() -> dict:
@@ -65,6 +66,59 @@ class _FakeGeminiWebSocket:
 
     async def close(self):
         return None
+
+
+@pytest.mark.asyncio
+async def test_twilio_clear_reports_delivery_acknowledgement():
+    class RecordingWebSocket:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_json(self, payload):
+            self.payloads.append(payload)
+
+    websocket = RecordingWebSocket()
+
+    delivered = await _send_twilio_clear(
+        websocket,
+        stream_sid="stream-redacted",
+        call_sid="CA_test",
+    )
+    skipped = await _send_twilio_clear(
+        websocket,
+        stream_sid="",
+        call_sid="CA_test",
+    )
+
+    assert delivered is True
+    assert skipped is False
+    assert websocket.payloads == [{
+        "event": "clear",
+        "streamSid": "stream-redacted",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_twilio_clear_failure_omits_provider_error_text(caplog):
+    private_error = "clear failed for private caller data"
+
+    class FailingWebSocket:
+        async def send_json(self, _payload):
+            raise RuntimeError(private_error)
+
+    caplog.set_level(logging.WARNING, logger="app.webhooks.media_stream")
+
+    delivered = await _send_twilio_clear(
+        FailingWebSocket(),
+        stream_sid="stream-redacted",
+        call_sid="CA_test",
+    )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert delivered is False
+    assert "media_event event=twilio_audio_clear_error" in messages
+    assert "exception_type=RuntimeError" in messages
+    assert private_error not in messages
 
 
 def _gemini_audio_message(chunk: bytes) -> str:
@@ -824,6 +878,7 @@ async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
     async def clear_audio():
         nonlocal clear_calls
         clear_calls += 1
+        return True
 
     pipeline = GeminiPipeline(
         on_audio_out=noop_audio,
@@ -1153,6 +1208,7 @@ async def test_gemini_reconnect_discards_stale_model_output_before_new_session(m
 
     async def clear_audio():
         clear_events.append("clear")
+        return True
 
     class ClosingWebSocket:
         def __aiter__(self):
@@ -1370,6 +1426,7 @@ async def test_gemini_barge_in_resets_caller_silence_state():
     async def clear_audio():
         nonlocal clear_count
         clear_count += 1
+        return True
 
     class OneMessageWebSocket:
         def __init__(self, message: dict):
@@ -1815,6 +1872,7 @@ async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch, capl
     async def clear_audio():
         events.append("clear")
         clear_completed.set()
+        return True
 
     pipeline = GeminiPipeline(
         on_audio_out=blocked_audio_send,
@@ -1849,7 +1907,258 @@ async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch, capl
     assert events == ["audio_started", "audio_sent", "clear"]
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=barge_in_clear" in messages
+    assert "voice_timing event=barge_in_clear_failed" not in messages
     assert "clear_ms=" in messages
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_barge_in_preempts_blocked_tool_and_discards_result(monkeypatch):
+    tool_started = asyncio.Event()
+    tool_cancelled = asyncio.Event()
+    release_tool = asyncio.Event()
+    clear_completed = asyncio.Event()
+
+    async def blocked_tool(_self, _name, _args):
+        tool_started.set()
+        try:
+            await release_tool.wait()
+        except asyncio.CancelledError:
+            tool_cancelled.set()
+            raise
+        return json.dumps({"available": True})
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", blocked_tool)
+
+    class ToolThenInterruptWebSocket(_FakeGeminiWebSocket):
+        async def __anext__(self):
+            if not self.messages:
+                raise StopAsyncIteration
+            if len(self.messages) == 1:
+                await tool_started.wait()
+            return self.messages.pop(0)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def clear_audio():
+        clear_completed.set()
+        return True
+
+    websocket = ToolThenInterruptWebSocket([
+        json.dumps({
+            "toolCall": {
+                "functionCalls": [{
+                    "id": "tool-call-redacted",
+                    "name": "check_availability",
+                    "args": {},
+                }]
+            }
+        }),
+        json.dumps({"serverContent": {"interrupted": True}}),
+    ])
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = websocket
+
+    await asyncio.wait_for(pipeline._receive_loop(), timeout=1)
+    await asyncio.wait_for(tool_cancelled.wait(), timeout=1)
+
+    assert clear_completed.is_set()
+    assert not release_tool.is_set()
+    assert not any("tool_response" in payload for payload in websocket.sent_payloads)
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_discards_cancellation_resistant_stale_tool_result(monkeypatch, caplog):
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    tool_finished = asyncio.Event()
+
+    async def cancellation_resistant_tool(_self, _name, _args):
+        tool_started.set()
+        try:
+            await release_tool.wait()
+        except asyncio.CancelledError:
+            await release_tool.wait()
+        tool_finished.set()
+        return json.dumps({"available": True})
+
+    monkeypatch.setattr(
+        VoicePipeline,
+        "_execute_tool",
+        cancellation_resistant_tool,
+    )
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    websocket = _FakeGeminiWebSocket()
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = websocket
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    pipeline._schedule_tool_calls([{
+        "id": "tool-call-redacted",
+        "name": "check_availability",
+        "args": {},
+    }])
+    await asyncio.wait_for(tool_started.wait(), timeout=1)
+
+    pipeline._invalidate_tool_task("reconnect")
+    release_tool.set()
+    await asyncio.wait_for(tool_finished.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert websocket.sent_payloads == []
+    assert "voice_timing event=tool_result_discarded" in messages
+    assert pipeline._tool_task is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_barge_in_clear_failure_is_not_reported_as_success(caplog):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def failed_clear():
+        return False
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_clear_audio=failed_clear,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"interrupted": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=barge_in_clear_failed" in messages
+    assert "voice_timing event=barge_in_clear call=" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_barge_in_preserves_co_delivered_caller_transcript():
+    transcripts = []
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def record_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    async def clear_audio():
+        return True
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=record_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({
+            "serverContent": {
+                "interrupted": True,
+                "inputTranscription": {"text": "I still need help."},
+            }
+        }),
+        json.dumps({
+            "serverContent": {
+                "modelTurn": {"parts": [{"text": "Acknowledged."}]},
+            }
+        }),
+    ])
+
+    await pipeline._receive_loop()
+
+    assert transcripts == [("Caller", "I still need help.")]
+    assert pipeline._transcript_lines == ["Caller: I still need help."]
+
+
+@pytest.mark.asyncio
+async def test_gemini_background_tool_task_returns_current_result(monkeypatch):
+    response_sent = asyncio.Event()
+
+    async def available_tool(_self, _name, _args):
+        return json.dumps({"available": True})
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", available_tool)
+
+    class RecordingWebSocket(_FakeGeminiWebSocket):
+        async def send(self, payload: str):
+            await super().send(payload)
+            response_sent.set()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    websocket = RecordingWebSocket([
+        json.dumps({
+            "toolCall": {
+                "functionCalls": [{
+                    "id": "tool-call-redacted",
+                    "name": "check_availability",
+                    "args": {},
+                }]
+            }
+        }),
+    ])
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = websocket
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(response_sent.wait(), timeout=1)
+
+    assert websocket.sent_payloads == [{
+        "tool_response": {
+            "function_responses": [{
+                "id": "tool-call-redacted",
+                "name": "check_availability",
+                "response": {"available": True},
+            }]
+        }
+    }]
     await pipeline.stop()
 
 
@@ -1871,7 +2180,7 @@ async def test_gemini_barge_in_discards_stale_output_until_turn_completes(monkey
         call_completed.set()
 
     async def noop_clear():
-        return None
+        return True
 
     pipeline = GeminiPipeline(
         on_audio_out=record_audio,

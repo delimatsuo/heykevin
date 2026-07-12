@@ -95,7 +95,7 @@ class GeminiPipeline:
         self,
         on_audio_out: Callable[[bytes], Awaitable[None]],
         on_transcript: Callable[[str, str], Awaitable[None]],
-        on_clear_audio: Optional[Callable[[], Awaitable[None]]] = None,
+        on_clear_audio: Optional[Callable[[], Awaitable[bool]]] = None,
         on_call_complete: Optional[Callable[[], Awaitable[None]]] = None,
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
@@ -115,6 +115,8 @@ class GeminiPipeline:
         self._ws = None
         self._receive_task = None
         self._recovery_task = None
+        self._tool_task: asyncio.Task[None] | None = None
+        self._tool_epoch = 0
         self._audio_playout_task = None
         self._connected = False
 
@@ -504,6 +506,7 @@ class GeminiPipeline:
             and self._recovery_task is not asyncio.current_task()
         ):
             self._recovery_task.cancel()
+        self._invalidate_tool_task("stop")
         if self._audio_playout_task:
             self._audio_playout_task.cancel()
         await self._clear_audio_queue()
@@ -559,6 +562,7 @@ class GeminiPipeline:
 
         self._reconnecting = True
         try:
+            self._invalidate_tool_task("reconnect")
             if self._caller_transcript_buf:
                 await self._flush_caller_transcript()
             self._interrupt_speaking = True
@@ -568,14 +572,14 @@ class GeminiPipeline:
             clear_started_at = time.monotonic()
             async with self._audio_output_lock:
                 dropped_chunks = await self._clear_audio_queue()
-                if self.on_clear_audio:
-                    await self.on_clear_audio()
+                clear_succeeded = await self._request_remote_audio_clear()
                 self._interrupt_speaking = False
             self._log_voice_timing(
                 "reconnect_output_clear",
                 clear_ms=self._elapsed_ms(clear_started_at),
                 dropped_chunks=dropped_chunks,
                 sent_chunks=self._audio_chunks_sent,
+                clear_succeeded=clear_succeeded,
             )
 
             if close_websocket:
@@ -637,10 +641,12 @@ class GeminiPipeline:
 
                 data = json.loads(message)
                 server_content = data.get("serverContent", {})
+                self._buffer_caller_transcript(data, server_content)
 
                 # Handle interruption (barge-in)
                 if server_content.get("interrupted"):
                     clear_started_at = time.monotonic()
+                    self._invalidate_tool_task("barge_in")
                     self._interrupt_speaking = True
                     self._audio_epoch += 1
                     self._assistant_instruction_pending = False
@@ -648,13 +654,21 @@ class GeminiPipeline:
                     self._kevin_transcript_buf.clear()
                     async with self._audio_output_lock:
                         dropped_chunks = await self._clear_audio_queue()
-                        if self.on_clear_audio:
-                            await self.on_clear_audio()
+                        clear_succeeded = await self._request_remote_audio_clear()
                     self._log_voice_timing(
-                        "barge_in_clear",
+                        (
+                            "barge_in_clear"
+                            if clear_succeeded
+                            else "barge_in_clear_failed"
+                        ),
                         clear_ms=self._elapsed_ms(clear_started_at),
                         dropped_chunks=dropped_chunks,
                         sent_chunks=self._audio_chunks_sent,
+                        reason=(
+                            "acknowledged"
+                            if clear_succeeded
+                            else "delivery_rejected"
+                        ),
                     )
                     logger.info("Gemini: caller interrupted (barge-in)")
                     continue
@@ -674,17 +688,6 @@ class GeminiPipeline:
                 output_text = self._extract_transcript(server_content, "output")
                 if output_text and not self._interrupt_speaking:
                     self._kevin_transcript_buf.append(output_text)
-
-                # Buffer caller's transcript fragments (sent word-by-word)
-                input_text = self._extract_transcript(server_content, "input")
-                if not input_text:
-                    input_text = self._extract_transcript(data, "input")
-                if input_text:
-                    self._caller_transcript_buf.append(input_text)
-                    self._last_caller_transcript_fragment_at = time.time()
-                    self._last_caller_transcript_fragment_monotonic = time.monotonic()
-                    self._response_start_latency_logged = False
-                    self._mark_caller_activity()
 
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
                 if model_turn.get("parts") and self._caller_transcript_buf:
@@ -751,7 +754,7 @@ class GeminiPipeline:
                     # Flush any pending caller transcript before tool execution
                     if self._caller_transcript_buf:
                         await self._flush_caller_transcript()
-                    await self._handle_tool_calls(function_calls)
+                    self._schedule_tool_calls(function_calls)
 
         except asyncio.CancelledError:
             pass
@@ -792,6 +795,19 @@ class GeminiPipeline:
         if isinstance(t, str):
             return t
         return ""
+
+    def _buffer_caller_transcript(self, data: dict, server_content: dict) -> None:
+        """Buffer caller text before handling co-delivered interruption events."""
+        input_text = self._extract_transcript(server_content, "input")
+        if not input_text:
+            input_text = self._extract_transcript(data, "input")
+        if not input_text:
+            return
+        self._caller_transcript_buf.append(input_text)
+        self._last_caller_transcript_fragment_at = time.time()
+        self._last_caller_transcript_fragment_monotonic = time.monotonic()
+        self._response_start_latency_logged = False
+        self._mark_caller_activity()
 
     def _ensure_audio_playout_task(self):
         """Ensure model audio is played to Twilio at roughly realtime speed."""
@@ -844,8 +860,7 @@ class GeminiPipeline:
         clear_started_at = time.monotonic()
         async with self._audio_output_lock:
             dropped_chunks = await self._clear_audio_queue()
-            if self.on_clear_audio:
-                await self.on_clear_audio()
+            clear_succeeded = await self._request_remote_audio_clear()
         self._log_voice_timing(
             "audio_backlog_overflow",
             attempted_backlog_ms=round(attempted_backlog_bytes / 8),
@@ -853,6 +868,7 @@ class GeminiPipeline:
             limit_ms=round(self.MAX_AUDIO_BACKLOG_BYTES / 8),
             clear_ms=self._elapsed_ms(clear_started_at),
             dropped_chunks=dropped_chunks,
+            clear_succeeded=clear_succeeded,
         )
 
     async def _audio_playout_loop(self):
@@ -924,6 +940,19 @@ class GeminiPipeline:
         self._queued_audio_bytes = 0
         self._is_speaking = False
         return dropped_chunks
+
+    async def _request_remote_audio_clear(self) -> bool:
+        """Return true only when the transport acknowledges a clear frame."""
+        if not self.on_clear_audio:
+            return False
+        try:
+            return await self.on_clear_audio() is True
+        except Exception as error:
+            self._log_voice_timing(
+                "remote_audio_clear_error",
+                exception_type=type(error).__name__,
+            )
+            return False
 
     async def _wait_for_audio_playout(self, timeout_seconds: float = 6.0):
         """Wait briefly for paced audio to drain before final side effects."""
@@ -1042,6 +1071,51 @@ class GeminiPipeline:
 
     # --- Tool Calling ---
 
+    def _invalidate_tool_task(self, reason: str) -> None:
+        """Invalidate pending tool work without blocking realtime receive events."""
+        self._tool_epoch += 1
+        task = self._tool_task
+        if task and not task.done():
+            task.cancel()
+            self._log_voice_timing("tool_task_cancelled", reason=reason)
+
+    def _schedule_tool_calls(self, function_calls: list) -> None:
+        """Run one epoch-bound tool batch outside the Gemini receive loop."""
+        if self._tool_task and not self._tool_task.done():
+            self._invalidate_tool_task("superseded")
+
+        websocket = self._ws
+        if websocket is None:
+            self._log_voice_timing("tool_task_rejected", reason="missing_websocket")
+            return
+
+        tool_epoch = self._tool_epoch
+        task = asyncio.create_task(
+            self._handle_tool_calls(
+                function_calls,
+                websocket=websocket,
+                tool_epoch=tool_epoch,
+            )
+        )
+        self._tool_task = task
+        task.add_done_callback(self._tool_task_done)
+
+    def _tool_task_done(self, task: asyncio.Task[None]) -> None:
+        """Consume background task failures and recover the live session."""
+        is_current = self._tool_task is task
+        if is_current:
+            self._tool_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if not error or not is_current:
+            return
+        self._log_voice_timing(
+            "tool_task_error",
+            exception_type=type(error).__name__,
+        )
+        self._schedule_receive_recovery(close_websocket=True)
+
     def _build_gemini_tools(self) -> list:
         """Build Gemini-format tool definitions from contractor config."""
         has_jobber = bool(self._contractor_config.get("jobber_access_token"))
@@ -1082,8 +1156,15 @@ class GeminiPipeline:
 
         return [{"function_declarations": declarations}]
 
-    async def _handle_tool_calls(self, function_calls: list):
-        """Execute tool calls and send results back to Gemini."""
+    async def _handle_tool_calls(
+        self,
+        function_calls: list,
+        *,
+        websocket=None,
+        tool_epoch: int | None = None,
+    ) -> None:
+        """Execute tool calls; scheduled live calls pass an epoch explicitly."""
+        websocket = websocket or self._ws
         from app.services.voice_pipeline import VoicePipeline
 
         # Reuse VoicePipeline's _execute_tool — it has all the Jobber/Calendar logic
@@ -1120,8 +1201,17 @@ class GeminiPipeline:
                 "response": json.loads(result_str),
             })
 
-        # Send tool responses back to Gemini
-        await self._ws.send(json.dumps({
+        if tool_epoch is not None and (
+            tool_epoch != self._tool_epoch
+            or websocket is not self._ws
+            or not self._connected
+            or self._reconnecting
+        ):
+            self._log_voice_timing("tool_result_discarded", reason="stale_epoch")
+            return
+
+        # Send tool responses back to the session that requested them.
+        await websocket.send(json.dumps({
             "tool_response": {
                 "function_responses": responses,
             }

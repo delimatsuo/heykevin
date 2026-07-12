@@ -771,6 +771,65 @@ async def test_gemini_receive_reconnect_preserves_context_without_greeting(monke
 
 
 @pytest.mark.asyncio
+async def test_gemini_reconnect_discards_stale_model_output_before_new_session(monkeypatch):
+    from websockets.exceptions import ConnectionClosedError
+
+    transcripts = []
+    clear_events = []
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def record_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    async def clear_audio():
+        clear_events.append("clear")
+
+    class ClosingWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise ConnectionClosedError(None, None)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=record_transcript,
+        on_clear_audio=clear_audio,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = ClosingWebSocket()
+    pipeline._caller_transcript_buf = ["I need help with a leaking faucet."]
+    pipeline._kevin_transcript_buf = ["This unfinished response must not survive."]
+    original_epoch = pipeline._audio_epoch
+    await pipeline._audio_queue.put((b"stale model audio", 1.0, original_epoch))
+
+    reconnect_calls = []
+
+    async def fake_start(**kwargs):
+        assert pipeline._audio_queue.empty()
+        assert pipeline._kevin_transcript_buf == []
+        assert pipeline._audio_epoch > original_epoch
+        assert clear_events == ["clear"]
+        reconnect_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    assert transcripts == [("Caller", "I need help with a leaking faucet.")]
+    assert pipeline._transcript_lines == ["Caller: I need help with a leaking faucet."]
+    assert reconnect_calls[0]["reconnect_context"] == (
+        "Caller: I need help with a leaking faucet."
+    )
+
+
+@pytest.mark.asyncio
 async def test_gemini_reconnect_does_not_start_owner_hold_from_partial_kevin_text(monkeypatch):
     from websockets.exceptions import ConnectionClosedError
 

@@ -855,7 +855,7 @@ async def test_gemini_goodbye_waits_for_audio_playout_before_hangup(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_gemini_receive_reconnect_preserves_context_without_greeting(monkeypatch):
+async def test_gemini_receive_reconnect_preserves_context_without_greeting(monkeypatch, caplog):
     from websockets.exceptions import ConnectionClosedError
 
     async def noop_audio(_chunk: bytes):
@@ -891,6 +891,7 @@ async def test_gemini_receive_reconnect_preserves_context_without_greeting(monke
         return True
 
     monkeypatch.setattr(pipeline, "start", fake_start)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
 
     await pipeline._receive_loop()
 
@@ -901,6 +902,56 @@ async def test_gemini_receive_reconnect_preserves_context_without_greeting(monke
             "reconnect_context": "Caller: Do you replace toilets?\nKevin: Yes, we do.",
         }
     ]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=reconnect_result" in messages
+    assert "attempt=1 success=True" in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_reconnect_limit_ends_call_without_another_session(monkeypatch, caplog):
+    from websockets.exceptions import ConnectionClosedError
+
+    completed = asyncio.Event()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        completed.set()
+
+    class ClosingWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise ConnectionClosedError(None, None)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = ClosingWebSocket()
+    pipeline._reconnect_attempts = pipeline.MAX_RECONNECT_ATTEMPTS
+
+    async def unexpected_start(**_kwargs):
+        pytest.fail("reconnect limit must prevent another session")
+
+    monkeypatch.setattr(pipeline, "start", unexpected_start)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    assert completed.is_set()
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=reconnect_result" in messages
+    assert "attempt=2 success=False reason=limit" in messages
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1082,95 @@ async def test_gemini_transcript_flush_records_response_timing():
         ("Kevin", "Yes, we do."),
     ]
     assert pipeline._last_caller_transcript_flushed_at == 0.0
+
+
+@pytest.mark.asyncio
+async def test_gemini_logs_response_latency_and_generated_duration_without_text(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    sent_chunks = []
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append(chunk)
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    private_caller_text = "Private caller request"
+    private_response_text = "Private response with four words"
+    generated_audio = b"a" * 8_000
+    pipeline = GeminiPipeline(
+        on_audio_out=record_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({
+            "serverContent": {
+                "inputTranscription": {"text": private_caller_text}
+            }
+        }),
+        _gemini_audio_message(generated_audio),
+        json.dumps({
+            "serverContent": {
+                "outputTranscription": {"text": private_response_text}
+            }
+        }),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=2)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert sent_chunks == [generated_audio]
+    assert messages.count("voice_timing event=response_first_audio") == 1
+    assert "latency_ms=" in messages
+    assert messages.count("voice_timing event=model_turn_complete") == 1
+    assert "generated_audio_ms=1000" in messages
+    assert "words=5" in messages
+    assert private_caller_text not in messages
+    assert private_response_text not in messages
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_turn_complete_without_transcript_closes_response_metrics(caplog):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._response_turn_number = 1
+    pipeline._response_first_audio_at = time.monotonic()
+    pipeline._generated_audio_ms = 750
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=model_turn_complete" in messages
+    assert "generated_audio_ms=750" in messages
+    assert "chars=0 words=0" in messages
+    assert pipeline._response_first_audio_at == 0.0
+    assert pipeline._generated_audio_ms == 0
 
 
 @pytest.mark.asyncio
@@ -1208,7 +1348,7 @@ async def test_gemini_logs_inbound_audio_error_once_without_exception_message(ca
 
 
 @pytest.mark.asyncio
-async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch):
+async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch, caplog):
     events = []
     audio_send_started = asyncio.Event()
     release_audio_send = asyncio.Event()
@@ -1237,6 +1377,7 @@ async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch):
         contractor_config=_plumbing_config(),
     )
     pipeline._connected = True
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
     pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
     await pipeline._enqueue_model_audio(b"model audio")
     await asyncio.wait_for(audio_send_started.wait(), timeout=1)
@@ -1259,6 +1400,9 @@ async def test_gemini_barge_in_clear_waits_for_in_flight_audio(monkeypatch):
     await asyncio.wait_for(clear_completed.wait(), timeout=1)
 
     assert events == ["audio_started", "audio_sent", "clear"]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=barge_in_clear" in messages
+    assert "clear_ms=" in messages
     await pipeline.stop()
 
 

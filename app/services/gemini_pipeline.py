@@ -17,6 +17,10 @@ from websockets.exceptions import ConnectionClosed
 
 from app.config import settings
 from app.services.entitlements import effective_mode
+from app.services.urgency import (
+    URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
+    find_urgent_signal,
+)
 from app.services.voice_pipeline import (
     _call_label,
     _log_tool_execution_failure,
@@ -65,13 +69,7 @@ class GeminiPipeline:
     on_call_complete, on_urgency_detected.
     """
 
-    URGENCY_KEYWORDS = {
-        "emergency", "flood", "flooding", "fire", "gas leak", "pipe burst",
-        "no water", "sewage", "sparking", "smoke", "hospital", "accident",
-        "burst pipe", "water everywhere", "electrical fire", "carbon monoxide",
-        "burning smell", "smell burning", "electrical panel", "electric panel",
-        "breaker tripped", "tripped breaker",
-    }
+    URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
     CALLER_SILENCE_PROMPT_SECONDS = 10
     CALLER_SILENCE_HANGUP_SECONDS = 10
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
@@ -1150,16 +1148,13 @@ class GeminiPipeline:
 
         # Urgency detection
         if not self._urgency_detected and self.on_urgency_detected:
-            text_lower = full_text.lower()
-            for keyword in self.URGENCY_KEYWORDS:
-                if keyword in text_lower:
-                    self._urgency_detected = True
-                    self._log_voice_timing("urgency_detected")
-                    asyncio.create_task(self.on_urgency_detected(full_text))
-                    if self._unavailable_task and not self._unavailable_task.done():
-                        self._unavailable_task.cancel()
-                        self._unavailable_task = None
-                    break
+            if find_urgent_signal(full_text):
+                self._urgency_detected = True
+                self._log_voice_timing("urgency_detected")
+                asyncio.create_task(self.on_urgency_detected(full_text))
+                if self._unavailable_task and not self._unavailable_task.done():
+                    self._unavailable_task.cancel()
+                    self._unavailable_task = None
 
         self._observe_receptionist_controller(full_text)
 

@@ -25,8 +25,13 @@ class FakeGcloud:
     def __init__(self):
         self.calls: list[tuple[str, ...]] = []
 
-    def run(self, *args: str, timeout: int | None = None) -> None:
-        del timeout
+    def run(
+        self,
+        *args: str,
+        timeout: int | None = None,
+        operation: str = "gcloud mutation",
+    ) -> None:
+        del timeout, operation
         self.calls.append(args)
 
 
@@ -35,8 +40,13 @@ class SnapshotGcloud(FakeGcloud):
         super().__init__()
         self.responses = responses
 
-    def json(self, *args: str, timeout: int | None = None):
-        del timeout
+    def json(
+        self,
+        *args: str,
+        timeout: int | None = None,
+        operation: str = "gcloud read",
+    ):
+        del timeout, operation
         for prefix, response in self.responses:
             if args[: len(prefix)] == prefix:
                 return deepcopy(response)
@@ -432,8 +442,14 @@ def test_gcloud_failures_do_not_forward_provider_output(monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: FailedResult())
 
     with pytest.raises(module.PreparationError) as exc_info:
-        module.Gcloud().json("monitoring", "policies", "list")
+        module.Gcloud().json(
+            "monitoring",
+            "policies",
+            "list",
+            operation="staging Monitoring policy read",
+        )
 
     message = str(exc_info.value)
+    assert message == "staging Monitoring policy read failed"
     assert "sensitive-payload" not in message
     assert "provider-token" not in message

@@ -696,7 +696,9 @@ async def test_gemini_start_sends_exact_greeting_and_safe_startup_metrics(
 
 
 @pytest.mark.asyncio
-async def test_gemini_reconnect_can_resume_without_repeating_greeting(monkeypatch):
+async def test_gemini_reconnect_preserves_context_without_provider_resumption(
+    monkeypatch,
+):
     sent_messages = []
 
     class FakeWebSocket:
@@ -741,7 +743,10 @@ async def test_gemini_reconnect_can_resume_without_repeating_greeting(monkeypatc
 
     assert started
     assert len(sent_messages) == 1
-    setup_text = sent_messages[0]["setup"]["system_instruction"]["parts"][0]["text"]
+    setup = sent_messages[0]["setup"]
+    assert "session_resumption" not in setup
+    assert "sessionResumption" not in setup
+    setup_text = setup["system_instruction"]["parts"][0]["text"]
     assert "CONVERSATION CONTEXT BEFORE RECONNECT" in setup_text
     assert "Do not greet the caller again" in setup_text
     assert "Caller: Do you replace toilets?" in setup_text
@@ -792,7 +797,8 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
     realtime_config = setup["realtime_input_config"]
     activity_detection = realtime_config["automatic_activity_detection"]
     assert setup["context_window_compression"] == {"sliding_window": {}}
-    assert setup["session_resumption"] == {}
+    assert "session_resumption" not in setup
+    assert "sessionResumption" not in setup
     assert realtime_config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
     assert realtime_config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
     assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_HIGH"
@@ -802,59 +808,7 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gemini_resume_uses_provider_handle_without_duplicate_context(
-    monkeypatch,
-    caplog,
-):
-    private_handle = "private-resumption-handle"
-    private_context = "Caller: private conversation context"
-    websocket = _FakeGeminiWebSocket()
-
-    async def fake_connect(*_args, **_kwargs):
-        return websocket
-
-    async def noop_audio(_chunk: bytes):
-        return None
-
-    async def noop_transcript(_speaker: str, _text: str):
-        return None
-
-    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
-    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
-    pipeline = GeminiPipeline(
-        on_audio_out=noop_audio,
-        on_transcript=noop_transcript,
-        call_sid="CA_private_identifier",
-        contractor_config=_plumbing_config(),
-    )
-    pipeline._session_resumption_handle = private_handle
-    pipeline._session_resume_ready = True
-
-    started = await pipeline.start(
-        send_greeting=False,
-        start_background_tasks=False,
-        reconnect_context=private_context,
-    )
-
-    assert started is True
-    setup = websocket.sent_payloads[0]["setup"]
-    assert setup["session_resumption"] == {"handle": private_handle}
-    system_text = setup["system_instruction"]["parts"][0]["text"]
-    assert "CONVERSATION CONTEXT BEFORE RECONNECT" not in system_text
-    assert private_context not in system_text
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert private_handle not in messages
-    assert private_context not in messages
-    assert "CA_private_identifier" not in messages
-    await pipeline.stop()
-    assert pipeline._session_resumption_handle == ""
-    assert pipeline._session_resume_ready is False
-
-
-@pytest.mark.asyncio
-async def test_gemini_failed_resumption_closes_socket_before_cold_fallback(
-    monkeypatch,
-):
+async def test_gemini_cold_reconnect_closes_socket_before_new_session(monkeypatch):
     class RecordingWebSocket:
         def __init__(self):
             self.closed = False
@@ -875,21 +829,16 @@ async def test_gemini_failed_resumption_closes_socket_before_cold_fallback(
         contractor_config=_plumbing_config(),
     )
     initial_websocket = RecordingWebSocket()
-    failed_resume_websocket = RecordingWebSocket()
-    fallback_websocket = RecordingWebSocket()
+    replacement_websocket = RecordingWebSocket()
     pipeline._connected = True
     pipeline._ws = initial_websocket
-    pipeline._session_resumption_handle = "previous-handle"
-    pipeline._session_resume_ready = True
-    resume_states: list[bool] = []
+    start_calls = 0
 
     async def fake_start(**_kwargs):
-        resume_states.append(pipeline._session_resume_ready)
-        if len(resume_states) == 1:
-            pipeline._ws = failed_resume_websocket
-            return False
-        assert failed_resume_websocket.closed is True
-        pipeline._ws = fallback_websocket
+        nonlocal start_calls
+        start_calls += 1
+        assert initial_websocket.closed is True
+        pipeline._ws = replacement_websocket
         return True
 
     monkeypatch.setattr(pipeline, "start", fake_start)
@@ -897,15 +846,13 @@ async def test_gemini_failed_resumption_closes_socket_before_cold_fallback(
     await pipeline._recover_receive_loop(close_websocket=True)
 
     assert initial_websocket.closed is True
-    assert failed_resume_websocket.closed is True
-    assert fallback_websocket.closed is False
-    assert resume_states == [True, False]
-    assert pipeline._session_resumption_handle == ""
+    assert replacement_websocket.closed is False
+    assert start_calls == 1
     assert pipeline._reconnect_attempts == 0
 
 
 @pytest.mark.asyncio
-async def test_gemini_resumption_update_and_goaway_schedule_private_recovery(
+async def test_gemini_does_not_retain_unexpected_resumption_update_and_goaway_recovers(
     monkeypatch,
     caplog,
 ):
@@ -948,51 +895,15 @@ async def test_gemini_resumption_update_and_goaway_schedule_private_recovery(
 
     await pipeline._receive_loop()
 
-    assert pipeline._session_resumption_handle == private_handle
-    assert pipeline._session_resume_ready is True
+    assert "_session_resumption_handle" not in pipeline.__dict__
+    assert "_session_resume_ready" not in pipeline.__dict__
     assert recovery_requests == [True]
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "voice_timing event=session_resumption_ready" in messages
+    assert "voice_timing event=unexpected_session_resumption_update" in messages
     assert "voice_timing event=go_away_received" in messages
     assert private_handle not in messages
     assert private_time_left not in messages
     assert "CA_private_identifier" not in messages
-
-
-@pytest.mark.asyncio
-async def test_gemini_non_resumable_update_prevents_stale_handle_reuse():
-    async def noop_audio(_chunk: bytes):
-        return None
-
-    async def noop_transcript(_speaker: str, _text: str):
-        return None
-
-    pipeline = GeminiPipeline(
-        on_audio_out=noop_audio,
-        on_transcript=noop_transcript,
-        call_sid="CA_test",
-        contractor_config=_plumbing_config(),
-    )
-    pipeline._connected = True
-    pipeline._session_resumption_handle = "previous-handle"
-    pipeline._session_resume_ready = True
-    pipeline._ws = _FakeGeminiWebSocket(
-        [
-            json.dumps(
-                {
-                    "sessionResumptionUpdate": {
-                        "resumable": False,
-                        "newHandle": "",
-                    }
-                }
-            )
-        ]
-    )
-
-    await pipeline._receive_loop()
-
-    assert pipeline._session_resumption_handle == ""
-    assert pipeline._session_resume_ready is False
 
 
 @pytest.mark.asyncio

@@ -78,12 +78,16 @@ markers block promotion. Twilio documents that returned marks represent played
 or cleared buffered media:
 <https://www.twilio.com/docs/voice/media-streams/websocket-messages>.
 
-The native Gemini candidate requests context-window compression and session
-resumption on every connection. It retains only the latest resumable handle in
-memory, never logs or persists it, clears it when the call stops, and reacts to
-`GoAway` with a bounded resume attempt. Failed resumption falls back to the
-existing bounded transcript-context reconnect. See the official lifecycle
-guidance: <https://ai.google.dev/gemini-api/docs/live-api/session-management>.
+The native Gemini candidate requests context-window compression but
+intentionally omits session resumption. Google documents that configuring
+session resumption retains conversation state, including text and audio, for
+up to 24 hours and must be avoided for zero data retention:
+<https://ai.google.dev/gemini-api/docs/zdr>. A `GoAway` event therefore starts
+the existing bounded cold reconnect with recent in-memory transcript context
+and buffered caller audio. Unexpected resumption updates are discarded without
+retaining or logging the provider payload. This favors zero retention over
+provider-side seamless continuity. See the lifecycle guidance:
+<https://ai.google.dev/gemini-api/docs/live-api/session-management>.
 Gemini 3.1 greeting and corrective text instructions use `realtimeInput.text`;
 the older `clientContent` contract remains available only for an explicit 2.5
 rollback model. This follows Google's 3.1 migration guidance:
@@ -252,7 +256,7 @@ caller turns across this matrix:
 | Background noise and pauses | No false hangup, duplicate prompt, or sustained talk-over. |
 | Shadow VAD calibration | Compare labeled caller speech boundaries with shadow delivery, overlap, unassociated, and error diagnostics; do not alter Gemini activity control. |
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the voice-only candidate path. |
-| Reconnect simulation | Provider handle resumes without duplicate transcript context; `GoAway` reconnects; failed resumption cold-falls back; old Kevin output is absent; buffered caller audio replays in order before new live frames. |
+| Reconnect simulation | No provider resumption handle is requested or retained; `GoAway` cold-reconnects with bounded context; old Kevin output is absent; buffered caller audio replays in order before new live frames. |
 | Oversized response simulation | Queued audio stays bounded; stale output clears; one short retry is requested. |
 | Bounded normal responses | Generated audio stays within budget and no response ends mid-sentence. |
 | Inbound startup overflow simulation | Stream closes, no caller audio is logged, and the release evaluator fails. |
@@ -267,6 +271,8 @@ in the release artifact.
 - Full unit suite passes on Python 3.12.
 - Ruff and `git diff --check` pass.
 - The configured Gemini model is an explicit non-`latest` model ID.
+- Gemini setup omits session resumption, and unexpected resumption updates are
+  discarded without retaining or logging their payload.
 - Credential-shaped and full-phone-shaped additions scan clean.
 - `app/services/gemini_pipeline.py` and `app/services/voice_pipeline.py` do not
   import controller modules in the voice-only release candidate.
@@ -282,6 +288,9 @@ in the release artifact.
   jurisdiction policy; code coverage is not legal approval.
 - Logs contain no transcript text, audio payload, full phone, customer record,
   OAuth code, bearer token, integration token, or provider API key.
+- Provider-account evidence must confirm paid-service data terms and approved
+  zero-retention settings before live qualification. Request/response logging
+  and retention-incompatible grounding must remain disabled.
 - Production must have a valid `TRANSCRIPT_ENCRYPTION_KEY` and must fail closed
   if it is absent or invalid. The current plaintext fallback in
   `app/db/calls.py` remains a production blocker until separately hardened and

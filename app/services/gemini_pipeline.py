@@ -127,7 +127,6 @@ class GeminiPipeline:
     MAX_RECONNECT_AUDIO_BUFFER_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
-    MAX_SESSION_RESUMPTION_HANDLE_CHARS = 16_384
     MAX_GREETING_WORDS = 24
     MAX_RESPONSE_OUTPUT_TOKENS = 120
     INBOUND_FORWARDING_LAG_BUCKETS_MS = (
@@ -202,9 +201,6 @@ class GeminiPipeline:
         self._command_check_task = None
         self._reconnect_attempts = 0
         self._reconnecting = False
-        self._session_resumption_handle = ""
-        self._session_resume_ready = False
-        self._go_away_pending = False
 
         # Transcript accumulation (for post-call processing)
         self._transcript_lines: list[str] = []
@@ -473,15 +469,8 @@ class GeminiPipeline:
             )
 
             # Build setup message
-            resumption_handle = (
-                self._session_resumption_handle
-                if self._session_resume_ready
-                else ""
-            )
-            system_prompt = (
-                self._system_prompt
-                if resumption_handle
-                else self._system_prompt_with_reconnect_context(reconnect_context)
+            system_prompt = self._system_prompt_with_reconnect_context(
+                reconnect_context
             )
             setup = {
                 "setup": {
@@ -503,11 +492,6 @@ class GeminiPipeline:
                         "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
                     },
                     "context_window_compression": {"sliding_window": {}},
-                    "session_resumption": (
-                        {"handle": resumption_handle}
-                        if resumption_handle
-                        else {}
-                    ),
                 }
             }
 
@@ -539,7 +523,6 @@ class GeminiPipeline:
             self._usage_session_number += 1
             self._last_usage_snapshot = None
             self._connected = True
-            self._go_away_pending = False
             self._log_voice_timing(
                 "gemini_setup_ack",
                 phase_ms=self._elapsed_ms(setup_started_at),
@@ -797,9 +780,6 @@ class GeminiPipeline:
         self._connected = False
         self._audio_input_ready.set()
         self._reconnecting = False
-        self._session_resumption_handle = ""
-        self._session_resume_ready = False
-        self._go_away_pending = False
         self._interrupt_speaking = True
         self._log_interrupted_response_turn()
         if self._silence_check_task:
@@ -868,7 +848,7 @@ class GeminiPipeline:
         )
 
     async def _recover_receive_loop(self, *, close_websocket: bool) -> None:
-        """Clear stale output and make one bounded attempt to resume Gemini."""
+        """Clear stale output and make one bounded replacement connection."""
         async with self._inbound_audio_lock:
             if not self._connected or self._reconnecting:
                 return
@@ -914,28 +894,11 @@ class GeminiPipeline:
             self._reconnect_attempts = next_attempt
             logger.info("Attempting Gemini reconnection...")
             reconnect_context = self._build_reconnect_context()
-            resumption_attempted = (
-                self._session_resume_ready
-                and bool(self._session_resumption_handle)
-            )
             reconnected = await self.start(
                 send_greeting=False,
                 start_background_tasks=False,
                 reconnect_context=reconnect_context,
             )
-            if not reconnected and resumption_attempted:
-                await self._close_current_websocket()
-                self._session_resumption_handle = ""
-                self._session_resume_ready = False
-                self._log_voice_timing(
-                    "session_resumption_fallback",
-                    attempt=self._reconnect_attempts,
-                )
-                reconnected = await self.start(
-                    send_greeting=False,
-                    start_background_tasks=False,
-                    reconnect_context=reconnect_context,
-                )
             audio_replayed = False
             if reconnected:
                 audio_replayed = await self._flush_reconnect_audio()
@@ -979,40 +942,9 @@ class GeminiPipeline:
 
     # --- Receive Loop ---
 
-    def _schedule_go_away_recovery(self) -> None:
-        if not self._go_away_pending or not self._session_resume_ready:
-            return
-        self._go_away_pending = False
-        self._schedule_receive_recovery(close_websocket=True)
-
-    def _record_session_resumption_update(self, update: object) -> None:
-        if not isinstance(update, dict):
-            self._session_resumption_handle = ""
-            self._session_resume_ready = False
-            return
-        handle = update.get("newHandle", update.get("new_handle", ""))
-        resumable = update.get("resumable") is True
-        if (
-            resumable
-            and isinstance(handle, str)
-            and 0 < len(handle) <= self.MAX_SESSION_RESUMPTION_HANDLE_CHARS
-        ):
-            self._session_resumption_handle = handle
-            self._session_resume_ready = True
-            self._log_voice_timing("session_resumption_ready")
-            self._schedule_go_away_recovery()
-            return
-        self._session_resumption_handle = ""
-        self._session_resume_ready = False
-        self._log_voice_timing("session_resumption_unavailable")
-
     def _record_go_away(self) -> None:
-        self._go_away_pending = True
-        self._log_voice_timing(
-            "go_away_received",
-            resumable=self._session_resume_ready,
-        )
-        self._schedule_go_away_recovery()
+        self._log_voice_timing("go_away_received")
+        self._schedule_receive_recovery(close_websocket=True)
 
     async def _receive_loop(self):
         """Process messages from Gemini Live API."""
@@ -1028,7 +960,9 @@ class GeminiPipeline:
                     data.get("session_resumption_update"),
                 )
                 if resumption_update is not None:
-                    self._record_session_resumption_update(resumption_update)
+                    self._log_voice_timing(
+                        "unexpected_session_resumption_update"
+                    )
                     continue
                 if data.get("goAway", data.get("go_away")) is not None:
                     self._record_go_away()
@@ -1391,7 +1325,7 @@ class GeminiPipeline:
             )
 
     def _build_reconnect_context(self, limit: int = 12) -> str:
-        """Return recent transcript lines for a resumed Gemini session."""
+        """Return recent transcript lines for a replacement Gemini session."""
         lines = self._transcript_lines[-limit:]
         return "\n".join(lines)[-4000:]
 

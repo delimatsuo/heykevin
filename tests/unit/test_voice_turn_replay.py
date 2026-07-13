@@ -395,6 +395,36 @@ class _ProviderUnknownCloseSocket(_FakeProviderSocket):
         yield ""  # pragma: no cover
 
 
+class _CleanClosedSocket(_FakeProviderSocket):
+    def __init__(
+        self,
+        close_code: int,
+        *,
+        first_audio: bool,
+        turn_complete: bool = False,
+    ) -> None:
+        super().__init__()
+        self.close_code = close_code
+        self.close_reason = "sensitive-clean-close-reason"
+        self.first_audio = first_audio
+        self.turn_complete = turn_complete
+
+    async def _messages(self):
+        await self.activity_ended.wait()
+        if self.first_audio or self.turn_complete:
+            content = {"turnComplete": self.turn_complete}
+            if self.first_audio:
+                content["modelTurn"] = {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": "cHVibGlj",
+                        }
+                    }]
+                }
+            yield json.dumps({"serverContent": content})
+
+
 class _SetupTimeoutSocket(_FakeProviderSocket):
     async def recv(self) -> str:
         await asyncio.Event().wait()
@@ -594,6 +624,77 @@ async def test_receiver_failures_use_bounded_error_codes(
     assert "sensitive-request-id" not in repr(observation)
     assert "sensitive-close-reason" not in repr(observation)
     assert "sensitive-private-close-reason" not in repr(observation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arm", "close_code", "first_audio", "expected_error"),
+    [
+        ("manual", 1000, False, "provider_closed_normal"),
+        ("automatic", 1001, False, "provider_closed_going_away"),
+        ("manual", 1001, True, "provider_closed_going_away"),
+        ("automatic", 1000, True, "provider_closed_normal"),
+    ],
+)
+async def test_clean_preterminal_closes_are_not_reported_as_timeouts(
+    monkeypatch,
+    arm,
+    close_code,
+    first_audio,
+    expected_error,
+):
+    _stub_short_manual_replay(monkeypatch)
+    socket = _CleanClosedSocket(close_code, first_audio=first_audio)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm=arm),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error == expected_error
+    assert "sensitive-clean-close-reason" not in repr(observation)
+
+
+@pytest.mark.asyncio
+async def test_clean_close_after_turn_complete_is_not_an_error(monkeypatch):
+    _stub_short_manual_replay(monkeypatch)
+    socket = _CleanClosedSocket(1000, first_audio=True, turn_complete=True)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error is None
+    assert observation.turn_complete is True
 
 
 @pytest.mark.asyncio

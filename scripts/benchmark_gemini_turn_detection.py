@@ -270,6 +270,11 @@ async def _receive_provider_events(websocket: Any, state: _AttemptState) -> None
             if content.get("turnComplete"):
                 state.turn_complete = True
                 state.turn_complete_ready.set()
+        if not state.turn_complete:
+            _record_receive_error(
+                state,
+                _provider_close_code_error(getattr(websocket, "close_code", None)),
+            )
     except asyncio.CancelledError:
         raise
     except ConnectionClosed as exc:
@@ -286,6 +291,12 @@ def _record_receive_error(state: _AttemptState, error: str) -> None:
 
 def _provider_close_error(error: ConnectionClosed) -> str:
     code = error.rcvd.code if error.rcvd is not None else 1006
+    return _provider_close_code_error(code)
+
+
+def _provider_close_code_error(code: object) -> str:
+    if isinstance(code, bool) or not isinstance(code, int):
+        code = 1006
     return PROVIDER_CLOSE_ERROR_CODES.get(code, "provider_closed")
 
 

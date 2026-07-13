@@ -677,12 +677,12 @@ async def test_gemini_start_sends_exact_greeting_and_safe_startup_metrics(
             "close_timeout": 1.0,
         }
         greeting_text = pipeline._build_greeting_text()
-        greeting_prompt = websocket.sent_payloads[1]["client_content"]["turns"][0][
-            "parts"
-        ][0]["text"]
+        greeting_message = websocket.sent_payloads[1]
+        greeting_prompt = greeting_message["realtime_input"]["text"]
         assert greeting_prompt == (
             f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
         )
+        assert "client_content" not in greeting_message
 
         messages = "\n".join(record.getMessage() for record in caplog.records)
         assert "voice_timing event=gemini_ws_connected" in messages
@@ -791,6 +791,8 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
     setup = sent_messages[0]["setup"]
     realtime_config = setup["realtime_input_config"]
     activity_detection = realtime_config["automatic_activity_detection"]
+    assert setup["context_window_compression"] == {"sliding_window": {}}
+    assert setup["session_resumption"] == {}
     assert realtime_config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
     assert realtime_config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
     assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_HIGH"
@@ -800,7 +802,201 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatch):
+async def test_gemini_resume_uses_provider_handle_without_duplicate_context(
+    monkeypatch,
+    caplog,
+):
+    private_handle = "private-resumption-handle"
+    private_context = "Caller: private conversation context"
+    websocket = _FakeGeminiWebSocket()
+
+    async def fake_connect(*_args, **_kwargs):
+        return websocket
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr("app.services.gemini_pipeline.websockets.connect", fake_connect)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._session_resumption_handle = private_handle
+    pipeline._session_resume_ready = True
+
+    started = await pipeline.start(
+        send_greeting=False,
+        start_background_tasks=False,
+        reconnect_context=private_context,
+    )
+
+    assert started is True
+    setup = websocket.sent_payloads[0]["setup"]
+    assert setup["session_resumption"] == {"handle": private_handle}
+    system_text = setup["system_instruction"]["parts"][0]["text"]
+    assert "CONVERSATION CONTEXT BEFORE RECONNECT" not in system_text
+    assert private_context not in system_text
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert private_handle not in messages
+    assert private_context not in messages
+    assert "CA_private_identifier" not in messages
+    await pipeline.stop()
+    assert pipeline._session_resumption_handle == ""
+    assert pipeline._session_resume_ready is False
+
+
+@pytest.mark.asyncio
+async def test_gemini_failed_resumption_closes_socket_before_cold_fallback(
+    monkeypatch,
+):
+    class RecordingWebSocket:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    initial_websocket = RecordingWebSocket()
+    failed_resume_websocket = RecordingWebSocket()
+    fallback_websocket = RecordingWebSocket()
+    pipeline._connected = True
+    pipeline._ws = initial_websocket
+    pipeline._session_resumption_handle = "previous-handle"
+    pipeline._session_resume_ready = True
+    resume_states: list[bool] = []
+
+    async def fake_start(**_kwargs):
+        resume_states.append(pipeline._session_resume_ready)
+        if len(resume_states) == 1:
+            pipeline._ws = failed_resume_websocket
+            return False
+        assert failed_resume_websocket.closed is True
+        pipeline._ws = fallback_websocket
+        return True
+
+    monkeypatch.setattr(pipeline, "start", fake_start)
+
+    await pipeline._recover_receive_loop(close_websocket=True)
+
+    assert initial_websocket.closed is True
+    assert failed_resume_websocket.closed is True
+    assert fallback_websocket.closed is False
+    assert resume_states == [True, False]
+    assert pipeline._session_resumption_handle == ""
+    assert pipeline._reconnect_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_gemini_resumption_update_and_goaway_schedule_private_recovery(
+    monkeypatch,
+    caplog,
+):
+    private_handle = "private-resumption-handle"
+    private_time_left = "private-provider-duration"
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket(
+        [
+            json.dumps(
+                {
+                    "sessionResumptionUpdate": {
+                        "resumable": True,
+                        "newHandle": private_handle,
+                    }
+                }
+            ),
+            json.dumps({"goAway": {"timeLeft": private_time_left}}),
+        ]
+    )
+    recovery_requests: list[bool] = []
+
+    def record_recovery(*, close_websocket: bool):
+        recovery_requests.append(close_websocket)
+
+    monkeypatch.setattr(pipeline, "_schedule_receive_recovery", record_recovery)
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    assert pipeline._session_resumption_handle == private_handle
+    assert pipeline._session_resume_ready is True
+    assert recovery_requests == [True]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=session_resumption_ready" in messages
+    assert "voice_timing event=go_away_received" in messages
+    assert private_handle not in messages
+    assert private_time_left not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_non_resumable_update_prevents_stale_handle_reuse():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._session_resumption_handle = "previous-handle"
+    pipeline._session_resume_ready = True
+    pipeline._ws = _FakeGeminiWebSocket(
+        [
+            json.dumps(
+                {
+                    "sessionResumptionUpdate": {
+                        "resumable": False,
+                        "newHandle": "",
+                    }
+                }
+            )
+        ]
+    )
+
+    await pipeline._receive_loop()
+
+    assert pipeline._session_resumption_handle == ""
+    assert pipeline._session_resume_ready is False
+
+
+@pytest.mark.asyncio
+async def test_gemini_setup_uses_pinned_model_and_minimal_thinking(monkeypatch):
     sent_messages = []
 
     class FakeWebSocket:
@@ -841,10 +1037,69 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
 
     assert started
     generation_config = sent_messages[0]["setup"]["generation_config"]
-    assert generation_config["thinking_config"] == {"thinking_budget": 0}
+    model = sent_messages[0]["setup"]["model"]
+    assert model == "models/gemini-3.1-flash-live-preview"
+    assert "latest" not in model
+    assert generation_config["thinking_config"] == {"thinking_level": "minimal"}
     assert generation_config["temperature"] <= 0.5
     assert generation_config["max_output_tokens"] == 120
     await pipeline.stop()
+
+
+def test_gemini_rejects_mutable_latest_model_override(monkeypatch):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.settings.gemini_live_model",
+        "gemini-2.5-flash-native-audio-latest",
+    )
+
+    with pytest.raises(ValueError, match="explicit Gemini Live model"):
+        GeminiPipeline(
+            on_audio_out=noop_audio,
+            on_transcript=noop_transcript,
+            call_sid="CA_test",
+            contractor_config=_plumbing_config(),
+        )
+
+
+def test_gemini_explicit_25_model_preserves_client_content_text_updates(
+    monkeypatch,
+):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.settings.gemini_live_model",
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+
+    message = pipeline._build_text_input_message("Continue briefly.")
+
+    assert message == {
+        "client_content": {
+            "turns": [
+                {
+                    "role": "user",
+                    "parts": [{"text": "Continue briefly."}],
+                }
+            ],
+            "turn_complete": True,
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -1187,8 +1442,10 @@ async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
     assert not pipeline._interrupt_speaking
     assert pipeline._audio_backlog_recoveries == 1
     assert len(websocket.sent_payloads) == 1
-    retry_text = websocket.sent_payloads[0]["client_content"]["turns"][0]["parts"][0]["text"]
+    retry_message = websocket.sent_payloads[0]
+    retry_text = retry_message["realtime_input"]["text"]
     assert "one short sentence" in retry_text
+    assert "client_content" not in retry_message
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=audio_backlog_overflow" in messages

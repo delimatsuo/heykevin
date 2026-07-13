@@ -19,6 +19,7 @@ from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
 from app.webhooks.media_stream import (
     _TwilioMediaIngress,
+    _TwilioPlayoutTracker,
     _consume_twilio_ingress,
     _serve_pipeline_ingress,
 )
@@ -58,6 +59,14 @@ class _ControlledIngressWebSocket:
         return None
 
 
+class _OutboundWebSocket:
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_json(self, message: dict):
+        self.sent.append(message)
+
+
 @pytest.mark.asyncio
 async def test_twilio_ingress_buffers_audio_in_order_under_a_byte_bound():
     first = b"first caller frame"
@@ -91,6 +100,196 @@ async def test_twilio_ingress_buffers_audio_in_order_under_a_byte_bound():
     assert closed_event is None
     assert ingress.buffered_audio_bytes == 0
     assert ingress.buffered_audio_chunks == 0
+
+
+@pytest.mark.asyncio
+async def test_twilio_ingress_dispatches_playout_marks_without_queueing_them():
+    acknowledged: list[tuple[str, float]] = []
+    received_times = iter((100.25,))
+    websocket = _IngressWebSocket(
+        [
+            json.dumps({"event": "mark", "mark": {"name": "kv-a-1"}}),
+            json.dumps({"event": "stop"}),
+        ]
+    )
+    ingress = _TwilioMediaIngress(
+        websocket,
+        call_sid="CA_test",
+        clock=lambda: next(received_times),
+        on_mark=lambda name, received_at: acknowledged.append(
+            (name, received_at)
+        ),
+    )
+
+    await ingress.run()
+
+    assert acknowledged == [("kv-a-1", 100.25)]
+    assert (await ingress.receive()).kind == "stop"
+    assert await ingress.receive() is None
+    assert ingress.buffered_audio_chunks == 0
+
+
+@pytest.mark.asyncio
+async def test_twilio_playout_tracker_sends_audio_then_mark_and_records_ack(
+    caplog,
+):
+    private_audio = b"private generated speech"
+    times = iter((10.0, 10.125))
+    websocket = _OutboundWebSocket()
+    tracker = _TwilioPlayoutTracker(
+        call_sid="CA_private_identifier",
+        clock=lambda: next(times),
+    )
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    sent = await tracker.send_audio(
+        websocket,
+        stream_sid="MZ_test",
+        mulaw_chunk=private_audio,
+    )
+
+    assert sent is True
+    assert [message["event"] for message in websocket.sent] == ["media", "mark"]
+    mark_name = websocket.sent[1]["mark"]["name"]
+    assert mark_name == "kv-a-1"
+    assert tracker.pending_count == 1
+
+    tracker.acknowledge(mark_name)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert tracker.pending_count == 0
+    assert "voice_timing event=twilio_playout_ack" in messages
+    assert "kind=audio" in messages
+    assert "outcome=played" in messages
+    assert "ack_ms=125" in messages
+    assert private_audio.decode("ascii") not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playout_tracker_marks_pending_audio_at_clear_boundary(
+    caplog,
+):
+    times = iter((20.0, 20.1, 20.15, 20.2))
+    websocket = _OutboundWebSocket()
+    tracker = _TwilioPlayoutTracker(
+        call_sid="CA_private_identifier",
+        clock=lambda: next(times),
+    )
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    assert await tracker.send_audio(
+        websocket,
+        stream_sid="MZ_test",
+        mulaw_chunk=b"generated speech",
+    )
+    assert await tracker.send_clear(websocket, stream_sid="MZ_test")
+
+    assert [message["event"] for message in websocket.sent] == [
+        "media",
+        "mark",
+        "clear",
+        "mark",
+    ]
+    audio_mark = websocket.sent[1]["mark"]["name"]
+    clear_mark = websocket.sent[3]["mark"]["name"]
+    assert (audio_mark, clear_mark) == ("kv-a-1", "kv-c-2")
+
+    tracker.acknowledge(audio_mark)
+    tracker.acknowledge(clear_mark)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert tracker.pending_count == 0
+    assert "kind=audio outcome=clear_requested" in messages
+    assert "kind=clear outcome=confirmed" in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_clear_classifies_ack_that_arrives_during_clear_send(caplog):
+    class ImmediateClearAckWebSocket(_OutboundWebSocket):
+        tracker: _TwilioPlayoutTracker
+        audio_mark: str
+
+        async def send_json(self, message: dict):
+            await super().send_json(message)
+            if message["event"] == "clear":
+                self.tracker.acknowledge(self.audio_mark, received_at=40.05)
+
+    times = iter((40.0, 40.1))
+    websocket = ImmediateClearAckWebSocket()
+    tracker = _TwilioPlayoutTracker(
+        call_sid="CA_private_identifier",
+        clock=lambda: next(times),
+    )
+    websocket.tracker = tracker
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    assert await tracker.send_audio(
+        websocket,
+        stream_sid="MZ_test",
+        mulaw_chunk=b"generated speech",
+    )
+    websocket.audio_mark = websocket.sent[1]["mark"]["name"]
+    assert await tracker.send_clear(websocket, stream_sid="MZ_test")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "kind=audio outcome=clear_requested" in messages
+    assert "kind=audio outcome=played" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_clear_tolerates_marker_ack_before_send_returns(caplog):
+    class ImmediateMarkAckWebSocket(_OutboundWebSocket):
+        tracker: _TwilioPlayoutTracker
+
+        async def send_json(self, message: dict):
+            await super().send_json(message)
+            if message["event"] == "mark":
+                self.tracker.acknowledge(
+                    message["mark"]["name"],
+                    received_at=50.05,
+                )
+
+    websocket = ImmediateMarkAckWebSocket()
+    tracker = _TwilioPlayoutTracker(
+        call_sid="CA_private_identifier",
+        clock=lambda: 50.0,
+    )
+    websocket.tracker = tracker
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    sent = await tracker.send_clear(websocket, stream_sid="MZ_test")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert sent is True
+    assert tracker.pending_count == 0
+    assert "event=twilio_clear_mark_sent" in messages
+    assert "kind=clear outcome=confirmed" in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playout_tracker_bounds_unacknowledged_marks(caplog):
+    times = iter((30.0, 30.1, 30.2))
+    websocket = _OutboundWebSocket()
+    tracker = _TwilioPlayoutTracker(
+        call_sid="CA_private_identifier",
+        max_pending_marks=2,
+        clock=lambda: next(times),
+    )
+    caplog.set_level(logging.WARNING, logger="app.webhooks.media_stream")
+
+    for _ in range(3):
+        assert await tracker.send_audio(
+            websocket,
+            stream_sid="MZ_test",
+            mulaw_chunk=b"generated speech",
+        )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert tracker.pending_count == 2
+    assert "voice_timing event=twilio_mark_evicted" in messages
+    assert "CA_private_identifier" not in messages
 
 
 @pytest.mark.asyncio

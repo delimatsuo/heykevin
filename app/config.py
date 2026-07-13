@@ -59,7 +59,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
-    gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
+    gemini_live_model: str = "gemini-3.1-flash-live-preview"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4
 

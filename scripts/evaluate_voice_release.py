@@ -51,6 +51,11 @@ class VoiceReleaseThresholds:
     barge_in_clear_p95_ms: int = 250
     barge_in_clear_max_ms: int = 500
     max_barge_in_clear_failures: int = 0
+    twilio_clear_ack_coverage_rate: float = 1.0
+    twilio_clear_ack_p95_ms: int = 250
+    twilio_clear_ack_max_ms: int = 500
+    max_twilio_mark_send_errors: int = 0
+    max_twilio_mark_evictions: int = 0
     max_inbound_audio_errors: int = 0
     max_inbound_media_buffer_overflows: int = 0
     max_inbound_reconnect_audio_overflows: int = 0
@@ -347,6 +352,43 @@ def evaluate_voice_release(
     barge_event_keys = _event_keys(barge_events, "barge")
     barge_failure_keys = _event_keys(barge_failure_events, "barge")
     barge_in_attempts = len(barge_event_keys | barge_failure_keys)
+    twilio_clear_mark_events = _events_for_calls(
+        by_name.get("twilio_clear_mark_sent", []),
+        attempted_calls,
+    )
+    twilio_clear_ack_events = [
+        event
+        for event in _events_for_calls(
+            by_name.get("twilio_playout_ack", []),
+            attempted_calls,
+        )
+        if event.get("kind") == "clear" and event.get("outcome") == "confirmed"
+    ]
+    twilio_clear_mark_keys = _event_keys(
+        twilio_clear_mark_events,
+        "ordinal",
+    )
+    twilio_clear_ack_keys = _event_keys(
+        twilio_clear_ack_events,
+        "ordinal",
+    )
+    matched_twilio_clear_ack_keys = (
+        twilio_clear_mark_keys & twilio_clear_ack_keys
+    )
+    matched_twilio_clear_ack_events = [
+        event
+        for event in twilio_clear_ack_events
+        if _event_key(event, "ordinal") in matched_twilio_clear_ack_keys
+    ]
+    twilio_clear_ack_rate = (
+        len(matched_twilio_clear_ack_keys) / len(twilio_clear_mark_keys)
+        if twilio_clear_mark_keys
+        else 0.0
+    )
+    twilio_mark_send_errors = len(
+        by_name.get("twilio_mark_send_error", [])
+    )
+    twilio_mark_evictions = len(by_name.get("twilio_mark_evicted", []))
     reconnect_clear_events = _events_for_calls(
         by_name.get("reconnect_output_clear", []),
         attempted_calls,
@@ -545,6 +587,11 @@ def evaluate_voice_release(
         "clear_ms",
         ordinal="barge",
     )
+    twilio_clear_ack_values = _worst_numeric_values(
+        matched_twilio_clear_ack_events,
+        "ack_ms",
+        ordinal="ordinal",
+    )
     inbound_audio_gap_values = _worst_numeric_values(
         inbound_audio_gap_events,
         "gap_ms",
@@ -602,6 +649,19 @@ def evaluate_voice_release(
         _event_key(event, "barge") is None
         for event in (barge_events + barge_failure_events)
     )
+    unidentified_twilio_clear_events = sum(
+        _event_key(event, "ordinal") is None
+        for event in (twilio_clear_mark_events + twilio_clear_ack_events)
+    )
+    duplicate_twilio_clear_events = (
+        len(twilio_clear_mark_events)
+        - len(twilio_clear_mark_keys)
+        + len(twilio_clear_ack_events)
+        - len(twilio_clear_ack_keys)
+    )
+    orphan_twilio_clear_acks = len(
+        twilio_clear_ack_keys - twilio_clear_mark_keys
+    )
     unmatched_terminal_turns = len(
         (completion_turn_keys | interrupted_turn_keys) - response_turn_keys
     )
@@ -626,10 +686,14 @@ def evaluate_voice_release(
             - len(interrupted_model_stream_values)
         ),
         len(barge_event_keys) - len(barge_clear_values),
+        len(matched_twilio_clear_ack_keys) - len(twilio_clear_ack_values),
     ])
     evidence_integrity_errors = (
         unidentified_response_events
         + unidentified_barge_events
+        + unidentified_twilio_clear_events
+        + duplicate_twilio_clear_events
+        + orphan_twilio_clear_acks
         + unmatched_terminal_turns
         + conflicting_terminal_turns
         + missing_metric_evidence
@@ -801,6 +865,47 @@ def evaluate_voice_release(
             f"<= {limits.max_barge_in_clear_failures}",
         ),
         _gate(
+            "twilio_clear_mark_coverage",
+            len(twilio_clear_mark_keys) >= len(barge_event_keys),
+            len(twilio_clear_mark_keys),
+            f">= {len(barge_event_keys)}",
+        ),
+        _gate(
+            "twilio_clear_ack_coverage_rate",
+            (
+                twilio_clear_ack_rate
+                >= limits.twilio_clear_ack_coverage_rate
+            ),
+            round(twilio_clear_ack_rate, 4),
+            f">= {limits.twilio_clear_ack_coverage_rate}",
+        ),
+        _at_most_gate(
+            "twilio_clear_ack_p95_ms",
+            twilio_clear_ack_values,
+            limits.twilio_clear_ack_p95_ms,
+            0.95,
+        ),
+        _max_gate(
+            "twilio_clear_ack_max_ms",
+            twilio_clear_ack_values,
+            limits.twilio_clear_ack_max_ms,
+        ),
+        _gate(
+            "twilio_mark_send_errors",
+            (
+                twilio_mark_send_errors
+                <= limits.max_twilio_mark_send_errors
+            ),
+            twilio_mark_send_errors,
+            f"<= {limits.max_twilio_mark_send_errors}",
+        ),
+        _gate(
+            "twilio_mark_evictions",
+            twilio_mark_evictions <= limits.max_twilio_mark_evictions,
+            twilio_mark_evictions,
+            f"<= {limits.max_twilio_mark_evictions}",
+        ),
+        _gate(
             "inbound_audio_errors",
             inbound_errors <= limits.max_inbound_audio_errors,
             inbound_errors,
@@ -864,6 +969,12 @@ def evaluate_voice_release(
             "response_turns": len(response_turn_keys),
             "barge_in_events": barge_in_attempts,
             "barge_in_clear_failures": len(all_barge_failure_events),
+            "twilio_clear_marks_sent": len(twilio_clear_mark_keys),
+            "twilio_clear_marks_acknowledged": len(
+                matched_twilio_clear_ack_keys
+            ),
+            "twilio_mark_send_errors": twilio_mark_send_errors,
+            "twilio_mark_evictions": twilio_mark_evictions,
             "reconnect_attempts": reconnect_attempts,
             "out_of_cohort_events": out_of_cohort_events,
             "evidence_integrity_errors": evidence_integrity_errors,
@@ -887,6 +998,12 @@ def evaluate_voice_release(
             "outbound_audio_errors": outbound_audio_errors,
         },
         "diagnostics": {
+            "twilio_clear_missing_acknowledgements": len(
+                twilio_clear_mark_keys - twilio_clear_ack_keys
+            ),
+            "twilio_clear_orphan_acknowledgements": orphan_twilio_clear_acks,
+            "twilio_clear_duplicate_events": duplicate_twilio_clear_events,
+            "twilio_clear_invalid_events": unidentified_twilio_clear_events,
             "inbound_audio_forwarding_summary_calls": len({
                 str(event["call"])
                 for event in inbound_audio_forwarding_summary_events

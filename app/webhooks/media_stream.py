@@ -46,7 +46,7 @@ async def _send_twilio_audio(
     mulaw_chunk: bytes,
     call_sid: str,
 ) -> bool:
-    """Send one audio chunk and report whether Twilio accepted the frame."""
+    """Send one audio chunk and report WebSocket write completion."""
     if not stream_sid:
         logger.warning(
             "media_event event=twilio_audio_send_skipped call=%s reason=missing_stream",
@@ -72,7 +72,7 @@ async def _send_twilio_clear(
     stream_sid: str,
     call_sid: str,
 ) -> bool:
-    """Send a clear frame and report whether Twilio accepted it."""
+    """Send a clear frame and report WebSocket write completion."""
     if not stream_sid:
         logger.warning(
             "media_event event=twilio_audio_clear_skipped call=%s reason=missing_stream",
@@ -92,6 +92,182 @@ async def _send_twilio_clear(
         _call_label(call_sid),
     )
     return True
+
+
+@dataclass(slots=True)
+class _PendingTwilioMark:
+    kind: str
+    ordinal: int
+    sent_at: float
+    audio_ms: int = 0
+    clear_requested: bool = False
+
+
+class _TwilioPlayoutTracker:
+    """Correlate opaque Twilio marks with bounded, payload-free telemetry."""
+
+    def __init__(
+        self,
+        *,
+        call_sid: str,
+        max_pending_marks: int = 256,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_pending_marks < 1:
+            raise ValueError("max_pending_marks must be positive")
+        self._call_sid = call_sid
+        self._max_pending_marks = max_pending_marks
+        self._clock = clock
+        self._send_lock = asyncio.Lock()
+        self._pending: dict[str, _PendingTwilioMark] = {}
+        self._ordinal = 0
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def _reserve_mark(self, kind: str, *, audio_ms: int = 0) -> str:
+        if len(self._pending) >= self._max_pending_marks:
+            oldest_name = next(iter(self._pending))
+            evicted = self._pending.pop(oldest_name)
+            logger.warning(
+                "voice_timing event=twilio_mark_evicted call=%s "
+                "kind=%s pending_limit=%s",
+                _call_label(self._call_sid),
+                evicted.kind,
+                self._max_pending_marks,
+            )
+
+        self._ordinal += 1
+        name = f"kv-{kind[0]}-{self._ordinal}"
+        self._pending[name] = _PendingTwilioMark(
+            kind=kind,
+            ordinal=self._ordinal,
+            sent_at=self._clock(),
+            audio_ms=audio_ms,
+        )
+        return name
+
+    async def _send_mark(
+        self,
+        websocket: WebSocket,
+        *,
+        stream_sid: str,
+        kind: str,
+        audio_ms: int = 0,
+    ) -> bool:
+        name = self._reserve_mark(kind, audio_ms=audio_ms)
+        ordinal = self._pending[name].ordinal
+        try:
+            await websocket.send_json(
+                {
+                    "event": "mark",
+                    "streamSid": stream_sid,
+                    "mark": {"name": name},
+                }
+            )
+        except Exception as error:
+            self._pending.pop(name, None)
+            logger.warning(
+                "voice_timing event=twilio_mark_send_error call=%s "
+                "kind=%s exception_type=%s",
+                _call_label(self._call_sid),
+                kind,
+                type(error).__name__,
+            )
+            return False
+        if kind == "clear":
+            logger.info(
+                "voice_timing event=twilio_clear_mark_sent call=%s ordinal=%s",
+                _call_label(self._call_sid),
+                ordinal,
+            )
+        return True
+
+    async def send_audio(
+        self,
+        websocket: WebSocket,
+        *,
+        stream_sid: str,
+        mulaw_chunk: bytes,
+    ) -> bool:
+        """Send audio followed by an ordered playout marker."""
+        async with self._send_lock:
+            sent = await _send_twilio_audio(
+                websocket,
+                stream_sid=stream_sid,
+                mulaw_chunk=mulaw_chunk,
+                call_sid=self._call_sid,
+            )
+            if not sent:
+                return False
+            await self._send_mark(
+                websocket,
+                stream_sid=stream_sid,
+                kind="audio",
+                audio_ms=round(len(mulaw_chunk) / 8),
+            )
+            return True
+
+    async def send_clear(
+        self,
+        websocket: WebSocket,
+        *,
+        stream_sid: str,
+    ) -> bool:
+        """Send clear followed by a marker that confirms its playout boundary."""
+        async with self._send_lock:
+            previous_clear_state = {
+                name: pending.clear_requested
+                for name, pending in self._pending.items()
+                if pending.kind == "audio"
+            }
+            for name in previous_clear_state:
+                self._pending[name].clear_requested = True
+            sent = await _send_twilio_clear(
+                websocket,
+                stream_sid=stream_sid,
+                call_sid=self._call_sid,
+            )
+            if not sent:
+                for name, previous in previous_clear_state.items():
+                    pending = self._pending.get(name)
+                    if pending is not None:
+                        pending.clear_requested = previous
+                return False
+            await self._send_mark(
+                websocket,
+                stream_sid=stream_sid,
+                kind="clear",
+            )
+            return True
+
+    def acknowledge(self, name: str, received_at: float | None = None) -> None:
+        """Record a known Twilio mark without exposing its provider payload."""
+        if not isinstance(name, str) or len(name) > 64:
+            return
+        pending = self._pending.pop(name, None)
+        if pending is None:
+            return
+        acknowledged_at = self._clock() if received_at is None else received_at
+        elapsed_ms = max(0, round((acknowledged_at - pending.sent_at) * 1000))
+        outcome = (
+            "confirmed"
+            if pending.kind == "clear"
+            else "clear_requested"
+            if pending.clear_requested
+            else "played"
+        )
+        logger.info(
+            "voice_timing event=twilio_playout_ack call=%s kind=%s "
+            "outcome=%s ordinal=%s ack_ms=%s audio_ms=%s",
+            _call_label(self._call_sid),
+            pending.kind,
+            outcome,
+            pending.ordinal,
+            elapsed_ms,
+            pending.audio_ms,
+        )
 
 
 async def _finish_max_call_duration(on_call_complete) -> None:
@@ -173,12 +349,14 @@ class _TwilioMediaIngress:
         max_buffered_audio_bytes: int = MAX_MEDIA_INGRESS_AUDIO_BYTES,
         max_buffered_audio_chunks: int = MAX_MEDIA_INGRESS_AUDIO_CHUNKS,
         clock: Callable[[], float] = time.monotonic,
+        on_mark: Callable[[str, float], None] | None = None,
     ) -> None:
         self._websocket = websocket
         self._call_sid = call_sid
         self._max_buffered_audio_bytes = max_buffered_audio_bytes
         self._max_buffered_audio_chunks = max_buffered_audio_chunks
         self._clock = clock
+        self._on_mark = on_mark
         # Two reserved slots guarantee stop and close signals cannot be starved.
         self._queue: asyncio.Queue[_TwilioIngressEvent | None] = asyncio.Queue(
             maxsize=max_buffered_audio_chunks + 2
@@ -233,6 +411,19 @@ class _TwilioMediaIngress:
                     self.stop_received = True
                     self._queue.put_nowait(_TwilioIngressEvent(kind="stop"))
                     break
+                if kind == "mark":
+                    mark = data.get("mark", {})
+                    name = mark.get("name", "") if isinstance(mark, dict) else ""
+                    if self._on_mark and isinstance(name, str) and name:
+                        try:
+                            self._on_mark(name, self._clock())
+                        except Exception as error:
+                            _log_safe_exception(
+                                "twilio_mark_callback_error",
+                                error,
+                                self._call_sid,
+                            )
+                    continue
                 if kind != "media":
                     continue
                 received_at = self._clock()
@@ -541,7 +732,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     # Begin bounded reads before database/config startup so Twilio audio cannot
     # sit unread while the call is authenticated and the provider connects.
-    ingress = _TwilioMediaIngress(websocket, call_sid=call_sid)
+    playout_tracker = _TwilioPlayoutTracker(call_sid=call_sid)
+    ingress = _TwilioMediaIngress(
+        websocket,
+        call_sid=call_sid,
+        on_mark=playout_tracker.acknowledge,
+    )
     ingress_task = asyncio.create_task(ingress.run())
 
     # Validate WebSocket token against RTDB
@@ -620,20 +816,18 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     async def on_audio_out(mulaw_chunk: bytes):
         """Voice pipeline produced audio — send to Twilio."""
         nonlocal stream_sid
-        return await _send_twilio_audio(
+        return await playout_tracker.send_audio(
             websocket,
             stream_sid=stream_sid or "",
             mulaw_chunk=mulaw_chunk,
-            call_sid=call_sid,
         )
 
     async def on_clear_audio():
         """Clear Twilio's outbound audio buffer (used during barge-in)."""
         nonlocal stream_sid
-        return await _send_twilio_clear(
+        return await playout_tracker.send_clear(
             websocket,
             stream_sid=stream_sid or "",
-            call_sid=call_sid,
         )
 
     call_redirected = False  # Set when call is accepted/redirected to conference

@@ -51,7 +51,19 @@ def _passing_messages() -> list[str]:
                 ),
             ])
         if call_number < 5:
-            messages.append(_event("barge_in_clear", call, barge=1, clear_ms=90))
+            messages.extend([
+                _event("barge_in_clear", call, barge=1, clear_ms=90),
+                _event("twilio_clear_mark_sent", call, ordinal=1),
+                _event(
+                    "twilio_playout_ack",
+                    call,
+                    kind="clear",
+                    outcome="confirmed",
+                    ordinal=1,
+                    ack_ms=20,
+                    audio_ms=0,
+                ),
+            ])
     return messages
 
 
@@ -97,6 +109,10 @@ def test_voice_release_evaluator_passes_certification_sample():
         "response_turns": 30,
         "barge_in_events": 5,
         "barge_in_clear_failures": 0,
+        "twilio_clear_marks_sent": 5,
+        "twilio_clear_marks_acknowledged": 5,
+        "twilio_mark_send_errors": 0,
+        "twilio_mark_evictions": 0,
         "reconnect_attempts": 0,
         "out_of_cohort_events": 0,
         "evidence_integrity_errors": 0,
@@ -117,6 +133,64 @@ def test_voice_release_evaluator_passes_certification_sample():
     serialized = json.dumps(report)
     assert "call0001" not in serialized
     assert "private-caller-sentinel" not in serialized
+
+
+def test_voice_release_evaluator_rejects_missing_twilio_clear_acknowledgement():
+    messages = [
+        message
+        for message in _passing_messages()
+        if not (
+            "event=twilio_playout_ack" in message
+            and "call=call0004" in message
+            and "kind=clear" in message
+        )
+    ]
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert gates["twilio_clear_ack_coverage_rate"]["observed"] == 0.8
+    assert not gates["twilio_clear_ack_coverage_rate"]["passed"]
+    assert report["diagnostics"]["twilio_clear_missing_acknowledgements"] == 1
+
+
+def test_voice_release_evaluator_rejects_twilio_mark_send_error():
+    messages = _passing_messages()
+    messages.append(
+        _event(
+            "twilio_mark_send_error",
+            "call0004",
+            kind="clear",
+            exception_type="RuntimeError",
+        )
+    )
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert gates["twilio_mark_send_errors"]["observed"] == 1
+    assert not gates["twilio_mark_send_errors"]["passed"]
+
+
+def test_voice_release_evaluator_rejects_twilio_mark_eviction():
+    messages = _passing_messages()
+    messages.append(
+        _event(
+            "twilio_mark_evicted",
+            "call0004",
+            kind="audio",
+            pending_limit=256,
+        )
+    )
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "fail"
+    assert gates["twilio_mark_evictions"]["observed"] == 1
+    assert not gates["twilio_mark_evictions"]["passed"]
 
 
 def test_voice_release_evaluator_rejects_transcription_proxy_as_valid_latency():

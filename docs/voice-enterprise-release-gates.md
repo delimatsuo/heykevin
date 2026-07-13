@@ -51,8 +51,12 @@ not run the query without the exact revision filter.
 | First audio from Twilio media start | p95 <= 2,500 ms; max <= 3,500 ms |
 | Response first audio after validated caller speech end | p95 <= 1,500 ms; max <= 2,500 ms |
 | Generated response audio | p95 <= 6,000 ms; max <= 8,000 ms |
-| Interruption to Twilio clear completion | p95 <= 250 ms; max <= 500 ms |
+| Interruption to Twilio clear WebSocket send completion | p95 <= 250 ms; max <= 500 ms |
 | Twilio clear delivery failures | zero |
+| Twilio clear mark coverage | 100% of successful clear sends have a returned mark |
+| Twilio clear mark acknowledgement | p95 <= 250 ms; max <= 500 ms |
+| Twilio mark send failures | zero |
+| Twilio pending-mark evictions | zero |
 | Inbound audio forwarding errors | zero |
 | Inbound media buffer overflows | zero |
 | Inbound reconnect audio buffer overflows | zero |
@@ -64,6 +68,26 @@ not run the query without the exact revision filter.
 These are release thresholds, not aspirations. A small or incomplete sample is
 a failure, not a waiver. Start the export window before the first canary call
 and end it after the last call so every event belongs to a complete cohort.
+
+`barge_in_clear.clear_ms` ends after the clear frame write and the ordered
+marker write attempt. Local clear success is not a provider acknowledgement.
+`twilio_clear_mark_sent` and the matching `twilio_playout_ack` ordinal prove
+that the marker write completed and Twilio returned it after processing the
+clear boundary. Missing, duplicate, orphaned, invalid, slow, or failed clear
+markers block promotion. Twilio documents that returned marks represent played
+or cleared buffered media:
+<https://www.twilio.com/docs/voice/media-streams/websocket-messages>.
+
+The native Gemini candidate requests context-window compression and session
+resumption on every connection. It retains only the latest resumable handle in
+memory, never logs or persists it, clears it when the call stops, and reacts to
+`GoAway` with a bounded resume attempt. Failed resumption falls back to the
+existing bounded transcript-context reconnect. See the official lifecycle
+guidance: <https://ai.google.dev/gemini-api/docs/live-api/session-management>.
+Gemini 3.1 greeting and corrective text instructions use `realtimeInput.text`;
+the older `clientContent` contract remains available only for an explicit 2.5
+rollback model. This follows Google's 3.1 migration guidance:
+<https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview>.
 
 Gemini input-transcription events arrive independently and have no guaranteed
 ordering relative to model audio. `transcript_to_audio_ms` is diagnostic only
@@ -228,7 +252,7 @@ caller turns across this matrix:
 | Background noise and pauses | No false hangup, duplicate prompt, or sustained talk-over. |
 | Shadow VAD calibration | Compare labeled caller speech boundaries with shadow delivery, overlap, unassociated, and error diagnostics; do not alter Gemini activity control. |
 | Tool-free intake | No Jobber/CRM lookup or controller import appears on the voice-only candidate path. |
-| Reconnect simulation | Old Kevin output is absent; buffered caller audio replays in order before new live frames. |
+| Reconnect simulation | Provider handle resumes without duplicate transcript context; `GoAway` reconnects; failed resumption cold-falls back; old Kevin output is absent; buffered caller audio replays in order before new live frames. |
 | Oversized response simulation | Queued audio stays bounded; stale output clears; one short retry is requested. |
 | Bounded normal responses | Generated audio stays within budget and no response ends mid-sentence. |
 | Inbound startup overflow simulation | Stream closes, no caller audio is logged, and the release evaluator fails. |
@@ -242,6 +266,7 @@ in the release artifact.
 
 - Full unit suite passes on Python 3.12.
 - Ruff and `git diff --check` pass.
+- The configured Gemini model is an explicit non-`latest` model ID.
 - Credential-shaped and full-phone-shaped additions scan clean.
 - `app/services/gemini_pipeline.py` and `app/services/voice_pipeline.py` do not
   import controller modules in the voice-only release candidate.

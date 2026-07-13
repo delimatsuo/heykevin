@@ -38,6 +38,13 @@ APPROVED_QUALIFICATION_CORPUS_SHA256 = "".join((
 ))
 SAFE_ERROR_CODES = {
     "first_audio_timeout",
+    "provider_closed_abnormal",
+    "provider_closed_going_away",
+    "provider_closed_internal",
+    "provider_closed_normal",
+    "provider_closed_policy",
+    "provider_closed_restart",
+    "provider_closed_retry",
     "provider_closed",
     "provider_error",
     "provider_timeout",

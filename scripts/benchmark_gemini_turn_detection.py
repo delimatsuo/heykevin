@@ -61,6 +61,15 @@ MAX_PROVIDER_ATTEMPTS = 60
 SETUP_TIMEOUT_SECONDS = 5.0
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SILENCE_AUDIO = mulaw_to_pcm16k(b"\xff" * 160)
+PROVIDER_CLOSE_ERROR_CODES = {
+    1000: "provider_closed_normal",
+    1001: "provider_closed_going_away",
+    1006: "provider_closed_abnormal",
+    1008: "provider_closed_policy",
+    1011: "provider_closed_internal",
+    1012: "provider_closed_restart",
+    1013: "provider_closed_retry",
+}
 
 
 class _CredentialUnavailable(Exception):
@@ -212,8 +221,8 @@ async def run_attempt(
                     error = state.receive_error
     except TimeoutError:
         error = "provider_timeout"
-    except ConnectionClosed:
-        error = "provider_closed"
+    except ConnectionClosed as exc:
+        error = _provider_close_error(exc)
     except Exception:
         error = "provider_error"
 
@@ -263,8 +272,8 @@ async def _receive_provider_events(websocket: Any, state: _AttemptState) -> None
                 state.turn_complete_ready.set()
     except asyncio.CancelledError:
         raise
-    except ConnectionClosed:
-        _record_receive_error(state, "provider_closed")
+    except ConnectionClosed as exc:
+        _record_receive_error(state, _provider_close_error(exc))
     except Exception:
         _record_receive_error(state, "receive_error")
 
@@ -273,6 +282,11 @@ def _record_receive_error(state: _AttemptState, error: str) -> None:
     state.receive_error = error
     state.first_audio_ready.set()
     state.turn_complete_ready.set()
+
+
+def _provider_close_error(error: ConnectionClosed) -> str:
+    code = error.rcvd.code if error.rcvd is not None else 1006
+    return PROVIDER_CLOSE_ERROR_CODES.get(code, "provider_closed")
 
 
 async def _continue_automatic_silence(

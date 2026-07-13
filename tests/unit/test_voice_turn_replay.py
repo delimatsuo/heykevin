@@ -9,6 +9,7 @@ import shutil
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from app.services.voice_turn_replay import (
     APPROVED_QUALIFICATION_CORPUS_SHA256,
@@ -377,7 +378,20 @@ class _ProviderErrorSocket(_FakeProviderSocket):
 class _ProviderClosedSocket(_FakeProviderSocket):
     async def _messages(self):
         await self.activity_ended.wait()
-        raise ConnectionClosedError(None, None)
+        raise ConnectionClosedError(
+            Close(1008, "sensitive-close-reason"),
+            None,
+        )
+        yield ""  # pragma: no cover
+
+
+class _ProviderUnknownCloseSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        raise ConnectionClosedError(
+            Close(4001, "sensitive-private-close-reason"),
+            None,
+        )
         yield ""  # pragma: no cover
 
 
@@ -545,7 +559,8 @@ async def test_provider_exception_details_are_not_retained(monkeypatch):
     ("socket", "expected_error"),
     [
         (_ProviderErrorSocket(), "provider_error"),
-        (_ProviderClosedSocket(), "provider_closed"),
+        (_ProviderClosedSocket(), "provider_closed_policy"),
+        (_ProviderUnknownCloseSocket(), "provider_closed"),
     ],
 )
 async def test_receiver_failures_use_bounded_error_codes(
@@ -577,6 +592,8 @@ async def test_receiver_failures_use_bounded_error_codes(
     assert observation.error == expected_error
     assert "sensitive-provider-detail" not in repr(observation)
     assert "sensitive-request-id" not in repr(observation)
+    assert "sensitive-close-reason" not in repr(observation)
+    assert "sensitive-private-close-reason" not in repr(observation)
 
 
 @pytest.mark.asyncio
@@ -1079,6 +1096,7 @@ def test_smoke_summary_exposes_only_bounded_error_counts():
     report = _smoke_report(VERTEX_PROVIDER, ready=False)
     report["diagnostics"]["automatic"]["error_counts"] = {
         "provider_closed": 1,
+        "provider_closed_policy": 1,
         "sensitive-provider-detail": 2,
         "provider_timeout": True,
     }
@@ -1088,6 +1106,7 @@ def test_smoke_summary_exposes_only_bounded_error_counts():
     assert summary["automatic"]["error_counts"] == {
         "other": 2,
         "provider_closed": 1,
+        "provider_closed_policy": 1,
     }
     assert "sensitive-provider-detail" not in json.dumps(summary)
 

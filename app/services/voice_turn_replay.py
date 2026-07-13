@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+import base64
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
@@ -11,7 +12,7 @@ from pathlib import Path
 import random
 import re
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 import audioop
 
 from app.utils.audio import mulaw_to_pcm16k
@@ -20,6 +21,13 @@ from app.utils.audio import mulaw_to_pcm16k
 AUTOMATIC_ARM = "automatic"
 MANUAL_ARM = "manual"
 VALID_ARMS = {AUTOMATIC_ARM, MANUAL_ARM}
+DEVELOPER_PROVIDER = "developer"
+VERTEX_PROVIDER = "vertex"
+VALID_PROVIDERS = {DEVELOPER_PROVIDER, VERTEX_PROVIDER}
+DEVELOPER_MODEL = "gemini-3.1-flash-live-preview"
+VERTEX_MODEL = "gemini-live-2.5-flash-native-audio"
+VERTEX_LOCATION = "us-central1"
+QUALIFICATION_SEEDS = frozenset({29, 41})
 SAFE_ERROR_CODES = {
     "provider_closed",
     "provider_error",
@@ -28,6 +36,7 @@ SAFE_ERROR_CODES = {
     "setup_rejected",
 }
 MODEL_PATTERN = re.compile(r"gemini-[a-z0-9][a-z0-9.-]*")
+PROJECT_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,9 +432,17 @@ def build_paired_schedule(
     return tuple(schedule)
 
 
-def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
+def build_gemini_setup_message(
+    model: str,
+    *,
+    arm: str,
+    provider: str = DEVELOPER_PROVIDER,
+    project: str | None = None,
+    location: str | None = None,
+) -> dict[str, Any]:
     """Build provider setup for one explicit non-latest replay model ID."""
     _validate_arm(arm)
+    _validate_provider(provider)
     if (
         not MODEL_PATTERN.fullmatch(model)
         or "latest" in model
@@ -433,11 +450,20 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
     ):
         raise ValueError("an explicit non-latest Gemini model ID is required")
 
-    thinking_config = (
-        {"thinkingLevel": "minimal"}
-        if model.startswith("gemini-3")
-        else {"thinkingBudget": 0}
-    )
+    setup_model = f"models/{model}"
+    if provider == VERTEX_PROVIDER:
+        if (
+            model != VERTEX_MODEL
+            or not project
+            or not PROJECT_PATTERN.fullmatch(project)
+            or location != VERTEX_LOCATION
+        ):
+            raise ValueError("Vertex replay requires the precommitted model and scope")
+        setup_model = (
+            f"projects/{project}/locations/{location}/publishers/google/"
+            f"models/{model}"
+        )
+
     automatic_detection = (
         {"disabled": True}
         if arm == MANUAL_ARM
@@ -449,20 +475,27 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
             "silenceDurationMs": 500,
         }
     )
+    generation_config: dict[str, Any] = {
+        "responseModalities": ["AUDIO"],
+        "maxOutputTokens": 120,
+        "temperature": 0.4,
+        "speechConfig": {
+            "voiceConfig": {
+                "prebuiltVoiceConfig": {"voiceName": "Puck"}
+            }
+        },
+    }
+    if provider == DEVELOPER_PROVIDER:
+        generation_config["thinkingConfig"] = (
+            {"thinkingLevel": "minimal"}
+            if model.startswith("gemini-3")
+            else {"thinkingBudget": 0}
+        )
+
     return {
         "setup": {
-            "model": f"models/{model}",
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "maxOutputTokens": 120,
-                "temperature": 0.4,
-                "thinkingConfig": thinking_config,
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": "Puck"}
-                    }
-                },
-            },
+            "model": setup_model,
+            "generationConfig": generation_config,
             "systemInstruction": {
                 "parts": [{
                     "text": (
@@ -480,6 +513,37 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
             },
         }
     }
+
+
+def build_gemini_audio_message(
+    audio: bytes,
+    *,
+    provider: str,
+) -> dict[str, Any]:
+    """Serialize one public-fixture PCM chunk for the selected provider."""
+    _validate_provider(provider)
+    blob = {
+        "data": base64.b64encode(audio).decode("ascii"),
+        "mimeType": "audio/pcm;rate=16000",
+    }
+    if provider == VERTEX_PROVIDER:
+        realtime_input = {"mediaChunks": [blob]}
+    else:
+        realtime_input = {"audio": blob}
+    return {"realtimeInput": realtime_input}
+
+
+def build_gemini_activity_message(kind: str) -> dict[str, Any]:
+    """Serialize an explicit manual activity boundary."""
+    fields = {
+        "activity_start": "activityStart",
+        "activity_end": "activityEnd",
+    }
+    try:
+        field = fields[kind]
+    except KeyError as exc:
+        raise ValueError("unsupported activity event") from exc
+    return {"realtimeInput": {field: {}}}
 
 
 def evaluate_voice_turn_benchmark(
@@ -647,6 +711,142 @@ def _transform_pcm16(
     return samples.tobytes()
 
 
+def evaluate_gemini_provider_matrix(
+    reports: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Select a provider from the precommitted aggregate two-seed matrix."""
+    all_reports = list(reports)
+    expected_keys = {
+        (provider, seed)
+        for provider in VALID_PROVIDERS
+        for seed in QUALIFICATION_SEEDS
+    }
+    if len(all_reports) != len(expected_keys):
+        raise ValueError("provider matrix requires both providers and seeds")
+
+    expected_models = {
+        DEVELOPER_PROVIDER: DEVELOPER_MODEL,
+        VERTEX_PROVIDER: VERTEX_MODEL,
+    }
+    entries: dict[tuple[str, int], dict[str, Any]] = {}
+    corpus_identities: set[tuple[str, str]] = set()
+    for report in all_reports:
+        if not isinstance(report, Mapping):
+            raise ValueError("provider matrix report must be an object")
+        configuration = report.get("configuration")
+        diagnostics = report.get("diagnostics")
+        if not isinstance(configuration, Mapping) or not isinstance(
+            diagnostics, Mapping
+        ):
+            raise ValueError("provider matrix report is incomplete")
+        provider = configuration.get("provider")
+        seed = configuration.get("seed")
+        model = configuration.get("model")
+        if provider not in VALID_PROVIDERS or model != expected_models[provider]:
+            raise ValueError("provider matrix contains an unapproved treatment")
+        if seed not in QUALIFICATION_SEEDS:
+            raise ValueError("provider matrix contains an unapproved seed")
+        key = (provider, seed)
+        if key in entries:
+            raise ValueError("provider matrix contains a duplicate run")
+
+        manifest_sha256 = configuration.get("manifest_sha256")
+        corpus_sha256 = configuration.get("corpus_sha256")
+        if not _is_sha256(manifest_sha256) or not _is_sha256(corpus_sha256):
+            raise ValueError("provider matrix corpus identity is invalid")
+        corpus_identities.add((manifest_sha256, corpus_sha256))
+
+        automatic = diagnostics.get("automatic")
+        if not isinstance(automatic, Mapping):
+            raise ValueError("provider matrix automatic diagnostics are missing")
+        p95_ms = _optional_nonnegative_int(
+            automatic.get("speech_end_to_first_audio_p95_ms")
+        )
+        max_ms = _optional_nonnegative_int(
+            automatic.get("speech_end_to_first_audio_max_ms")
+        )
+        status = report.get("status")
+        if status not in {"pass", "fail"}:
+            raise ValueError("provider matrix status is invalid")
+        entries[key] = {
+            "passed": status == "pass" and p95_ms is not None and max_ms is not None,
+            "p95_ms": p95_ms,
+            "max_ms": max_ms,
+        }
+
+    if set(entries) != expected_keys:
+        raise ValueError("provider matrix requires both providers and seeds")
+    if len(corpus_identities) != 1:
+        raise ValueError("provider matrix must use one corpus identity")
+
+    summaries = {}
+    for provider in sorted(VALID_PROVIDERS):
+        provider_entries = {
+            seed: entries[(provider, seed)] for seed in sorted(QUALIFICATION_SEEDS)
+        }
+        failed_seeds = [
+            seed for seed, entry in provider_entries.items() if not entry["passed"]
+        ]
+        p95_values = [
+            entry["p95_ms"]
+            for entry in provider_entries.values()
+            if entry["p95_ms"] is not None
+        ]
+        max_values = [
+            entry["max_ms"]
+            for entry in provider_entries.values()
+            if entry["max_ms"] is not None
+        ]
+        summaries[provider] = {
+            "model": expected_models[provider],
+            "qualified": not failed_seeds,
+            "failed_seeds": failed_seeds,
+            "worst_automatic_speech_end_to_first_audio_p95_ms": (
+                max(p95_values) if p95_values else None
+            ),
+            "worst_automatic_speech_end_to_first_audio_max_ms": (
+                max(max_values) if max_values else None
+            ),
+        }
+
+    qualified = [
+        provider for provider, summary in summaries.items() if summary["qualified"]
+    ]
+    if not qualified:
+        status = "fail"
+        decision = "no_provider_qualified"
+    elif len(qualified) == 1:
+        status = "pass"
+        decision = qualified[0]
+    else:
+        scores = {
+            provider: (
+                summaries[provider][
+                    "worst_automatic_speech_end_to_first_audio_p95_ms"
+                ],
+                summaries[provider][
+                    "worst_automatic_speech_end_to_first_audio_max_ms"
+                ],
+            )
+            for provider in qualified
+        }
+        if len(set(scores.values())) == 1:
+            status = "fail"
+            decision = "inconclusive_tie"
+        else:
+            status = "pass"
+            decision = min(scores, key=scores.get)
+
+    manifest_sha256, corpus_sha256 = corpus_identities.pop()
+    return {
+        "status": status,
+        "decision": decision,
+        "manifest_sha256": manifest_sha256,
+        "corpus_sha256": corpus_sha256,
+        "providers": summaries,
+    }
+
+
 def _arm_diagnostics(
     observations: list[VoiceTurnObservation],
 ) -> dict[str, int | float | None]:
@@ -765,6 +965,23 @@ def _bounded_int(
 def _validate_arm(arm: str) -> None:
     if arm not in VALID_ARMS:
         raise ValueError("arm must be automatic or manual")
+
+
+def _validate_provider(provider: str) -> None:
+    if provider not in VALID_PROVIDERS:
+        raise ValueError("provider must be developer or vertex")
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("provider matrix latency must be a nonnegative integer")
+    return value
 
 
 def _safe_error_code(error: str) -> str:

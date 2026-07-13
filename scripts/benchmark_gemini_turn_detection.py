@@ -16,6 +16,7 @@ from typing import Any
 import google.auth
 from google.auth.transport.requests import Request
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -193,7 +194,7 @@ async def run_attempt(
                     error = state.receive_error
     except TimeoutError:
         error = "provider_timeout"
-    except websockets.exceptions.ConnectionClosed:
+    except ConnectionClosed:
         error = "provider_closed"
     except Exception:
         error = "provider_error"
@@ -224,6 +225,9 @@ async def _receive_provider_events(websocket: Any, state: _AttemptState) -> None
     try:
         async for raw_message in websocket:
             message = json.loads(raw_message)
+            if "error" in message:
+                _record_receive_error(state, "provider_error")
+                return
             content = message.get("serverContent", {})
             if content.get("interrupted"):
                 state.interruption_events += 1
@@ -241,10 +245,16 @@ async def _receive_provider_events(websocket: Any, state: _AttemptState) -> None
                 state.turn_complete_ready.set()
     except asyncio.CancelledError:
         raise
+    except ConnectionClosed:
+        _record_receive_error(state, "provider_closed")
     except Exception:
-        state.receive_error = "receive_error"
-        state.first_audio_ready.set()
-        state.turn_complete_ready.set()
+        _record_receive_error(state, "receive_error")
+
+
+def _record_receive_error(state: _AttemptState, error: str) -> None:
+    state.receive_error = error
+    state.first_audio_ready.set()
+    state.turn_complete_ready.set()
 
 
 async def _continue_automatic_silence(

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
 
 from app.services.voice_turn_replay import (
     APPROVED_QUALIFICATION_CORPUS_SHA256,
@@ -362,6 +363,24 @@ class _FakeProviderSocket:
         await asyncio.Event().wait()
 
 
+class _ProviderErrorSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        yield json.dumps({
+            "error": {
+                "message": "sensitive-provider-detail",
+                "request_id": "sensitive-request-id",
+            }
+        })
+
+
+class _ProviderClosedSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        raise ConnectionClosedError(None, None)
+        yield ""  # pragma: no cover
+
+
 class _ProviderSocketContext:
     def __init__(self, socket: _FakeProviderSocket) -> None:
         self.socket = socket
@@ -488,6 +507,45 @@ async def test_provider_exception_details_are_not_retained(monkeypatch):
     assert observation.error == "provider_error"
     assert "sensitive-provider-detail" not in repr(observation)
     assert "secret" not in repr(observation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("socket", "expected_error"),
+    [
+        (_ProviderErrorSocket(), "provider_error"),
+        (_ProviderClosedSocket(), "provider_closed"),
+    ],
+)
+async def test_receiver_failures_use_bounded_error_codes(
+    monkeypatch,
+    socket,
+    expected_error,
+):
+    _stub_short_manual_replay(monkeypatch)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.1,
+        terminal_timeout_seconds=0.1,
+    )
+
+    assert observation.error == expected_error
+    assert "sensitive-provider-detail" not in repr(observation)
+    assert "sensitive-request-id" not in repr(observation)
 
 
 @pytest.mark.asyncio
@@ -905,12 +963,14 @@ def _smoke_report(provider: str, *, ready: bool = True) -> dict:
             "automatic": {
                 "completed_turns": 6 if ready else 5,
                 "errors": 0 if ready else 1,
+                "error_counts": {} if ready else {"provider_closed": 1},
                 "speech_end_to_first_audio_p95_ms": 1_800,
                 "speech_end_to_first_audio_max_ms": 2_000,
             },
             "manual": {
                 "completed_turns": 6,
                 "errors": 0,
+                "error_counts": {},
                 "speech_end_to_first_audio_p95_ms": 1_200,
                 "speech_end_to_first_audio_max_ms": 1_400,
                 "activity_end_to_first_audio_p95_ms": 700,
@@ -918,6 +978,23 @@ def _smoke_report(provider: str, *, ready: bool = True) -> dict:
             },
         },
     }
+
+
+def test_smoke_summary_exposes_only_bounded_error_counts():
+    report = _smoke_report(VERTEX_PROVIDER, ready=False)
+    report["diagnostics"]["automatic"]["error_counts"] = {
+        "provider_closed": 1,
+        "sensitive-provider-detail": 2,
+        "provider_timeout": True,
+    }
+
+    summary = qualification_module._smoke_summary(report)
+
+    assert summary["automatic"]["error_counts"] == {
+        "other": 2,
+        "provider_closed": 1,
+    }
+    assert "sensitive-provider-detail" not in json.dumps(summary)
 
 
 @pytest.mark.asyncio
@@ -959,6 +1036,9 @@ async def test_qualification_matrix_stops_after_incomplete_smoke_from_any_cwd(
     assert QUALIFICATION_MANIFEST.is_absolute()
     assert all(call[3] is True for call in calls)
     assert all(call[4] == QUALIFICATION_MANIFEST for call in calls)
+    assert result["smoke"][VERTEX_PROVIDER]["automatic"]["error_counts"] == {
+        "provider_closed": 1
+    }
     assert "private-project-id" not in json.dumps(result)
 
 

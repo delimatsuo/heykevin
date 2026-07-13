@@ -20,6 +20,7 @@ from app.services.voice_turn_replay import (  # noqa: E402
     DEVELOPER_MODEL,
     DEVELOPER_PROVIDER,
     QUALIFICATION_SEEDS,
+    SAFE_ERROR_CODES,
     VERTEX_LOCATION,
     VERTEX_MODEL,
     VERTEX_PROVIDER,
@@ -197,17 +198,21 @@ def _arm_smoke_ready(
     return True
 
 
-def _safe_arm_summary(diagnostics: object) -> dict[str, int | None]:
+def _safe_arm_summary(
+    diagnostics: object,
+) -> dict[str, int | None | dict[str, int]]:
     if not isinstance(diagnostics, Mapping):
         return {
             "completed_turns": None,
             "errors": None,
+            "error_counts": {},
             "speech_end_to_first_audio_p95_ms": None,
             "speech_end_to_first_audio_max_ms": None,
         }
     return {
         "completed_turns": _safe_int(diagnostics.get("completed_turns")),
         "errors": _safe_int(diagnostics.get("errors")),
+        "error_counts": _safe_error_counts(diagnostics.get("error_counts")),
         "speech_end_to_first_audio_p95_ms": _safe_int(
             diagnostics.get("speech_end_to_first_audio_p95_ms")
         ),
@@ -215,6 +220,22 @@ def _safe_arm_summary(diagnostics: object) -> dict[str, int | None]:
             diagnostics.get("speech_end_to_first_audio_max_ms")
         ),
     }
+
+
+def _safe_error_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    counts: dict[str, int] = {}
+    for raw_code, raw_count in value.items():
+        if (
+            isinstance(raw_count, bool)
+            or not isinstance(raw_count, int)
+            or raw_count < 1
+        ):
+            continue
+        code = raw_code if raw_code in SAFE_ERROR_CODES else "other"
+        counts[code] = counts.get(code, 0) + raw_count
+    return dict(sorted(counts.items()))
 
 
 def _safe_int(value: object) -> int | None:

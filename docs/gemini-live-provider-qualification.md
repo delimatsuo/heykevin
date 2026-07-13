@@ -144,30 +144,36 @@ latency, reconnect, multilingual, privacy, and revision-filtered release gates.
 
 ## Recorded Feasibility Result
 
-The fixed smoke was run on 2026-07-13 from pre-network commit `5c8fa26`.
-Read-only preflight established that ADC was available and project billing was
-enabled, but no Developer API key was available to the process. The ADC
-principal had neither `aiplatform.endpoints.predict` nor
-`serviceusage.services.use`, and permission errors prevented verification of
-Enterprise API enablement and the project in-memory cache configuration.
+The fixed public-fixture smoke was rerun on 2026-07-13 from commit `3263d95d`
+with an authorized ceiling of 24 scheduled attempts. An approved Developer
+credential was injected into the process without being printed or persisted. A
+new keyless benchmark identity received only temporary Vertex prediction and
+service-usage roles; its access token was also process-only.
 
 The smoke failed closed:
 
-- the Developer control did not start without an approved credential;
-- the Vertex treatment stopped on its first manual-arm provider error, with no
-  completed turn;
-- the full four-run qualification matrix did not start; and
-- no model-quality, latency, or provider-selection conclusion was produced.
+- the Developer control completed all six automatic and six manual turns with
+  zero provider errors, but its report failed the precommitted latency gate;
+  automatic speech-end-to-first-audio p95 and maximum were 2,079 ms, while
+  manual p95 and maximum were 1,650 ms;
+- the Vertex treatment completed one automatic and two manual turns before one
+  manual-arm provider error stopped the run; the incomplete automatic and
+  manual latency samples were 1,429 ms and 1,284 ms, respectively;
+- the full four-run, 240-attempt qualification matrix did not start; and
+- the result authorizes neither a provider selection nor a release change.
 
-This is an environment-access result, not evidence that either model passed or
-failed the governing gates. Rerunning the public-fixture smoke requires an
-approved, process-injected Developer API key and a scoped Vertex benchmark
-principal with prediction and service-usage access. The tooling neither creates
-nor persists either credential. Customer data and staging promotion additionally
-require affirmative evidence that the project cache is disabled, any required
-abuse-monitoring exception is active, and the remaining privacy and
-telephone-path release gates pass. No live model default or pipeline wiring
-changed as a result of this run.
+The temporary identity and both project bindings were removed after the run.
+An independent audit found zero matching identities, zero matching project
+bindings, and zero temporary gcloud configurations. No customer audio, staging
+traffic, live model default, or pipeline wiring was used or changed.
+
+The Developer result is sufficient to show a complete but over-budget smoke
+sample. The truncated Vertex result is not sufficient for a model-quality or
+latency comparison. A further Vertex run should first classify and correct the
+provider error without weakening the fixed corpus, attempt ceilings, or release
+gates. Customer data and staging promotion additionally require affirmative
+evidence that the project cache is disabled, any required abuse-monitoring
+exception is active, and the remaining privacy and telephone-path gates pass.
 
 ## Primary Sources
 

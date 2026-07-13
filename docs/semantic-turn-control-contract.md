@@ -38,7 +38,17 @@ Run image.
 LiveKit Turn Detector is not a candidate because its model license restricts
 use to LiveKit Agents. TEN Turn Detection is not a candidate because it requires
 transcript processing and a 7B-class text model, supports only English/Chinese,
-and carries additional restrictions. A future candidate needs a new review.
+and carries additional restrictions.
+
+VideoSDK NAMO v1 Multilingual was also rejected. The disposable probe pinned
+source commit `75ddd0e858ef3fc28a65dbc48bb74d7e9b462f3c`, model revision
+`59245aac1f0a0f170277ebecc32ddaea418083b4`, and quantized-model SHA-256
+`67be31dac7c49abd43a277a105222c9031a0e22ac37f0e22dab395f68b318fc9`.
+On the two clean public fixtures, only three of five pause candidates had any
+transcript available at the 300 ms decision point. NAMO rejected zero of one
+premature candidate with text and accepted zero of two valid final candidates;
+inference was 27.590 ms p95/max. Transcript availability and correctness both
+fail. A future candidate needs a new review.
 
 Primary references:
 
@@ -47,6 +57,8 @@ Primary references:
 - https://docs.pipecat.ai/api-reference/server/utilities/turn-detection/smart-turn-overview
 - https://huggingface.co/livekit/turn-detector/blob/main/LICENSE
 - https://github.com/TEN-framework/ten-turn-detection
+- https://github.com/videosdk-live/NAMO-Turn-Detector-v1
+- https://huggingface.co/videosdk-live/Namo-Turn-Detector-v1-Multilingual
 
 ## Three Modes
 

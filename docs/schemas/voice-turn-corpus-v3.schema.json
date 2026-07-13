@@ -1,0 +1,497 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.example/schemas/voice-turn-corpus-v3.schema.json",
+  "title": "Hey Kevin Voice Turn Corpus V3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "suite_id",
+    "corpus_revision",
+    "partition",
+    "sources",
+    "scenarios"
+  ],
+  "properties": {
+    "version": {
+      "const": 3
+    },
+    "suite_id": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "corpus_revision": {
+      "$ref": "#/$defs/sha256"
+    },
+    "partition": {
+      "enum": ["development", "holdout"]
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/scenario"
+      }
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "non_negative_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "language": {
+      "type": "string",
+      "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "sha256_chunks",
+        "sample_rate_hz",
+        "channels",
+        "language",
+        "speaker_id",
+        "content_class",
+        "license_id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(?!.*\\.\\.)[A-Za-z0-9._/-]+$"
+        },
+        "sha256_chunks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}$"
+          }
+        },
+        "sample_rate_hz": {
+          "enum": [8000, 16000]
+        },
+        "channels": {
+          "const": 1
+        },
+        "language": {
+          "$ref": "#/$defs/language"
+        },
+        "speaker_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "content_class": {
+          "enum": [
+            "public_licensed",
+            "public_synthetic"
+          ]
+        },
+        "license_id": {
+          "$ref": "#/$defs/safe_id"
+        }
+      }
+    },
+    "track": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "source_id",
+        "source_start_ms",
+        "timeline_start_ms",
+        "duration_ms",
+        "gain"
+      ],
+      "properties": {
+        "role": {
+          "enum": ["caller", "assistant", "echo", "noise"]
+        },
+        "source_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "source_start_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "timeline_start_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gain": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "actor",
+        "at_ms",
+        "epoch",
+        "expected_action"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "type": {
+          "enum": [
+            "speech_start",
+            "speech_end",
+            "pause_candidate",
+            "semantic_decision",
+            "correction_start",
+            "correction_end",
+            "assistant_audio_start",
+            "assistant_audio_end",
+            "clear_requested",
+            "clear_accepted",
+            "activity_start_sent",
+            "activity_end_sent",
+            "reconnect_start",
+            "reconnect_end",
+            "hangup"
+          ]
+        },
+        "actor": {
+          "enum": ["caller", "assistant", "provider", "controller"]
+        },
+        "at_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "expected_action": {
+          "enum": [
+            "candidate_only",
+            "continue_turn",
+            "end_turn",
+            "clear_assistant",
+            "ignore",
+            "preserve_turn",
+            "disable_experiment",
+            "automatic_vad_fallback"
+          ]
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "speech_start",
+                  "pause_candidate",
+                  "semantic_decision",
+                  "clear_requested",
+                  "clear_accepted",
+                  "activity_start_sent",
+                  "activity_end_sent"
+                ]
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["candidate_id"]
+          }
+        }
+      ]
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "epoch",
+        "speech_start_ms",
+        "valid_end_window_start_ms",
+        "valid_end_window_end_ms",
+        "contains_correction",
+        "language"
+      ],
+      "properties": {
+        "turn_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "speech_start_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "valid_end_window_start_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "valid_end_window_end_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "contains_correction": {
+          "type": "boolean"
+        },
+        "language": {
+          "$ref": "#/$defs/language"
+        }
+      }
+    },
+    "interruption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "epoch",
+        "must_clear",
+        "clear_deadline_ms"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "must_clear": {
+          "type": "boolean"
+        },
+        "clear_deadline_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "expected_resume_turn_id": {
+          "$ref": "#/$defs/safe_id"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "must_clear": {
+                "const": true
+              }
+            },
+            "required": ["must_clear"]
+          },
+          "then": {
+            "required": ["candidate_id"]
+          }
+        }
+      ]
+    },
+    "provider_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "at_ms", "epoch"],
+      "properties": {
+        "type": {
+          "enum": [
+            "stt_partial",
+            "stt_final",
+            "stt_empty_final",
+            "stt_disconnect",
+            "stt_reconnect",
+            "detector_timeout",
+            "detector_error"
+          ]
+        },
+        "at_ms": {
+          "$ref": "#/$defs/non_negative_ms"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "semantic_state": {
+          "enum": ["unfinished", "corrected", "complete", "unknown"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": ["detector_timeout", "detector_error"]
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["candidate_id"]
+          }
+        }
+      ]
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "language",
+        "input_modes",
+        "initial_epoch",
+        "categories",
+        "duration_ms",
+        "frame_pattern_ms",
+        "tracks",
+        "events",
+        "turns",
+        "interruptions",
+        "provider_events",
+        "fault_outcome"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "language": {
+          "$ref": "#/$defs/language"
+        },
+        "input_modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["audio_waveform", "transcript_events"]
+          }
+        },
+        "initial_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "natural_pause",
+              "short_answer",
+              "long_turn",
+              "correction",
+              "late_correction",
+              "code_switch",
+              "fast_start",
+              "background_noise",
+              "speakerphone_echo",
+              "double_talk",
+              "barge_in",
+              "fragmented_frames",
+              "reconnect",
+              "provider_fault",
+              "detector_fault",
+              "hangup"
+            ]
+          }
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        },
+        "frame_pattern_ms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [10, 20, 30]
+          }
+        },
+        "tracks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/track"
+          }
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "turns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/turn"
+          }
+        },
+        "interruptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/interruption"
+          }
+        },
+        "provider_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider_event"
+          }
+        },
+        "fault_outcome": {
+          "enum": [
+            "none",
+            "disable_shadow",
+            "automatic_vad_fallback",
+            "terminate_to_safe_route"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -50,6 +50,55 @@ premature candidate with text and accepted zero of two valid final candidates;
 inference was 27.590 ms p95/max. Transcript availability and correctness both
 fail. A future candidate needs a new review.
 
+One Deepgram Flux Multilingual configuration was evaluated as a hosted,
+audio-waveform candidate and rejected from advancement. The aggregate-only
+probe used `flux-general-multi`, 16 kHz mono linear PCM, the
+provider-recommended 80 ms stream chunks with trailing-edge pacing, no language
+hints, `eot_timeout_ms=5000`, and model-improvement opt-out. It replayed the two
+clean public English and Spanish fixtures as baselines and with deterministic
+internal pauses of 500, 800, and 1,200 ms, for eight scenarios per threshold.
+Provider transcripts, words, request IDs, error payloads, audio, and
+attempt-level records were discarded; reports retained fixed language/scenario
+buckets and numeric or boolean aggregates only.
+
+The exact disposable probe identities were:
+
+- harness SHA-256 `6a05c112ba5f465c24b694a0bf74fb3a9fbada3d3a8b4e44de1f7e5bcb0bd44f`
+- replay helper SHA-256 `321e11fce4c1b8318b4eb53e41271517c9a85ae0e188e6a4eb2d40c9a17975af`
+- audio helper SHA-256 `b918ed588fe1e0804e1bbc82fb2c24bde2bbd5b76cb1ee74bb24c0d755adddef`
+- dependency-manifest SHA-256 `d5d095795b83d5c5667921633faa714abcb0a10d0e480351afc41f23a4a1c6a8`
+- source-manifest SHA-256 `ae84a0428697119bc794e70d661bfda94e3cbc7fc5f396283b72e29995790e5c`
+- source-corpus SHA-256 `b0c23e5a964427d7e51193913c760e39143d957a0660e9fe8ae3ad47ea515636`
+- rendered probe-corpus SHA-256 `ce64de260818e99140d239ba86eff7654df83ff39426d85c0d77310410a56c0e`
+- Python `3.12.13`, WebSockets `15.0.1`, schedule seed `73`
+
+Deepgram exposes only the mutable model alias; no immutable revision or model
+digest was reported. Each threshold received one seeded eight-scenario
+feasibility pass:
+
+| EOT threshold | Decisions | Premature ends | Errors | Language matches | Decision p95/max | Result |
+|---:|---:|---:|---:|---:|---:|---|
+| 0.70 | 8/8 | 3 | 0 | 8/8 | 1,153/1,153 ms | reject |
+| 0.80 | 8/8 | 2 | 0 | 8/8 | 1,203/1,203 ms | reject |
+| 0.85 | 8/8 | 0 | 0 | 8/8 | 1,452/1,452 ms | reject |
+
+At `0.70`, premature decisions occurred in the 800 and 1,200 ms pause
+buckets. At `0.80`, both 1,200 ms pauses ended prematurely. Threshold `0.85`
+eliminated premature ends in this pass but increased latency. Clean baseline
+maximum latency was 1,053, 1,076, and 1,189 ms respectively, so even the
+no-pause cases fail the 500 ms p95 and 800 ms maximum contract. The harness
+buffers each 80 ms chunk and sends it at the trailing edge of its nominal
+interval. The true-speech-end clock therefore includes capture buffering and
+does not give the provider an artificial look-ahead.
+
+No tested threshold passed both safety and latency, so this exact configuration
+does not advance to the full offline corpus. `eot_timeout_ms` was fixed at 5,000
+and was not swept, and the hosted alias is mutable, so this evidence does not
+reject every possible Flux configuration or future revision. Either would be a
+new candidate review. Hosted network egress, the incomplete development corpus,
+unavailable holdout, and unreported model revision independently block
+qualification; no runtime dependency, shadow path, or live wiring is approved.
+
 Primary references:
 
 - https://github.com/pipecat-ai/smart-turn
@@ -59,6 +108,10 @@ Primary references:
 - https://github.com/TEN-framework/ten-turn-detection
 - https://github.com/videosdk-live/NAMO-Turn-Detector-v1
 - https://huggingface.co/videosdk-live/Namo-Turn-Detector-v1-Multilingual
+- https://developers.deepgram.com/docs/flux/quickstart
+- https://developers.deepgram.com/docs/flux/configuration
+- https://developers.deepgram.com/docs/flux/language-prompting
+- https://developers.deepgram.com/reference/speech-to-text/listen-flux
 
 ## Three Modes
 

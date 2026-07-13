@@ -381,6 +381,37 @@ class _ProviderClosedSocket(_FakeProviderSocket):
         yield ""  # pragma: no cover
 
 
+class _SetupTimeoutSocket(_FakeProviderSocket):
+    async def recv(self) -> str:
+        await asyncio.Event().wait()
+        return ""  # pragma: no cover
+
+
+class _NoResponseSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        await asyncio.Event().wait()
+        yield ""  # pragma: no cover
+
+
+class _NoTerminalSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        yield json.dumps({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": "cHVibGlj",
+                        }
+                    }]
+                }
+            }
+        })
+        await asyncio.Event().wait()
+
+
 class _ProviderSocketContext:
     def __init__(self, socket: _FakeProviderSocket) -> None:
         self.socket = socket
@@ -546,6 +577,70 @@ async def test_receiver_failures_use_bounded_error_codes(
     assert observation.error == expected_error
     assert "sensitive-provider-detail" not in repr(observation)
     assert "sensitive-request-id" not in repr(observation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("socket", "expected_error"),
+    [
+        (_NoResponseSocket(), "first_audio_timeout"),
+        (_NoTerminalSocket(), "turn_complete_timeout"),
+    ],
+)
+async def test_provider_wait_timeouts_are_phase_specific(
+    monkeypatch,
+    socket,
+    expected_error,
+):
+    _stub_short_manual_replay(monkeypatch)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error == expected_error
+
+
+@pytest.mark.asyncio
+async def test_provider_setup_timeout_is_phase_specific(monkeypatch):
+    _stub_short_manual_replay(monkeypatch)
+    monkeypatch.setattr(benchmark_module, "SETUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(_SetupTimeoutSocket()),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error == "setup_timeout"
 
 
 @pytest.mark.asyncio

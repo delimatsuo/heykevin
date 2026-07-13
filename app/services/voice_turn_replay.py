@@ -37,11 +37,14 @@ APPROVED_QUALIFICATION_CORPUS_SHA256 = "".join((
     "143d957a", "0660e9fe", "8ae3ad47", "ea515636",
 ))
 SAFE_ERROR_CODES = {
+    "first_audio_timeout",
     "provider_closed",
     "provider_error",
     "provider_timeout",
     "receive_error",
     "setup_rejected",
+    "setup_timeout",
+    "turn_complete_timeout",
 }
 MODEL_PATTERN = re.compile(r"gemini-[a-z0-9][a-z0-9.-]*")
 PROJECT_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")

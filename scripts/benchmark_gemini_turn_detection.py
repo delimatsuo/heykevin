@@ -58,6 +58,7 @@ VERTEX_WS_PATH = (
     "/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent"
 )
 MAX_PROVIDER_ATTEMPTS = 60
+SETUP_TIMEOUT_SECONDS = 5.0
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SILENCE_AUDIO = mulaw_to_pcm16k(b"\xff" * 160)
 
@@ -121,12 +122,18 @@ async def run_attempt(
                     location=connection.location,
                 )
             ))
-            acknowledgement = json.loads(
-                await asyncio.wait_for(websocket.recv(), timeout=5)
-            )
-            if "setupComplete" not in acknowledgement:
+            try:
+                acknowledgement = json.loads(
+                    await asyncio.wait_for(
+                        websocket.recv(),
+                        timeout=SETUP_TIMEOUT_SECONDS,
+                    )
+                )
+            except TimeoutError:
+                error = "setup_timeout"
+            if error is None and "setupComplete" not in acknowledgement:
                 error = "setup_rejected"
-            else:
+            if error is None:
                 receiver = asyncio.create_task(
                     _receive_provider_events(websocket, state)
                 )
@@ -166,24 +173,35 @@ async def run_attempt(
                     )
                     await _sleep_until(stream_end_at)
                     if attempt.arm == AUTOMATIC_ARM:
-                        await _continue_automatic_silence(
-                            websocket,
-                            state,
-                            started_at=stream_end_at,
-                            timeout_seconds=response_timeout_seconds,
-                            provider=connection.provider,
-                        )
+                        try:
+                            await _continue_automatic_silence(
+                                websocket,
+                                state,
+                                started_at=stream_end_at,
+                                timeout_seconds=response_timeout_seconds,
+                                provider=connection.provider,
+                            )
+                        except TimeoutError:
+                            error = "first_audio_timeout"
                     else:
-                        await asyncio.wait_for(
-                            state.first_audio_ready.wait(),
-                            timeout=response_timeout_seconds,
-                        )
-                    await asyncio.wait_for(
-                        state.turn_complete_ready.wait(),
-                        timeout=terminal_timeout_seconds,
-                    )
+                        try:
+                            await asyncio.wait_for(
+                                state.first_audio_ready.wait(),
+                                timeout=response_timeout_seconds,
+                            )
+                        except TimeoutError:
+                            error = "first_audio_timeout"
+                    if error is None:
+                        try:
+                            await asyncio.wait_for(
+                                state.turn_complete_ready.wait(),
+                                timeout=terminal_timeout_seconds,
+                            )
+                        except TimeoutError:
+                            error = "turn_complete_timeout"
                 except TimeoutError:
-                    error = "provider_timeout"
+                    if error is None:
+                        error = "provider_timeout"
                 finally:
                     receiver.cancel()
                     try:

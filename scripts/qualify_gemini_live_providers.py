@@ -15,6 +15,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.services.voice_turn_replay import (  # noqa: E402
+    APPROVED_QUALIFICATION_CORPUS_SHA256,
+    APPROVED_QUALIFICATION_MANIFEST_SHA256,
     DEVELOPER_MODEL,
     DEVELOPER_PROVIDER,
     QUALIFICATION_SEEDS,
@@ -23,11 +25,13 @@ from app.services.voice_turn_replay import (  # noqa: E402
     VERTEX_PROVIDER,
     build_gemini_setup_message,
     evaluate_gemini_provider_matrix,
+    load_voice_turn_cases,
+    voice_turn_manifest_identity,
 )
 from scripts.benchmark_gemini_turn_detection import run_benchmark  # noqa: E402
 
 
-MANIFEST = Path("tests/fixtures/voice_vad/fleurs_turn_replay_manifest.json")
+MANIFEST = REPO_ROOT / "tests/fixtures/voice_vad/fleurs_turn_replay_manifest.json"
 SMOKE_SEED = 7
 SMOKE_TRIALS_PER_CASE = 1
 QUALIFICATION_TRIALS_PER_CASE = 5
@@ -46,6 +50,7 @@ async def run_qualification_matrix(
     location: str = VERTEX_LOCATION,
 ) -> dict[str, Any]:
     """Execute the precommitted smoke and two-seed provider matrix once."""
+    _validate_qualification_corpus()
     build_gemini_setup_message(
         VERTEX_MODEL,
         arm="manual",
@@ -73,6 +78,8 @@ async def run_qualification_matrix(
         return {
             "status": "fail",
             "decision": "smoke_blocked",
+            "decision_scope": "offline_candidate_only",
+            "release_authorized": False,
             "attempt_ceiling": ATTEMPT_CEILING,
             "attempts_scheduled": attempts_scheduled,
             "smoke": smoke,
@@ -120,6 +127,7 @@ def _benchmark_args(
     pairs = 6 * trials_per_case
     return argparse.Namespace(
         manifest=MANIFEST,
+        qualification_mode=True,
         provider=provider,
         model=PROVIDER_MODELS[provider],
         project=project if provider == VERTEX_PROVIDER else None,
@@ -134,6 +142,16 @@ def _benchmark_args(
         response_timeout_seconds=12.0,
         terminal_timeout_seconds=12.0,
     )
+
+
+def _validate_qualification_corpus() -> None:
+    cases = load_voice_turn_cases(MANIFEST)
+    identity = voice_turn_manifest_identity(MANIFEST, cases=cases)
+    if identity != {
+        "manifest_sha256": APPROVED_QUALIFICATION_MANIFEST_SHA256,
+        "corpus_sha256": APPROVED_QUALIFICATION_CORPUS_SHA256,
+    }:
+        raise ValueError("qualification requires the approved corpus")
 
 
 def _smoke_summary(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -220,7 +238,12 @@ def main() -> int:
             )
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        report = {"status": "fail", "decision": "configuration_invalid"}
+        report = {
+            "status": "fail",
+            "decision": "configuration_invalid",
+            "decision_scope": "offline_candidate_only",
+            "release_authorized": False,
+        }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "pass" else 1
 

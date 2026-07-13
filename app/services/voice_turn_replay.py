@@ -28,6 +28,14 @@ DEVELOPER_MODEL = "gemini-3.1-flash-live-preview"
 VERTEX_MODEL = "gemini-live-2.5-flash-native-audio"
 VERTEX_LOCATION = "us-central1"
 QUALIFICATION_SEEDS = frozenset({29, 41})
+APPROVED_QUALIFICATION_MANIFEST_SHA256 = "".join((
+    "ae84a042", "8697119b", "c794e70d", "661bfda9",
+    "4e3cbc7f", "c5f39628", "3b72e299", "95790e5c",
+))
+APPROVED_QUALIFICATION_CORPUS_SHA256 = "".join((
+    "b0c23e5a", "964427d7", "e5119391", "3c760e39",
+    "143d957a", "0660e9fe", "8ae3ad47", "ea515636",
+))
 SAFE_ERROR_CODES = {
     "provider_closed",
     "provider_error",
@@ -754,6 +762,15 @@ def evaluate_gemini_provider_matrix(
         corpus_sha256 = configuration.get("corpus_sha256")
         if not _is_sha256(manifest_sha256) or not _is_sha256(corpus_sha256):
             raise ValueError("provider matrix corpus identity is invalid")
+        if (
+            manifest_sha256 != APPROVED_QUALIFICATION_MANIFEST_SHA256
+            or corpus_sha256 != APPROVED_QUALIFICATION_CORPUS_SHA256
+        ):
+            raise ValueError("provider matrix must use the approved corpus")
+        if configuration.get("qualification_scope") is not True:
+            raise ValueError("provider matrix requires qualification-scoped reports")
+        if report.get("release_authorized") is not False:
+            raise ValueError("provider matrix reports cannot authorize release")
         corpus_identities.add((manifest_sha256, corpus_sha256))
 
         automatic = diagnostics.get("automatic")
@@ -841,6 +858,8 @@ def evaluate_gemini_provider_matrix(
     return {
         "status": status,
         "decision": decision,
+        "decision_scope": "offline_candidate_only",
+        "release_authorized": False,
         "manifest_sha256": manifest_sha256,
         "corpus_sha256": corpus_sha256,
         "providers": summaries,

@@ -1,15 +1,22 @@
 """Offline paired replay tests for Gemini turn detection experiments."""
 
 import argparse
+import asyncio
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
 import pytest
 
 from app.services.voice_turn_replay import (
+    APPROVED_QUALIFICATION_CORPUS_SHA256,
+    APPROVED_QUALIFICATION_MANIFEST_SHA256,
     DEVELOPER_PROVIDER,
+    RenderedVoiceTurn,
     VERTEX_PROVIDER,
+    VoiceReplayAttempt,
+    VoiceReplayInput,
     VoiceTurnBenchmarkThresholds,
     VoiceTurnObservation,
     build_gemini_activity_message,
@@ -23,8 +30,17 @@ from app.services.voice_turn_replay import (
     render_voice_turn_case,
     voice_turn_manifest_identity,
 )
-from scripts.benchmark_gemini_turn_detection import run_benchmark
-from scripts.qualify_gemini_live_providers import run_qualification_matrix
+import scripts.benchmark_gemini_turn_detection as benchmark_module
+import scripts.qualify_gemini_live_providers as qualification_module
+from scripts.benchmark_gemini_turn_detection import (
+    _ProviderConnection,
+    run_attempt,
+    run_benchmark,
+)
+from scripts.qualify_gemini_live_providers import (
+    MANIFEST as QUALIFICATION_MANIFEST,
+    run_qualification_matrix,
+)
 
 
 FIXTURE_DIR = Path("tests/fixtures/voice_vad")
@@ -311,6 +327,169 @@ def test_provider_audio_envelopes_and_activity_events_are_explicit():
         build_gemini_activity_message("audio_stream_end")
 
 
+class _FakeProviderSocket:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.activity_ended = asyncio.Event()
+
+    async def send(self, payload: str) -> None:
+        message = json.loads(payload)
+        self.sent.append(message)
+        if message.get("realtimeInput", {}).get("activityEnd") == {}:
+            self.activity_ended.set()
+
+    async def recv(self) -> str:
+        return json.dumps({"setupComplete": {}})
+
+    def __aiter__(self):
+        return self._messages()
+
+    async def _messages(self):
+        await self.activity_ended.wait()
+        yield json.dumps({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": "cHVibGlj",
+                        }
+                    }]
+                },
+                "turnComplete": True,
+            }
+        })
+        await asyncio.Event().wait()
+
+
+class _ProviderSocketContext:
+    def __init__(self, socket: _FakeProviderSocket) -> None:
+        self.socket = socket
+
+    async def __aenter__(self) -> _FakeProviderSocket:
+        return self.socket
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+
+def _stub_short_manual_replay(monkeypatch) -> None:
+    rendered = RenderedVoiceTurn(
+        mulaw8=b"",
+        sample_rate_hz=16_000,
+        speech_start_ms=0,
+        speech_end_ms=1,
+        duration_ms=1,
+        frame_pattern_ms=(1,),
+    )
+    inputs = (
+        VoiceReplayInput(kind="activity_start", at_ms=0),
+        VoiceReplayInput(kind="audio", at_ms=0, audio=b"\x00\x00", duration_ms=1),
+        VoiceReplayInput(kind="activity_end", at_ms=1),
+    )
+    monkeypatch.setattr(benchmark_module, "render_voice_turn_case", lambda _case: rendered)
+    monkeypatch.setattr(
+        benchmark_module,
+        "build_replay_inputs",
+        lambda _rendered, *, arm: inputs,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "project", "location", "audio_field"),
+    [
+        (
+            DEVELOPER_PROVIDER,
+            "gemini-3.1-flash-live-preview",
+            None,
+            None,
+            "audio",
+        ),
+        (
+            VERTEX_PROVIDER,
+            "gemini-live-2.5-flash-native-audio",
+            "example-project",
+            "us-central1",
+            "mediaChunks",
+        ),
+    ],
+)
+async def test_provider_websocket_lifecycle_is_protocol_safe(
+    monkeypatch,
+    provider,
+    model,
+    project,
+    location,
+    audio_field,
+):
+    _stub_short_manual_replay(monkeypatch)
+    socket = _FakeProviderSocket()
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=provider,
+            url="wss://provider.invalid",
+            project=project,
+            location=location,
+        ),
+        model=model,
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.1,
+        terminal_timeout_seconds=0.1,
+    )
+
+    assert observation.error is None
+    assert observation.turn_complete is True
+    assert socket.sent[0]["setup"]["model"].endswith(model)
+    audio_messages = [
+        message
+        for message in socket.sent
+        if audio_field in message.get("realtimeInput", {})
+    ]
+    assert len(audio_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_details_are_not_retained(monkeypatch):
+    _stub_short_manual_replay(monkeypatch)
+
+    class FailedConnection:
+        async def __aenter__(self):
+            raise RuntimeError("sensitive-provider-detail")
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: FailedConnection(),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=DEVELOPER_PROVIDER,
+            url="wss://provider.invalid?key=secret",
+        ),
+        model="gemini-3.1-flash-live-preview",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.1,
+        terminal_timeout_seconds=0.1,
+    )
+
+    assert observation.error == "provider_error"
+    assert "sensitive-provider-detail" not in repr(observation)
+    assert "secret" not in repr(observation)
+
+
 @pytest.mark.asyncio
 async def test_network_benchmark_fails_closed_without_provider_credential(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -333,7 +512,12 @@ async def test_network_benchmark_fails_closed_without_provider_credential(monkey
 
     report = await run_benchmark(args)
 
-    assert report == {"status": "fail", "error": "credential_unavailable"}
+    assert report == {
+        "status": "fail",
+        "error": "credential_unavailable",
+        "decision_scope": "offline_diagnostic_only",
+        "release_authorized": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -384,6 +568,9 @@ async def test_network_benchmark_reports_corpus_identity(monkeypatch):
         for key in identity
     } == identity
     assert report["configuration"]["provider"] == DEVELOPER_PROVIDER
+    assert report["configuration"]["qualification_scope"] is False
+    assert report["decision_scope"] == "offline_diagnostic_only"
+    assert report["release_authorized"] is False
 
 
 @pytest.mark.asyncio
@@ -460,7 +647,12 @@ async def test_network_benchmark_enforces_per_run_attempt_ceiling(monkeypatch):
 
     report = await run_benchmark(args)
 
-    assert report == {"status": "fail", "error": "attempt_limit_exceeded"}
+    assert report == {
+        "status": "fail",
+        "error": "attempt_limit_exceeded",
+        "decision_scope": "offline_diagnostic_only",
+        "release_authorized": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -610,12 +802,14 @@ def _provider_report(
     }[provider]
     return {
         "status": status,
+        "release_authorized": False,
         "configuration": {
             "provider": provider,
             "model": model,
             "seed": seed,
-            "manifest_sha256": "a" * 64,
-            "corpus_sha256": "b" * 64,
+            "qualification_scope": True,
+            "manifest_sha256": APPROVED_QUALIFICATION_MANIFEST_SHA256,
+            "corpus_sha256": APPROVED_QUALIFICATION_CORPUS_SHA256,
         },
         "diagnostics": {
             "automatic": {
@@ -642,6 +836,8 @@ def test_provider_matrix_selects_lower_worse_seed_automatic_latency():
         "worst_automatic_speech_end_to_first_audio_p95_ms"
     ] == 1_900
     assert decision["providers"][VERTEX_PROVIDER]["qualified"] is True
+    assert decision["decision_scope"] == "offline_candidate_only"
+    assert decision["release_authorized"] is False
     assert "diagnostics" not in decision
 
 
@@ -683,7 +879,7 @@ def test_provider_matrix_rejects_mixed_corpora_or_incomplete_seed_set():
     ]
     mixed[-1]["configuration"]["corpus_sha256"] = "c" * 64
 
-    with pytest.raises(ValueError, match="corpus"):
+    with pytest.raises(ValueError, match="approved corpus"):
         evaluate_gemini_provider_matrix(mixed)
     with pytest.raises(ValueError, match="matrix"):
         evaluate_gemini_provider_matrix(mixed[:-1])
@@ -725,11 +921,22 @@ def _smoke_report(provider: str, *, ready: bool = True) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_qualification_matrix_stops_after_incomplete_smoke(monkeypatch):
+async def test_qualification_matrix_stops_after_incomplete_smoke_from_any_cwd(
+    monkeypatch,
+    tmp_path,
+):
     calls = []
 
     async def fake_benchmark(args):
-        calls.append((args.provider, args.seed, args.trials_per_case))
+        calls.append(
+            (
+                args.provider,
+                args.seed,
+                args.trials_per_case,
+                args.qualification_mode,
+                args.manifest,
+            )
+        )
         return _smoke_report(
             args.provider,
             ready=args.provider == DEVELOPER_PROVIDER,
@@ -739,14 +946,42 @@ async def test_qualification_matrix_stops_after_incomplete_smoke(monkeypatch):
         "scripts.qualify_gemini_live_providers.run_benchmark",
         fake_benchmark,
     )
+    monkeypatch.chdir(tmp_path)
 
     result = await run_qualification_matrix(project="private-project-id")
 
     assert result["status"] == "fail"
     assert result["decision"] == "smoke_blocked"
     assert result["attempt_ceiling"] == 264
+    assert result["decision_scope"] == "offline_candidate_only"
+    assert result["release_authorized"] is False
     assert len(calls) == 2
+    assert QUALIFICATION_MANIFEST.is_absolute()
+    assert all(call[3] is True for call in calls)
+    assert all(call[4] == QUALIFICATION_MANIFEST for call in calls)
     assert "private-project-id" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_qualification_matrix_rejects_mutated_corpus_before_network(
+    monkeypatch,
+    tmp_path,
+):
+    fixture_copy = tmp_path / "voice_vad"
+    shutil.copytree(FIXTURE_DIR, fixture_copy)
+    mutated_manifest = fixture_copy / FLEURS_MANIFEST.name
+    mutated_manifest.write_bytes(mutated_manifest.read_bytes() + b"\n")
+
+    async def unexpected_benchmark(_args):
+        raise AssertionError("network benchmark must not start")
+
+    monkeypatch.setattr(qualification_module, "MANIFEST", mutated_manifest)
+    monkeypatch.setattr(qualification_module, "run_benchmark", unexpected_benchmark)
+
+    with pytest.raises(ValueError, match="approved corpus"):
+        await qualification_module.run_qualification_matrix(
+            project="private-project-id"
+        )
 
 
 @pytest.mark.asyncio
@@ -754,7 +989,14 @@ async def test_qualification_matrix_runs_fixed_264_attempt_program(monkeypatch):
     calls = []
 
     async def fake_benchmark(args):
-        calls.append((args.provider, args.seed, args.trials_per_case))
+        calls.append(
+            (
+                args.provider,
+                args.seed,
+                args.trials_per_case,
+                args.qualification_mode,
+            )
+        )
         if args.trials_per_case == 1:
             return _smoke_report(args.provider)
         p95 = 1_700 if args.provider == VERTEX_PROVIDER else 1_900
@@ -776,6 +1018,9 @@ async def test_qualification_matrix_runs_fixed_264_attempt_program(monkeypatch):
     assert result["decision"] == VERTEX_PROVIDER
     assert result["attempt_ceiling"] == 264
     assert result["attempts_scheduled"] == 264
+    assert result["decision_scope"] == "offline_candidate_only"
+    assert result["release_authorized"] is False
     assert len(calls) == 6
     assert {call[1] for call in calls if call[2] == 5} == {29, 41}
+    assert all(call[3] is True for call in calls)
     assert "private-project-id" not in json.dumps(result)

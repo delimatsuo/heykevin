@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run paired, payload-safe Gemini automatic/manual turn-detection replays."""
+"""Run non-authorizing Gemini turn-detection diagnostics on local fixtures."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.services.voice_turn_replay import (  # noqa: E402
+    APPROVED_QUALIFICATION_CORPUS_SHA256,
+    APPROVED_QUALIFICATION_MANIFEST_SHA256,
     AUTOMATIC_ARM,
     DEVELOPER_PROVIDER,
     MANUAL_ARM,
@@ -272,6 +274,15 @@ async def _sleep_until(target: float) -> None:
 async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     cases = load_voice_turn_cases(args.manifest)
     corpus_identity = voice_turn_manifest_identity(args.manifest, cases=cases)
+    qualification_mode = bool(getattr(args, "qualification_mode", False))
+    if qualification_mode and corpus_identity != {
+        "manifest_sha256": APPROVED_QUALIFICATION_MANIFEST_SHA256,
+        "corpus_sha256": APPROVED_QUALIFICATION_CORPUS_SHA256,
+    }:
+        return _failed_report(
+            "corpus_not_approved",
+            qualification_mode=qualification_mode,
+        )
     schedule = build_paired_schedule(
         case_count=len(cases),
         trials_per_case=args.trials_per_case,
@@ -281,11 +292,17 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         not 1 <= args.max_provider_attempts <= MAX_PROVIDER_ATTEMPTS
         or len(schedule) > args.max_provider_attempts
     ):
-        return {"status": "fail", "error": "attempt_limit_exceeded"}
+        return _failed_report(
+            "attempt_limit_exceeded",
+            qualification_mode=qualification_mode,
+        )
     try:
         connection = _build_provider_connection(args)
     except _CredentialUnavailable:
-        return {"status": "fail", "error": "credential_unavailable"}
+        return _failed_report(
+            "credential_unavailable",
+            qualification_mode=qualification_mode,
+        )
 
     observations = []
     for attempt in schedule:
@@ -312,6 +329,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     )
     report["configuration"] = {
         "scope": "labeled_fixture_endpoint",
+        "qualification_scope": qualification_mode,
         "provider": args.provider,
         "model": args.model,
         "cases": len(cases),
@@ -321,7 +339,30 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.provider == VERTEX_PROVIDER:
         report["configuration"]["location"] = args.location
+    report["decision_scope"] = (
+        "offline_qualification_measurement"
+        if qualification_mode
+        else "offline_diagnostic_only"
+    )
+    report["release_authorized"] = False
     return report
+
+
+def _failed_report(
+    error: str,
+    *,
+    qualification_mode: bool = False,
+) -> dict[str, Any]:
+    return {
+        "status": "fail",
+        "error": error,
+        "decision_scope": (
+            "offline_qualification_measurement"
+            if qualification_mode
+            else "offline_diagnostic_only"
+        ),
+        "release_authorized": False,
+    }
 
 
 def _build_provider_connection(args: argparse.Namespace) -> _ProviderConnection:
@@ -392,7 +433,7 @@ def main() -> int:
             raise ValueError("trials_per_case must be positive")
         report = asyncio.run(run_benchmark(args))
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        report = {"status": "fail", "error": "configuration_invalid"}
+        report = _failed_report("configuration_invalid")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "pass" else 1
 

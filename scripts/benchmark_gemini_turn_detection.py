@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -44,7 +45,17 @@ GEMINI_WS_BASE = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
+SETUP_TIMEOUT_SECONDS = 5.0
 SILENCE_AUDIO = mulaw_to_pcm16k(b"\xff" * 160)
+PROVIDER_CLOSE_ERROR_CODES = {
+    1000: "provider_closed_normal",
+    1001: "provider_closed_going_away",
+    1006: "provider_closed_abnormal",
+    1008: "provider_closed_policy",
+    1011: "provider_closed_internal",
+    1012: "provider_closed_restart",
+    1013: "provider_closed_retry",
+}
 
 
 class _AttemptState:
@@ -87,12 +98,18 @@ async def run_attempt(
             await websocket.send(json.dumps(
                 build_gemini_setup_message(model, arm=attempt.arm)
             ))
-            acknowledgement = json.loads(
-                await asyncio.wait_for(websocket.recv(), timeout=5)
-            )
-            if "setupComplete" not in acknowledgement:
+            try:
+                acknowledgement = json.loads(
+                    await asyncio.wait_for(
+                        websocket.recv(),
+                        timeout=SETUP_TIMEOUT_SECONDS,
+                    )
+                )
+            except TimeoutError:
+                error = "setup_timeout"
+            if error is None and "setupComplete" not in acknowledgement:
                 error = "setup_rejected"
-            else:
+            if error is None:
                 receiver = asyncio.create_task(
                     _receive_provider_events(websocket, state)
                 )
@@ -136,23 +153,34 @@ async def run_attempt(
                     )
                     await _sleep_until(stream_end_at)
                     if attempt.arm == AUTOMATIC_ARM:
-                        await _continue_automatic_silence(
-                            websocket,
-                            state,
-                            started_at=stream_end_at,
-                            timeout_seconds=response_timeout_seconds,
-                        )
+                        try:
+                            await _continue_automatic_silence(
+                                websocket,
+                                state,
+                                started_at=stream_end_at,
+                                timeout_seconds=response_timeout_seconds,
+                            )
+                        except TimeoutError:
+                            error = "first_audio_timeout"
                     else:
-                        await asyncio.wait_for(
-                            state.first_audio_ready.wait(),
-                            timeout=response_timeout_seconds,
-                        )
-                    await asyncio.wait_for(
-                        state.turn_complete_ready.wait(),
-                        timeout=terminal_timeout_seconds,
-                    )
+                        try:
+                            await asyncio.wait_for(
+                                state.first_audio_ready.wait(),
+                                timeout=response_timeout_seconds,
+                            )
+                        except TimeoutError:
+                            error = "first_audio_timeout"
+                    if error is None:
+                        try:
+                            await asyncio.wait_for(
+                                state.turn_complete_ready.wait(),
+                                timeout=terminal_timeout_seconds,
+                            )
+                        except TimeoutError:
+                            error = "turn_complete_timeout"
                 except TimeoutError:
-                    error = "provider_timeout"
+                    if error is None:
+                        error = "provider_timeout"
                 finally:
                     receiver.cancel()
                     try:
@@ -163,8 +191,8 @@ async def run_attempt(
                     error = state.receive_error
     except TimeoutError:
         error = "provider_timeout"
-    except websockets.exceptions.ConnectionClosed:
-        error = "provider_closed"
+    except ConnectionClosed as exc:
+        error = _provider_close_error(exc)
     except Exception:
         error = "provider_error"
 
@@ -194,6 +222,9 @@ async def _receive_provider_events(websocket: Any, state: _AttemptState) -> None
     try:
         async for raw_message in websocket:
             message = json.loads(raw_message)
+            if "error" in message:
+                _record_receive_error(state, "provider_error")
+                return
             content = message.get("serverContent", {})
             if content.get("interrupted"):
                 state.interruption_events += 1
@@ -209,12 +240,34 @@ async def _receive_provider_events(websocket: Any, state: _AttemptState) -> None
             if content.get("turnComplete"):
                 state.turn_complete = True
                 state.turn_complete_ready.set()
+        if not state.turn_complete:
+            _record_receive_error(
+                state,
+                _provider_close_code_error(getattr(websocket, "close_code", None)),
+            )
     except asyncio.CancelledError:
         raise
+    except ConnectionClosed as exc:
+        _record_receive_error(state, _provider_close_error(exc))
     except Exception:
-        state.receive_error = "receive_error"
-        state.first_audio_ready.set()
-        state.turn_complete_ready.set()
+        _record_receive_error(state, "receive_error")
+
+
+def _record_receive_error(state: _AttemptState, error: str) -> None:
+    state.receive_error = error
+    state.first_audio_ready.set()
+    state.turn_complete_ready.set()
+
+
+def _provider_close_error(error: ConnectionClosed) -> str:
+    code = error.rcvd.code if error.rcvd is not None else 1006
+    return _provider_close_code_error(code)
+
+
+def _provider_close_code_error(code: object) -> str:
+    if isinstance(code, bool) or not isinstance(code, int):
+        code = 1006
+    return PROVIDER_CLOSE_ERROR_CODES.get(code, "provider_closed")
 
 
 async def _continue_automatic_silence(

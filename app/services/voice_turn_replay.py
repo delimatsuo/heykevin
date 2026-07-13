@@ -21,11 +21,21 @@ AUTOMATIC_ARM = "automatic"
 MANUAL_ARM = "manual"
 VALID_ARMS = {AUTOMATIC_ARM, MANUAL_ARM}
 SAFE_ERROR_CODES = {
+    "first_audio_timeout",
+    "provider_closed_abnormal",
+    "provider_closed_going_away",
+    "provider_closed_internal",
+    "provider_closed_normal",
+    "provider_closed_policy",
+    "provider_closed_restart",
+    "provider_closed_retry",
     "provider_closed",
     "provider_error",
     "provider_timeout",
     "receive_error",
     "setup_rejected",
+    "setup_timeout",
+    "turn_complete_timeout",
 }
 MODEL_PATTERN = re.compile(r"gemini-[a-z0-9][a-z0-9.-]*")
 

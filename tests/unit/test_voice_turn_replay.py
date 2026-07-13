@@ -1,13 +1,20 @@
 """Offline paired replay tests for Gemini turn detection experiments."""
 
 import argparse
+import asyncio
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from app.services.voice_turn_replay import (
+    RenderedVoiceTurn,
+    VoiceReplayAttempt,
+    VoiceReplayInput,
     VoiceTurnBenchmarkThresholds,
     VoiceTurnObservation,
     build_gemini_setup_message,
@@ -18,12 +25,14 @@ from app.services.voice_turn_replay import (
     render_voice_turn_case,
     voice_turn_manifest_identity,
 )
-from scripts.benchmark_gemini_turn_detection import run_benchmark
+import scripts.benchmark_gemini_turn_detection as benchmark_module
+from scripts.benchmark_gemini_turn_detection import run_attempt, run_benchmark
 
 
 FIXTURE_DIR = Path("tests/fixtures/voice_vad")
 MANIFEST = FIXTURE_DIR / "turn_replay_manifest.json"
 FLEURS_MANIFEST = FIXTURE_DIR / "fleurs_turn_replay_manifest.json"
+TEST_VALUE = "test-only-placeholder"
 
 
 def test_voice_turn_manifest_renders_live_codec_conditions():
@@ -229,6 +238,316 @@ def test_gemini_setup_requires_explicit_model_and_separates_vad_arms():
     }
 
 
+class _FakeProviderSocket:
+    def __init__(self) -> None:
+        self.activity_ended = asyncio.Event()
+
+    async def send(self, payload: str) -> None:
+        message = json.loads(payload)
+        if message.get("realtimeInput", {}).get("activityEnd") == {}:
+            self.activity_ended.set()
+
+    async def recv(self) -> str:
+        return json.dumps({"setupComplete": {}})
+
+    def __aiter__(self):
+        return self._messages()
+
+    async def _messages(self):
+        await self.activity_ended.wait()
+        yield json.dumps({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": "cHVibGlj",
+                        }
+                    }]
+                },
+                "turnComplete": True,
+            }
+        })
+        await asyncio.Event().wait()
+
+
+class _ProviderErrorSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        yield json.dumps({
+            "error": {
+                "message": "sensitive-provider-detail",
+                "request_id": "sensitive-request-id",
+            }
+        })
+
+
+class _ProviderClosedSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        raise ConnectionClosedError(
+            Close(1008, "sensitive-close-reason"),
+            None,
+        )
+        yield ""  # pragma: no cover
+
+
+class _ProviderUnknownCloseSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        raise ConnectionClosedError(
+            Close(4001, "sensitive-private-close-reason"),
+            None,
+        )
+        yield ""  # pragma: no cover
+
+
+class _CleanClosedSocket(_FakeProviderSocket):
+    def __init__(
+        self,
+        close_code: int,
+        *,
+        first_audio: bool,
+        turn_complete: bool = False,
+    ) -> None:
+        super().__init__()
+        self.close_code = close_code
+        self.close_reason = "sensitive-clean-close-reason"
+        self.first_audio = first_audio
+        self.turn_complete = turn_complete
+
+    async def _messages(self):
+        await self.activity_ended.wait()
+        if self.first_audio or self.turn_complete:
+            content = {"turnComplete": self.turn_complete}
+            if self.first_audio:
+                content["modelTurn"] = {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": "cHVibGlj",
+                        }
+                    }]
+                }
+            yield json.dumps({"serverContent": content})
+
+
+class _SetupTimeoutSocket(_FakeProviderSocket):
+    async def recv(self) -> str:
+        await asyncio.Event().wait()
+        return ""  # pragma: no cover
+
+
+class _NoResponseSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        await asyncio.Event().wait()
+        yield ""  # pragma: no cover
+
+
+class _NoTerminalSocket(_FakeProviderSocket):
+    async def _messages(self):
+        await self.activity_ended.wait()
+        yield json.dumps({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": "cHVibGlj",
+                        }
+                    }]
+                }
+            }
+        })
+        await asyncio.Event().wait()
+
+
+class _ProviderSocketContext:
+    def __init__(self, socket: _FakeProviderSocket) -> None:
+        self.socket = socket
+
+    async def __aenter__(self) -> _FakeProviderSocket:
+        return self.socket
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+
+def _stub_short_replay(monkeypatch) -> None:
+    rendered = RenderedVoiceTurn(
+        mulaw8=b"",
+        sample_rate_hz=16_000,
+        speech_start_ms=0,
+        speech_end_ms=1,
+        duration_ms=1,
+        frame_pattern_ms=(1,),
+    )
+    inputs = (
+        VoiceReplayInput(kind="activity_start", at_ms=0),
+        VoiceReplayInput(kind="audio", at_ms=0, audio=b"\x00\x00", duration_ms=1),
+        VoiceReplayInput(kind="activity_end", at_ms=1),
+    )
+    monkeypatch.setattr(benchmark_module, "render_voice_turn_case", lambda _case: rendered)
+    monkeypatch.setattr(
+        benchmark_module,
+        "build_replay_inputs",
+        lambda _rendered, *, arm: inputs,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("socket", "expected_error"),
+    [
+        (_ProviderErrorSocket(), "provider_error"),
+        (_ProviderClosedSocket(), "provider_closed_policy"),
+        (_ProviderUnknownCloseSocket(), "provider_closed"),
+    ],
+)
+async def test_receiver_failures_use_bounded_error_codes(
+    monkeypatch,
+    socket,
+    expected_error,
+):
+    _stub_short_replay(monkeypatch)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        api_key=TEST_VALUE,
+        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.1,
+        terminal_timeout_seconds=0.1,
+    )
+
+    assert observation.error == expected_error
+    assert "sensitive-provider-detail" not in repr(observation)
+    assert "sensitive-request-id" not in repr(observation)
+    assert "sensitive-close-reason" not in repr(observation)
+    assert "sensitive-private-close-reason" not in repr(observation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arm", "close_code", "first_audio", "expected_error"),
+    [
+        ("manual", 1000, False, "provider_closed_normal"),
+        ("automatic", 1001, False, "provider_closed_going_away"),
+        ("manual", 1001, True, "provider_closed_going_away"),
+        ("automatic", 1000, True, "provider_closed_normal"),
+    ],
+)
+async def test_clean_preterminal_closes_are_not_reported_as_timeouts(
+    monkeypatch,
+    arm,
+    close_code,
+    first_audio,
+    expected_error,
+):
+    _stub_short_replay(monkeypatch)
+    socket = _CleanClosedSocket(close_code, first_audio=first_audio)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        api_key=TEST_VALUE,
+        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm=arm),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error == expected_error
+    assert "sensitive-clean-close-reason" not in repr(observation)
+
+
+@pytest.mark.asyncio
+async def test_clean_close_after_turn_complete_is_not_an_error(monkeypatch):
+    _stub_short_replay(monkeypatch)
+    socket = _CleanClosedSocket(1000, first_audio=True, turn_complete=True)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        api_key=TEST_VALUE,
+        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error is None
+    assert observation.turn_complete is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("socket", "expected_error"),
+    [
+        (_NoResponseSocket(), "first_audio_timeout"),
+        (_NoTerminalSocket(), "turn_complete_timeout"),
+    ],
+)
+async def test_provider_wait_timeouts_are_phase_specific(
+    monkeypatch,
+    socket,
+    expected_error,
+):
+    _stub_short_replay(monkeypatch)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        api_key=TEST_VALUE,
+        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error == expected_error
+
+
+@pytest.mark.asyncio
+async def test_provider_setup_timeout_is_phase_specific(monkeypatch):
+    _stub_short_replay(monkeypatch)
+    monkeypatch.setattr(benchmark_module, "SETUP_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(_SetupTimeoutSocket()),
+    )
+
+    observation = await run_attempt(
+        api_key=TEST_VALUE,
+        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.01,
+        terminal_timeout_seconds=0.01,
+    )
+
+    assert observation.error == "setup_timeout"
+
+
 @pytest.mark.asyncio
 async def test_network_benchmark_fails_closed_without_provider_credential(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -267,7 +586,7 @@ async def test_network_benchmark_reports_corpus_identity(monkeypatch):
             interruption_events=0,
         )
 
-    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_VALUE)
     monkeypatch.setattr(
         "scripts.benchmark_gemini_turn_detection.run_attempt",
         fake_attempt,
@@ -378,4 +697,30 @@ def test_voice_turn_benchmark_fails_small_incomplete_or_premature_treatment():
     } <= failed
     assert report["diagnostics"]["manual"]["error_counts"] == {
         "provider_timeout": 1
+    }
+
+
+def test_voice_turn_benchmark_preserves_bounded_diagnostic_error_codes():
+    observations = _passing_observations()
+    observations[0] = replace(
+        observations[0],
+        first_audio_after_speech_end_ms=None,
+        turn_complete=False,
+        error="provider_closed_policy",
+    )
+    observations[1] = replace(
+        observations[1],
+        first_audio_after_speech_end_ms=None,
+        first_audio_after_activity_end_ms=None,
+        turn_complete=False,
+        error="setup_timeout",
+    )
+
+    report = evaluate_voice_turn_benchmark(observations)
+
+    assert report["diagnostics"]["automatic"]["error_counts"] == {
+        "provider_closed_policy": 1
+    }
+    assert report["diagnostics"]["manual"]["error_counts"] == {
+        "setup_timeout": 1
     }

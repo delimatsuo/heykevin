@@ -179,8 +179,8 @@ not reproduce the pass: automatic measured 2,059/2,099 ms with one error and
 96.67% terminal/latency coverage, while manual measured 1,593/1,809 ms and
 missed the 1,500 ms p95 gate. The worse seed governs, so neither a model-only
 3.1 treatment nor live manual endpointing is qualified. Those runs used six
-transformations of one English source. The new bilingual FLEURS corpus has not
-yet been run against the provider, so it does not supersede that evidence.
+transformations of one English source. The bilingual FLEURS replay below now
+provides the governing provider evidence.
 `gemini-3.1-flash-live-preview` is an explicit
 non-`latest` model ID, but it is still a mutable preview rather than an
 immutable dated release; all qualification evidence must therefore be rerun

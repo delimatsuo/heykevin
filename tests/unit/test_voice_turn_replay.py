@@ -7,33 +7,53 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import sys
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
+import app.services.voice_turn_replay as replay_module
 from app.services.voice_turn_replay import (
+    APPROVED_CONNECTION_SMOKE_CORPUS_SHA256,
+    APPROVED_CONNECTION_SMOKE_MANIFEST_SHA256,
+    DEVELOPER_PROVIDER,
     RenderedVoiceTurn,
+    VERTEX_PROVIDER,
     VoiceReplayAttempt,
     VoiceReplayInput,
     VoiceTurnBenchmarkThresholds,
     VoiceTurnObservation,
+    build_gemini_activity_message,
+    build_gemini_audio_message,
     build_gemini_setup_message,
     build_paired_schedule,
     build_replay_inputs,
+    evaluate_gemini_provider_matrix,
     evaluate_voice_turn_benchmark,
     load_voice_turn_cases,
     render_voice_turn_case,
     voice_turn_manifest_identity,
 )
 import scripts.benchmark_gemini_turn_detection as benchmark_module
-from scripts.benchmark_gemini_turn_detection import run_attempt, run_benchmark
+import scripts.smoke_gemini_live_providers as smoke_module
+from scripts.benchmark_gemini_turn_detection import (
+    _ProviderConnection,
+    run_attempt,
+    run_benchmark,
+)
+from scripts.smoke_gemini_live_providers import (
+    MANIFEST as SMOKE_MANIFEST,
+    run_provider_smoke,
+)
 
 
 FIXTURE_DIR = Path("tests/fixtures/voice_vad")
 MANIFEST = FIXTURE_DIR / "turn_replay_manifest.json"
 FLEURS_MANIFEST = FIXTURE_DIR / "fleurs_turn_replay_manifest.json"
-TEST_VALUE = "test-only-placeholder"
+MATRIX_MANIFEST_SHA256 = "d" * 64
+MATRIX_CORPUS_SHA256 = "e" * 64
 
 
 def test_offline_replay_is_not_imported_by_live_call_paths():
@@ -51,9 +71,7 @@ def test_offline_replay_is_not_imported_by_live_call_paths():
                 imported_modules.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
-                imported_modules.update(
-                    f"{node.module}.{alias.name}" for alias in node.names
-                )
+                imported_modules.update(f"{node.module}.{alias.name}" for alias in node.names)
 
         assert offline_modules.isdisjoint(imported_modules), path
 
@@ -92,9 +110,7 @@ def test_voice_turn_manifest_identity_is_stable_and_corpus_specific():
     fleurs = voice_turn_manifest_identity(FLEURS_MANIFEST)
 
     assert fleurs == voice_turn_manifest_identity(FLEURS_MANIFEST)
-    assert fleurs["manifest_sha256"] == hashlib.sha256(
-        FLEURS_MANIFEST.read_bytes()
-    ).hexdigest()
+    assert fleurs["manifest_sha256"] == hashlib.sha256(FLEURS_MANIFEST.read_bytes()).hexdigest()
     assert len(fleurs["corpus_sha256"]) == 64
     assert legacy["manifest_sha256"] != fleurs["manifest_sha256"]
     assert legacy["corpus_sha256"] != fleurs["corpus_sha256"]
@@ -127,9 +143,7 @@ def test_voice_turn_manifest_supports_path_confined_multi_source_v2(tmp_path):
         source_path.write_bytes(b"\x00\x00" * 8_000)
         sources[source_id] = {
             "source_pcm": source_path.name,
-            "source_sha256_chunks": [
-                hashlib.sha256(source_path.read_bytes()).hexdigest()
-            ],
+            "source_sha256_chunks": [hashlib.sha256(source_path.read_bytes()).hexdigest()],
             "source_sample_rate_hz": 8_000,
             "source_speech_start_ms": 100,
             "source_speech_end_ms": 500,
@@ -204,8 +218,7 @@ def test_manual_replay_orders_activity_signals_around_identical_audio():
     endpoint_events = [
         event
         for event in audio_events
-        if event.at_ms < rendered.speech_end_ms
-        <= event.at_ms + event.duration_ms
+        if event.at_ms < rendered.speech_end_ms <= event.at_ms + event.duration_ms
     ]
     assert len(endpoint_events) == 1
 
@@ -221,16 +234,13 @@ def test_paired_schedule_is_balanced_reproducible_and_interleaved():
     first_arms = [item.arm for item in first[::2]]
     assert first_arms.count("automatic") == 15
     assert first_arms.count("manual") == 15
-    assert {
-        (item.case_index, item.trial)
-        for item in first
-    } == {(case_index, trial) for case_index in range(6) for trial in range(1, 6)}
+    assert {(item.case_index, item.trial) for item in first} == {
+        (case_index, trial) for case_index in range(6) for trial in range(1, 6)
+    }
     for case_index in range(6):
         for trial in range(1, 6):
             arms = {
-                item.arm
-                for item in first
-                if item.case_index == case_index and item.trial == trial
+                item.arm for item in first if item.case_index == case_index and item.trial == trial
             }
             assert arms == {"automatic", "manual"}
 
@@ -251,25 +261,92 @@ def test_gemini_setup_requires_explicit_model_and_separates_vad_arms():
         arm="manual",
     )
 
-    automatic_detection = automatic["setup"]["realtimeInputConfig"][
-        "automaticActivityDetection"
-    ]
-    manual_detection = manual["setup"]["realtimeInputConfig"][
-        "automaticActivityDetection"
-    ]
+    automatic_detection = automatic["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
+    manual_detection = manual["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
     assert automatic_detection["silenceDurationMs"] == 500
     assert manual_detection == {"disabled": True}
-    assert automatic["setup"]["generationConfig"]["thinkingConfig"] == {
-        "thinkingBudget": 0
+    assert automatic["setup"]["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+def test_vertex_setup_pins_resource_and_preserves_zero_retention():
+    developer = build_gemini_setup_message(
+        "gemini-3.1-flash-live-preview",
+        arm="automatic",
+        provider=DEVELOPER_PROVIDER,
+    )
+    vertex = build_gemini_setup_message(
+        "gemini-live-2.5-flash-native-audio",
+        arm="automatic",
+        provider=VERTEX_PROVIDER,
+        project="example-project",
+        location="us-central1",
+    )
+
+    assert vertex["setup"]["model"] == (
+        "projects/example-project/locations/us-central1/publishers/google/"
+        "models/gemini-live-2.5-flash-native-audio"
+    )
+    assert vertex["setup"]["realtimeInputConfig"] == developer["setup"]["realtimeInputConfig"]
+    assert "thinkingConfig" not in vertex["setup"]["generationConfig"]
+    serialized = json.dumps(vertex)
+    assert "sessionResumption" not in serialized
+    assert "session_resumption" not in serialized
+    assert "tools" not in vertex["setup"]
+
+
+@pytest.mark.parametrize(
+    ("project", "location"),
+    [
+        ("", "us-central1"),
+        ("example-project/escape", "us-central1"),
+        ("example-project", "global"),
+    ],
+)
+def test_vertex_setup_rejects_unapproved_resource_scope(project, location):
+    with pytest.raises(ValueError, match="Vertex"):
+        build_gemini_setup_message(
+            "gemini-live-2.5-flash-native-audio",
+            arm="automatic",
+            provider=VERTEX_PROVIDER,
+            project=project,
+            location=location,
+        )
+
+
+def test_provider_audio_envelopes_and_activity_events_are_explicit():
+    developer = build_gemini_audio_message(
+        b"public-fixture",
+        provider=DEVELOPER_PROVIDER,
+    )
+    vertex = build_gemini_audio_message(
+        b"public-fixture",
+        provider=VERTEX_PROVIDER,
+    )
+
+    assert developer["realtimeInput"]["audio"]["mimeType"] == ("audio/pcm;rate=16000")
+    assert "mediaChunks" not in developer["realtimeInput"]
+    assert vertex["realtimeInput"]["mediaChunks"] == [
+        {
+            "data": "cHVibGljLWZpeHR1cmU=",
+            "mimeType": "audio/pcm;rate=16000",
+        }
+    ]
+    assert build_gemini_activity_message("activity_start") == {
+        "realtimeInput": {"activityStart": {}}
     }
+    assert build_gemini_activity_message("activity_end") == {"realtimeInput": {"activityEnd": {}}}
+    with pytest.raises(ValueError, match="activity"):
+        build_gemini_activity_message("audio_stream_end")
 
 
 class _FakeProviderSocket:
     def __init__(self) -> None:
+        self.sent: list[dict] = []
         self.activity_ended = asyncio.Event()
 
     async def send(self, payload: str) -> None:
         message = json.loads(payload)
+        self.sent.append(message)
         if message.get("realtimeInput", {}).get("activityEnd") == {}:
             self.activity_ended.set()
 
@@ -281,31 +358,37 @@ class _FakeProviderSocket:
 
     async def _messages(self):
         await self.activity_ended.wait()
-        yield json.dumps({
-            "serverContent": {
-                "modelTurn": {
-                    "parts": [{
-                        "inlineData": {
-                            "mimeType": "audio/pcm;rate=24000",
-                            "data": "cHVibGlj",
-                        }
-                    }]
-                },
-                "turnComplete": True,
+        yield json.dumps(
+            {
+                "serverContent": {
+                    "modelTurn": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/pcm;rate=24000",
+                                    "data": "cHVibGlj",
+                                }
+                            }
+                        ]
+                    },
+                    "turnComplete": True,
+                }
             }
-        })
+        )
         await asyncio.Event().wait()
 
 
 class _ProviderErrorSocket(_FakeProviderSocket):
     async def _messages(self):
         await self.activity_ended.wait()
-        yield json.dumps({
-            "error": {
-                "message": "sensitive-provider-detail",
-                "request_id": "sensitive-request-id",
+        yield json.dumps(
+            {
+                "error": {
+                    "message": "sensitive-provider-detail",
+                    "request_id": "sensitive-request-id",
+                }
             }
-        })
+        )
 
 
 class _ProviderClosedSocket(_FakeProviderSocket):
@@ -348,12 +431,14 @@ class _CleanClosedSocket(_FakeProviderSocket):
             content = {"turnComplete": self.turn_complete}
             if self.first_audio:
                 content["modelTurn"] = {
-                    "parts": [{
-                        "inlineData": {
-                            "mimeType": "audio/pcm;rate=24000",
-                            "data": "cHVibGlj",
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": "audio/pcm;rate=24000",
+                                "data": "cHVibGlj",
+                            }
                         }
-                    }]
+                    ]
                 }
             yield json.dumps({"serverContent": content})
 
@@ -374,18 +459,22 @@ class _NoResponseSocket(_FakeProviderSocket):
 class _NoTerminalSocket(_FakeProviderSocket):
     async def _messages(self):
         await self.activity_ended.wait()
-        yield json.dumps({
-            "serverContent": {
-                "modelTurn": {
-                    "parts": [{
-                        "inlineData": {
-                            "mimeType": "audio/pcm;rate=24000",
-                            "data": "cHVibGlj",
-                        }
-                    }]
+        yield json.dumps(
+            {
+                "serverContent": {
+                    "modelTurn": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/pcm;rate=24000",
+                                    "data": "cHVibGlj",
+                                }
+                            }
+                        ]
+                    }
                 }
             }
-        })
+        )
         await asyncio.Event().wait()
 
 
@@ -400,7 +489,7 @@ class _ProviderSocketContext:
         return None
 
 
-def _stub_short_replay(monkeypatch) -> None:
+def _stub_short_manual_replay(monkeypatch) -> None:
     rendered = RenderedVoiceTurn(
         mulaw8=b"",
         sample_rate_hz=16_000,
@@ -424,6 +513,99 @@ def _stub_short_replay(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("provider", "model", "project", "location", "audio_field"),
+    [
+        (
+            DEVELOPER_PROVIDER,
+            "gemini-3.1-flash-live-preview",
+            None,
+            None,
+            "audio",
+        ),
+        (
+            VERTEX_PROVIDER,
+            "gemini-live-2.5-flash-native-audio",
+            "example-project",
+            "us-central1",
+            "mediaChunks",
+        ),
+    ],
+)
+async def test_provider_websocket_lifecycle_is_protocol_safe(
+    monkeypatch,
+    provider,
+    model,
+    project,
+    location,
+    audio_field,
+):
+    _stub_short_manual_replay(monkeypatch)
+    socket = _FakeProviderSocket()
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: _ProviderSocketContext(socket),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=provider,
+            url="wss://provider.invalid",
+            project=project,
+            location=location,
+        ),
+        model=model,
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.1,
+        terminal_timeout_seconds=0.1,
+    )
+
+    assert observation.error is None
+    assert observation.turn_complete is True
+    assert socket.sent[0]["setup"]["model"].endswith(model)
+    audio_messages = [
+        message for message in socket.sent if audio_field in message.get("realtimeInput", {})
+    ]
+    assert len(audio_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_details_are_not_retained(monkeypatch):
+    _stub_short_manual_replay(monkeypatch)
+
+    class FailedConnection:
+        async def __aenter__(self):
+            raise RuntimeError("sensitive-provider-detail")
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(
+        benchmark_module.websockets,
+        "connect",
+        lambda *_args, **_kwargs: FailedConnection(),
+    )
+
+    observation = await run_attempt(
+        connection=_ProviderConnection(
+            provider=DEVELOPER_PROVIDER,
+            url="wss://provider.invalid?key=secret",
+        ),
+        model="gemini-3.1-flash-live-preview",
+        case=object(),
+        attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
+        response_timeout_seconds=0.1,
+        terminal_timeout_seconds=0.1,
+    )
+
+    assert observation.error == "provider_error"
+    assert "sensitive-provider-detail" not in repr(observation)
+    assert "secret" not in repr(observation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("socket", "expected_error"),
     [
         (_ProviderErrorSocket(), "provider_error"),
@@ -436,7 +618,7 @@ async def test_receiver_failures_use_bounded_error_codes(
     socket,
     expected_error,
 ):
-    _stub_short_replay(monkeypatch)
+    _stub_short_manual_replay(monkeypatch)
     monkeypatch.setattr(
         benchmark_module.websockets,
         "connect",
@@ -444,8 +626,13 @@ async def test_receiver_failures_use_bounded_error_codes(
     )
 
     observation = await run_attempt(
-        api_key=TEST_VALUE,
-        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
         case=object(),
         attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
         response_timeout_seconds=0.1,
@@ -476,7 +663,7 @@ async def test_clean_preterminal_closes_are_not_reported_as_timeouts(
     first_audio,
     expected_error,
 ):
-    _stub_short_replay(monkeypatch)
+    _stub_short_manual_replay(monkeypatch)
     socket = _CleanClosedSocket(close_code, first_audio=first_audio)
     monkeypatch.setattr(
         benchmark_module.websockets,
@@ -485,8 +672,13 @@ async def test_clean_preterminal_closes_are_not_reported_as_timeouts(
     )
 
     observation = await run_attempt(
-        api_key=TEST_VALUE,
-        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
         case=object(),
         attempt=VoiceReplayAttempt(case_index=0, trial=1, arm=arm),
         response_timeout_seconds=0.01,
@@ -499,7 +691,7 @@ async def test_clean_preterminal_closes_are_not_reported_as_timeouts(
 
 @pytest.mark.asyncio
 async def test_clean_close_after_turn_complete_is_not_an_error(monkeypatch):
-    _stub_short_replay(monkeypatch)
+    _stub_short_manual_replay(monkeypatch)
     socket = _CleanClosedSocket(1000, first_audio=True, turn_complete=True)
     monkeypatch.setattr(
         benchmark_module.websockets,
@@ -508,8 +700,13 @@ async def test_clean_close_after_turn_complete_is_not_an_error(monkeypatch):
     )
 
     observation = await run_attempt(
-        api_key=TEST_VALUE,
-        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
         case=object(),
         attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
         response_timeout_seconds=0.01,
@@ -533,7 +730,7 @@ async def test_provider_wait_timeouts_are_phase_specific(
     socket,
     expected_error,
 ):
-    _stub_short_replay(monkeypatch)
+    _stub_short_manual_replay(monkeypatch)
     monkeypatch.setattr(
         benchmark_module.websockets,
         "connect",
@@ -541,8 +738,13 @@ async def test_provider_wait_timeouts_are_phase_specific(
     )
 
     observation = await run_attempt(
-        api_key=TEST_VALUE,
-        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
         case=object(),
         attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
         response_timeout_seconds=0.01,
@@ -554,8 +756,8 @@ async def test_provider_wait_timeouts_are_phase_specific(
 
 @pytest.mark.asyncio
 async def test_provider_setup_timeout_is_phase_specific(monkeypatch):
-    _stub_short_replay(monkeypatch)
-    monkeypatch.setattr(benchmark_module, "SETUP_TIMEOUT_SECONDS", 0.01, raising=False)
+    _stub_short_manual_replay(monkeypatch)
+    monkeypatch.setattr(benchmark_module, "SETUP_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(
         benchmark_module.websockets,
         "connect",
@@ -563,8 +765,13 @@ async def test_provider_setup_timeout_is_phase_specific(monkeypatch):
     )
 
     observation = await run_attempt(
-        api_key=TEST_VALUE,
-        model="gemini-2.5-flash-native-audio-preview-12-2025",
+        connection=_ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url="wss://provider.invalid",
+            project="example-project",
+            location="us-central1",
+        ),
+        model="gemini-live-2.5-flash-native-audio",
         case=object(),
         attempt=VoiceReplayAttempt(case_index=0, trial=1, arm="manual"),
         response_timeout_seconds=0.01,
@@ -577,7 +784,10 @@ async def test_provider_setup_timeout_is_phase_specific(monkeypatch):
 def _benchmark_args(**overrides):
     values = {
         "manifest": FLEURS_MANIFEST,
+        "provider": DEVELOPER_PROVIDER,
         "model": "gemini-3.1-flash-live-preview",
+        "project": None,
+        "location": None,
         "trials_per_case": 1,
         "max_provider_attempts": 60,
         "seed": 29,
@@ -608,7 +818,7 @@ async def test_network_benchmark_fails_closed_without_provider_credential(monkey
 async def test_network_benchmark_rejects_attempts_over_limit_before_network(
     monkeypatch,
 ):
-    monkeypatch.setenv("GEMINI_API_KEY", TEST_VALUE)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
 
     async def unexpected_attempt(**_kwargs):
         pytest.fail("provider attempt must not run above the hard limit")
@@ -627,7 +837,7 @@ async def test_network_benchmark_rejects_attempts_over_limit_before_network(
 
 @pytest.mark.asyncio
 async def test_network_benchmark_stops_after_first_provider_error(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", TEST_VALUE)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
     attempts = []
 
     async def failed_attempt(*, attempt, **_kwargs):
@@ -661,17 +871,13 @@ async def test_network_benchmark_reports_corpus_identity(monkeypatch):
             case_index=attempt.case_index,
             trial=attempt.trial,
             arm=attempt.arm,
-            first_audio_after_speech_end_ms=(
-                1_200 if attempt.arm == "automatic" else 1_100
-            ),
-            first_audio_after_activity_end_ms=(
-                None if attempt.arm == "automatic" else 700
-            ),
+            first_audio_after_speech_end_ms=(1_200 if attempt.arm == "automatic" else 1_100),
+            first_audio_after_activity_end_ms=(None if attempt.arm == "automatic" else 700),
             turn_complete=True,
             interruption_events=0,
         )
 
-    monkeypatch.setenv("GEMINI_API_KEY", TEST_VALUE)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
     monkeypatch.setattr(
         "scripts.benchmark_gemini_turn_detection.run_attempt",
         fake_attempt,
@@ -700,10 +906,156 @@ async def test_network_benchmark_reports_corpus_identity(monkeypatch):
         "turn_complete": 1.0,
     }
     identity = voice_turn_manifest_identity(FLEURS_MANIFEST)
-    assert {
-        key: report["configuration"][key]
-        for key in identity
-    } == identity
+    assert {key: report["configuration"][key] for key in identity} == identity
+    assert report["configuration"]["provider"] == DEVELOPER_PROVIDER
+    assert "qualification_scope" not in report["configuration"]
+    assert report["configuration"]["session_scope"] == "cold_single_turn"
+    assert report["decision_scope"] == "offline_diagnostic_only"
+    assert report["release_authorized"] is False
+
+
+@pytest.mark.asyncio
+async def test_network_benchmark_pins_automatic_latency_limits(monkeypatch):
+    async def fake_attempt(*, attempt, **_kwargs):
+        return VoiceTurnObservation(
+            case_index=attempt.case_index,
+            trial=attempt.trial,
+            arm=attempt.arm,
+            first_audio_after_speech_end_ms=(1_501 if attempt.arm == "automatic" else 1_200),
+            first_audio_after_activity_end_ms=(None if attempt.arm == "automatic" else 700),
+            turn_complete=True,
+            interruption_events=0,
+        )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
+    monkeypatch.setattr(
+        "scripts.benchmark_gemini_turn_detection.run_attempt",
+        fake_attempt,
+    )
+    args = argparse.Namespace(
+        manifest=FLEURS_MANIFEST,
+        provider=DEVELOPER_PROVIDER,
+        model="gemini-3.1-flash-live-preview",
+        project=None,
+        location=None,
+        trials_per_case=1,
+        max_provider_attempts=60,
+        seed=29,
+        min_attempts_per_arm=6,
+        min_paired_attempts=6,
+        automatic_latency_p95_ms=99_999,
+        automatic_latency_max_ms=99_999,
+        manual_latency_p95_ms=1_500,
+        manual_latency_max_ms=2_500,
+        response_timeout_seconds=1.0,
+        terminal_timeout_seconds=1.0,
+        qualification_mode=True,
+    )
+
+    report = await run_benchmark(args)
+
+    failed = {gate["name"] for gate in report["gates"] if not gate["passed"]}
+    assert report["status"] == "fail"
+    assert "automatic_latency_p95_ms" in failed
+    assert report["decision_scope"] == "offline_diagnostic_only"
+    assert "qualification_scope" not in report["configuration"]
+
+
+def test_benchmark_cli_rejects_automatic_latency_overrides(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_gemini_turn_detection.py",
+            "--provider",
+            DEVELOPER_PROVIDER,
+            "--model",
+            "gemini-3.1-flash-live-preview",
+            "--automatic-latency-p95-ms",
+            "99999",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        benchmark_module.parse_args()
+
+
+@pytest.mark.asyncio
+async def test_vertex_benchmark_report_omits_project_and_bearer_token(monkeypatch):
+    async def fake_attempt(*, attempt, **_kwargs):
+        return VoiceTurnObservation(
+            case_index=attempt.case_index,
+            trial=attempt.trial,
+            arm=attempt.arm,
+            first_audio_after_speech_end_ms=(1_400 if attempt.arm == "automatic" else 1_200),
+            first_audio_after_activity_end_ms=(None if attempt.arm == "automatic" else 700),
+            turn_complete=True,
+            interruption_events=0,
+        )
+
+    monkeypatch.setattr(
+        "scripts.benchmark_gemini_turn_detection._load_vertex_access_token",
+        lambda: "private-bearer-token",
+    )
+    monkeypatch.setattr(
+        "scripts.benchmark_gemini_turn_detection.run_attempt",
+        fake_attempt,
+    )
+    args = argparse.Namespace(
+        manifest=FLEURS_MANIFEST,
+        provider=VERTEX_PROVIDER,
+        model="gemini-live-2.5-flash-native-audio",
+        project="private-project-id",
+        location="us-central1",
+        trials_per_case=1,
+        max_provider_attempts=60,
+        seed=29,
+        min_attempts_per_arm=6,
+        min_paired_attempts=6,
+        manual_latency_p95_ms=1_500,
+        manual_latency_max_ms=2_500,
+        response_timeout_seconds=1.0,
+        terminal_timeout_seconds=1.0,
+    )
+
+    report = await run_benchmark(args)
+
+    assert report["status"] == "pass"
+    assert report["configuration"]["provider"] == VERTEX_PROVIDER
+    assert report["configuration"]["location"] == "us-central1"
+    serialized = json.dumps(report)
+    assert "private-project-id" not in serialized
+    assert "private-bearer-token" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_network_benchmark_enforces_per_run_attempt_ceiling(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-placeholder")
+    args = argparse.Namespace(
+        manifest=FLEURS_MANIFEST,
+        provider=DEVELOPER_PROVIDER,
+        model="gemini-3.1-flash-live-preview",
+        project=None,
+        location=None,
+        trials_per_case=5,
+        max_provider_attempts=59,
+        seed=29,
+        min_attempts_per_arm=30,
+        min_paired_attempts=30,
+        manual_latency_p95_ms=1_500,
+        manual_latency_max_ms=2_500,
+        response_timeout_seconds=1.0,
+        terminal_timeout_seconds=1.0,
+    )
+
+    report = await run_benchmark(args)
+
+    assert report == {
+        "status": "fail",
+        "error": "attempt_limit_exceeded",
+        "decision_scope": "offline_diagnostic_only",
+        "release_authorized": False,
+    }
 
 
 def _passing_observations() -> list[VoiceTurnObservation]:
@@ -711,26 +1063,28 @@ def _passing_observations() -> list[VoiceTurnObservation]:
     for pair in range(30):
         case_index = pair % 6
         trial = pair // 6 + 1
-        observations.extend([
-            VoiceTurnObservation(
-                case_index=case_index,
-                trial=trial,
-                arm="automatic",
-                first_audio_after_speech_end_ms=1200,
-                first_audio_after_activity_end_ms=None,
-                turn_complete=True,
-                interruption_events=1 if pair < 5 else 0,
-            ),
-            VoiceTurnObservation(
-                case_index=case_index,
-                trial=trial,
-                arm="manual",
-                first_audio_after_speech_end_ms=1200,
-                first_audio_after_activity_end_ms=700,
-                turn_complete=True,
-                interruption_events=0,
-            ),
-        ])
+        observations.extend(
+            [
+                VoiceTurnObservation(
+                    case_index=case_index,
+                    trial=trial,
+                    arm="automatic",
+                    first_audio_after_speech_end_ms=1200,
+                    first_audio_after_activity_end_ms=None,
+                    turn_complete=True,
+                    interruption_events=1 if pair < 5 else 0,
+                ),
+                VoiceTurnObservation(
+                    case_index=case_index,
+                    trial=trial,
+                    arm="manual",
+                    first_audio_after_speech_end_ms=1200,
+                    first_audio_after_activity_end_ms=700,
+                    turn_complete=True,
+                    interruption_events=0,
+                ),
+            ]
+        )
     return observations
 
 
@@ -761,6 +1115,32 @@ def test_voice_turn_benchmark_passes_complete_aggregate_treatment():
     assert "case_index" not in str(report)
 
 
+def test_voice_turn_benchmark_enforces_automatic_latency_boundaries():
+    boundary = [
+        replace(item, first_audio_after_speech_end_ms=1_500) if item.arm == "automatic" else item
+        for item in _passing_observations()
+    ]
+    boundary[0] = replace(boundary[0], first_audio_after_speech_end_ms=2_500)
+
+    assert evaluate_voice_turn_benchmark(boundary)["status"] == "pass"
+
+    over_p95 = [
+        replace(item, first_audio_after_speech_end_ms=1_501) if item.arm == "automatic" else item
+        for item in _passing_observations()
+    ]
+    p95_report = evaluate_voice_turn_benchmark(over_p95)
+    p95_failed = {gate["name"] for gate in p95_report["gates"] if not gate["passed"]}
+    assert "automatic_latency_p95_ms" in p95_failed
+    assert "automatic_latency_max_ms" not in p95_failed
+
+    over_max = list(boundary)
+    over_max[0] = replace(over_max[0], first_audio_after_speech_end_ms=2_501)
+    max_report = evaluate_voice_turn_benchmark(over_max)
+    max_failed = {gate["name"] for gate in max_report["gates"] if not gate["passed"]}
+    assert "automatic_latency_p95_ms" not in max_failed
+    assert "automatic_latency_max_ms" in max_failed
+
+
 def test_voice_turn_benchmark_fails_small_incomplete_or_premature_treatment():
     observations = _passing_observations()[:4]
     observations[1] = VoiceTurnObservation(
@@ -787,9 +1167,7 @@ def test_voice_turn_benchmark_fails_small_incomplete_or_premature_treatment():
         "manual_latency_coverage",
         "manual_activity_end_latency_coverage",
     } <= failed
-    assert report["diagnostics"]["manual"]["error_counts"] == {
-        "provider_timeout": 1
-    }
+    assert report["diagnostics"]["manual"]["error_counts"] == {"provider_timeout": 1}
 
 
 def test_voice_turn_benchmark_fails_automatic_latency_breach():
@@ -830,9 +1208,554 @@ def test_voice_turn_benchmark_preserves_bounded_diagnostic_error_codes():
 
     report = evaluate_voice_turn_benchmark(observations)
 
-    assert report["diagnostics"]["automatic"]["error_counts"] == {
-        "provider_closed_policy": 1
+    assert report["diagnostics"]["automatic"]["error_counts"] == {"provider_closed_policy": 1}
+    assert report["diagnostics"]["manual"]["error_counts"] == {"setup_timeout": 1}
+
+
+def _provider_report(
+    provider: str,
+    seed: int,
+    *,
+    status: str = "pass",
+    automatic_p95_ms: int = 1_400,
+    automatic_max_ms: int = 2_000,
+) -> dict:
+    model = {
+        DEVELOPER_PROVIDER: "gemini-3.1-flash-live-preview",
+        VERTEX_PROVIDER: "gemini-live-2.5-flash-native-audio",
+    }[provider]
+    observations = []
+    for index in range(30):
+        observations.extend(
+            (
+                VoiceTurnObservation(
+                    case_index=index,
+                    trial=1,
+                    arm="automatic",
+                    first_audio_after_speech_end_ms=(
+                        automatic_max_ms if index == 29 else automatic_p95_ms
+                    ),
+                    first_audio_after_activity_end_ms=None,
+                    turn_complete=True,
+                    interruption_events=0,
+                ),
+                VoiceTurnObservation(
+                    case_index=index,
+                    trial=1,
+                    arm="manual",
+                    first_audio_after_speech_end_ms=1_400 if index == 29 else 1_200,
+                    first_audio_after_activity_end_ms=800 if index == 29 else 700,
+                    turn_complete=True,
+                    interruption_events=0,
+                ),
+            )
+        )
+    report = evaluate_voice_turn_benchmark(
+        observations,
+        thresholds=VoiceTurnBenchmarkThresholds(
+            min_attempts_per_arm=30,
+            min_paired_attempts=30,
+        ),
+    )
+    report["status"] = status
+    report["release_authorized"] = False
+    report["configuration"] = {
+        "provider": provider,
+        "model": model,
+        "seed": seed,
+        "session_scope": "persistent_multi_turn",
+        "manifest_sha256": MATRIX_MANIFEST_SHA256,
+        "corpus_sha256": MATRIX_CORPUS_SHA256,
     }
-    assert report["diagnostics"]["manual"]["error_counts"] == {
-        "setup_timeout": 1
+    report["diagnostics"]["session"] = {
+        "sessions": 6,
+        "minimum_turns_per_session": 3,
+        "reconnect_attempts": 0,
+        "reconnect_failures": 0,
+        "context_continuity_failures": 0,
     }
+    return report
+
+
+def _authorize_matrix_corpus(
+    monkeypatch,
+    *,
+    manifest_sha256: str = MATRIX_MANIFEST_SHA256,
+    corpus_sha256: str = MATRIX_CORPUS_SHA256,
+) -> None:
+    monkeypatch.setattr(
+        replay_module,
+        "APPROVED_PERSISTENT_MATRIX_MANIFEST_SHA256",
+        manifest_sha256,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "APPROVED_PERSISTENT_MATRIX_CORPUS_SHA256",
+        corpus_sha256,
+        raising=False,
+    )
+
+
+def _evaluate_matrix(reports: list[dict], monkeypatch) -> dict:
+    _authorize_matrix_corpus(monkeypatch)
+    return evaluate_gemini_provider_matrix(reports)
+
+
+def test_provider_matrix_fails_closed_without_committed_matrix_corpus():
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+
+    with pytest.raises(ValueError, match="matrix corpus is not committed"):
+        evaluate_gemini_provider_matrix(reports)
+
+
+def test_provider_matrix_rejects_automatic_latency_over_budget(monkeypatch):
+    reports = [
+        _provider_report(DEVELOPER_PROVIDER, 29),
+        _provider_report(DEVELOPER_PROVIDER, 41, automatic_p95_ms=1_501),
+        _provider_report(VERTEX_PROVIDER, 29),
+        _provider_report(VERTEX_PROVIDER, 41),
+    ]
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["status"] == "pass"
+    assert decision["decision"] == "one_provider_eligible"
+    assert "candidate" not in decision
+    assert decision["selection_authorized"] is False
+    assert (
+        decision["providers"][DEVELOPER_PROVIDER][
+            "worst_automatic_speech_end_to_first_audio_p95_ms"
+        ]
+        == 1_501
+    )
+    assert decision["providers"][DEVELOPER_PROVIDER]["evidence_eligible"] is False
+    assert decision["providers"][VERTEX_PROVIDER]["evidence_eligible"] is True
+    assert decision["decision_scope"] == "offline_evidence_only"
+    assert decision["release_authorized"] is False
+    assert "diagnostics" not in decision
+
+
+def test_provider_matrix_accepts_exact_automatic_latency_limits(monkeypatch):
+    reports = [
+        _provider_report(
+            DEVELOPER_PROVIDER,
+            29,
+            automatic_p95_ms=1_500,
+            automatic_max_ms=2_500,
+        ),
+        _provider_report(
+            DEVELOPER_PROVIDER,
+            41,
+            automatic_p95_ms=1_500,
+            automatic_max_ms=2_500,
+        ),
+        _provider_report(VERTEX_PROVIDER, 29),
+        _provider_report(VERTEX_PROVIDER, 41),
+    ]
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["status"] == "pass"
+    assert decision["decision"] == "both_providers_eligible"
+    assert "candidate" not in decision
+    assert decision["providers"][DEVELOPER_PROVIDER]["evidence_eligible"] is True
+
+
+@pytest.mark.parametrize(
+    ("developer_p95", "developer_max", "vertex_p95", "vertex_max", "expected"),
+    [
+        (1_300, 2_000, 1_400, 2_250, True),
+        (1_200, 1_800, 1_301, 2_051, False),
+    ],
+)
+def test_provider_matrix_reports_practical_equivalence_without_selecting(
+    monkeypatch,
+    developer_p95,
+    developer_max,
+    vertex_p95,
+    vertex_max,
+    expected,
+):
+    reports = []
+    for seed in (29, 41):
+        reports.extend(
+            [
+                _provider_report(
+                    DEVELOPER_PROVIDER,
+                    seed,
+                    automatic_p95_ms=developer_p95,
+                    automatic_max_ms=developer_max,
+                ),
+                _provider_report(
+                    VERTEX_PROVIDER,
+                    seed,
+                    automatic_p95_ms=vertex_p95,
+                    automatic_max_ms=vertex_max,
+                ),
+            ]
+        )
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["status"] == "pass"
+    assert decision["decision"] == "both_providers_eligible"
+    assert "candidate" not in decision
+    assert decision["practical_equivalence"]["within_margin"] is expected
+    assert decision["practical_equivalence"]["p95_margin_ms"] == 100
+    assert decision["practical_equivalence"]["max_margin_ms"] == 250
+
+
+def test_provider_matrix_reports_no_eligible_provider(monkeypatch):
+    reports = [
+        _provider_report(provider, seed, automatic_p95_ms=1_501)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["status"] == "fail"
+    assert decision["decision"] == "no_provider_eligible"
+    assert "candidate" not in decision
+    assert decision["eligible_providers"] == []
+
+
+def test_provider_matrix_rejects_mixed_corpora_or_incomplete_seed_set(monkeypatch):
+    mixed = [
+        _provider_report(DEVELOPER_PROVIDER, 29),
+        _provider_report(DEVELOPER_PROVIDER, 41),
+        _provider_report(VERTEX_PROVIDER, 29),
+        _provider_report(VERTEX_PROVIDER, 41),
+    ]
+    mixed[-1]["configuration"]["corpus_sha256"] = "c" * 64
+
+    with pytest.raises(ValueError, match="approved matrix corpus"):
+        _evaluate_matrix(mixed, monkeypatch)
+    with pytest.raises(ValueError, match="matrix"):
+        _evaluate_matrix(mixed[:-1], monkeypatch)
+
+
+def test_provider_matrix_rejects_cold_single_turn_evidence(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    reports[0]["configuration"]["session_scope"] = "cold_single_turn"
+
+    with pytest.raises(ValueError, match="persistent multi-turn"):
+        _evaluate_matrix(reports, monkeypatch)
+
+
+def test_provider_matrix_rejects_the_connection_smoke_corpus(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    for report in reports:
+        report["configuration"]["manifest_sha256"] = APPROVED_CONNECTION_SMOKE_MANIFEST_SHA256
+        report["configuration"]["corpus_sha256"] = APPROVED_CONNECTION_SMOKE_CORPUS_SHA256
+
+    _authorize_matrix_corpus(
+        monkeypatch,
+        manifest_sha256=APPROVED_CONNECTION_SMOKE_MANIFEST_SHA256,
+        corpus_sha256=APPROVED_CONNECTION_SMOKE_CORPUS_SHA256,
+    )
+
+    with pytest.raises(ValueError, match="connection smoke corpus"):
+        evaluate_gemini_provider_matrix(reports)
+
+
+def test_provider_matrix_requires_count_only_persistent_session_evidence(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    del reports[0]["diagnostics"]["session"]
+
+    with pytest.raises(ValueError, match="session diagnostics"):
+        _evaluate_matrix(reports, monkeypatch)
+
+
+def test_provider_matrix_rejects_session_evidence_with_reconnect_failure(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    reports[0]["diagnostics"]["session"]["reconnect_failures"] = 1
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["decision"] == "one_provider_eligible"
+    assert "candidate" not in decision
+    assert decision["providers"][DEVELOPER_PROVIDER]["persistent_session_qualified"] is False
+
+
+def test_provider_matrix_requires_complete_benchmark_evidence(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    del reports[0]["sample"]
+
+    with pytest.raises(ValueError, match="benchmark sample"):
+        _evaluate_matrix(reports, monkeypatch)
+
+
+def test_provider_matrix_rejects_raw_errors_despite_passing_status(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    automatic = reports[0]["diagnostics"]["automatic"]
+    automatic["completed_turns"] = 29
+    automatic["completion_rate"] = round(29 / 30, 4)
+    automatic["errors"] = 1
+    automatic["error_counts"] = {"other": 1}
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["decision"] == "one_provider_eligible"
+    assert decision["providers"][DEVELOPER_PROVIDER]["evidence_eligible"] is False
+
+
+def test_provider_matrix_rejects_incomplete_coverage_despite_passing_gates(
+    monkeypatch,
+):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    reports[0]["sample"]["paired_attempts"] = 29
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["decision"] == "one_provider_eligible"
+    assert decision["providers"][DEVELOPER_PROVIDER]["evidence_eligible"] is False
+
+
+def test_provider_matrix_requires_passing_benchmark_gates(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    for gate in reports[0]["gates"]:
+        if gate["name"] == "automatic_completion_rate":
+            gate["passed"] = False
+            break
+
+    decision = _evaluate_matrix(reports, monkeypatch)
+
+    assert decision["decision"] == "one_provider_eligible"
+    assert decision["providers"][DEVELOPER_PROVIDER]["evidence_eligible"] is False
+
+
+def test_provider_matrix_rejects_impossible_sample_totals(monkeypatch):
+    reports = [
+        _provider_report(provider, seed)
+        for provider in (DEVELOPER_PROVIDER, VERTEX_PROVIDER)
+        for seed in (29, 41)
+    ]
+    reports[0]["sample"]["attempts"] = 59
+
+    with pytest.raises(ValueError, match="attempt total"):
+        _evaluate_matrix(reports, monkeypatch)
+
+
+def _smoke_report(provider: str, *, ready: bool = True) -> dict:
+    return {
+        "status": "pass" if ready else "fail",
+        "configuration": {
+            "provider": provider,
+            "model": {
+                DEVELOPER_PROVIDER: "gemini-3.1-flash-live-preview",
+                VERTEX_PROVIDER: "gemini-live-2.5-flash-native-audio",
+            }[provider],
+        },
+        "sample": {
+            "attempts": 12,
+            "automatic_attempts": 6,
+            "manual_attempts": 6,
+            "paired_attempts": 6,
+        },
+        "diagnostics": {
+            "automatic": {
+                "completed_turns": 6 if ready else 5,
+                "errors": 0 if ready else 1,
+                "error_counts": {} if ready else {"provider_closed": 1},
+                "speech_end_to_first_audio_p95_ms": 1_400,
+                "speech_end_to_first_audio_max_ms": 2_000,
+            },
+            "manual": {
+                "completed_turns": 6,
+                "errors": 0,
+                "error_counts": {},
+                "speech_end_to_first_audio_p95_ms": 1_200,
+                "speech_end_to_first_audio_max_ms": 1_400,
+                "activity_end_to_first_audio_p95_ms": 700,
+                "activity_end_to_first_audio_max_ms": 800,
+            },
+        },
+    }
+
+
+def test_smoke_summary_exposes_only_bounded_error_counts():
+    report = _smoke_report(VERTEX_PROVIDER, ready=False)
+    report["diagnostics"]["automatic"]["error_counts"] = {
+        "provider_closed": 1,
+        "provider_closed_policy": 1,
+        "sensitive-provider-detail": 2,
+        "provider_timeout": True,
+    }
+
+    summary = smoke_module._smoke_summary(report)
+
+    assert summary["automatic"]["error_counts"] == {
+        "other": 2,
+        "provider_closed": 1,
+        "provider_closed_policy": 1,
+    }
+    assert "sensitive-provider-detail" not in json.dumps(summary)
+
+
+def test_smoke_summary_blocks_over_budget_automatic_latency():
+    report = _smoke_report(DEVELOPER_PROVIDER)
+    report["diagnostics"]["automatic"]["speech_end_to_first_audio_p95_ms"] = 1_501
+
+    summary = smoke_module._smoke_summary(report)
+
+    assert summary["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_smoke_blocks_failed_benchmark_with_plausible_aggregates(
+    monkeypatch,
+):
+    async def fake_benchmark(args):
+        report = _smoke_report(args.provider)
+        if args.provider == DEVELOPER_PROVIDER:
+            report["status"] = "fail"
+        return report
+
+    monkeypatch.setattr(
+        "scripts.smoke_gemini_live_providers.run_benchmark",
+        fake_benchmark,
+    )
+
+    result = await run_provider_smoke(project="private-project-id")
+
+    assert result["status"] == "fail"
+    assert result["decision"] == "smoke_blocked"
+    assert result["smoke"][DEVELOPER_PROVIDER]["ready"] is False
+    assert result["smoke"][VERTEX_PROVIDER]["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_smoke_stays_capped_when_a_provider_is_not_ready(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    async def fake_benchmark(args):
+        calls.append(
+            (
+                args.provider,
+                args.seed,
+                args.trials_per_case,
+                hasattr(args, "qualification_mode"),
+                args.manifest,
+            )
+        )
+        return _smoke_report(
+            args.provider,
+            ready=args.provider == DEVELOPER_PROVIDER,
+        )
+
+    monkeypatch.setattr(
+        "scripts.smoke_gemini_live_providers.run_benchmark",
+        fake_benchmark,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = await run_provider_smoke(project="private-project-id")
+
+    assert result["status"] == "fail"
+    assert result["decision"] == "smoke_blocked"
+    assert result["attempt_ceiling"] == 24
+    assert result["decision_scope"] == "connection_smoke_only"
+    assert result["release_authorized"] is False
+    assert result["matrix_authorized"] is False
+    assert len(calls) == 2
+    assert SMOKE_MANIFEST.is_absolute()
+    assert all(call[3] is False for call in calls)
+    assert all(call[4] == SMOKE_MANIFEST for call in calls)
+    assert result["smoke"][VERTEX_PROVIDER]["automatic"]["error_counts"] == {"provider_closed": 1}
+    assert "private-project-id" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_provider_smoke_rejects_mutated_corpus_before_network(
+    monkeypatch,
+    tmp_path,
+):
+    fixture_copy = tmp_path / "voice_vad"
+    shutil.copytree(FIXTURE_DIR, fixture_copy)
+    mutated_manifest = fixture_copy / FLEURS_MANIFEST.name
+    mutated_manifest.write_bytes(mutated_manifest.read_bytes() + b"\n")
+
+    async def unexpected_benchmark(_args):
+        raise AssertionError("network benchmark must not start")
+
+    monkeypatch.setattr(smoke_module, "MANIFEST", mutated_manifest)
+    monkeypatch.setattr(smoke_module, "run_benchmark", unexpected_benchmark)
+
+    with pytest.raises(ValueError, match="approved corpus"):
+        await smoke_module.run_provider_smoke(project="private-project-id")
+
+
+@pytest.mark.asyncio
+async def test_provider_smoke_never_continues_into_a_matrix(monkeypatch):
+    calls = []
+
+    async def fake_benchmark(args):
+        calls.append(
+            (
+                args.provider,
+                args.seed,
+                args.trials_per_case,
+                hasattr(args, "qualification_mode"),
+            )
+        )
+        return _smoke_report(args.provider)
+
+    monkeypatch.setattr(
+        "scripts.smoke_gemini_live_providers.run_benchmark",
+        fake_benchmark,
+    )
+
+    result = await run_provider_smoke(project="private-project-id")
+
+    assert result["status"] == "pass"
+    assert result["decision"] == "smoke_ready"
+    assert result["attempt_ceiling"] == 24
+    assert result["attempts_scheduled"] == 24
+    assert result["decision_scope"] == "connection_smoke_only"
+    assert result["release_authorized"] is False
+    assert result["matrix_authorized"] is False
+    assert len(calls) == 2
+    assert all(call[2] == 1 for call in calls)
+    assert all(call[3] is False for call in calls)
+    assert "private-project-id" not in json.dumps(result)

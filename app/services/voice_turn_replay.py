@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+import base64
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
@@ -21,10 +22,41 @@ AUTOMATIC_ARM = "automatic"
 MANUAL_ARM = "manual"
 VALID_ARMS = {AUTOMATIC_ARM, MANUAL_ARM}
 OFFLINE_DIAGNOSTIC_SCOPE = "offline_diagnostic_only"
+DEVELOPER_PROVIDER = "developer"
+VERTEX_PROVIDER = "vertex"
+VALID_PROVIDERS = {DEVELOPER_PROVIDER, VERTEX_PROVIDER}
+DEVELOPER_MODEL = "gemini-3.1-flash-live-preview"
+VERTEX_MODEL = "gemini-live-2.5-flash-native-audio"
+VERTEX_LOCATION = "us-central1"
+COLD_SINGLE_TURN_SCOPE = "cold_single_turn"
 AUTOMATIC_LATENCY_P95_LIMIT_MS = 1_500
 AUTOMATIC_LATENCY_MAX_LIMIT_MS = 2_500
 MANUAL_LATENCY_P95_LIMIT_MS = 1_500
 MANUAL_LATENCY_MAX_LIMIT_MS = 2_500
+APPROVED_CONNECTION_SMOKE_MANIFEST_SHA256 = "".join(
+    (
+        "ae84a042",
+        "8697119b",
+        "c794e70d",
+        "661bfda9",
+        "4e3cbc7f",
+        "c5f39628",
+        "3b72e299",
+        "95790e5c",
+    )
+)
+APPROVED_CONNECTION_SMOKE_CORPUS_SHA256 = "".join(
+    (
+        "b0c23e5a",
+        "964427d7",
+        "e5119391",
+        "3c760e39",
+        "143d957a",
+        "0660e9fe",
+        "8ae3ad47",
+        "ea515636",
+    )
+)
 SAFE_ERROR_CODES = {
     "first_audio_timeout",
     "provider_closed_abnormal",
@@ -43,6 +75,7 @@ SAFE_ERROR_CODES = {
     "turn_complete_timeout",
 }
 MODEL_PATTERN = re.compile(r"gemini-[a-z0-9][a-z0-9.-]*")
+PROJECT_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,9 +174,7 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
             raise ValueError("sources must be a non-empty object")
         sources = {}
         for source_id, raw_source in raw_sources.items():
-            if not isinstance(source_id, str) or not re.fullmatch(
-                r"[a-z0-9_]+", source_id
-            ):
+            if not isinstance(source_id, str) or not re.fullmatch(r"[a-z0-9_]+", source_id):
                 raise ValueError("source id must be a safe identifier")
             if not isinstance(raw_source, dict):
                 raise ValueError("each source must be an object")
@@ -198,9 +229,7 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
             not isinstance(frame_pattern, list)
             or not frame_pattern
             or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value not in {10, 20, 30}
+                isinstance(value, bool) or not isinstance(value, int) or value not in {10, 20, 30}
                 for value in frame_pattern
             )
         ):
@@ -316,18 +345,12 @@ def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:
         noise_seed=case.noise_seed,
     )
     source_samples = len(transformed) // 2
-    source_start_sample = round(
-        case.source_speech_start_ms * case.source_sample_rate_hz / 1_000
-    )
-    source_end_sample = round(
-        case.source_speech_end_ms * case.source_sample_rate_hz / 1_000
-    )
+    source_start_sample = round(case.source_speech_start_ms * case.source_sample_rate_hz / 1_000)
+    source_end_sample = round(case.source_speech_end_ms * case.source_sample_rate_hz / 1_000)
     if source_end_sample > source_samples:
         raise ValueError("speech boundary exceeds source duration")
 
-    inter_silence_samples = (
-        case.inter_repeat_silence_ms * case.source_sample_rate_hz // 1_000
-    )
+    inter_silence_samples = case.inter_repeat_silence_ms * case.source_sample_rate_hz // 1_000
     inter_silence = b"\x00\x00" * inter_silence_samples
     parts = []
     for repetition in range(case.repetitions):
@@ -336,9 +359,7 @@ def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:
         parts.append(transformed)
     rendered_pcm = b"".join(parts)
 
-    final_offset_samples = (case.repetitions - 1) * (
-        source_samples + inter_silence_samples
-    )
+    final_offset_samples = (case.repetitions - 1) * (source_samples + inter_silence_samples)
     final_speech_end_sample = final_offset_samples + source_end_sample
     required_end_sample = final_speech_end_sample + (
         case.post_speech_silence_ms * case.source_sample_rate_hz // 1_000
@@ -356,9 +377,7 @@ def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:
     mulaw8 = audioop.lin2ulaw(rendered_pcm, 2)
     duration_ms = len(mulaw8) // samples_per_ms
     speech_start_ms = round(source_start_sample * 1_000 / case.source_sample_rate_hz)
-    speech_end_ms = round(
-        final_speech_end_sample * 1_000 / case.source_sample_rate_hz
-    )
+    speech_end_ms = round(final_speech_end_sample * 1_000 / case.source_sample_rate_hz)
     return RenderedVoiceTurn(
         mulaw8=mulaw8,
         sample_rate_hz=16_000,
@@ -383,9 +402,7 @@ def build_replay_inputs(
     position = 0
     pattern_index = 0
     while position < len(rendered.mulaw8):
-        chunk_ms = rendered.frame_pattern_ms[
-            pattern_index % len(rendered.frame_pattern_ms)
-        ]
+        chunk_ms = rendered.frame_pattern_ms[pattern_index % len(rendered.frame_pattern_ms)]
         pattern_index += 1
         chunk_bytes = chunk_ms * 8
         chunk = rendered.mulaw8[position : position + chunk_bytes]
@@ -425,10 +442,7 @@ def build_paired_schedule(
         for trial in range(1, trials_per_case + 1)
     ]
     rng.shuffle(pairs)
-    first_arms = [
-        AUTOMATIC_ARM if index % 2 == 0 else MANUAL_ARM
-        for index in range(len(pairs))
-    ]
+    first_arms = [AUTOMATIC_ARM if index % 2 == 0 else MANUAL_ARM for index in range(len(pairs))]
     rng.shuffle(first_arms)
     schedule = []
     for (case_index, trial), first_arm in zip(pairs, first_arms, strict=True):
@@ -444,21 +458,31 @@ def build_paired_schedule(
     return tuple(schedule)
 
 
-def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
+def build_gemini_setup_message(
+    model: str,
+    *,
+    arm: str,
+    provider: str = DEVELOPER_PROVIDER,
+    project: str | None = None,
+    location: str | None = None,
+) -> dict[str, Any]:
     """Build provider setup for one explicit non-latest replay model ID."""
     _validate_arm(arm)
-    if (
-        not MODEL_PATTERN.fullmatch(model)
-        or "latest" in model
-        or model.endswith("-exp")
-    ):
+    _validate_provider(provider)
+    if not MODEL_PATTERN.fullmatch(model) or "latest" in model or model.endswith("-exp"):
         raise ValueError("an explicit non-latest Gemini model ID is required")
 
-    thinking_config = (
-        {"thinkingLevel": "minimal"}
-        if model.startswith("gemini-3")
-        else {"thinkingBudget": 0}
-    )
+    setup_model = f"models/{model}"
+    if provider == VERTEX_PROVIDER:
+        if (
+            model != VERTEX_MODEL
+            or not project
+            or not PROJECT_PATTERN.fullmatch(project)
+            or location != VERTEX_LOCATION
+        ):
+            raise ValueError("Vertex replay requires the precommitted model and scope")
+        setup_model = f"projects/{project}/locations/{location}/publishers/google/models/{model}"
+
     automatic_detection = (
         {"disabled": True}
         if arm == MANUAL_ARM
@@ -470,27 +494,30 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
             "silenceDurationMs": 500,
         }
     )
+    generation_config: dict[str, Any] = {
+        "responseModalities": ["AUDIO"],
+        "maxOutputTokens": 120,
+        "temperature": 0.4,
+        "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
+    }
+    if provider == DEVELOPER_PROVIDER:
+        generation_config["thinkingConfig"] = (
+            {"thinkingLevel": "minimal"} if model.startswith("gemini-3") else {"thinkingBudget": 0}
+        )
+
     return {
         "setup": {
-            "model": f"models/{model}",
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "maxOutputTokens": 120,
-                "temperature": 0.4,
-                "thinkingConfig": thinking_config,
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": "Puck"}
-                    }
-                },
-            },
+            "model": setup_model,
+            "generationConfig": generation_config,
             "systemInstruction": {
-                "parts": [{
-                    "text": (
-                        "You are a concise receptionist. Respond to the caller "
-                        "in one short sentence."
-                    )
-                }]
+                "parts": [
+                    {
+                        "text": (
+                            "You are a concise receptionist. Respond to the caller "
+                            "in one short sentence."
+                        )
+                    }
+                ]
             },
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
@@ -501,6 +528,37 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
             },
         }
     }
+
+
+def build_gemini_audio_message(
+    audio: bytes,
+    *,
+    provider: str,
+) -> dict[str, Any]:
+    """Serialize one public-fixture PCM chunk for the selected provider."""
+    _validate_provider(provider)
+    blob = {
+        "data": base64.b64encode(audio).decode("ascii"),
+        "mimeType": "audio/pcm;rate=16000",
+    }
+    if provider == VERTEX_PROVIDER:
+        realtime_input = {"mediaChunks": [blob]}
+    else:
+        realtime_input = {"audio": blob}
+    return {"realtimeInput": realtime_input}
+
+
+def build_gemini_activity_message(kind: str) -> dict[str, Any]:
+    """Serialize an explicit manual activity boundary."""
+    fields = {
+        "activity_start": "activityStart",
+        "activity_end": "activityEnd",
+    }
+    try:
+        field = fields[kind]
+    except KeyError as exc:
+        raise ValueError("unsupported activity event") from exc
+    return {"realtimeInput": {field: {}}}
 
 
 def evaluate_voice_turn_benchmark(
@@ -521,10 +579,7 @@ def evaluate_voice_turn_benchmark(
         pair_arms.setdefault((item.case_index, item.trial), set()).add(item.arm)
     paired_attempts = sum(arms == VALID_ARMS for arms in pair_arms.values())
 
-    diagnostics = {
-        arm: _arm_diagnostics(grouped[arm])
-        for arm in (AUTOMATIC_ARM, MANUAL_ARM)
-    }
+    diagnostics = {arm: _arm_diagnostics(grouped[arm]) for arm in (AUTOMATIC_ARM, MANUAL_ARM)}
     automatic = diagnostics[AUTOMATIC_ARM]
     manual = diagnostics[MANUAL_ARM]
     automatic_attempts = len(grouped[AUTOMATIC_ARM])
@@ -585,22 +640,19 @@ def evaluate_voice_turn_benchmark(
         ),
         _gate(
             "manual_activity_end_latency_coverage",
-            _activity_latency_coverage(grouped[MANUAL_ARM])
-            >= limits.latency_coverage,
+            _activity_latency_coverage(grouped[MANUAL_ARM]) >= limits.latency_coverage,
             round(_activity_latency_coverage(grouped[MANUAL_ARM]), 4),
             f">= {limits.latency_coverage}",
         ),
         _gate(
             "manual_premature_responses",
-            manual["premature_responses"]
-            <= limits.max_manual_premature_responses,
+            manual["premature_responses"] <= limits.max_manual_premature_responses,
             manual["premature_responses"],
             f"<= {limits.max_manual_premature_responses}",
         ),
         _gate(
             "manual_interruption_events",
-            manual["interruption_events"]
-            <= limits.max_manual_interruption_events,
+            manual["interruption_events"] <= limits.max_manual_interruption_events,
             manual["interruption_events"],
             f"<= {limits.max_manual_interruption_events}",
         ),
@@ -715,9 +767,7 @@ def _arm_diagnostics(
         ),
         "interruption_events": sum(item.interruption_events for item in observations),
         "speech_end_to_first_audio_p95_ms": _percentile(speech_latencies, 0.95),
-        "speech_end_to_first_audio_max_ms": max(speech_latencies)
-        if speech_latencies
-        else None,
+        "speech_end_to_first_audio_max_ms": max(speech_latencies) if speech_latencies else None,
         "activity_end_to_first_audio_p95_ms": _percentile(
             activity_latencies,
             0.95,
@@ -726,11 +776,13 @@ def _arm_diagnostics(
         if activity_latencies
         else None,
         "errors": sum(item.error is not None for item in observations),
-        "error_counts": dict(sorted(Counter(
-            _safe_error_code(item.error)
-            for item in observations
-            if item.error is not None
-        ).items())),
+        "error_counts": dict(
+            sorted(
+                Counter(
+                    _safe_error_code(item.error) for item in observations if item.error is not None
+                ).items()
+            )
+        ),
     }
 
 
@@ -794,11 +846,7 @@ def _bounded_int(
     maximum: int,
 ) -> int:
     value = data.get(key, default)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not minimum <= value <= maximum
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ValueError(f"{key} must be between {minimum} and {maximum}")
     return value
 
@@ -806,6 +854,11 @@ def _bounded_int(
 def _validate_arm(arm: str) -> None:
     if arm not in VALID_ARMS:
         raise ValueError("arm must be automatic or manual")
+
+
+def _validate_provider(provider: str) -> None:
+    if provider not in VALID_PROVIDERS:
+        raise ValueError("provider must be developer or vertex")
 
 
 def _safe_error_code(error: str) -> str:

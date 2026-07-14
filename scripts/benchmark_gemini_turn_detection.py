@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Run paired, payload-safe Gemini automatic/manual turn-detection replays."""
+"""Run non-authorizing Gemini turn-detection diagnostics on local fixtures."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 import json
 import os
 from pathlib import Path
@@ -14,6 +13,8 @@ import sys
 import time
 from typing import Any
 
+import google.auth
+from google.auth.transport.requests import Request
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -25,14 +26,20 @@ from app.services.voice_turn_replay import (  # noqa: E402
     AUTOMATIC_ARM,
     AUTOMATIC_LATENCY_MAX_LIMIT_MS,
     AUTOMATIC_LATENCY_P95_LIMIT_MS,
+    COLD_SINGLE_TURN_SCOPE,
+    DEVELOPER_PROVIDER,
     MANUAL_ARM,
     MANUAL_LATENCY_MAX_LIMIT_MS,
     MANUAL_LATENCY_P95_LIMIT_MS,
     OFFLINE_DIAGNOSTIC_SCOPE,
+    VALID_PROVIDERS,
+    VERTEX_PROVIDER,
     VoiceReplayAttempt,
     VoiceTurnBenchmarkThresholds,
     VoiceTurnObservation,
     VoiceTurnReplayCase,
+    build_gemini_activity_message,
+    build_gemini_audio_message,
     build_gemini_setup_message,
     build_paired_schedule,
     build_replay_inputs,
@@ -44,15 +51,15 @@ from app.services.voice_turn_replay import (  # noqa: E402
 from app.utils.audio import mulaw_to_pcm16k  # noqa: E402
 
 
-DEFAULT_MANIFEST = Path(
-    "tests/fixtures/voice_vad/fleurs_turn_replay_manifest.json"
-)
+DEFAULT_MANIFEST = Path("tests/fixtures/voice_vad/fleurs_turn_replay_manifest.json")
 GEMINI_WS_BASE = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
+VERTEX_WS_PATH = "/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent"
 MAX_PROVIDER_ATTEMPTS = 60
 SETUP_TIMEOUT_SECONDS = 5.0
+CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SILENCE_AUDIO = mulaw_to_pcm16k(b"\xff" * 160)
 PROVIDER_CLOSE_ERROR_CODES = {
     1000: "provider_closed_normal",
@@ -63,6 +70,19 @@ PROVIDER_CLOSE_ERROR_CODES = {
     1012: "provider_closed_restart",
     1013: "provider_closed_retry",
 }
+
+
+class _CredentialUnavailable(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderConnection:
+    provider: str
+    url: str = field(repr=False)
+    headers: dict[str, str] | None = field(default=None, repr=False)
+    project: str | None = field(default=None, repr=False)
+    location: str | None = None
 
 
 class _AttemptState:
@@ -77,7 +97,7 @@ class _AttemptState:
 
 async def run_attempt(
     *,
-    api_key: str,
+    connection: _ProviderConnection,
     model: str,
     case: VoiceTurnReplayCase,
     attempt: VoiceReplayAttempt,
@@ -91,20 +111,28 @@ async def run_attempt(
     speech_end_at: float | None = None
     activity_end_at: float | None = None
     error: str | None = None
-    url = f"{GEMINI_WS_BASE}?key={api_key}"
 
     try:
         async with websockets.connect(
-            url,
+            connection.url,
+            additional_headers=connection.headers,
             max_size=10 * 1024 * 1024,
             open_timeout=5,
             ping_interval=10,
             ping_timeout=5,
             close_timeout=1,
         ) as websocket:
-            await websocket.send(json.dumps(
-                build_gemini_setup_message(model, arm=attempt.arm)
-            ))
+            await websocket.send(
+                json.dumps(
+                    build_gemini_setup_message(
+                        model,
+                        arm=attempt.arm,
+                        provider=connection.provider,
+                        project=connection.project,
+                        location=connection.location,
+                    )
+                )
+            )
             try:
                 acknowledgement = json.loads(
                     await asyncio.wait_for(
@@ -117,47 +145,40 @@ async def run_attempt(
             if error is None and "setupComplete" not in acknowledgement:
                 error = "setup_rejected"
             if error is None:
-                receiver = asyncio.create_task(
-                    _receive_provider_events(websocket, state)
-                )
+                receiver = asyncio.create_task(_receive_provider_events(websocket, state))
                 try:
                     stream_started_at = time.monotonic()
                     for replay_input in inputs:
-                        await _sleep_until(
-                            stream_started_at + replay_input.at_ms / 1_000
-                        )
+                        await _sleep_until(stream_started_at + replay_input.at_ms / 1_000)
                         if replay_input.kind == "audio":
-                            await websocket.send(json.dumps({
-                                "realtimeInput": {
-                                    "audio": {
-                                        "data": base64.b64encode(
-                                            replay_input.audio
-                                        ).decode("ascii"),
-                                        "mimeType": "audio/pcm;rate=16000",
-                                    }
-                                }
-                            }))
+                            await websocket.send(
+                                json.dumps(
+                                    build_gemini_audio_message(
+                                        replay_input.audio,
+                                        provider=connection.provider,
+                                    )
+                                )
+                            )
                             if (
-                                replay_input.at_ms < rendered.speech_end_ms
+                                replay_input.at_ms
+                                < rendered.speech_end_ms
                                 <= replay_input.at_ms + replay_input.duration_ms
                             ):
                                 speech_end_at = time.monotonic()
                         elif replay_input.kind == "activity_start":
-                            await websocket.send(json.dumps({
-                                "realtimeInput": {"activityStart": {}}
-                            }))
+                            await websocket.send(
+                                json.dumps(build_gemini_activity_message("activity_start"))
+                            )
                         elif replay_input.kind == "activity_end":
-                            await websocket.send(json.dumps({
-                                "realtimeInput": {"activityEnd": {}}
-                            }))
+                            await websocket.send(
+                                json.dumps(build_gemini_activity_message("activity_end"))
+                            )
                             activity_end_at = time.monotonic()
 
                     if speech_end_at is None:
                         raise ValueError("labeled speech end was not forwarded")
 
-                    stream_end_at = (
-                        stream_started_at + rendered.duration_ms / 1_000
-                    )
+                    stream_end_at = stream_started_at + rendered.duration_ms / 1_000
                     await _sleep_until(stream_end_at)
                     if attempt.arm == AUTOMATIC_ARM:
                         try:
@@ -166,6 +187,7 @@ async def run_attempt(
                                 state,
                                 started_at=stream_end_at,
                                 timeout_seconds=response_timeout_seconds,
+                                provider=connection.provider,
                             )
                         except TimeoutError:
                             error = "first_audio_timeout"
@@ -205,14 +227,10 @@ async def run_attempt(
 
     first_audio_after_speech_end_ms = None
     if state.first_audio_at is not None and speech_end_at is not None:
-        first_audio_after_speech_end_ms = round(
-            (state.first_audio_at - speech_end_at) * 1_000
-        )
+        first_audio_after_speech_end_ms = round((state.first_audio_at - speech_end_at) * 1_000)
     first_audio_after_activity_end_ms = None
     if state.first_audio_at is not None and activity_end_at is not None:
-        first_audio_after_activity_end_ms = round(
-            (state.first_audio_at - activity_end_at) * 1_000
-        )
+        first_audio_after_activity_end_ms = round((state.first_audio_at - activity_end_at) * 1_000)
     return VoiceTurnObservation(
         case_index=attempt.case_index,
         trial=attempt.trial,
@@ -283,6 +301,7 @@ async def _continue_automatic_silence(
     *,
     started_at: float,
     timeout_seconds: float,
+    provider: str,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     next_frame_at = started_at
@@ -290,14 +309,9 @@ async def _continue_automatic_silence(
         if time.monotonic() >= deadline:
             raise TimeoutError
         await _sleep_until(next_frame_at)
-        await websocket.send(json.dumps({
-            "realtimeInput": {
-                "audio": {
-                    "data": base64.b64encode(SILENCE_AUDIO).decode("ascii"),
-                    "mimeType": "audio/pcm;rate=16000",
-                }
-            }
-        }))
+        await websocket.send(
+            json.dumps(build_gemini_audio_message(SILENCE_AUDIO, provider=provider))
+        )
         next_frame_at += 0.02
 
 
@@ -319,15 +333,15 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         trials_per_case=args.trials_per_case,
         seed=args.seed,
     )
-
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
+    try:
+        connection = _build_provider_connection(args)
+    except _CredentialUnavailable:
         return _failed_report("credential_unavailable")
 
     observations = []
     for attempt in schedule:
         observation = await run_attempt(
-            api_key=api_key,
+            connection=connection,
             model=args.model,
             case=cases[attempt.case_index],
             attempt=attempt,
@@ -352,6 +366,8 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     )
     report["configuration"] = {
         "scope": "labeled_fixture_endpoint",
+        "session_scope": COLD_SINGLE_TURN_SCOPE,
+        "provider": args.provider,
         "model": args.model,
         "cases": len(cases),
         "trials_per_case": args.trials_per_case,
@@ -364,6 +380,10 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         },
         **corpus_identity,
     }
+    if args.provider == VERTEX_PROVIDER:
+        report["configuration"]["location"] = args.location
+    report["decision_scope"] = OFFLINE_DIAGNOSTIC_SCOPE
+    report["release_authorized"] = False
     return report
 
 
@@ -376,10 +396,45 @@ def _failed_report(error: str) -> dict[str, Any]:
     }
 
 
+def _build_provider_connection(args: argparse.Namespace) -> _ProviderConnection:
+    if args.provider == DEVELOPER_PROVIDER:
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            raise _CredentialUnavailable
+        return _ProviderConnection(
+            provider=DEVELOPER_PROVIDER,
+            url=f"{GEMINI_WS_BASE}?key={api_key}",
+        )
+    if args.provider == VERTEX_PROVIDER:
+        try:
+            access_token = _load_vertex_access_token()
+        except Exception as exc:
+            raise _CredentialUnavailable from exc
+        return _ProviderConnection(
+            provider=VERTEX_PROVIDER,
+            url=(f"wss://{args.location}-aiplatform.googleapis.com{VERTEX_WS_PATH}"),
+            headers={"Authorization": f"Bearer {access_token}"},
+            project=args.project,
+            location=args.location,
+        )
+    raise ValueError("unsupported provider")
+
+
+def _load_vertex_access_token() -> str:
+    credentials, _ = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
+    credentials.refresh(Request())
+    if not credentials.token:
+        raise _CredentialUnavailable
+    return str(credentials.token)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--provider", choices=sorted(VALID_PROVIDERS), required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--project")
+    parser.add_argument("--location")
     parser.add_argument("--trials-per-case", type=int, default=5)
     parser.add_argument("--max-provider-attempts", type=int, default=60)
     parser.add_argument("--seed", type=int, default=29)
@@ -393,7 +448,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        build_gemini_setup_message(args.model, arm=MANUAL_ARM)
+        build_gemini_setup_message(
+            args.model,
+            arm=MANUAL_ARM,
+            provider=args.provider,
+            project=args.project,
+            location=args.location,
+        )
         if args.trials_per_case < 1:
             raise ValueError("trials_per_case must be positive")
         report = asyncio.run(run_benchmark(args))

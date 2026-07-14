@@ -58,20 +58,35 @@ uv run --python 3.12 --with '.[dev]' \
 ```
 
 The opt-in provider diagnostic is isolated from live call serving and requires
-an explicit, versioned model ID:
+an explicit provider and versioned model ID. For the Gemini Developer API,
+provide `GEMINI_API_KEY` through the approved secret-delivery path:
 
 ```bash
 uv run --python 3.12 --with '.[dev]' \
   python scripts/benchmark_gemini_turn_detection.py \
+  --provider developer \
   --model gemini-3.1-flash-live-preview
 ```
 
-The diagnostic requires `GEMINI_API_KEY` in the environment, exits nonzero on
-any failed gate, and reports aggregate lifecycle metrics plus manifest and
-semantic corpus hashes. It does not output case-level events, audio, API keys,
-or audio-derived text. Both latency arms use fixed 1,500 ms p95 and 2,500 ms
-maximum gates. Provider execution has a hard 60-attempt ceiling and stops after
-the first provider error. Reports record the effective thresholds, timeouts,
-attempt ceiling, offline-only decision scope, and explicit release
-nonauthorization. Their result is experimental evidence only and cannot
-authorize a provider selection, release, or production configuration change.
+For Vertex, use pre-approved Application Default Credentials with Vertex AI
+permissions and set `GCP_PROJECT_ID` to the approved project:
+
+```bash
+uv run --python 3.12 --with '.[dev]' \
+  python scripts/benchmark_gemini_turn_detection.py \
+  --provider vertex \
+  --model gemini-live-2.5-flash-native-audio \
+  --project "$GCP_PROJECT_ID" \
+  --location us-central1
+```
+
+Do not create temporary credentials or substitute a different project, model, or
+location for a recorded diagnostic run. The diagnostic exits nonzero on any
+failed gate and reports aggregate lifecycle metrics plus manifest and semantic
+corpus hashes. It does not output case-level events, audio, credentials, project
+identifiers, or audio-derived text. Both latency arms use fixed 1,500 ms p95 and
+2,500 ms maximum gates. Provider execution has a hard 60-attempt ceiling and
+stops after the first provider error. Reports record the effective thresholds,
+timeouts, attempt ceiling, offline-only decision scope, and explicit release
+nonauthorization. Their result is experimental evidence only and cannot authorize
+a provider selection, release, or production configuration change.

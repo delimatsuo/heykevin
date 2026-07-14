@@ -22,6 +22,11 @@ The replay evaluator emits only aggregate counts, bounded error codes, latency
 statistics, gate results, and corpus identities. It does not emit provider
 payloads, audio, transcripts, API keys, or per-case observations.
 
+Provider execution is capped at 60 attempts. A lower ceiling may be supplied
+with `--max-provider-attempts`, but the hard ceiling cannot be raised. The
+runner stops after the first provider error so a rejected or unhealthy setup
+cannot consume the remainder of the cohort.
+
 ## Local Verification
 
 ```bash
@@ -51,6 +56,10 @@ uv run --python 3.12 --with '.[dev]' \
 
 The command exits nonzero when credentials are unavailable, configuration is
 invalid, a provider attempt fails, sample coverage is incomplete, or any
-latency or lifecycle gate fails. A passing report remains experimental evidence
-only. It cannot authorize provider selection, live wiring, staging, or
-production deployment.
+latency or lifecycle gate fails. Automatic and manual speech-end latency gates
+are fixed at 1,500 ms p95 and 2,500 ms maximum. Reports include the effective
+thresholds, timeouts, attempt ceiling, `decision_scope: offline_diagnostic_only`,
+and `release_authorized: false`.
+
+A passing report remains experimental evidence only. It cannot authorize
+provider selection, live wiring, staging, or production deployment.

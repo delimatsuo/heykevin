@@ -69,5 +69,9 @@ uv run --python 3.12 --with '.[dev]' \
 The diagnostic requires `GEMINI_API_KEY` in the environment, exits nonzero on
 any failed gate, and reports aggregate lifecycle metrics plus manifest and
 semantic corpus hashes. It does not output case-level events, audio, API keys,
-or audio-derived text. Its result is experimental evidence only and cannot
+or audio-derived text. Both latency arms use fixed 1,500 ms p95 and 2,500 ms
+maximum gates. Provider execution has a hard 60-attempt ceiling and stops after
+the first provider error. Reports record the effective thresholds, timeouts,
+attempt ceiling, offline-only decision scope, and explicit release
+nonauthorization. Their result is experimental evidence only and cannot
 authorize a provider selection, release, or production configuration change.

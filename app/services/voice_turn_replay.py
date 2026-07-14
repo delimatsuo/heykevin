@@ -20,6 +20,11 @@ from app.utils.audio import mulaw_to_pcm16k
 AUTOMATIC_ARM = "automatic"
 MANUAL_ARM = "manual"
 VALID_ARMS = {AUTOMATIC_ARM, MANUAL_ARM}
+OFFLINE_DIAGNOSTIC_SCOPE = "offline_diagnostic_only"
+AUTOMATIC_LATENCY_P95_LIMIT_MS = 1_500
+AUTOMATIC_LATENCY_MAX_LIMIT_MS = 2_500
+MANUAL_LATENCY_P95_LIMIT_MS = 1_500
+MANUAL_LATENCY_MAX_LIMIT_MS = 2_500
 SAFE_ERROR_CODES = {
     "first_audio_timeout",
     "provider_closed_abnormal",
@@ -112,8 +117,10 @@ class VoiceTurnBenchmarkThresholds:
     max_manual_premature_responses: int = 0
     max_manual_interruption_events: int = 0
     max_errors: int = 0
-    manual_latency_p95_ms: int = 1_500
-    manual_latency_max_ms: int = 2_500
+    automatic_latency_p95_ms: int = AUTOMATIC_LATENCY_P95_LIMIT_MS
+    automatic_latency_max_ms: int = AUTOMATIC_LATENCY_MAX_LIMIT_MS
+    manual_latency_p95_ms: int = MANUAL_LATENCY_P95_LIMIT_MS
+    manual_latency_max_ms: int = MANUAL_LATENCY_MAX_LIMIT_MS
 
 
 def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
@@ -418,17 +425,21 @@ def build_paired_schedule(
         for trial in range(1, trials_per_case + 1)
     ]
     rng.shuffle(pairs)
+    first_arms = [
+        AUTOMATIC_ARM if index % 2 == 0 else MANUAL_ARM
+        for index in range(len(pairs))
+    ]
+    rng.shuffle(first_arms)
     schedule = []
-    for case_index, trial in pairs:
-        arms = [AUTOMATIC_ARM, MANUAL_ARM]
-        rng.shuffle(arms)
+    for (case_index, trial), first_arm in zip(pairs, first_arms, strict=True):
+        second_arm = MANUAL_ARM if first_arm == AUTOMATIC_ARM else AUTOMATIC_ARM
         schedule.extend(
             VoiceReplayAttempt(
                 case_index=case_index,
                 trial=trial,
                 arm=arm,
             )
-            for arm in arms
+            for arm in (first_arm, second_arm)
         )
     return tuple(schedule)
 
@@ -606,6 +617,24 @@ def evaluate_voice_turn_benchmark(
             f"<= {limits.max_errors}",
         ),
         _gate(
+            "automatic_latency_p95_ms",
+            _at_most(
+                automatic["speech_end_to_first_audio_p95_ms"],
+                limits.automatic_latency_p95_ms,
+            ),
+            automatic["speech_end_to_first_audio_p95_ms"],
+            f"<= {limits.automatic_latency_p95_ms}",
+        ),
+        _gate(
+            "automatic_latency_max_ms",
+            _at_most(
+                automatic["speech_end_to_first_audio_max_ms"],
+                limits.automatic_latency_max_ms,
+            ),
+            automatic["speech_end_to_first_audio_max_ms"],
+            f"<= {limits.automatic_latency_max_ms}",
+        ),
+        _gate(
             "manual_latency_p95_ms",
             _at_most(
                 manual["speech_end_to_first_audio_p95_ms"],
@@ -626,6 +655,8 @@ def evaluate_voice_turn_benchmark(
     ]
     return {
         "status": "pass" if all(gate["passed"] for gate in gates) else "fail",
+        "decision_scope": OFFLINE_DIAGNOSTIC_SCOPE,
+        "release_authorized": False,
         "sample": {
             "attempts": len(all_observations),
             "automatic_attempts": automatic_attempts,

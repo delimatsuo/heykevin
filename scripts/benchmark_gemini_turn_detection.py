@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.services.voice_turn_replay import (  # noqa: E402
     AUTOMATIC_ARM,
+    AUTOMATIC_LATENCY_MAX_LIMIT_MS,
+    AUTOMATIC_LATENCY_P95_LIMIT_MS,
     MANUAL_ARM,
+    MANUAL_LATENCY_MAX_LIMIT_MS,
+    MANUAL_LATENCY_P95_LIMIT_MS,
+    OFFLINE_DIAGNOSTIC_SCOPE,
     VoiceReplayAttempt,
     VoiceTurnBenchmarkThresholds,
     VoiceTurnObservation,
@@ -45,6 +51,7 @@ GEMINI_WS_BASE = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
+MAX_PROVIDER_ATTEMPTS = 60
 SETUP_TIMEOUT_SECONDS = 5.0
 SILENCE_AUDIO = mulaw_to_pcm16k(b"\xff" * 160)
 PROVIDER_CLOSE_ERROR_CODES = {
@@ -299,46 +306,74 @@ async def _sleep_until(target: float) -> None:
 
 
 async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        return {"status": "fail", "error": "credential_unavailable"}
-
     cases = load_voice_turn_cases(args.manifest)
     corpus_identity = voice_turn_manifest_identity(args.manifest, cases=cases)
+    planned_attempts = len(cases) * args.trials_per_case * 2
+    if (
+        not 1 <= args.max_provider_attempts <= MAX_PROVIDER_ATTEMPTS
+        or planned_attempts > args.max_provider_attempts
+    ):
+        return _failed_report("attempt_limit_exceeded")
     schedule = build_paired_schedule(
         case_count=len(cases),
         trials_per_case=args.trials_per_case,
         seed=args.seed,
     )
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return _failed_report("credential_unavailable")
+
     observations = []
     for attempt in schedule:
-        observations.append(await run_attempt(
+        observation = await run_attempt(
             api_key=api_key,
             model=args.model,
             case=cases[attempt.case_index],
             attempt=attempt,
             response_timeout_seconds=args.response_timeout_seconds,
             terminal_timeout_seconds=args.terminal_timeout_seconds,
-        ))
+        )
+        observations.append(observation)
+        if observation.error is not None:
+            break
 
+    thresholds = VoiceTurnBenchmarkThresholds(
+        min_attempts_per_arm=args.min_attempts_per_arm,
+        min_paired_attempts=args.min_paired_attempts,
+        automatic_latency_p95_ms=AUTOMATIC_LATENCY_P95_LIMIT_MS,
+        automatic_latency_max_ms=AUTOMATIC_LATENCY_MAX_LIMIT_MS,
+        manual_latency_p95_ms=MANUAL_LATENCY_P95_LIMIT_MS,
+        manual_latency_max_ms=MANUAL_LATENCY_MAX_LIMIT_MS,
+    )
     report = evaluate_voice_turn_benchmark(
         observations,
-        thresholds=VoiceTurnBenchmarkThresholds(
-            min_attempts_per_arm=args.min_attempts_per_arm,
-            min_paired_attempts=args.min_paired_attempts,
-            manual_latency_p95_ms=args.manual_latency_p95_ms,
-            manual_latency_max_ms=args.manual_latency_max_ms,
-        ),
+        thresholds=thresholds,
     )
     report["configuration"] = {
         "scope": "labeled_fixture_endpoint",
         "model": args.model,
         "cases": len(cases),
         "trials_per_case": args.trials_per_case,
+        "max_provider_attempts": args.max_provider_attempts,
         "seed": args.seed,
+        "thresholds": asdict(thresholds),
+        "timeouts_seconds": {
+            "first_audio": args.response_timeout_seconds,
+            "turn_complete": args.terminal_timeout_seconds,
+        },
         **corpus_identity,
     }
     return report
+
+
+def _failed_report(error: str) -> dict[str, Any]:
+    return {
+        "status": "fail",
+        "error": error,
+        "decision_scope": OFFLINE_DIAGNOSTIC_SCOPE,
+        "release_authorized": False,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -346,11 +381,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--model", required=True)
     parser.add_argument("--trials-per-case", type=int, default=5)
+    parser.add_argument("--max-provider-attempts", type=int, default=60)
     parser.add_argument("--seed", type=int, default=29)
     parser.add_argument("--min-attempts-per-arm", type=int, default=30)
     parser.add_argument("--min-paired-attempts", type=int, default=30)
-    parser.add_argument("--manual-latency-p95-ms", type=int, default=1_500)
-    parser.add_argument("--manual-latency-max-ms", type=int, default=2_500)
     parser.add_argument("--response-timeout-seconds", type=float, default=12.0)
     parser.add_argument("--terminal-timeout-seconds", type=float, default=12.0)
     return parser.parse_args()
@@ -364,7 +398,7 @@ def main() -> int:
             raise ValueError("trials_per_case must be positive")
         report = asyncio.run(run_benchmark(args))
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        report = {"status": "fail", "error": "configuration_invalid"}
+        report = _failed_report("configuration_invalid")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "pass" else 1
 

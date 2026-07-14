@@ -218,6 +218,9 @@ def test_paired_schedule_is_balanced_reproducible_and_interleaved():
     assert len(first) == 60
     assert sum(item.arm == "automatic" for item in first) == 30
     assert sum(item.arm == "manual" for item in first) == 30
+    first_arms = [item.arm for item in first[::2]]
+    assert first_arms.count("automatic") == 15
+    assert first_arms.count("manual") == 15
     assert {
         (item.case_index, item.trial)
         for item in first
@@ -571,25 +574,84 @@ async def test_provider_setup_timeout_is_phase_specific(monkeypatch):
     assert observation.error == "setup_timeout"
 
 
+def _benchmark_args(**overrides):
+    values = {
+        "manifest": FLEURS_MANIFEST,
+        "model": "gemini-3.1-flash-live-preview",
+        "trials_per_case": 1,
+        "max_provider_attempts": 60,
+        "seed": 29,
+        "min_attempts_per_arm": 6,
+        "min_paired_attempts": 6,
+        "response_timeout_seconds": 1.0,
+        "terminal_timeout_seconds": 1.0,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
 @pytest.mark.asyncio
 async def test_network_benchmark_fails_closed_without_provider_credential(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    args = argparse.Namespace(
-        manifest=MANIFEST,
-        model="gemini-3.1-flash-live-preview",
-        trials_per_case=1,
-        seed=29,
-        min_attempts_per_arm=6,
-        min_paired_attempts=6,
-        manual_latency_p95_ms=1_500,
-        manual_latency_max_ms=2_500,
-        response_timeout_seconds=1.0,
-        terminal_timeout_seconds=1.0,
-    )
 
-    report = await run_benchmark(args)
+    report = await run_benchmark(_benchmark_args())
 
-    assert report == {"status": "fail", "error": "credential_unavailable"}
+    assert report == {
+        "status": "fail",
+        "error": "credential_unavailable",
+        "decision_scope": "offline_diagnostic_only",
+        "release_authorized": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_network_benchmark_rejects_attempts_over_limit_before_network(
+    monkeypatch,
+):
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_VALUE)
+
+    async def unexpected_attempt(**_kwargs):
+        pytest.fail("provider attempt must not run above the hard limit")
+
+    monkeypatch.setattr(benchmark_module, "run_attempt", unexpected_attempt)
+
+    report = await run_benchmark(_benchmark_args(max_provider_attempts=10))
+
+    assert report == {
+        "status": "fail",
+        "error": "attempt_limit_exceeded",
+        "decision_scope": "offline_diagnostic_only",
+        "release_authorized": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_network_benchmark_stops_after_first_provider_error(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_VALUE)
+    attempts = []
+
+    async def failed_attempt(*, attempt, **_kwargs):
+        attempts.append(attempt)
+        return VoiceTurnObservation(
+            case_index=attempt.case_index,
+            trial=attempt.trial,
+            arm=attempt.arm,
+            first_audio_after_speech_end_ms=None,
+            first_audio_after_activity_end_ms=None,
+            turn_complete=False,
+            interruption_events=0,
+            error="provider_timeout",
+        )
+
+    monkeypatch.setattr(benchmark_module, "run_attempt", failed_attempt)
+
+    report = await run_benchmark(_benchmark_args())
+
+    assert len(attempts) == 1
+    assert report["status"] == "fail"
+    assert report["sample"]["attempts"] == 1
+    assert report["decision_scope"] == "offline_diagnostic_only"
+    assert report["release_authorized"] is False
 
 
 @pytest.mark.asyncio
@@ -600,7 +662,7 @@ async def test_network_benchmark_reports_corpus_identity(monkeypatch):
             trial=attempt.trial,
             arm=attempt.arm,
             first_audio_after_speech_end_ms=(
-                1_900 if attempt.arm == "automatic" else 1_200
+                1_200 if attempt.arm == "automatic" else 1_100
             ),
             first_audio_after_activity_end_ms=(
                 None if attempt.arm == "automatic" else 700
@@ -614,22 +676,29 @@ async def test_network_benchmark_reports_corpus_identity(monkeypatch):
         "scripts.benchmark_gemini_turn_detection.run_attempt",
         fake_attempt,
     )
-    args = argparse.Namespace(
-        manifest=FLEURS_MANIFEST,
-        model="gemini-3.1-flash-live-preview",
-        trials_per_case=1,
-        seed=29,
-        min_attempts_per_arm=6,
-        min_paired_attempts=6,
-        manual_latency_p95_ms=1_500,
-        manual_latency_max_ms=2_500,
-        response_timeout_seconds=1.0,
-        terminal_timeout_seconds=1.0,
-    )
-
-    report = await run_benchmark(args)
+    report = await run_benchmark(_benchmark_args())
 
     assert report["status"] == "pass"
+    assert report["decision_scope"] == "offline_diagnostic_only"
+    assert report["release_authorized"] is False
+    assert report["configuration"]["max_provider_attempts"] == 60
+    assert report["configuration"]["thresholds"] == {
+        "min_attempts_per_arm": 6,
+        "min_paired_attempts": 6,
+        "completion_rate": 1.0,
+        "latency_coverage": 1.0,
+        "max_manual_premature_responses": 0,
+        "max_manual_interruption_events": 0,
+        "max_errors": 0,
+        "automatic_latency_p95_ms": 1_500,
+        "automatic_latency_max_ms": 2_500,
+        "manual_latency_p95_ms": 1_500,
+        "manual_latency_max_ms": 2_500,
+    }
+    assert report["configuration"]["timeouts_seconds"] == {
+        "first_audio": 1.0,
+        "turn_complete": 1.0,
+    }
     identity = voice_turn_manifest_identity(FLEURS_MANIFEST)
     assert {
         key: report["configuration"][key]
@@ -647,7 +716,7 @@ def _passing_observations() -> list[VoiceTurnObservation]:
                 case_index=case_index,
                 trial=trial,
                 arm="automatic",
-                first_audio_after_speech_end_ms=1900,
+                first_audio_after_speech_end_ms=1200,
                 first_audio_after_activity_end_ms=None,
                 turn_complete=True,
                 interruption_events=1 if pair < 5 else 0,
@@ -721,6 +790,26 @@ def test_voice_turn_benchmark_fails_small_incomplete_or_premature_treatment():
     assert report["diagnostics"]["manual"]["error_counts"] == {
         "provider_timeout": 1
     }
+
+
+def test_voice_turn_benchmark_fails_automatic_latency_breach():
+    observations = _passing_observations()
+    for index in (0, 2):
+        observations[index] = replace(
+            observations[index],
+            first_audio_after_speech_end_ms=2_501,
+        )
+
+    report = evaluate_voice_turn_benchmark(observations)
+    failed = {gate["name"] for gate in report["gates"] if not gate["passed"]}
+
+    assert report["status"] == "fail"
+    assert report["decision_scope"] == "offline_diagnostic_only"
+    assert report["release_authorized"] is False
+    assert {
+        "automatic_latency_p95_ms",
+        "automatic_latency_max_ms",
+    } <= failed
 
 
 def test_voice_turn_benchmark_preserves_bounded_diagnostic_error_codes():

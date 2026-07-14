@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from collections import Counter
 from dataclasses import dataclass
 import json
@@ -9,7 +10,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from app.services.dialogue_planner import NextAction, plan_next_action
+from app.services.dialogue_planner import ActionName, NextAction, plan_next_action
 from app.services.instruction_composer import (
     CALLER_ID_SENTINEL_PATTERN,
     PHONE_PATTERN,
@@ -17,14 +18,108 @@ from app.services.instruction_composer import (
     SECRET_MARKER_PATTERN,
     compose_turn_instructions,
 )
-from app.services.receptionist_state import CallerObservation, IntakeState
+from app.services.receptionist_state import (
+    CallbackConfirmation,
+    CallbackIntent,
+    CallerObservation,
+    IntakeState,
+    Intent,
+    ServiceAction,
+    Urgency,
+)
 
 
-UNSUPPORTED_FIXTURE_TIMING_POLICY_KEYS = frozenset(
+SCENARIO_FIELDS = frozenset(
+    {"scenario", "policy", "initial_state", "private_memory_lines", "turns"}
+)
+POLICY_FIELDS = frozenset({"max_questions", "max_words"})
+INITIAL_STATE_FIELDS = frozenset(
     {
+        "call_sid",
+        "phase",
+        "caller_identity",
+        "caller_phone_last_four",
+        "callback_phone_last_four",
+        "business_scope",
+        "business_scope_reason",
+        "intent",
+        "service_object",
+        "service_action",
+        "urgency",
+        "known_facts",
+        "asked_slots",
+        "callback_intent",
+        "callback_confirmation",
+        "address_need",
+        "memory_refs_used",
+        "side_effects_allowed",
+        "language",
+    }
+)
+CALLER_TURN_FIELDS = frozenset({"speaker", "text", "observation", "expect"})
+ASSISTANT_TURN_FIELDS = frozenset(
+    {"speaker", "text", "observed", "expect", "interrupted", "tool_calls"}
+)
+EXPECTATION_SCALAR_FIELDS = frozenset(
+    {
+        "service_object",
+        "service_action",
+        "intent",
+        "urgency",
+        "callback_intent",
+        "callback_confirmation",
+        "language",
+        "action_name",
+    }
+)
+EXPECTATION_SLOT_LIST_FIELDS = frozenset(
+    {
+        "allowed_slots",
+        "forbidden_slots",
+        "asked_slots_state",
+        "unasked_slots_state",
+    }
+)
+EXPECTATION_TEXT_LIST_FIELDS = frozenset(
+    {
+        "known_facts_include",
+        "known_facts_exclude",
+        "instruction_includes",
+        "instruction_excludes",
+        "output_includes",
+        "output_excludes",
+    }
+)
+EXPECTATION_INTEGER_FIELDS = frozenset({"max_questions", "max_words"})
+EXPECTATION_FIELDS = (
+    EXPECTATION_SCALAR_FIELDS
+    | EXPECTATION_SLOT_LIST_FIELDS
+    | EXPECTATION_TEXT_LIST_FIELDS
+    | EXPECTATION_INTEGER_FIELDS
+)
+KNOWN_SLOTS = frozenset(
+    {
+        "caller_name",
+        "service_action",
+        "service_object",
+        "callback_number",
+        "callback_confirmation",
+        "service_address",
+        "job_complexity",
+        "urgency",
+        "safety_location",
+    }
+)
+TIMING_FIELD_NAMES = frozenset(
+    {
+        "metrics",
         "require_metrics",
+        "response_first_audio_ms",
+        "generated_audio_ms",
         "max_response_first_audio_ms",
         "max_generated_audio_ms",
+        "latency_ms",
+        "max_latency_ms",
     }
 )
 
@@ -46,12 +141,7 @@ class ReplayResult:
 
     @property
     def violation_codes(self) -> tuple[str, ...]:
-        codes = []
-        for violation in self.violations:
-            match = re.search(r"\[([a-z0-9_]+)\]", violation)
-            if match:
-                codes.append(match.group(1))
-        return tuple(codes)
+        return _extract_violation_codes(self.violations)
 
 
 @dataclass(frozen=True)
@@ -78,15 +168,363 @@ def offline_policy_report_metadata() -> dict[str, object]:
     }
 
 
-def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
-    state = IntakeState.from_dict(scenario["initial_state"])
+def validate_replay_scenario(scenario: object) -> tuple[str, ...]:
+    violations: list[str] = []
+    timing_fields = _collect_timing_fields(scenario)
+    if timing_fields:
+        violations.append(
+            _violation(
+                -1,
+                "fixture_timing_not_evidence",
+                f"unsupported timing fields: {', '.join(sorted(timing_fields))}",
+            )
+        )
+
+    if not isinstance(scenario, dict):
+        violations.append(_violation(-1, "fixture_schema_invalid", "scenario must be an object"))
+        return tuple(violations)
+
+    _check_unknown_fields(violations, -1, scenario, SCENARIO_FIELDS, "scenario")
+    if not isinstance(scenario.get("scenario"), str) or not scenario["scenario"].strip():
+        violations.append(
+            _violation(-1, "fixture_schema_invalid", "scenario name must be a string")
+        )
+
+    policy = scenario.get("policy", {})
+    if not isinstance(policy, dict):
+        violations.append(_violation(-1, "fixture_schema_invalid", "policy must be an object"))
+    else:
+        _check_unknown_fields(violations, -1, policy, POLICY_FIELDS, "policy")
+        for key, value in policy.items():
+            if _is_timing_field(key):
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                violations.append(
+                    _violation(-1, "fixture_schema_invalid", f"policy.{key} must be nonnegative")
+                )
+
+    initial_state = scenario.get("initial_state")
+    if not isinstance(initial_state, dict):
+        violations.append(
+            _violation(-1, "fixture_schema_invalid", "initial_state must be an object")
+        )
+    else:
+        violations.extend(_validate_initial_state(initial_state))
+
+    private_memory_lines = scenario.get("private_memory_lines", [])
+    if not _is_string_list(private_memory_lines):
+        violations.append(
+            _violation(-1, "fixture_schema_invalid", "private_memory_lines must be strings")
+        )
+
+    turns = scenario.get("turns")
+    if not isinstance(turns, list) or not turns:
+        violations.append(_violation(-1, "fixture_schema_invalid", "turns must be a nonempty list"))
+        return tuple(violations)
+
+    for index, turn in enumerate(turns):
+        violations.extend(_validate_turn(index, turn))
+
+    return tuple(violations)
+
+
+def _validate_initial_state(initial_state: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    _check_unknown_fields(
+        violations,
+        -1,
+        initial_state,
+        INITIAL_STATE_FIELDS,
+        "initial_state",
+    )
+
+    string_fields = {
+        "call_sid",
+        "phase",
+        "caller_phone_last_four",
+        "callback_phone_last_four",
+        "business_scope",
+        "business_scope_reason",
+        "intent",
+        "service_object",
+        "service_action",
+        "urgency",
+        "callback_intent",
+        "callback_confirmation",
+        "address_need",
+        "language",
+    }
+    for key in string_fields.intersection(initial_state):
+        if not isinstance(initial_state[key], str):
+            violations.append(
+                _violation(-1, "fixture_schema_invalid", f"initial_state.{key} must be a string")
+            )
+
+    for key in ("known_facts", "memory_refs_used"):
+        if key in initial_state and not _is_string_list(initial_state[key]):
+            violations.append(
+                _violation(-1, "fixture_schema_invalid", f"initial_state.{key} must be strings")
+            )
+    if "asked_slots" in initial_state:
+        _validate_slot_list(
+            violations,
+            -1,
+            initial_state["asked_slots"],
+            "initial_state.asked_slots",
+        )
+
+    for key in ("caller_phone_last_four", "callback_phone_last_four"):
+        value = initial_state.get(key)
+        if isinstance(value, str) and value and (len(value) != 4 or not value.isdigit()):
+            violations.append(
+                _violation(
+                    -1,
+                    "fixture_schema_invalid",
+                    f"initial_state.{key} must contain exactly four digits",
+                )
+            )
+
+    if "side_effects_allowed" in initial_state and not isinstance(
+        initial_state["side_effects_allowed"], bool
+    ):
+        violations.append(
+            _violation(
+                -1,
+                "fixture_schema_invalid",
+                "initial_state.side_effects_allowed must be a boolean",
+            )
+        )
+
+    identity = initial_state.get("caller_identity")
+    if identity is not None:
+        if not isinstance(identity, dict):
+            violations.append(
+                _violation(-1, "fixture_schema_invalid", "caller_identity must be an object")
+            )
+        else:
+            _check_unknown_fields(
+                violations,
+                -1,
+                identity,
+                frozenset({"name", "confidence", "source", "confirmed"}),
+                "caller_identity",
+            )
+            if any(
+                key in identity and not isinstance(identity[key], str) for key in ("name", "source")
+            ):
+                violations.append(
+                    _violation(-1, "fixture_schema_invalid", "caller identity text is invalid")
+                )
+            confidence = identity.get("confidence")
+            if confidence is not None and (
+                isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            ):
+                violations.append(
+                    _violation(-1, "fixture_schema_invalid", "caller confidence is invalid")
+                )
+            if "confirmed" in identity and not isinstance(identity["confirmed"], bool):
+                violations.append(
+                    _violation(-1, "fixture_schema_invalid", "caller confirmed is invalid")
+                )
+
+    if violations:
+        return violations
+    try:
+        IntakeState.from_dict(initial_state)
+    except (AttributeError, TypeError, ValueError):
+        violations.append(
+            _violation(-1, "fixture_schema_invalid", "initial_state values are invalid")
+        )
+    return violations
+
+
+def _validate_turn(index: int, turn: object) -> list[str]:
+    violations: list[str] = []
+    if not isinstance(turn, dict):
+        return [_violation(index, "fixture_schema_invalid", "turn must be an object")]
+
+    speaker = turn.get("speaker")
+    if speaker not in {"caller", "assistant"}:
+        return [_violation(index, "fixture_schema_invalid", "speaker must be caller or assistant")]
+
+    allowed_fields = CALLER_TURN_FIELDS if speaker == "caller" else ASSISTANT_TURN_FIELDS
+    _check_unknown_fields(violations, index, turn, allowed_fields, f"{speaker} turn")
+    if not isinstance(turn.get("text"), str):
+        violations.append(_violation(index, "fixture_schema_invalid", "turn text must be a string"))
+
+    expectation = turn.get("expect", {})
+    if not isinstance(expectation, dict):
+        violations.append(_violation(index, "fixture_schema_invalid", "expect must be an object"))
+    else:
+        violations.extend(_validate_expectation(index, expectation))
+
+    if speaker == "caller":
+        observation = turn.get("observation")
+        if not isinstance(observation, dict):
+            violations.append(
+                _violation(index, "caller_observation_missing", "structured observation required")
+            )
+        else:
+            try:
+                CallerObservation.from_dict(observation)
+            except (TypeError, ValueError):
+                violations.append(
+                    _violation(
+                        index, "caller_observation_invalid", "invalid structured observation"
+                    )
+                )
+        return violations
+
+    observed = turn.get("observed")
+    if not isinstance(observed, dict) or "asked_slots" not in observed:
+        violations.append(
+            _violation(
+                index,
+                "assistant_observation_missing",
+                "observed.asked_slots is required",
+            )
+        )
+    else:
+        _check_unknown_fields(
+            violations,
+            index,
+            observed,
+            frozenset({"asked_slots"}),
+            "assistant observed",
+        )
+        _validate_slot_list(violations, index, observed["asked_slots"], "observed.asked_slots")
+
+    if "interrupted" in turn and not isinstance(turn["interrupted"], bool):
+        violations.append(
+            _violation(index, "fixture_schema_invalid", "interrupted must be a boolean")
+        )
+    if "tool_calls" in turn and not _is_string_list(turn["tool_calls"]):
+        violations.append(_violation(index, "fixture_schema_invalid", "tool_calls must be strings"))
+    return violations
+
+
+def _validate_expectation(index: int, expectation: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    _check_unknown_fields(
+        violations,
+        index,
+        expectation,
+        EXPECTATION_FIELDS,
+        "expect",
+    )
+    for key in EXPECTATION_SCALAR_FIELDS.intersection(expectation):
+        if not isinstance(expectation[key], str):
+            violations.append(
+                _violation(index, "fixture_schema_invalid", f"expect.{key} must be a string")
+            )
+    for key in EXPECTATION_SLOT_LIST_FIELDS.intersection(expectation):
+        _validate_slot_list(violations, index, expectation[key], f"expect.{key}")
+    for key in EXPECTATION_TEXT_LIST_FIELDS.intersection(expectation):
+        if not _is_string_list(expectation[key]):
+            violations.append(
+                _violation(index, "fixture_schema_invalid", f"expect.{key} must be strings")
+            )
+    for key in EXPECTATION_INTEGER_FIELDS.intersection(expectation):
+        value = expectation[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            violations.append(
+                _violation(index, "fixture_schema_invalid", f"expect.{key} must be nonnegative")
+            )
+
+    enum_fields = {
+        "service_action": ServiceAction,
+        "intent": Intent,
+        "urgency": Urgency,
+        "callback_intent": CallbackIntent,
+        "callback_confirmation": CallbackConfirmation,
+        "action_name": ActionName,
+    }
+    for key, enum_type in enum_fields.items():
+        if key in expectation and isinstance(expectation[key], str):
+            try:
+                enum_type(expectation[key])
+            except ValueError:
+                violations.append(
+                    _violation(index, "fixture_schema_invalid", f"expect.{key} is invalid")
+                )
+    return violations
+
+
+def _validate_slot_list(
+    violations: list[str],
+    index: int,
+    value: object,
+    field_name: str,
+) -> None:
+    if not _is_string_list(value) or any(slot not in KNOWN_SLOTS for slot in value):
+        violations.append(
+            _violation(index, "fixture_schema_invalid", f"{field_name} contains invalid slots")
+        )
+
+
+def _check_unknown_fields(
+    violations: list[str],
+    index: int,
+    data: dict[str, Any],
+    allowed_fields: frozenset[str],
+    location: str,
+) -> None:
+    unknown = {key for key in data if key not in allowed_fields and not _is_timing_field(key)}
+    if unknown:
+        violations.append(
+            _violation(
+                index,
+                "fixture_schema_invalid",
+                f"unknown {location} fields: {', '.join(sorted(unknown))}",
+            )
+        )
+
+
+def _collect_timing_fields(value: object) -> set[str]:
+    fields: set[str] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if _is_timing_field(key):
+                fields.add(key)
+            fields.update(_collect_timing_fields(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            fields.update(_collect_timing_fields(nested))
+    return fields
+
+
+def _is_timing_field(key: object) -> bool:
+    return isinstance(key, str) and (
+        key in TIMING_FIELD_NAMES or "latency" in key or key.endswith("_ms")
+    )
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def run_replay_scenario(scenario: object) -> ReplayResult:
+    schema_violations = validate_replay_scenario(scenario)
+    if not isinstance(scenario, dict):
+        return ReplayResult(
+            final_state=IntakeState(),
+            steps=(),
+            violations=list(schema_violations),
+        )
+
+    initial_state = scenario.get("initial_state")
+    if schema_violations:
+        return ReplayResult(
+            final_state=IntakeState(),
+            steps=(),
+            violations=list(schema_violations),
+        )
+    state = IntakeState.from_dict(initial_state if isinstance(initial_state, dict) else {})
+
     private_memory_lines = tuple(scenario.get("private_memory_lines") or [])
     policy = dict(scenario.get("policy") or {})
     steps: list[ReplayStepResult] = []
-    violations = [
-        _violation(-1, "fixture_timing_policy_unsupported", key)
-        for key in sorted(UNSUPPORTED_FIXTURE_TIMING_POLICY_KEYS.intersection(policy))
-    ]
+    violations: list[str] = []
     pending_action: NextAction | None = None
     pending_instructions = ""
 
@@ -95,21 +533,7 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
         text = str(turn.get("text") or "")
         if speaker == "caller":
             observation_data = turn.get("observation")
-            if not isinstance(observation_data, dict):
-                violations.append(
-                    _violation(
-                        index, "caller_observation_missing", "structured observation required"
-                    )
-                )
-            else:
-                try:
-                    state.apply_caller_observation(CallerObservation.from_dict(observation_data))
-                except (TypeError, ValueError):
-                    violations.append(
-                        _violation(
-                            index, "caller_observation_invalid", "invalid structured observation"
-                        )
-                    )
+            state.apply_caller_observation(CallerObservation.from_dict(observation_data))
             action = plan_next_action(state)
             instructions = compose_turn_instructions(
                 state,
@@ -169,7 +593,7 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
 
 
 def evaluate_replay_suite(
-    scenarios: list[dict[str, Any]],
+    scenarios: list[object],
     *,
     thresholds: ReplaySuiteThresholds | None = None,
 ) -> dict[str, Any]:
@@ -177,30 +601,36 @@ def evaluate_replay_suite(
     limits = thresholds or ReplaySuiteThresholds()
     assistant_turns = 0
     interrupted_assistant_turns = 0
+    executed_scenarios = 0
     violation_counts: Counter[str] = Counter()
 
     for scenario in scenarios:
-        turns = scenario.get("turns") or []
-        for turn in turns:
-            if turn.get("speaker") != "assistant":
-                continue
-            assistant_turns += 1
-            if turn.get("interrupted"):
-                interrupted_assistant_turns += 1
+        schema_violations = validate_replay_scenario(scenario)
+        if schema_violations:
+            violation_counts.update(_extract_violation_codes(schema_violations))
+            continue
 
         try:
             result = run_replay_scenario(scenario)
         except (KeyError, TypeError, ValueError):
             violation_counts["scenario_execution_error"] += 1
             continue
+
+        executed_scenarios += 1
+        for step in result.steps:
+            if step.speaker != "assistant":
+                continue
+            assistant_turns += 1
+            if step.interrupted:
+                interrupted_assistant_turns += 1
         violation_counts.update(result.violation_codes)
 
     violation_total = sum(violation_counts.values())
     gates = [
         _suite_gate(
             "minimum_scenarios",
-            len(scenarios) >= limits.min_scenarios,
-            len(scenarios),
+            executed_scenarios >= limits.min_scenarios,
+            executed_scenarios,
             f">= {limits.min_scenarios}",
         ),
         _suite_gate(
@@ -227,7 +657,8 @@ def evaluate_replay_suite(
         **offline_policy_report_metadata(),
         "status": "pass" if all(gate["passed"] for gate in gates) else "fail",
         "sample": {
-            "scenarios": len(scenarios),
+            "input_scenarios": len(scenarios),
+            "scenarios": executed_scenarios,
             "assistant_turns": assistant_turns,
             "interrupted_assistant_turns": interrupted_assistant_turns,
         },
@@ -395,15 +826,6 @@ def _check_assistant_output(
     expect = turn.get("expect") or {}
     observed = turn.get("observed") or {}
 
-    if "metrics" in turn:
-        violations.append(
-            _violation(
-                index,
-                "fixture_timing_not_evidence",
-                "fixture timing cannot represent measured latency",
-            )
-        )
-
     max_words = int(expect.get("max_words", policy.get("max_words", 40)))
     if len(text.split()) > max_words:
         violations.append(
@@ -450,6 +872,15 @@ def _check_assistant_output(
 
 def _violation(index: int, code: str, detail: str) -> str:
     return f"turn {index} [{code}]: {detail}"
+
+
+def _extract_violation_codes(violations: Iterable[str]) -> tuple[str, ...]:
+    codes = []
+    for violation in violations:
+        match = re.search(r"\[([a-z0-9_]+)\]", violation)
+        if match:
+            codes.append(match.group(1))
+    return tuple(codes)
 
 
 def _suite_gate(

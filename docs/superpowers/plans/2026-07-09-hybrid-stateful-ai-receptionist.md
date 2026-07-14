@@ -21,6 +21,12 @@ snippets below:
   retained only as fixture payload for policy assertions.
 - Assistant responses are fixture-authored. Fixture timing is rejected rather
   than treated as measured latency.
+- Replay fixtures are schema-validated before execution. Every assistant turn
+  must declare `observed.asked_slots`, and invalid fixtures do not count toward
+  suite coverage gates.
+- A caller-ID rejection may capture only a replacement callback last four. The
+  planner asks for the replacement once, confirms that last four once, and does
+  not expose the rejected caller-ID value in composed instructions.
 - Aggregate output is scoped as `offline_policy_contract` and always reports
   `caller_observation_source: fixture`, `assistant_output_source: fixture`,
   `latency_measured: false`, `live_behavior_validated: false`, and

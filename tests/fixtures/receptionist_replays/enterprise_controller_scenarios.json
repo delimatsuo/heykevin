@@ -82,7 +82,8 @@
       },
       {
         "speaker": "assistant",
-        "text": "Got it. The business will call you back."
+        "text": "Got it. The business will call you back.",
+        "observed": {"asked_slots": []}
       }
     ]
   },

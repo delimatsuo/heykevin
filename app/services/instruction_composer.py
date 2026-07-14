@@ -18,7 +18,9 @@ FORBIDDEN_SLOT_PHRASES = {
     "service_address": "service address",
 }
 
-PRIVATE_SOURCE_PATTERN = re.compile(r"\b(?:Jobber|PRIVATE_SOURCE|CRM)\b(?:\s+note)?:?\s*", re.IGNORECASE)
+PRIVATE_SOURCE_PATTERN = re.compile(
+    r"\b(?:Jobber|PRIVATE_SOURCE|CRM)\b(?:\s+note)?:?\s*", re.IGNORECASE
+)
 CALLER_ID_SENTINEL_PATTERN = re.compile(r"\bcaller-id-ending-\d{4}\b", re.IGNORECASE)
 PHONE_PATTERN = re.compile(r"\+?\d[\d .()\-]{7,}\d")
 SECRET_MARKER_PATTERN = re.compile(r"\bSENSITIVE_SENTINEL\b", re.IGNORECASE)
@@ -63,7 +65,9 @@ def compose_turn_instructions(
     sections.append("- Ask at most one question; one question maximum.")
     sections.append("- Do not mention private memory sources.")
     sections.append("- Do not expose full phone numbers.")
-    sections.append("- Keep tool side effects disabled unless the allowed action explicitly permits them.")
+    sections.append(
+        "- Keep tool side effects disabled unless the allowed action explicitly permits them."
+    )
 
     return "\n".join(sections)
 
@@ -75,7 +79,9 @@ def _state_lines(state: IntakeState) -> list[str]:
     else:
         lines.append("- Caller identity is unknown.")
 
-    if state.caller_phone_last_four:
+    if state.callback_phone_last_four:
+        lines.append(f"- Callback number ending: {state.callback_phone_last_four}.")
+    elif state.caller_phone_last_four:
         lines.append(f"- Caller ID ending: {state.caller_phone_last_four}.")
 
     if state.service_object:

@@ -116,6 +116,7 @@ class CallerObservation:
     urgency: Urgency | None = None
     callback_intent: CallbackIntent | None = None
     callback_confirmation: CallbackConfirmation | None = None
+    callback_phone_last_four: str | None = None
     address_need: AddressNeed | None = None
 
     def __post_init__(self) -> None:
@@ -149,6 +150,12 @@ class CallerObservation:
                 "business_scope_reason",
                 _normalize_observation_text(self.business_scope_reason, max_length=160),
             )
+        if self.callback_phone_last_four is not None:
+            object.__setattr__(
+                self,
+                "callback_phone_last_four",
+                _normalize_callback_last_four(self.callback_phone_last_four),
+            )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CallerObservation":
@@ -163,6 +170,7 @@ class CallerObservation:
             "urgency",
             "callback_intent",
             "callback_confirmation",
+            "callback_phone_last_four",
             "address_need",
         }
         if set(data) - allowed_fields:
@@ -199,6 +207,10 @@ class CallerObservation:
                 if data.get("callback_confirmation") is not None
                 else None
             ),
+            callback_phone_last_four=_optional_observation_text(
+                data,
+                "callback_phone_last_four",
+            ),
             address_need=(
                 AddressNeed(data["address_need"]) if data.get("address_need") is not None else None
             ),
@@ -233,6 +245,13 @@ def _normalize_observation_text(value: str, *, max_length: int) -> str:
     return normalized
 
 
+def _normalize_callback_last_four(value: str) -> str:
+    normalized = value.strip()
+    if len(normalized) != 4 or not normalized.isdigit():
+        raise ValueError("callback_phone_last_four must contain exactly four digits")
+    return normalized
+
+
 def phone_last_four(phone: str) -> str:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return digits[-4:] if len(digits) >= 4 else ""
@@ -244,6 +263,7 @@ class IntakeState:
     phase: IntakePhase = IntakePhase.GREETING
     caller_identity: CallerIdentity = field(default_factory=CallerIdentity)
     caller_phone_last_four: str = ""
+    callback_phone_last_four: str = ""
     business_scope: BusinessScope = BusinessScope.UNCLEAR
     business_scope_reason: str = ""
     intent: Intent = Intent.UNKNOWN
@@ -323,6 +343,11 @@ class IntakeState:
                 if observation.callback_intent == CallbackIntent.NONE
                 else observation.callback_intent.value,
             )
+        if observation.callback_phone_last_four is not None:
+            self.callback_phone_last_four = observation.callback_phone_last_four
+            self.callback_confirmation = CallbackConfirmation.UNKNOWN
+            self.asked_slots.discard("callback_confirmation")
+            self._replace_known_slot("callback_confirmation", "")
         if observation.callback_confirmation is not None:
             self.callback_confirmation = observation.callback_confirmation
             self._replace_known_slot(
@@ -348,6 +373,7 @@ class IntakeState:
             "phase": self.phase.value,
             "caller_identity": self.caller_identity.to_dict(),
             "caller_phone_last_four": self.caller_phone_last_four,
+            "callback_phone_last_four": self.callback_phone_last_four,
             "business_scope": self.business_scope.value,
             "business_scope_reason": self.business_scope_reason,
             "intent": self.intent.value,
@@ -371,6 +397,11 @@ class IntakeState:
             phase=IntakePhase(data.get("phase") or IntakePhase.GREETING.value),
             caller_identity=CallerIdentity.from_dict(data.get("caller_identity")),
             caller_phone_last_four=str(data.get("caller_phone_last_four") or ""),
+            callback_phone_last_four=(
+                _normalize_callback_last_four(str(data["callback_phone_last_four"]))
+                if data.get("callback_phone_last_four")
+                else ""
+            ),
             business_scope=BusinessScope(data.get("business_scope") or BusinessScope.UNCLEAR.value),
             business_scope_reason=str(data.get("business_scope_reason") or ""),
             intent=Intent(data.get("intent") or Intent.UNKNOWN.value),
@@ -396,6 +427,7 @@ class IntakeState:
             "call_sid": self.call_sid,
             "phase": self.phase.value,
             "caller_phone_last_four": self.caller_phone_last_four,
+            "callback_phone_last_four": self.callback_phone_last_four,
             "intent": self.intent.value,
             "service_object_present": bool(self.service_object),
             "service_action": self.service_action.value,

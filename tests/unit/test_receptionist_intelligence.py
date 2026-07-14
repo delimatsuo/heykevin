@@ -16,7 +16,11 @@ os.environ.setdefault("USER_PHONE", "+15550000001")
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.job_card import _build_extraction_prompt
 from app.services.vcard import generate_vcard
-from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold, VoicePipeline
+from app.services.voice_pipeline import (
+    build_system_prompt,
+    is_owner_availability_hold,
+    VoicePipeline,
+)
 from app.services import voice_pipeline as voice_pipeline_module
 
 
@@ -47,7 +51,7 @@ def test_business_prompt_rejects_out_of_scope_trade_work():
     assert "Listed services: House call, Faucet replacement" in prompt
     assert "If it is OUT OF SCOPE" in prompt
     assert "do not ask trade-specific diagnostic questions for a different trade" in prompt
-    assert "Do not say \"Sure, I can help with that\"" in prompt
+    assert 'Do not say "Sure, I can help with that"' in prompt
     assert "electrical panel" in prompt
 
 
@@ -61,7 +65,7 @@ def test_business_prompt_instructs_media_followup_without_live_review_claim():
 def test_business_prompt_prevents_immediate_close_after_availability_check():
     prompt = build_system_prompt(_plumbing_config())
 
-    assert "Never say \"I'll pass this along\" immediately after" in prompt
+    assert 'Never say "I\'ll pass this along" immediately after' in prompt
     assert "First wait for the availability result" in prompt
     assert "Owner handoff" in prompt
     assert "Silent caller" in prompt
@@ -77,11 +81,13 @@ def test_business_prompt_confirms_only_phone_last_four():
 
 
 def test_personal_prompt_confirms_only_phone_last_four():
-    prompt = build_system_prompt({
-        "owner_name": "Deli Matsuo",
-        "mode": "personal",
-        "effective_mode": "personal",
-    })
+    prompt = build_system_prompt(
+        {
+            "owner_name": "Deli Matsuo",
+            "mode": "personal",
+            "effective_mode": "personal",
+        }
+    )
 
     assert "confirm only the last 4 digits" in prompt
     assert "Do not read back the full phone number" in prompt
@@ -113,7 +119,10 @@ def test_business_prompt_requires_explicit_callback_opt_in():
 def test_business_prompt_limits_pricing_turns_to_one_followup():
     prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
 
-    assert "When answering pricing questions, answer first, then ask at most one short follow-up question" in prompt
+    assert (
+        "When answering pricing questions, answer first, then ask at most one short follow-up question"
+        in prompt
+    )
     assert "Do not bundle multiple intake questions into the same pricing answer" in prompt
     assert "Keep spoken turns brief" in prompt
     assert "one short question at a time" in prompt
@@ -131,8 +140,14 @@ def test_business_prompt_does_not_reask_known_fixture_category():
 def test_business_prompt_restricts_live_owner_hold_to_emergencies_or_live_transfer():
     prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
 
-    assert "Only try the owner live for emergencies or when the caller explicitly asks to speak with" in prompt
-    assert "For routine and same-day leads, take a concise message instead of putting the caller on hold" in prompt
+    assert (
+        "Only try the owner live for emergencies or when the caller explicitly asks to speak with"
+        in prompt
+    )
+    assert (
+        "For routine and same-day leads, take a concise message instead of putting the caller on hold"
+        in prompt
+    )
     assert "For urgent or same-day issues" not in prompt
 
 
@@ -372,10 +387,10 @@ def test_media_stream_passes_caller_phone_to_gemini_pipeline():
 
     source = inspect.getsource(media_stream.media_stream_ws)
     gemini_call = source.split("pipeline = GeminiPipeline(", 1)[1].split(
-        "logger.info(f\"Using Gemini Live pipeline", 1
+        'logger.info(f"Using Gemini Live pipeline', 1
     )[0]
 
-    assert "caller_phone=active_call.caller_phone if active_call else \"\"" in gemini_call
+    assert 'caller_phone=active_call.caller_phone if active_call else ""' in gemini_call
 
 
 @pytest.mark.asyncio
@@ -835,12 +850,14 @@ async def test_gemini_barge_in_resets_caller_silence_state():
 
 
 def test_vcard_ignores_generic_or_wrong_service_type_labels():
-    vcard = generate_vcard({
-        "owner_name": "Deli Matsuo",
-        "business_name": "Matsuo Plumbing",
-        "twilio_number": "+15555550123",
-        "service_type": "personal",
-    })
+    vcard = generate_vcard(
+        {
+            "owner_name": "Deli Matsuo",
+            "business_name": "Matsuo Plumbing",
+            "twilio_number": "+15555550123",
+            "service_type": "personal",
+        }
+    )
 
     assert "FN:Deli Matsuo\r\n" in vcard
     assert "personal" not in vcard

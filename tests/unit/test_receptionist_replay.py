@@ -11,6 +11,7 @@ from app.services.receptionist_replay import (
     run_replay_scenario,
 )
 from app.services.receptionist_state import IntakeState, ServiceAction
+from scripts.evaluate_receptionist_replays import load_scenarios
 
 
 FIXTURE_DIR = Path("tests/fixtures/receptionist_replays")
@@ -146,7 +147,7 @@ def test_replay_commits_only_completed_assistant_questions():
     assert result.steps[1].interrupted is True
 
 
-def test_replay_detects_output_privacy_side_effect_and_fixture_evidence_violations():
+def test_replay_detects_output_privacy_and_side_effect_violations():
     scenario = {
         "scenario": "bad_model_output",
         "policy": {"max_questions": 1},
@@ -170,10 +171,6 @@ def test_replay_detects_output_privacy_side_effect_and_fixture_evidence_violatio
                 "observed": {
                     "asked_slots": ["service_action", "service_address"],
                 },
-                "metrics": {
-                    "response_first_audio_ms": 3000,
-                    "generated_audio_ms": 9000,
-                },
                 "tool_calls": ["create_job"],
             },
         ],
@@ -185,7 +182,6 @@ def test_replay_detects_output_privacy_side_effect_and_fixture_evidence_violatio
         "assistant_private_source",
         "assistant_secret_marker",
         "assistant_question_count",
-        "fixture_timing_not_evidence",
         "assistant_forbidden_slot",
         "assistant_tool_call_forbidden",
     } <= set(result.violation_codes)
@@ -226,6 +222,72 @@ def test_replay_requires_a_structured_caller_observation():
     assert result.final_state.intent.value == "unknown"
 
 
+def test_fixture_loader_rejects_non_object_entries(tmp_path: Path):
+    (tmp_path / "invalid.json").write_text('[{"scenario": "valid_shape"}, "dropped"]')
+
+    with pytest.raises(ValueError, match="fixture entries must be objects"):
+        load_scenarios(tmp_path)
+
+
+def test_replay_rejects_missing_assistant_annotations_instead_of_false_passing():
+    scenario = {
+        "scenario": "missing_assistant_annotation",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need a faucet repair.",
+                "observation": {
+                    "intent": "service_request",
+                    "service_object": "faucet",
+                    "service_action": "repair",
+                },
+            },
+            {
+                "speaker": "assistant",
+                "text": "What is the full service address?",
+            },
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+    report = evaluate_replay_suite(
+        [scenario],
+        thresholds=ReplaySuiteThresholds(
+            min_scenarios=1,
+            min_assistant_turns=1,
+            min_interrupted_assistant_turns=0,
+        ),
+    )
+
+    assert result.violation_codes == ("assistant_observation_missing",)
+    assert report["status"] == "fail"
+    assert report["violation_counts"] == {"assistant_observation_missing": 1}
+
+
+def test_replay_rejects_per_turn_timing_expectations():
+    scenario = {
+        "scenario": "timing_expectation_is_not_evidence",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need a faucet repair.",
+                "observation": {
+                    "intent": "service_request",
+                    "service_object": "faucet",
+                    "service_action": "repair",
+                },
+                "expect": {"max_response_first_audio_ms": 1},
+            }
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+
+    assert result.violation_codes == ("fixture_timing_not_evidence",)
+
+
 @pytest.mark.parametrize(
     "observation",
     [
@@ -255,6 +317,25 @@ def test_replay_rejects_invalid_structured_observations(
     assert result.final_state.phase.value == "greeting"
 
 
+def test_replay_returns_schema_violation_for_invalid_initial_state():
+    scenario = {
+        "scenario": "invalid_initial_state",
+        "initial_state": {"phase": "not-a-phase"},
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need help.",
+                "observation": {},
+            }
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+
+    assert result.violation_codes == ("fixture_schema_invalid",)
+    assert result.final_state.phase.value == "greeting"
+
+
 def test_fixture_timing_is_rejected_instead_of_reported_as_measured_latency():
     scenario = {
         "scenario": "fixture_timing_is_not_measurement",
@@ -272,6 +353,7 @@ def test_fixture_timing_is_rejected_instead_of_reported_as_measured_latency():
             {
                 "speaker": "assistant",
                 "text": "What problem are you seeing?",
+                "observed": {"asked_slots": []},
                 "metrics": {
                     "response_first_audio_ms": 1,
                     "generated_audio_ms": 1,
@@ -293,6 +375,9 @@ def test_fixture_timing_is_rejected_instead_of_reported_as_measured_latency():
     assert result.violation_codes == ("fixture_timing_not_evidence",)
     assert report["status"] == "fail"
     assert report["latency_measured"] is False
+    assert report["sample"]["input_scenarios"] == 1
+    assert report["sample"]["scenarios"] == 0
+    assert report["sample"]["assistant_turns"] == 0
     assert "metric_coverage" not in str(report)
 
 
@@ -314,6 +399,7 @@ def test_replay_suite_gate_fails_small_or_violating_sample():
             {
                 "speaker": "assistant",
                 "text": "What happened? When did it start?",
+                "observed": {"asked_slots": []},
             },
         ],
     }

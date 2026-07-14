@@ -78,33 +78,62 @@ def plan_next_action(state: IntakeState) -> NextAction:
         state.callback_intent in {CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED}
         and state.callback_confirmation != CallbackConfirmation.CONFIRMED
     ):
-        if state.callback_confirmation == CallbackConfirmation.REJECTED:
+        if state.callback_phone_last_four:
+            if "callback_confirmation" in state.asked_slots:
+                return _take_callback_message(
+                    reason="replacement callback confirmation was requested once but remains unavailable",
+                    forbidden=forbidden,
+                    memory_facts=memory_facts,
+                )
+            return NextAction(
+                name=ActionName.CONFIRM_CALLBACK_LAST_FOUR,
+                reason=(
+                    "replacement callback number ending "
+                    f"{state.callback_phone_last_four} is available"
+                ),
+                allowed_slots=("callback_confirmation",),
+                forbidden_slots=tuple(sorted(forbidden - {"callback_confirmation"})),
+                memory_facts_safe_to_use=memory_facts,
+                max_spoken_shape="confirm the replacement callback number last four in one short question",
+                tool_calls_allowed=False,
+            )
+        if (
+            state.callback_confirmation == CallbackConfirmation.REJECTED
+            or not state.caller_phone_last_four
+        ):
+            if "callback_number" in state.asked_slots:
+                return _take_callback_message(
+                    reason="callback number was requested once but remains unavailable",
+                    forbidden=forbidden,
+                    memory_facts=memory_facts,
+                )
+            reason = (
+                "caller rejected the caller ID callback number"
+                if state.callback_confirmation == CallbackConfirmation.REJECTED
+                else "callback intent exists and caller ID is missing"
+            )
             return NextAction(
                 name=ActionName.ASK_CALLBACK_NUMBER,
-                reason="caller rejected the caller ID callback number",
+                reason=reason,
                 allowed_slots=("callback_number",),
                 forbidden_slots=tuple(sorted(forbidden - {"callback_number"})),
                 memory_facts_safe_to_use=memory_facts,
                 max_spoken_shape="ask for the best callback number in one short question",
                 tool_calls_allowed=False,
             )
-        if state.caller_phone_last_four:
-            return NextAction(
-                name=ActionName.CONFIRM_CALLBACK_LAST_FOUR,
-                reason=f"callback intent exists; caller ID ending {state.caller_phone_last_four} is available",
-                allowed_slots=("callback_confirmation",),
-                forbidden_slots=tuple(sorted(forbidden - {"callback_number"})),
-                memory_facts_safe_to_use=memory_facts,
-                max_spoken_shape="confirm the caller ID last four in one short question",
-                tool_calls_allowed=False,
+        if "callback_confirmation" in state.asked_slots:
+            return _take_callback_message(
+                reason="caller ID callback confirmation was requested once but remains unavailable",
+                forbidden=forbidden,
+                memory_facts=memory_facts,
             )
         return NextAction(
-            name=ActionName.ASK_CALLBACK_NUMBER,
-            reason="callback intent exists and caller ID is missing",
-            allowed_slots=("callback_number",),
-            forbidden_slots=tuple(sorted(forbidden - {"callback_number"})),
+            name=ActionName.CONFIRM_CALLBACK_LAST_FOUR,
+            reason=f"callback intent exists; caller ID ending {state.caller_phone_last_four} is available",
+            allowed_slots=("callback_confirmation",),
+            forbidden_slots=tuple(sorted(forbidden)),
             memory_facts_safe_to_use=memory_facts,
-            max_spoken_shape="ask for the best callback number in one short question",
+            max_spoken_shape="confirm the caller ID last four in one short question",
             tool_calls_allowed=False,
         )
 
@@ -172,10 +201,16 @@ def _forbidden_slots(state: IntakeState) -> set[str]:
         forbidden.add("service_object")
     if state.caller_identity.name and state.caller_identity.confidence >= 0.8:
         forbidden.add("caller_name")
-    if state.callback_intent in {CallbackIntent.NONE, CallbackIntent.DECLINED, CallbackIntent.OFFERED}:
+    if state.callback_intent in {
+        CallbackIntent.NONE,
+        CallbackIntent.DECLINED,
+        CallbackIntent.OFFERED,
+    }:
         forbidden.add("callback_number")
     if state.callback_confirmation == CallbackConfirmation.CONFIRMED:
         forbidden.add("callback_confirmation")
+        forbidden.add("callback_number")
+    if state.callback_phone_last_four:
         forbidden.add("callback_number")
     if state.address_need in {
         AddressNeed.NONE,
@@ -190,6 +225,22 @@ def _forbidden_slots(state: IntakeState) -> set[str]:
 
 def _allowed_slots(candidates: tuple[str, ...], forbidden: set[str]) -> tuple[str, ...]:
     return tuple(slot for slot in candidates if slot not in forbidden)
+
+
+def _take_callback_message(
+    *,
+    reason: str,
+    forbidden: set[str],
+    memory_facts: tuple[str, ...],
+) -> NextAction:
+    return NextAction(
+        name=ActionName.TAKE_MESSAGE,
+        reason=reason,
+        forbidden_slots=tuple(sorted(forbidden | {"callback_confirmation", "callback_number"})),
+        memory_facts_safe_to_use=memory_facts,
+        max_spoken_shape="briefly take a message without asking another callback question",
+        tool_calls_allowed=False,
+    )
 
 
 def _safe_memory_facts(state: IntakeState) -> tuple[str, ...]:

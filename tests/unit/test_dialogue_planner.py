@@ -98,6 +98,70 @@ def test_planner_asks_callback_number_when_caller_rejects_caller_id():
     assert "callback_number" not in action.forbidden_slots
 
 
+def test_planner_confirms_replacement_callback_last_four_without_reasking_number():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.intent = Intent.CALLBACK
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.callback_intent = CallbackIntent.REQUESTED
+    state.callback_confirmation = CallbackConfirmation.REJECTED
+    state.mark_slot_asked("callback_number")
+    state.apply_caller_observation(CallerObservation(callback_phone_last_four="4321"))
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.CONFIRM_CALLBACK_LAST_FOUR
+    assert action.allowed_slots == ("callback_confirmation",)
+    assert "callback_number" in action.forbidden_slots
+    assert "4321" in action.reason
+
+    state.apply_caller_observation(
+        CallerObservation(
+            callback_intent=CallbackIntent.ACCEPTED,
+            callback_confirmation=CallbackConfirmation.CONFIRMED,
+        )
+    )
+
+    assert plan_next_action(state).name == ActionName.WRAP_UP
+
+
+def test_planner_does_not_repeat_callback_number_question_without_new_number():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.callback_intent = CallbackIntent.REQUESTED
+    state.callback_confirmation = CallbackConfirmation.REJECTED
+    state.mark_slot_asked("callback_number")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.TAKE_MESSAGE
+    assert action.allowed_slots == ()
+    assert "callback_number" in action.forbidden_slots
+
+
+def test_planner_does_not_repeat_callback_number_when_caller_id_is_missing():
+    state = IntakeState.new(call_sid="CA_test")
+    state.callback_intent = CallbackIntent.REQUESTED
+    state.mark_slot_asked("callback_number")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.TAKE_MESSAGE
+    assert action.allowed_slots == ()
+    assert "callback_number" in action.forbidden_slots
+
+
+def test_planner_does_not_repeat_unanswered_callback_confirmation():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.callback_intent = CallbackIntent.REQUESTED
+    state.mark_slot_asked("callback_confirmation")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.TAKE_MESSAGE
+    assert action.allowed_slots == ()
+    assert "callback_confirmation" in action.forbidden_slots
+
+
 def test_planner_allows_address_only_when_state_requires_it():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     state.intent = Intent.SCHEDULING

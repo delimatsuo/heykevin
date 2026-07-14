@@ -96,3 +96,20 @@ def test_composer_sanitizes_private_memory_before_model_context():
     assert "SENSITIVE_SENTINEL" not in instructions
     assert "caller-id-ending-8667" not in instructions
     assert "Caller ID ending: 8667" in instructions
+
+
+def test_composer_includes_only_replacement_callback_last_four():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.CALLBACK,
+            callback_phone_last_four="4321",
+        )
+    )
+
+    instructions = compose_turn_instructions(state, plan_next_action(state))
+
+    assert "Callback number ending: 4321" in instructions
+    assert "Caller ID ending: 8667" not in instructions
+    assert "caller-full-phone" not in instructions
+    assert "caller-id-ending-8667" not in instructions

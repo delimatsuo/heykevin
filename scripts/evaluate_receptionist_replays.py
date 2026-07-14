@@ -29,9 +29,13 @@ def load_scenarios(fixture_dir: Path) -> list[dict[str, Any]]:
     for fixture_path in sorted(fixture_dir.glob("*.json")):
         loaded = load_replay_fixture(fixture_path)
         if isinstance(loaded, list):
-            scenarios.extend(item for item in loaded if isinstance(item, dict))
+            if not all(isinstance(item, dict) for item in loaded):
+                raise ValueError("fixture entries must be objects")
+            scenarios.extend(loaded)
         elif isinstance(loaded, dict):
             scenarios.append(loaded)
+        else:
+            raise ValueError("fixture root must be an object or list of objects")
     return scenarios
 
 

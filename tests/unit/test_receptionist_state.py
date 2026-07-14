@@ -113,6 +113,23 @@ def test_intake_state_tracks_callback_rejection_and_language():
     assert "callback_confirmation:rejected" in state.known_facts
 
 
+def test_intake_state_tracks_only_replacement_callback_last_four():
+    state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
+    state.callback_confirmation = CallbackConfirmation.REJECTED
+    state.mark_slot_asked("callback_confirmation")
+
+    state.apply_caller_observation(CallerObservation(callback_phone_last_four="4321"))
+
+    assert state.callback_phone_last_four == "4321"
+    assert state.callback_confirmation == CallbackConfirmation.UNKNOWN
+    assert "callback_confirmation" not in state.asked_slots
+    assert state.to_dict()["callback_phone_last_four"] == "4321"
+    assert state.redacted_log_dict()["callback_phone_last_four"] == "4321"
+
+    with pytest.raises(ValueError, match="exactly four digits"):
+        CallerObservation(callback_phone_last_four="caller-full-phone")
+
+
 def test_intake_state_records_asked_slots_without_duplicates():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
 

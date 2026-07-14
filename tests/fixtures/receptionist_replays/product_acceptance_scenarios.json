@@ -73,6 +73,53 @@
           "allowed_slots": ["callback_number"],
           "instruction_excludes": ["service address?", "full-phone-number", "PRIVATE_SOURCE"]
         }
+      },
+      {
+        "speaker": "assistant",
+        "text": "What is the best callback number?",
+        "observed": {"asked_slots": ["callback_number"]},
+        "expect": {"asked_slots_state": ["callback_number"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "Use the replacement number I provided.",
+        "observation": {"callback_phone_last_four": "4321"},
+        "expect": {
+          "action_name": "confirm_callback_last_four",
+          "allowed_slots": ["callback_confirmation"],
+          "forbidden_slots": ["callback_number"],
+          "instruction_includes": ["Callback number ending: 4321"],
+          "instruction_excludes": [
+            "Caller ID ending: 8667",
+            "full-phone-number",
+            "PRIVATE_SOURCE"
+          ]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Should the business call the number ending in 4321?",
+        "observed": {"asked_slots": ["callback_confirmation"]},
+        "expect": {"asked_slots_state": ["callback_confirmation"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "Yes, that is correct.",
+        "observation": {
+          "callback_intent": "accepted",
+          "callback_confirmation": "confirmed"
+        },
+        "expect": {
+          "callback_intent": "accepted",
+          "callback_confirmation": "confirmed",
+          "action_name": "wrap_up",
+          "forbidden_slots": ["callback_number", "callback_confirmation"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Got it. The business will call you back.",
+        "observed": {"asked_slots": []}
       }
     ]
   },

@@ -49,6 +49,10 @@ from scripts.smoke_gemini_live_providers import (
 FIXTURE_DIR = Path("tests/fixtures/voice_vad")
 MANIFEST = FIXTURE_DIR / "turn_replay_manifest.json"
 FLEURS_MANIFEST = FIXTURE_DIR / "fleurs_turn_replay_manifest.json"
+PROVIDER_RUNBOOKS = (
+    Path("docs/gemini-live-offline-replay.md"),
+    FIXTURE_DIR / "README.md",
+)
 
 
 def test_offline_replay_is_not_imported_by_live_call_paths():
@@ -69,6 +73,18 @@ def test_offline_replay_is_not_imported_by_live_call_paths():
                 imported_modules.update(f"{node.module}.{alias.name}" for alias in node.names)
 
         assert offline_modules.isdisjoint(imported_modules), path
+
+
+@pytest.mark.parametrize("path", PROVIDER_RUNBOOKS)
+def test_provider_runbooks_document_explicit_provider_credentials(path):
+    runbook = path.read_text()
+
+    assert "--provider developer" in runbook
+    assert "--provider vertex" in runbook
+    assert "GEMINI_API_KEY" in runbook
+    assert "Application Default Credentials" in runbook
+    assert '--project "$GCP_PROJECT_ID"' in runbook
+    assert "--location us-central1" in runbook
 
 
 def test_voice_turn_manifest_renders_live_codec_conditions():

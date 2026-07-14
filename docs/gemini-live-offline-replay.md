@@ -46,15 +46,34 @@ gates, payload-safe output, and static isolation from the live call pipelines.
 
 ## Provider Diagnostic
 
-After separate approval to spend provider quota, run:
+After separate approval to spend provider quota, choose one explicit provider.
+For the Gemini Developer API, provide `GEMINI_API_KEY` through the approved
+secret-delivery path and run:
 
 ```bash
 uv run --python 3.12 --with '.[dev]' \
   python scripts/benchmark_gemini_turn_detection.py \
+  --provider developer \
   --model gemini-3.1-flash-live-preview
 ```
 
-The command exits nonzero when credentials are unavailable, configuration is
+For Vertex, use pre-approved Application Default Credentials with Vertex AI
+permissions, set `GCP_PROJECT_ID` to the approved project, and run the pinned
+model and location:
+
+```bash
+uv run --python 3.12 --with '.[dev]' \
+  python scripts/benchmark_gemini_turn_detection.py \
+  --provider vertex \
+  --model gemini-live-2.5-flash-native-audio \
+  --project "$GCP_PROJECT_ID" \
+  --location us-central1
+```
+
+Do not create temporary credentials or substitute a different project, model, or
+location for a recorded diagnostic run.
+
+The selected command exits nonzero when credentials are unavailable, configuration is
 invalid, a provider attempt fails, sample coverage is incomplete, or any
 latency or lifecycle gate fails. Automatic and manual speech-end latency gates
 are fixed at 1,500 ms p95 and 2,500 ms maximum. Reports include the effective

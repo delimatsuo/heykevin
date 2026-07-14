@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "source_pcm": "py-webrtcvad-test-audio.raw",
+  "source_sha256_chunks": [
+    "3dbb730b",
+    "90e0266d",
+    "78d4fe03",
+    "f00aba37",
+    "a83780a6",
+    "a5240d90",
+    "84b5c012",
+    "66194c1e"
+  ],
+  "source_sample_rate_hz": 8000,
+  "source_speech_start_ms": 180,
+  "source_speech_end_ms": 780,
+  "cases": [
+    {
+      "name": "clean_short",
+      "gain": 1.0,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "quiet_short",
+      "gain": 0.35,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "background_noise",
+      "gain": 0.8,
+      "noise_peak": 400,
+      "noise_seed": 17,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "natural_pause_500ms",
+      "gain": 1.0,
+      "repetitions": 2,
+      "inter_repeat_silence_ms": 500,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "natural_pause_800ms",
+      "gain": 1.0,
+      "repetitions": 2,
+      "inter_repeat_silence_ms": 800,
+      "frame_pattern_ms": [20]
+    },
+    {
+      "name": "fragmented_frames",
+      "gain": 1.0,
+      "frame_pattern_ms": [10, 30, 20]
+    }
+  ]
+}

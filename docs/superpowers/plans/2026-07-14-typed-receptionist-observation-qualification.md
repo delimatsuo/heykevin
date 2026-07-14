@@ -250,12 +250,15 @@ table is added to controller or adapter code.
 - `identity_present: bool`
 - `identity_confirmation_pending: bool`
 - `callback_number_present: bool`
+- `callback_confirmation_pending: bool`
 
 It excludes call/contractor IDs, names, phone digits, service object/history,
 addresses, known facts, memory, asked slots, prompts, transcript history, and all
 other free text. Never serialize `IntakeState.to_dict()` or a generic model dump.
 Corrections that cannot be resolved from the current turn and this context return no
-observation.
+observation. Callback confirmation or rejection is accepted only when
+`callback_confirmation_pending` is true. `callback_number_present` proves that a
+number exists; it does not prove which question an ambiguous confirmation answers.
 
 Local epoch, turn ID, fixture labels, and report metadata are never sent to the
 provider. The adapter reattaches local metadata only after transport returns.
@@ -289,8 +292,9 @@ Reject the entire observation rather than partially applying it when:
 - text is over-length or contains controls;
 - a phone value is not exactly four digits;
 - identity confirmation lacks `identity_present` or a pending confirmation;
-- callback confirmation lacks `callback_number_present` or a same-turn synthetic
-  last-four value;
+- callback confirmation or rejection lacks `callback_confirmation_pending`, or
+  confirmation lacks `callback_number_present` or a same-turn synthetic last-four
+  value;
 - urgency/emergency or callback values are inconsistent;
 - a service object copies unrelated instructions or contact/location content;
 - local epoch/turn state is stale, duplicate, cancelled, or closed.
@@ -328,6 +332,9 @@ At minimum:
 - 20% mixed-language or code-switched turns;
 - emergency/non-emergency near-neighbor pairs;
 - all callback intents, confirmations, denials, and corrections;
+- indistinguishable-history collision pairs where identical caller text such as
+  "yes" follows identity confirmation, callback confirmation, or no pending
+  question;
 - identity confirmation/denial with valid and invalid context;
 - in-scope, out-of-scope, and unclear requests;
 - ambiguous service action/object combinations;
@@ -470,17 +477,45 @@ The command has no model, project, credential, or endpoint default that can make
 request. Default and `--dry-run` invocations validate the complete plan and perform
 zero DNS, socket, or provider activity.
 
+Before execution, build one canonical Live setup document from the approved source
+SHA and synthetic contractor configuration. Exclude credentials and caller data,
+but include every behavior-affecting field:
+
+- exact model resource, API version, and endpoint;
+- canonical system-instruction digest and synthetic prompt-fixture digest;
+- complete generation configuration;
+- input/output transcription configuration;
+- automatic activity detection sensitivities, padding, and silence duration;
+- activity handling and turn coverage;
+- complete tool declaration digest and tool-response policy;
+- reconnect, context-restoration, and retry policy;
+- selected turn-assembly quiescence policy;
+- WebSocket limits and timeouts;
+- runner and evaluator commit SHA plus file digests.
+
+The pre-registration stores the canonical setup digest, its non-sensitive canonical
+document, and an explicit list of deviations from the setup produced by the current
+immutable `GeminiPipeline` source SHA. An unexplained deviation is a hard failure;
+the runner cannot silently substitute defaults.
+
 **Tests first:**
 
 - `--execute` is required for any WebSocket connection;
+- default and `--dry-run` perform zero DNS, socket, or provider activity even when
+  valid-looking qualification credentials are present in the environment;
 - execution requires an approval-named exact model, API version, official endpoint,
   non-production project, dedicated credential reference, manifest path, manifest
   digest, attempt cap, wall-clock cap, session timeout, and maximum cost;
-- model, project, endpoint, credential reference, manifest digest, and all caps are
-  copied into the machine-readable pre-registration block before connection;
+- the canonical Live setup document/digest, quiescence policy, runner/evaluator SHA
+  and file digests, explicit setup deviations, model, project, endpoint, credential
+  reference, manifest digest, and all caps are copied into the machine-readable
+  pre-registration block before connection;
 - the command rejects a production project, live-call credential, unknown endpoint,
   changed manifest digest, missing consent/provenance, real-call label, unbounded
   attempts, or absent cost cap;
+- setup-digest tests fail on any prompt, generation, transcription, VAD, activity,
+  turn-coverage, tool, reconnect, quiescence, WebSocket-limit, timeout, runner, or
+  evaluator drift;
 - the reviewed manifest contains only synthetic scripts and purpose-recorded audio
   from consenting adults, with language, codec, condition, rights, and split labels;
 - a mocked WebSocket covers setup failure, timeout, cancellation, interruption,
@@ -508,8 +543,12 @@ call is authorized.
 
 After separate approval naming the exact model, API version, endpoint, project,
 credential reference, manifest digest, attempt cap, wall-clock cap, timeout, and
-cost cap, run the bounded purpose-recorded audio matrix and finalize the ADR with a
-go/no-go. If any pre-registered value drifts or Gate 0 fails, stop this plan.
+cost cap plus the canonical Live setup digest and runner/evaluator SHA, run the
+bounded purpose-recorded audio matrix. Put the aggregate redacted evidence and
+finalized go/no-go ADR on a separate evidence branch and PR from current `main`.
+Tasks 1-4 remain prohibited until that evidence PR receives staff/security review,
+passes CI, and merges. If any pre-registered value drifts or Gate 0 fails, stop this
+plan and record a no-go ADR.
 
 ### Task 1: Add canonical observation contracts
 
@@ -520,7 +559,8 @@ go/no-go. If any pre-registered value drifts or Gate 0 fails, stop this plan.
 
 **Tests first:** one generated schema source, exact context allowlist, no generic
 state serialization, bounds, language semantics, every semantic rejection,
-deterministic envelopes, raw-data exclusion, and nonauthorization metadata.
+indistinguishable-history collision pairs for pending confirmations, deterministic
+envelopes, raw-data exclusion, and nonauthorization metadata.
 
 ### Task 2: Build semantic fixtures and evaluator
 
@@ -621,10 +661,13 @@ or caller-experience improvement.
 
 1. This branch contains the reviewed plan only.
 2. After the plan merges, Tasks 0A-0C use a fresh branch from current `origin/main`.
-3. After Gate 0 merges and passes, Tasks 1-4 use a new fresh-main branch.
-4. Provider evidence, if approved, is reviewed separately and contains only
-   aggregate redacted reports.
-5. Any worker/runtime implementation requires a new reviewed plan and new branch.
+3. Merge the Tasks 0A-0C implementation PR before any Gate 0B provider execution.
+4. If separately approved, run Gate 0B from that exact merged implementation SHA.
+   Put only aggregate redacted evidence and the finalized ADR on a new evidence PR
+   from current `main`.
+5. Tasks 1-4 remain prohibited until the Gate 0B evidence/ADR PR passes review and
+   CI and merges with a go decision. Then use a new fresh-main branch.
+6. Any worker/runtime implementation requires a new reviewed plan and new branch.
 
 Each successor starts from fresh `main` after its predecessor merges. Before every
 PR, record the exact base and head SHA. Use that immutable base for isolation checks,

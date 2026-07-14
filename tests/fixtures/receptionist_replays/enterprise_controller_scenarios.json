@@ -305,5 +305,34 @@
         "observed": {"asked_slots": []}
       }
     ]
+  },
+  {
+    "scenario": "known_job_complexity_is_not_reasked",
+    "policy": {"max_questions": 1, "max_words": 40},
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "intent": "service_request",
+      "service_object": "faucet",
+      "service_action": "repair",
+      "urgency": "routine",
+      "known_facts": ["job_complexity:existing fixture already removed"]
+    },
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "The existing fixture is already removed.",
+        "observation": {},
+        "expect": {
+          "action_name": "offer_callback_or_scheduling",
+          "allowed_slots": ["callback_preference"],
+          "forbidden_slots": ["job_complexity", "urgency"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Would you like a callback or help with scheduling?",
+        "observed": {"asked_slots": ["callback_preference"]}
+      }
+    ]
   }
 ]

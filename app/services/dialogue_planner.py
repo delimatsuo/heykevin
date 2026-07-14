@@ -111,7 +111,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
         and state.callback_confirmation != CallbackConfirmation.CONFIRMED
     ):
         if state.callback_phone_last_four:
-            if "callback_confirmation" in state.asked_slots:
+            if "callback_confirmation" in forbidden:
                 return _take_callback_message(
                     reason="replacement callback confirmation was requested once but remains unavailable",
                     forbidden=forbidden,
@@ -134,7 +134,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
             state.callback_confirmation == CallbackConfirmation.REJECTED
             or not state.caller_phone_last_four
         ):
-            if "callback_number" in state.asked_slots:
+            if "callback_number" in forbidden:
                 return _take_callback_message(
                     reason="callback number was requested once but remains unavailable",
                     forbidden=forbidden,
@@ -155,7 +155,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
                 tool_calls_allowed=False,
                 question_required=True,
             )
-        if "callback_confirmation" in state.asked_slots:
+        if "callback_confirmation" in forbidden:
             return _take_callback_message(
                 reason="caller ID callback confirmation was requested once but remains unavailable",
                 forbidden=forbidden,
@@ -275,6 +275,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
 
 def _forbidden_slots(state: IntakeState) -> set[str]:
     forbidden = set(state.asked_slots)
+    forbidden.update(state.known_askable_slots())
 
     if state.service_action != ServiceAction.UNKNOWN:
         forbidden.add("service_action")

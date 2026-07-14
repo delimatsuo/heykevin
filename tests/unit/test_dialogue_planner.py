@@ -229,6 +229,49 @@ def test_planner_does_not_ask_for_known_urgency():
     assert "urgency" in action.forbidden_slots
 
 
+def test_planner_does_not_ask_for_known_job_complexity_fact():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.urgency = Urgency.ROUTINE
+    state.known_facts = ["job_complexity:existing fixture already removed"]
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.OFFER_CALLBACK_OR_SCHEDULING
+    assert action.allowed_slots == ("callback_preference",)
+    assert "job_complexity" in action.forbidden_slots
+    assert "urgency" in action.forbidden_slots
+
+
+def test_planner_does_not_reask_known_callback_slots():
+    number_state = IntakeState.new(call_sid="CA_test")
+    number_state.intent = Intent.CALLBACK
+    number_state.callback_intent = CallbackIntent.REQUESTED
+    number_state.known_facts = ["callback_number:provided"]
+
+    number_action = plan_next_action(number_state)
+
+    assert number_action.name == ActionName.TAKE_MESSAGE
+    assert number_action.allowed_slots == ()
+    assert "callback_number" in number_action.forbidden_slots
+
+    confirmation_state = IntakeState.new(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+    )
+    confirmation_state.intent = Intent.CALLBACK
+    confirmation_state.callback_intent = CallbackIntent.REQUESTED
+    confirmation_state.known_facts = ["callback_confirmation:recorded"]
+
+    confirmation_action = plan_next_action(confirmation_state)
+
+    assert confirmation_action.name == ActionName.TAKE_MESSAGE
+    assert confirmation_action.allowed_slots == ()
+    assert "callback_confirmation" in confirmation_action.forbidden_slots
+
+
 def test_planner_does_not_repeat_required_address_question():
     state = IntakeState.new(call_sid="CA_test")
     state.intent = Intent.SCHEDULING

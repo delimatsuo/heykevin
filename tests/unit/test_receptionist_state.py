@@ -143,6 +143,22 @@ def test_intake_state_records_asked_slots_without_duplicates():
     assert restored.asked_slots == {"service_action", "callback_number"}
 
 
+def test_intake_state_derives_canonical_askable_slots_from_known_facts():
+    state = IntakeState.new(call_sid="CA_test")
+    state.known_facts = [
+        "job_complexity:existing fixture already removed",
+        "callback_intent:declined",
+        "urgency:",
+        "unstructured note without a slot",
+        "unsupported_slot:value",
+    ]
+
+    assert state.known_askable_slots() == {
+        "job_complexity",
+        "callback_preference",
+    }
+
+
 def test_intake_state_log_dict_uses_last_four_only():
     state = IntakeState.new(
         call_sid="CA_test",

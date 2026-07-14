@@ -324,6 +324,48 @@ def test_replay_rejects_duplicate_slot_annotations():
     assert result.violation_codes == ("fixture_schema_invalid",)
 
 
+def test_replay_rejects_interrupted_terminal_annotation_outside_allowed_slots():
+    scenario = {
+        "scenario": "interrupted_terminal_annotation_is_forbidden",
+        "initial_state": {
+            **IntakeState.new(call_sid="CA_redacted").to_dict(),
+            "intent": "callback",
+            "service_object": "faucet",
+            "service_action": "repair",
+            "callback_intent": "accepted",
+            "callback_confirmation": "confirmed",
+        },
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "That is correct.",
+                "observation": {},
+                "expect": {"action_name": "wrap_up"},
+            },
+            {
+                "speaker": "assistant",
+                "text": "The business will call you back.",
+                "interrupted": True,
+                "observed": {"asked_slots": ["urgency"]},
+            },
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+    report = evaluate_replay_suite(
+        [scenario],
+        thresholds=ReplaySuiteThresholds(
+            min_scenarios=1,
+            min_assistant_turns=1,
+            min_interrupted_assistant_turns=1,
+        ),
+    )
+
+    assert result.violation_codes == ("assistant_forbidden_slot",)
+    assert report["status"] == "fail"
+    assert report["structured_contract_status"] == "fail"
+
+
 def test_replay_requires_a_structured_caller_observation():
     scenario = {
         "scenario": "text_is_not_an_observation",

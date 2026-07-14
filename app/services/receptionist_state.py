@@ -7,6 +7,25 @@ from enum import Enum
 from typing import Any, Iterable
 
 
+ASKABLE_SLOTS = frozenset(
+    {
+        "caller_name",
+        "service_action",
+        "service_object",
+        "callback_number",
+        "callback_confirmation",
+        "callback_preference",
+        "service_address",
+        "job_complexity",
+        "urgency",
+        "safety_location",
+    }
+)
+_KNOWN_FACT_SLOT_ALIASES = {
+    "callback_intent": "callback_preference",
+}
+
+
 class IntakePhase(str, Enum):
     GREETING = "greeting"
     UNDERSTAND_REQUEST = "understand_request"
@@ -360,6 +379,17 @@ class IntakeState:
     def mark_slot_asked(self, slot: str) -> None:
         if slot:
             self.asked_slots.add(slot)
+
+    def known_askable_slots(self) -> set[str]:
+        slots: set[str] = set()
+        for fact in self.known_facts:
+            slot, separator, value = fact.partition(":")
+            if not separator or not value.strip():
+                continue
+            askable_slot = _KNOWN_FACT_SLOT_ALIASES.get(slot.strip(), slot.strip())
+            if askable_slot in ASKABLE_SLOTS:
+                slots.add(askable_slot)
+        return slots
 
     def _replace_known_slot(self, slot: str, value: str) -> None:
         prefix = f"{slot}:"

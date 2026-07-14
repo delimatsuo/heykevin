@@ -19,6 +19,7 @@ from app.services.instruction_composer import (
     compose_turn_instructions,
 )
 from app.services.receptionist_state import (
+    ASKABLE_SLOTS,
     CallbackConfirmation,
     CallbackIntent,
     CallerObservation,
@@ -96,20 +97,6 @@ EXPECTATION_FIELDS = (
     | EXPECTATION_SLOT_LIST_FIELDS
     | EXPECTATION_TEXT_LIST_FIELDS
     | EXPECTATION_INTEGER_FIELDS
-)
-KNOWN_SLOTS = frozenset(
-    {
-        "caller_name",
-        "service_action",
-        "service_object",
-        "callback_number",
-        "callback_confirmation",
-        "callback_preference",
-        "service_address",
-        "job_complexity",
-        "urgency",
-        "safety_location",
-    }
 )
 TIMING_FIELD_NAMES = frozenset(
     {
@@ -463,7 +450,7 @@ def _validate_slot_list(
     if (
         not _is_string_list(value)
         or len(value) != len(set(value))
-        or any(slot not in KNOWN_SLOTS for slot in value)
+        or any(slot not in ASKABLE_SLOTS for slot in value)
     ):
         violations.append(
             _violation(index, "fixture_schema_invalid", f"{field_name} contains invalid slots")
@@ -891,10 +878,9 @@ def _check_assistant_output(
                 )
             )
 
-    if action.question_required:
-        for slot in asked_slots:
-            if slot not in action.allowed_slots:
-                violations.append(_violation(index, "assistant_forbidden_slot", str(slot)))
+    for slot in asked_slots:
+        if slot not in action.allowed_slots:
+            violations.append(_violation(index, "assistant_forbidden_slot", str(slot)))
 
     if turn.get("tool_calls") and not action.tool_calls_allowed:
         violations.append(

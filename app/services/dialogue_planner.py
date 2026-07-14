@@ -248,10 +248,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
             question_required=True,
         )
 
-    if (
-        state.callback_intent == CallbackIntent.NONE
-        and "callback_preference" not in state.asked_slots
-    ):
+    if state.callback_intent == CallbackIntent.NONE and "callback_preference" not in forbidden:
         return NextAction(
             name=ActionName.OFFER_CALLBACK_OR_SCHEDULING,
             reason="supported intake details are complete; offer a follow-up option",

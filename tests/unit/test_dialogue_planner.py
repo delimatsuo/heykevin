@@ -4,6 +4,7 @@ import pytest
 
 from app.services.dialogue_planner import ActionName, NextAction, plan_next_action
 from app.services.receptionist_state import (
+    ASKABLE_SLOTS,
     AddressNeed,
     CallerObservation,
     CallbackConfirmation,
@@ -270,6 +271,46 @@ def test_planner_does_not_reask_known_callback_slots():
     assert confirmation_action.name == ActionName.TAKE_MESSAGE
     assert confirmation_action.allowed_slots == ()
     assert "callback_confirmation" in confirmation_action.forbidden_slots
+
+
+@pytest.mark.parametrize(
+    "known_fact",
+    [
+        "callback_preference:declined",
+        "callback_intent:declined",
+    ],
+)
+def test_planner_does_not_reoffer_known_callback_preference(known_fact: str):
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.urgency = Urgency.ROUTINE
+    state.mark_slot_asked("job_complexity")
+    state.known_facts = [known_fact]
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.WRAP_UP
+    assert action.allowed_slots == ()
+    assert "callback_preference" in action.forbidden_slots
+
+
+@pytest.mark.parametrize("known_slot", sorted(ASKABLE_SLOTS))
+def test_planner_never_allows_a_canonical_known_slot(known_slot: str):
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.urgency = Urgency.ROUTINE
+    state.mark_slot_asked("job_complexity")
+    state.known_facts = [f"{known_slot}:known"]
+
+    action = plan_next_action(state)
+
+    assert known_slot in action.forbidden_slots
+    assert known_slot not in action.allowed_slots
+    assert set(action.allowed_slots).isdisjoint(action.forbidden_slots)
 
 
 def test_planner_does_not_repeat_required_address_question():

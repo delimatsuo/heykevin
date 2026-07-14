@@ -334,5 +334,34 @@
         "observed": {"asked_slots": ["callback_preference"]}
       }
     ]
+  },
+  {
+    "scenario": "known_callback_intent_alias_is_not_reoffered",
+    "policy": {"max_questions": 1, "max_words": 40},
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "intent": "service_request",
+      "service_object": "faucet",
+      "service_action": "repair",
+      "urgency": "routine",
+      "asked_slots": ["job_complexity"],
+      "known_facts": ["callback_intent:declined"]
+    },
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "I do not need a callback.",
+        "observation": {},
+        "expect": {
+          "action_name": "wrap_up",
+          "forbidden_slots": ["callback_preference", "urgency"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Understood. The business has your repair details.",
+        "observed": {"asked_slots": []}
+      }
+    ]
   }
 ]

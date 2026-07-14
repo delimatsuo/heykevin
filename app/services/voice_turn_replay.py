@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+import base64
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
@@ -11,7 +12,7 @@ from pathlib import Path
 import random
 import re
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 import audioop
 
 from app.utils.audio import mulaw_to_pcm16k
@@ -20,6 +21,68 @@ from app.utils.audio import mulaw_to_pcm16k
 AUTOMATIC_ARM = "automatic"
 MANUAL_ARM = "manual"
 VALID_ARMS = {AUTOMATIC_ARM, MANUAL_ARM}
+DEVELOPER_PROVIDER = "developer"
+VERTEX_PROVIDER = "vertex"
+VALID_PROVIDERS = {DEVELOPER_PROVIDER, VERTEX_PROVIDER}
+DEVELOPER_MODEL = "gemini-3.1-flash-live-preview"
+VERTEX_MODEL = "gemini-live-2.5-flash-native-audio"
+VERTEX_LOCATION = "us-central1"
+COLD_SINGLE_TURN_SCOPE = "cold_single_turn"
+PERSISTENT_MULTI_TURN_SCOPE = "persistent_multi_turn"
+AUTOMATIC_LATENCY_P95_LIMIT_MS = 1_500
+AUTOMATIC_LATENCY_MAX_LIMIT_MS = 2_500
+PRACTICAL_EQUIVALENCE_P95_MS = 100
+PRACTICAL_EQUIVALENCE_MAX_MS = 250
+QUALIFICATION_SEEDS = frozenset({29, 41})
+PERSISTENT_MATRIX_MIN_ATTEMPTS_PER_ARM = 30
+PERSISTENT_MATRIX_REQUIRED_GATES = frozenset(
+    {
+        "minimum_automatic_attempts",
+        "minimum_manual_attempts",
+        "minimum_paired_attempts",
+        "paired_coverage",
+        "automatic_completion_rate",
+        "manual_completion_rate",
+        "automatic_latency_coverage",
+        "manual_latency_coverage",
+        "manual_activity_end_latency_coverage",
+        "manual_premature_responses",
+        "manual_interruption_events",
+        "automatic_errors",
+        "manual_errors",
+        "automatic_latency_p95_ms",
+        "automatic_latency_max_ms",
+        "manual_latency_p95_ms",
+        "manual_latency_max_ms",
+    }
+)
+APPROVED_CONNECTION_SMOKE_MANIFEST_SHA256 = "".join(
+    (
+        "ae84a042",
+        "8697119b",
+        "c794e70d",
+        "661bfda9",
+        "4e3cbc7f",
+        "c5f39628",
+        "3b72e299",
+        "95790e5c",
+    )
+)
+APPROVED_CONNECTION_SMOKE_CORPUS_SHA256 = "".join(
+    (
+        "b0c23e5a",
+        "964427d7",
+        "e5119391",
+        "3c760e39",
+        "143d957a",
+        "0660e9fe",
+        "8ae3ad47",
+        "ea515636",
+    )
+)
+# A persistent matrix cannot execute until its reviewed corpus is committed here.
+APPROVED_PERSISTENT_MATRIX_MANIFEST_SHA256: str | None = None
+APPROVED_PERSISTENT_MATRIX_CORPUS_SHA256: str | None = None
 SAFE_ERROR_CODES = {
     "first_audio_timeout",
     "provider_closed_abnormal",
@@ -38,6 +101,7 @@ SAFE_ERROR_CODES = {
     "turn_complete_timeout",
 }
 MODEL_PATTERN = re.compile(r"gemini-[a-z0-9][a-z0-9.-]*")
+PROJECT_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +176,8 @@ class VoiceTurnBenchmarkThresholds:
     max_manual_premature_responses: int = 0
     max_manual_interruption_events: int = 0
     max_errors: int = 0
+    automatic_latency_p95_ms: int = AUTOMATIC_LATENCY_P95_LIMIT_MS
+    automatic_latency_max_ms: int = AUTOMATIC_LATENCY_MAX_LIMIT_MS
     manual_latency_p95_ms: int = 1_500
     manual_latency_max_ms: int = 2_500
 
@@ -134,9 +200,7 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
             raise ValueError("sources must be a non-empty object")
         sources = {}
         for source_id, raw_source in raw_sources.items():
-            if not isinstance(source_id, str) or not re.fullmatch(
-                r"[a-z0-9_]+", source_id
-            ):
+            if not isinstance(source_id, str) or not re.fullmatch(r"[a-z0-9_]+", source_id):
                 raise ValueError("source id must be a safe identifier")
             if not isinstance(raw_source, dict):
                 raise ValueError("each source must be an object")
@@ -191,9 +255,7 @@ def load_voice_turn_cases(path: str | Path) -> tuple[VoiceTurnReplayCase, ...]:
             not isinstance(frame_pattern, list)
             or not frame_pattern
             or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value not in {10, 20, 30}
+                isinstance(value, bool) or not isinstance(value, int) or value not in {10, 20, 30}
                 for value in frame_pattern
             )
         ):
@@ -309,18 +371,12 @@ def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:
         noise_seed=case.noise_seed,
     )
     source_samples = len(transformed) // 2
-    source_start_sample = round(
-        case.source_speech_start_ms * case.source_sample_rate_hz / 1_000
-    )
-    source_end_sample = round(
-        case.source_speech_end_ms * case.source_sample_rate_hz / 1_000
-    )
+    source_start_sample = round(case.source_speech_start_ms * case.source_sample_rate_hz / 1_000)
+    source_end_sample = round(case.source_speech_end_ms * case.source_sample_rate_hz / 1_000)
     if source_end_sample > source_samples:
         raise ValueError("speech boundary exceeds source duration")
 
-    inter_silence_samples = (
-        case.inter_repeat_silence_ms * case.source_sample_rate_hz // 1_000
-    )
+    inter_silence_samples = case.inter_repeat_silence_ms * case.source_sample_rate_hz // 1_000
     inter_silence = b"\x00\x00" * inter_silence_samples
     parts = []
     for repetition in range(case.repetitions):
@@ -329,9 +385,7 @@ def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:
         parts.append(transformed)
     rendered_pcm = b"".join(parts)
 
-    final_offset_samples = (case.repetitions - 1) * (
-        source_samples + inter_silence_samples
-    )
+    final_offset_samples = (case.repetitions - 1) * (source_samples + inter_silence_samples)
     final_speech_end_sample = final_offset_samples + source_end_sample
     required_end_sample = final_speech_end_sample + (
         case.post_speech_silence_ms * case.source_sample_rate_hz // 1_000
@@ -349,9 +403,7 @@ def render_voice_turn_case(case: VoiceTurnReplayCase) -> RenderedVoiceTurn:
     mulaw8 = audioop.lin2ulaw(rendered_pcm, 2)
     duration_ms = len(mulaw8) // samples_per_ms
     speech_start_ms = round(source_start_sample * 1_000 / case.source_sample_rate_hz)
-    speech_end_ms = round(
-        final_speech_end_sample * 1_000 / case.source_sample_rate_hz
-    )
+    speech_end_ms = round(final_speech_end_sample * 1_000 / case.source_sample_rate_hz)
     return RenderedVoiceTurn(
         mulaw8=mulaw8,
         sample_rate_hz=16_000,
@@ -376,9 +428,7 @@ def build_replay_inputs(
     position = 0
     pattern_index = 0
     while position < len(rendered.mulaw8):
-        chunk_ms = rendered.frame_pattern_ms[
-            pattern_index % len(rendered.frame_pattern_ms)
-        ]
+        chunk_ms = rendered.frame_pattern_ms[pattern_index % len(rendered.frame_pattern_ms)]
         pattern_index += 1
         chunk_bytes = chunk_ms * 8
         chunk = rendered.mulaw8[position : position + chunk_bytes]
@@ -433,21 +483,31 @@ def build_paired_schedule(
     return tuple(schedule)
 
 
-def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
+def build_gemini_setup_message(
+    model: str,
+    *,
+    arm: str,
+    provider: str = DEVELOPER_PROVIDER,
+    project: str | None = None,
+    location: str | None = None,
+) -> dict[str, Any]:
     """Build provider setup for one explicit non-latest replay model ID."""
     _validate_arm(arm)
-    if (
-        not MODEL_PATTERN.fullmatch(model)
-        or "latest" in model
-        or model.endswith("-exp")
-    ):
+    _validate_provider(provider)
+    if not MODEL_PATTERN.fullmatch(model) or "latest" in model or model.endswith("-exp"):
         raise ValueError("an explicit non-latest Gemini model ID is required")
 
-    thinking_config = (
-        {"thinkingLevel": "minimal"}
-        if model.startswith("gemini-3")
-        else {"thinkingBudget": 0}
-    )
+    setup_model = f"models/{model}"
+    if provider == VERTEX_PROVIDER:
+        if (
+            model != VERTEX_MODEL
+            or not project
+            or not PROJECT_PATTERN.fullmatch(project)
+            or location != VERTEX_LOCATION
+        ):
+            raise ValueError("Vertex replay requires the precommitted model and scope")
+        setup_model = f"projects/{project}/locations/{location}/publishers/google/models/{model}"
+
     automatic_detection = (
         {"disabled": True}
         if arm == MANUAL_ARM
@@ -459,27 +519,30 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
             "silenceDurationMs": 500,
         }
     )
+    generation_config: dict[str, Any] = {
+        "responseModalities": ["AUDIO"],
+        "maxOutputTokens": 120,
+        "temperature": 0.4,
+        "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
+    }
+    if provider == DEVELOPER_PROVIDER:
+        generation_config["thinkingConfig"] = (
+            {"thinkingLevel": "minimal"} if model.startswith("gemini-3") else {"thinkingBudget": 0}
+        )
+
     return {
         "setup": {
-            "model": f"models/{model}",
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "maxOutputTokens": 120,
-                "temperature": 0.4,
-                "thinkingConfig": thinking_config,
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": "Puck"}
-                    }
-                },
-            },
+            "model": setup_model,
+            "generationConfig": generation_config,
             "systemInstruction": {
-                "parts": [{
-                    "text": (
-                        "You are a concise receptionist. Respond to the caller "
-                        "in one short sentence."
-                    )
-                }]
+                "parts": [
+                    {
+                        "text": (
+                            "You are a concise receptionist. Respond to the caller "
+                            "in one short sentence."
+                        )
+                    }
+                ]
             },
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
@@ -490,6 +553,37 @@ def build_gemini_setup_message(model: str, *, arm: str) -> dict[str, Any]:
             },
         }
     }
+
+
+def build_gemini_audio_message(
+    audio: bytes,
+    *,
+    provider: str,
+) -> dict[str, Any]:
+    """Serialize one public-fixture PCM chunk for the selected provider."""
+    _validate_provider(provider)
+    blob = {
+        "data": base64.b64encode(audio).decode("ascii"),
+        "mimeType": "audio/pcm;rate=16000",
+    }
+    if provider == VERTEX_PROVIDER:
+        realtime_input = {"mediaChunks": [blob]}
+    else:
+        realtime_input = {"audio": blob}
+    return {"realtimeInput": realtime_input}
+
+
+def build_gemini_activity_message(kind: str) -> dict[str, Any]:
+    """Serialize an explicit manual activity boundary."""
+    fields = {
+        "activity_start": "activityStart",
+        "activity_end": "activityEnd",
+    }
+    try:
+        field = fields[kind]
+    except KeyError as exc:
+        raise ValueError("unsupported activity event") from exc
+    return {"realtimeInput": {field: {}}}
 
 
 def evaluate_voice_turn_benchmark(
@@ -510,10 +604,7 @@ def evaluate_voice_turn_benchmark(
         pair_arms.setdefault((item.case_index, item.trial), set()).add(item.arm)
     paired_attempts = sum(arms == VALID_ARMS for arms in pair_arms.values())
 
-    diagnostics = {
-        arm: _arm_diagnostics(grouped[arm])
-        for arm in (AUTOMATIC_ARM, MANUAL_ARM)
-    }
+    diagnostics = {arm: _arm_diagnostics(grouped[arm]) for arm in (AUTOMATIC_ARM, MANUAL_ARM)}
     automatic = diagnostics[AUTOMATIC_ARM]
     manual = diagnostics[MANUAL_ARM]
     automatic_attempts = len(grouped[AUTOMATIC_ARM])
@@ -574,22 +665,19 @@ def evaluate_voice_turn_benchmark(
         ),
         _gate(
             "manual_activity_end_latency_coverage",
-            _activity_latency_coverage(grouped[MANUAL_ARM])
-            >= limits.latency_coverage,
+            _activity_latency_coverage(grouped[MANUAL_ARM]) >= limits.latency_coverage,
             round(_activity_latency_coverage(grouped[MANUAL_ARM]), 4),
             f">= {limits.latency_coverage}",
         ),
         _gate(
             "manual_premature_responses",
-            manual["premature_responses"]
-            <= limits.max_manual_premature_responses,
+            manual["premature_responses"] <= limits.max_manual_premature_responses,
             manual["premature_responses"],
             f"<= {limits.max_manual_premature_responses}",
         ),
         _gate(
             "manual_interruption_events",
-            manual["interruption_events"]
-            <= limits.max_manual_interruption_events,
+            manual["interruption_events"] <= limits.max_manual_interruption_events,
             manual["interruption_events"],
             f"<= {limits.max_manual_interruption_events}",
         ),
@@ -604,6 +692,24 @@ def evaluate_voice_turn_benchmark(
             manual["errors"] <= limits.max_errors,
             manual["errors"],
             f"<= {limits.max_errors}",
+        ),
+        _gate(
+            "automatic_latency_p95_ms",
+            _at_most(
+                automatic["speech_end_to_first_audio_p95_ms"],
+                limits.automatic_latency_p95_ms,
+            ),
+            automatic["speech_end_to_first_audio_p95_ms"],
+            f"<= {limits.automatic_latency_p95_ms}",
+        ),
+        _gate(
+            "automatic_latency_max_ms",
+            _at_most(
+                automatic["speech_end_to_first_audio_max_ms"],
+                limits.automatic_latency_max_ms,
+            ),
+            automatic["speech_end_to_first_audio_max_ms"],
+            f"<= {limits.automatic_latency_max_ms}",
         ),
         _gate(
             "manual_latency_p95_ms",
@@ -657,6 +763,286 @@ def _transform_pcm16(
     return samples.tobytes()
 
 
+def evaluate_gemini_provider_matrix(
+    reports: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate immutable-corpus, persistent-session evidence only."""
+    approved_manifest_sha256, approved_corpus_sha256 = _approved_persistent_matrix_identity()
+    all_reports = list(reports)
+    expected_keys = {
+        (provider, seed) for provider in VALID_PROVIDERS for seed in QUALIFICATION_SEEDS
+    }
+    if len(all_reports) != len(expected_keys):
+        raise ValueError("provider matrix requires both providers and seeds")
+
+    expected_models = {
+        DEVELOPER_PROVIDER: DEVELOPER_MODEL,
+        VERTEX_PROVIDER: VERTEX_MODEL,
+    }
+    entries: dict[tuple[str, int], dict[str, Any]] = {}
+    corpus_identities: set[tuple[str, str]] = set()
+    for report in all_reports:
+        if not isinstance(report, Mapping):
+            raise ValueError("provider matrix report must be an object")
+        configuration = report.get("configuration")
+        diagnostics = report.get("diagnostics")
+        if not isinstance(configuration, Mapping) or not isinstance(diagnostics, Mapping):
+            raise ValueError("provider matrix report is incomplete")
+        provider = configuration.get("provider")
+        seed = configuration.get("seed")
+        model = configuration.get("model")
+        if provider not in VALID_PROVIDERS or model != expected_models[provider]:
+            raise ValueError("provider matrix contains an unapproved treatment")
+        if seed not in QUALIFICATION_SEEDS:
+            raise ValueError("provider matrix contains an unapproved seed")
+        key = (provider, seed)
+        if key in entries:
+            raise ValueError("provider matrix contains a duplicate run")
+
+        manifest_sha256 = configuration.get("manifest_sha256")
+        corpus_sha256 = configuration.get("corpus_sha256")
+        if not _is_sha256(manifest_sha256) or not _is_sha256(corpus_sha256):
+            raise ValueError("provider matrix corpus identity is invalid")
+        if manifest_sha256 != approved_manifest_sha256 or corpus_sha256 != approved_corpus_sha256:
+            raise ValueError("provider matrix must use the approved matrix corpus")
+        if configuration.get("session_scope") != PERSISTENT_MULTI_TURN_SCOPE:
+            raise ValueError("provider matrix requires persistent multi-turn evidence")
+        if report.get("release_authorized") is not False:
+            raise ValueError("provider matrix reports cannot authorize release")
+        corpus_identities.add((manifest_sha256, corpus_sha256))
+
+        automatic = diagnostics.get("automatic")
+        if not isinstance(automatic, Mapping):
+            raise ValueError("provider matrix automatic diagnostics are missing")
+        benchmark_eligible = _persistent_benchmark_eligible(
+            report,
+            diagnostics,
+        )
+        session_eligible = _persistent_session_eligible(diagnostics.get("session"))
+        p95_ms = _required_nonnegative_int(automatic.get("speech_end_to_first_audio_p95_ms"))
+        max_ms = _required_nonnegative_int(automatic.get("speech_end_to_first_audio_max_ms"))
+        status = report.get("status")
+        if status not in {"pass", "fail"}:
+            raise ValueError("provider matrix status is invalid")
+        latency_eligible = _at_most(
+            p95_ms,
+            AUTOMATIC_LATENCY_P95_LIMIT_MS,
+        ) and _at_most(
+            max_ms,
+            AUTOMATIC_LATENCY_MAX_LIMIT_MS,
+        )
+        entries[key] = {
+            "passed": (
+                status == "pass" and benchmark_eligible and latency_eligible and session_eligible
+            ),
+            "p95_ms": p95_ms,
+            "max_ms": max_ms,
+            "benchmark_eligible": benchmark_eligible,
+            "session_eligible": session_eligible,
+        }
+
+    if set(entries) != expected_keys:
+        raise ValueError("provider matrix requires both providers and seeds")
+    if len(corpus_identities) != 1:
+        raise ValueError("provider matrix must use one corpus identity")
+
+    summaries = {}
+    for provider in sorted(VALID_PROVIDERS):
+        provider_entries = {seed: entries[(provider, seed)] for seed in sorted(QUALIFICATION_SEEDS)}
+        failed_seeds = [seed for seed, entry in provider_entries.items() if not entry["passed"]]
+        p95_values = [
+            entry["p95_ms"] for entry in provider_entries.values() if entry["p95_ms"] is not None
+        ]
+        max_values = [
+            entry["max_ms"] for entry in provider_entries.values() if entry["max_ms"] is not None
+        ]
+        summaries[provider] = {
+            "model": expected_models[provider],
+            "evidence_eligible": not failed_seeds,
+            "failed_seeds": failed_seeds,
+            "persistent_benchmark_qualified": all(
+                entry["benchmark_eligible"] for entry in provider_entries.values()
+            ),
+            "persistent_session_qualified": all(
+                entry["session_eligible"] for entry in provider_entries.values()
+            ),
+            "worst_automatic_speech_end_to_first_audio_p95_ms": (
+                max(p95_values) if p95_values else None
+            ),
+            "worst_automatic_speech_end_to_first_audio_max_ms": (
+                max(max_values) if max_values else None
+            ),
+        }
+
+    qualified = [
+        provider for provider, summary in summaries.items() if summary["evidence_eligible"]
+    ]
+    practical_equivalence = {
+        "p95_margin_ms": PRACTICAL_EQUIVALENCE_P95_MS,
+        "max_margin_ms": PRACTICAL_EQUIVALENCE_MAX_MS,
+        "observed_p95_delta_ms": None,
+        "observed_max_delta_ms": None,
+        "within_margin": None,
+    }
+    if not qualified:
+        status = "fail"
+        decision = "no_provider_eligible"
+    elif len(qualified) == 1:
+        status = "pass"
+        decision = "one_provider_eligible"
+    else:
+        status = "pass"
+        decision = "both_providers_eligible"
+        developer = summaries[DEVELOPER_PROVIDER]
+        vertex = summaries[VERTEX_PROVIDER]
+        p95_delta = abs(
+            developer["worst_automatic_speech_end_to_first_audio_p95_ms"]
+            - vertex["worst_automatic_speech_end_to_first_audio_p95_ms"]
+        )
+        max_delta = abs(
+            developer["worst_automatic_speech_end_to_first_audio_max_ms"]
+            - vertex["worst_automatic_speech_end_to_first_audio_max_ms"]
+        )
+        practical_equivalence.update(
+            {
+                "observed_p95_delta_ms": p95_delta,
+                "observed_max_delta_ms": max_delta,
+                "within_margin": (
+                    p95_delta <= PRACTICAL_EQUIVALENCE_P95_MS
+                    and max_delta <= PRACTICAL_EQUIVALENCE_MAX_MS
+                ),
+            }
+        )
+
+    manifest_sha256, corpus_sha256 = corpus_identities.pop()
+    return {
+        "status": status,
+        "decision": decision,
+        "decision_scope": "offline_evidence_only",
+        "release_authorized": False,
+        "selection_authorized": False,
+        "eligible_providers": qualified,
+        "practical_equivalence": practical_equivalence,
+        "manifest_sha256": manifest_sha256,
+        "corpus_sha256": corpus_sha256,
+        "providers": summaries,
+    }
+
+
+def _approved_persistent_matrix_identity() -> tuple[str, str]:
+    manifest_sha256 = APPROVED_PERSISTENT_MATRIX_MANIFEST_SHA256
+    corpus_sha256 = APPROVED_PERSISTENT_MATRIX_CORPUS_SHA256
+    if not (_is_sha256(manifest_sha256) and _is_sha256(corpus_sha256)):
+        raise ValueError("persistent matrix corpus is not committed")
+    if (
+        manifest_sha256 == APPROVED_CONNECTION_SMOKE_MANIFEST_SHA256
+        and corpus_sha256 == APPROVED_CONNECTION_SMOKE_CORPUS_SHA256
+    ):
+        raise ValueError("connection smoke corpus cannot support provider matrix")
+    return manifest_sha256, corpus_sha256
+
+
+def _persistent_benchmark_eligible(
+    report: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> bool:
+    sample = report.get("sample")
+    if not isinstance(sample, Mapping):
+        raise ValueError("provider matrix benchmark sample is missing")
+    attempts = _required_nonnegative_int(sample.get("attempts"))
+    automatic_attempts = _required_nonnegative_int(sample.get("automatic_attempts"))
+    manual_attempts = _required_nonnegative_int(sample.get("manual_attempts"))
+    paired_attempts = _required_nonnegative_int(sample.get("paired_attempts"))
+    if attempts != automatic_attempts + manual_attempts:
+        raise ValueError("provider matrix benchmark attempt total is invalid")
+    if paired_attempts > min(automatic_attempts, manual_attempts):
+        raise ValueError("provider matrix benchmark paired count is invalid")
+
+    automatic = diagnostics.get("automatic")
+    manual = diagnostics.get("manual")
+    if not isinstance(automatic, Mapping) or not isinstance(manual, Mapping):
+        raise ValueError("provider matrix arm diagnostics are missing")
+    automatic_eligible = _persistent_arm_eligible(
+        automatic,
+        attempts=automatic_attempts,
+        require_activity=False,
+    )
+    manual_eligible = _persistent_arm_eligible(
+        manual,
+        attempts=manual_attempts,
+        require_activity=True,
+    )
+    gates_eligible = _persistent_gates_eligible(report.get("gates"))
+    full_coverage = (
+        automatic_attempts >= PERSISTENT_MATRIX_MIN_ATTEMPTS_PER_ARM
+        and manual_attempts >= PERSISTENT_MATRIX_MIN_ATTEMPTS_PER_ARM
+        and paired_attempts == automatic_attempts == manual_attempts
+    )
+    return full_coverage and automatic_eligible and manual_eligible and gates_eligible
+
+
+def _persistent_arm_eligible(
+    diagnostics: Mapping[str, Any],
+    *,
+    attempts: int,
+    require_activity: bool,
+) -> bool:
+    completed_turns = _required_nonnegative_int(diagnostics.get("completed_turns"))
+    completion_rate = _required_rate(diagnostics.get("completion_rate"))
+    premature_responses = _required_nonnegative_int(diagnostics.get("premature_responses"))
+    interruption_events = _required_nonnegative_int(diagnostics.get("interruption_events"))
+    errors = _required_nonnegative_int(diagnostics.get("errors"))
+    error_counts = _required_error_counts(
+        diagnostics.get("error_counts"),
+        errors=errors,
+    )
+    speech_p95 = _required_nonnegative_int(diagnostics.get("speech_end_to_first_audio_p95_ms"))
+    speech_max = _required_nonnegative_int(diagnostics.get("speech_end_to_first_audio_max_ms"))
+    if completed_turns > attempts or errors > attempts:
+        raise ValueError("provider matrix arm diagnostics exceed attempts")
+    if speech_p95 > speech_max:
+        raise ValueError("provider matrix speech latency is invalid")
+    if require_activity:
+        activity_p95 = _required_nonnegative_int(
+            diagnostics.get("activity_end_to_first_audio_p95_ms")
+        )
+        activity_max = _required_nonnegative_int(
+            diagnostics.get("activity_end_to_first_audio_max_ms")
+        )
+        if activity_p95 > activity_max:
+            raise ValueError("provider matrix activity latency is invalid")
+    expected_completion_rate = round(completed_turns / attempts, 4) if attempts else 0.0
+    if completion_rate != expected_completion_rate:
+        raise ValueError("provider matrix completion rate is invalid")
+    return (
+        completed_turns == attempts
+        and completion_rate == 1.0
+        and errors == 0
+        and not error_counts
+        and (not require_activity or (premature_responses == 0 and interruption_events == 0))
+    )
+
+
+def _persistent_gates_eligible(gates: object) -> bool:
+    if not isinstance(gates, list):
+        raise ValueError("provider matrix benchmark gates are missing")
+    passed_by_name: dict[str, bool] = {}
+    for gate in gates:
+        if not isinstance(gate, Mapping):
+            raise ValueError("provider matrix benchmark gate is invalid")
+        name = gate.get("name")
+        passed = gate.get("passed")
+        if not isinstance(name, str) or not isinstance(passed, bool):
+            raise ValueError("provider matrix benchmark gate is invalid")
+        if name in passed_by_name:
+            raise ValueError("provider matrix benchmark gate is duplicated")
+        passed_by_name[name] = passed
+    missing = PERSISTENT_MATRIX_REQUIRED_GATES - set(passed_by_name)
+    if missing:
+        raise ValueError("provider matrix benchmark gates are incomplete")
+    return all(passed_by_name[name] for name in PERSISTENT_MATRIX_REQUIRED_GATES)
+
+
 def _arm_diagnostics(
     observations: list[VoiceTurnObservation],
 ) -> dict[str, int | float | None]:
@@ -684,9 +1070,7 @@ def _arm_diagnostics(
         ),
         "interruption_events": sum(item.interruption_events for item in observations),
         "speech_end_to_first_audio_p95_ms": _percentile(speech_latencies, 0.95),
-        "speech_end_to_first_audio_max_ms": max(speech_latencies)
-        if speech_latencies
-        else None,
+        "speech_end_to_first_audio_max_ms": max(speech_latencies) if speech_latencies else None,
         "activity_end_to_first_audio_p95_ms": _percentile(
             activity_latencies,
             0.95,
@@ -695,11 +1079,13 @@ def _arm_diagnostics(
         if activity_latencies
         else None,
         "errors": sum(item.error is not None for item in observations),
-        "error_counts": dict(sorted(Counter(
-            _safe_error_code(item.error)
-            for item in observations
-            if item.error is not None
-        ).items())),
+        "error_counts": dict(
+            sorted(
+                Counter(
+                    _safe_error_code(item.error) for item in observations if item.error is not None
+                ).items()
+            )
+        ),
     }
 
 
@@ -763,11 +1149,7 @@ def _bounded_int(
     maximum: int,
 ) -> int:
     value = data.get(key, default)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not minimum <= value <= maximum
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ValueError(f"{key} must be between {minimum} and {maximum}")
     return value
 
@@ -775,6 +1157,82 @@ def _bounded_int(
 def _validate_arm(arm: str) -> None:
     if arm not in VALID_ARMS:
         raise ValueError("arm must be automatic or manual")
+
+
+def _validate_provider(provider: str) -> None:
+    if provider not in VALID_PROVIDERS:
+        raise ValueError("provider must be developer or vertex")
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("provider matrix value must be a nonnegative integer")
+    return value
+
+
+def _required_nonnegative_int(value: object) -> int:
+    result = _optional_nonnegative_int(value)
+    if result is None:
+        raise ValueError("provider matrix value is missing")
+    return result
+
+
+def _required_rate(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+        raise ValueError("provider matrix completion rate is invalid")
+    return float(value)
+
+
+def _required_error_counts(
+    value: object,
+    *,
+    errors: int,
+) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise ValueError("provider matrix error counts are missing")
+    counts: dict[str, int] = {}
+    for code, count in value.items():
+        if (
+            not isinstance(code, str)
+            or (code not in SAFE_ERROR_CODES and code != "other")
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            raise ValueError("provider matrix error counts are invalid")
+        counts[code] = count
+    if sum(counts.values()) != errors:
+        raise ValueError("provider matrix error counts do not match errors")
+    return counts
+
+
+def _persistent_session_eligible(session: object) -> bool:
+    if not isinstance(session, Mapping):
+        raise ValueError("provider matrix session diagnostics are missing")
+    values = {
+        key: _optional_nonnegative_int(session.get(key))
+        for key in (
+            "sessions",
+            "minimum_turns_per_session",
+            "reconnect_attempts",
+            "reconnect_failures",
+            "context_continuity_failures",
+        )
+    }
+    if any(value is None for value in values.values()):
+        raise ValueError("provider matrix session diagnostics are invalid")
+    return (
+        values["sessions"] > 0
+        and values["minimum_turns_per_session"] >= 3
+        and values["reconnect_failures"] == 0
+        and values["context_continuity_failures"] == 0
+    )
 
 
 def _safe_error_code(error: str) -> str:

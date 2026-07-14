@@ -231,6 +231,35 @@
         "speaker": "assistant",
         "text": "What problem are you noticing with the water heater?",
         "observed": {"asked_slots": ["job_complexity"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "It is making a rattling sound.",
+        "observation": {},
+        "expect": {
+          "action_name": "offer_callback_or_scheduling",
+          "allowed_slots": ["callback_preference"],
+          "forbidden_slots": ["urgency"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Would you like a callback or help with scheduling?",
+        "observed": {"asked_slots": ["callback_preference"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "No, thank you.",
+        "observation": {"callback_intent": "declined"},
+        "expect": {
+          "action_name": "wrap_up",
+          "forbidden_slots": ["callback_number", "callback_preference", "urgency"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Understood. The business has your inspection details.",
+        "observed": {"asked_slots": []}
       }
     ]
   },

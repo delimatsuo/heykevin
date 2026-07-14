@@ -239,7 +239,7 @@ def test_replay_never_claims_plain_text_semantic_validation(
             {
                 "speaker": "assistant",
                 "text": assistant_text,
-                "observed": {"asked_slots": []},
+                "observed": {"asked_slots": ["job_complexity"]},
             },
         ],
     }
@@ -257,6 +257,71 @@ def test_replay_never_claims_plain_text_semantic_validation(
     assert report["structured_contract_status"] == "pass"
     assert report["assistant_text_semantics_validated"] is False
     assert report["plain_text_acceptance_status"] == "review_required"
+
+
+def test_replay_fails_required_question_with_empty_slot_annotation():
+    scenario = {
+        "scenario": "required_question_annotation_is_empty",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need a faucet repair.",
+                "observation": {
+                    "intent": "service_request",
+                    "service_object": "faucet",
+                    "service_action": "repair",
+                },
+            },
+            {
+                "speaker": "assistant",
+                "text": "What problem are you seeing?",
+                "observed": {"asked_slots": []},
+            },
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+    report = evaluate_replay_suite(
+        [scenario],
+        thresholds=ReplaySuiteThresholds(
+            min_scenarios=1,
+            min_assistant_turns=1,
+            min_interrupted_assistant_turns=0,
+        ),
+    )
+
+    assert result.violation_codes == ("assistant_required_question_missing",)
+    assert report["status"] == "fail"
+    assert report["structured_contract_status"] == "fail"
+    assert report["violation_counts"] == {"assistant_required_question_missing": 1}
+
+
+def test_replay_rejects_duplicate_slot_annotations():
+    scenario = {
+        "scenario": "duplicate_assistant_slot_annotation",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need a faucet repair.",
+                "observation": {
+                    "intent": "service_request",
+                    "service_object": "faucet",
+                    "service_action": "repair",
+                },
+            },
+            {
+                "speaker": "assistant",
+                "text": "What problem are you seeing?",
+                "observed": {"asked_slots": ["job_complexity", "job_complexity"]},
+            },
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+
+    assert result.violation_codes == ("fixture_schema_invalid",)
 
 
 def test_replay_requires_a_structured_caller_observation():
@@ -469,4 +534,7 @@ def test_replay_suite_gate_fails_small_or_violating_sample():
         "minimum_interrupted_assistant_turns",
         "structured_and_syntactic_violations",
     } <= failed
-    assert report["violation_counts"] == {"assistant_question_count": 1}
+    assert report["violation_counts"] == {
+        "assistant_question_count": 1,
+        "assistant_required_question_missing": 1,
+    }

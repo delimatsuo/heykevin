@@ -11,6 +11,7 @@ from app.services.receptionist_state import (
     IntakeState,
     Intent,
     ServiceAction,
+    Urgency,
 )
 
 
@@ -211,6 +212,21 @@ def test_planner_answers_pricing_without_question_when_intake_is_exhausted():
     assert action.allowed_slots == ()
     assert action.question_required is False
     assert "without another question" in action.max_spoken_shape
+
+
+def test_planner_does_not_ask_for_known_urgency():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.urgency = Urgency.ROUTINE
+    state.mark_slot_asked("job_complexity")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.OFFER_CALLBACK_OR_SCHEDULING
+    assert action.allowed_slots == ("callback_preference",)
+    assert "urgency" in action.forbidden_slots
 
 
 def test_planner_does_not_repeat_required_address_question():

@@ -460,7 +460,11 @@ def _validate_slot_list(
     value: object,
     field_name: str,
 ) -> None:
-    if not _is_string_list(value) or any(slot not in KNOWN_SLOTS for slot in value):
+    if (
+        not _is_string_list(value)
+        or len(value) != len(set(value))
+        or any(slot not in KNOWN_SLOTS for slot in value)
+    ):
         violations.append(
             _violation(index, "fixture_schema_invalid", f"{field_name} contains invalid slots")
         )
@@ -831,6 +835,7 @@ def _check_assistant_output(
     violations: list[str] = []
     expect = turn.get("expect") or {}
     observed = turn.get("observed") or {}
+    asked_slots = tuple(observed.get("asked_slots") or ())
 
     max_words = int(expect.get("max_words", policy.get("max_words", 40)))
     if len(text.split()) > max_words:
@@ -860,9 +865,36 @@ def _check_assistant_output(
     if PHONE_PATTERN.search(text) or CALLER_ID_SENTINEL_PATTERN.search(text):
         violations.append(_violation(index, "assistant_full_phone", "phone-shaped output"))
 
-    for slot in observed.get("asked_slots") or []:
-        if slot not in action.allowed_slots:
-            violations.append(_violation(index, "assistant_forbidden_slot", str(slot)))
+    if not turn.get("interrupted"):
+        if action.question_required and not asked_slots:
+            violations.append(
+                _violation(
+                    index,
+                    "assistant_required_question_missing",
+                    "question-required action has no annotated slot",
+                )
+            )
+        elif action.question_required and len(asked_slots) != 1:
+            violations.append(
+                _violation(
+                    index,
+                    "assistant_question_annotation_cardinality",
+                    f"expected one annotated slot, got {len(asked_slots)}",
+                )
+            )
+        elif not action.question_required and asked_slots:
+            violations.append(
+                _violation(
+                    index,
+                    "assistant_unexpected_question_annotation",
+                    "non-question action has annotated slots",
+                )
+            )
+
+    if action.question_required:
+        for slot in asked_slots:
+            if slot not in action.allowed_slots:
+                violations.append(_violation(index, "assistant_forbidden_slot", str(slot)))
 
     if turn.get("tool_calls") and not action.tool_calls_allowed:
         violations.append(

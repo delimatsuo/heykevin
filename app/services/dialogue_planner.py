@@ -280,6 +280,8 @@ def _forbidden_slots(state: IntakeState) -> set[str]:
         forbidden.add("service_action")
     if state.service_object:
         forbidden.add("service_object")
+    if state.urgency != Urgency.UNKNOWN:
+        forbidden.add("urgency")
     if state.caller_identity.name and state.caller_identity.confidence >= 0.8:
         forbidden.add("caller_name")
     if state.callback_intent in {

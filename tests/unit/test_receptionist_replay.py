@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import app.services.receptionist_replay as replay_module
 from app.services.receptionist_replay import (
     ReplaySuiteThresholds,
     evaluate_replay_suite,
@@ -16,6 +17,51 @@ from scripts.evaluate_receptionist_replays import load_scenarios
 
 
 FIXTURE_DIR = Path("tests/fixtures/receptionist_replays")
+
+
+def test_run_replay_converts_validator_exception_to_schema_violation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def raise_validation_error(_scenario: object) -> tuple[str, ...]:
+        raise TypeError("synthetic validator failure")
+
+    monkeypatch.setattr(
+        replay_module,
+        "validate_replay_scenario",
+        raise_validation_error,
+    )
+
+    result = run_replay_scenario({})
+
+    assert result.violation_codes == ("fixture_schema_invalid",)
+    assert result.steps == ()
+
+
+def test_replay_suite_converts_validator_exception_to_failed_report(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def raise_validation_error(_scenario: object) -> tuple[str, ...]:
+        raise TypeError("synthetic validator failure")
+
+    monkeypatch.setattr(
+        replay_module,
+        "validate_replay_scenario",
+        raise_validation_error,
+    )
+
+    report = evaluate_replay_suite(
+        [{}],
+        thresholds=ReplaySuiteThresholds(
+            min_scenarios=0,
+            min_assistant_turns=0,
+            min_interrupted_assistant_turns=0,
+        ),
+    )
+
+    assert report["status"] == "fail"
+    assert report["structured_contract_status"] == "fail"
+    assert report["sample"]["scenarios"] == 0
+    assert report["violation_counts"] == {"fixture_schema_invalid": 1}
 
 
 @pytest.mark.parametrize(

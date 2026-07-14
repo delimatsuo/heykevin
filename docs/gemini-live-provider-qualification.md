@@ -6,9 +6,10 @@ Date: 2026-07-13
 
 No candidate is authorized by this qualification work for a provider-selection
 change, staging release, production release, or new customer-audio exposure. No
-provider-selection matrix can run or evaluate today: no reviewed
-persistent-session corpus is committed. The executable commands produce
-diagnostic evidence only, never a provider decision.
+provider-selection matrix can run or evaluate today: no persistent runner,
+canonical matrix artifact schema, evaluator, or reviewed persistent-session
+corpus is shipped. The executable commands produce diagnostic evidence only,
+never a provider decision.
 
 This work does not change `app/services/gemini_pipeline.py`,
 `app/services/voice_pipeline.py`, the active model, staging, or production.
@@ -66,9 +67,9 @@ and bounded WebSocket-close behavior. It cannot establish call stability,
 context continuity, reconnect handling, tool behavior, or receptionist quality.
 
 The lower-level benchmark is also permanently labeled `offline_diagnostic_only`
-and `cold_single_turn`. It cannot emit a qualification scope. Its automatic-VAD
-p95 and maximum limits are pinned at 1,500 ms and 2,500 ms in code; no command
-line or programmatic argument can relax them.
+and `cold_single_turn`. It cannot emit a qualification scope. Both VAD arms have
+p95 and maximum limits pinned at 1,500 ms and 2,500 ms in code; no command-line
+or programmatic argument can relax them.
 
 ### 2. Persistent Multi-Turn Qualification
 
@@ -86,31 +87,23 @@ The current FLEURS fixture has two independent sources and several deterministic
 transforms. It is suitable for smoke diagnostics, not a matrix-grade production
 language or speaker claim.
 
-### 3. Offline Matrix Evaluation
+### 3. Persistent Matrix Deferred
 
-The pure evaluator is deliberately disabled today. It has no caller-supplied
-corpus-hash parameters and fails closed until a reviewed persistent matrix corpus
-and its exact manifest/corpus SHA-256 values are committed in the source. This
-prevents an arbitrary report caller from declaring a corpus approved.
+No persistent matrix executor or evaluator exists in this change. Matrix support
+must not be activated by adding corpus hashes to the smoke tooling or by feeding
+aggregate benchmark reports into a separate script.
 
-Once that corpus and a persistent-session runner are separately shipped, the
-evaluator will accept only `persistent_multi_turn` reports with both providers,
-both fixed seeds, the committed corpus identity, full paired coverage, at least
-30 attempts per arm, zero raw errors, complete arm diagnostics, and every
-benchmark gate passed. It independently checks those fields instead of trusting
-the report status. Cold smoke reports cannot enter the evaluator.
+The runner, evidence artifact schema, and evaluator must land together in a
+separately reviewed change. That design must provide canonical, payload-safe pair
+and session evidence from which the evaluator can independently recompute arm
+coverage, latency coverage, latency limits, errors, reconnect outcomes, and
+context continuity. It must validate the evidence against a committed matrix
+corpus and reject internally inconsistent counts or caller-supplied eligibility
+flags. Aggregate status or gate booleans are not authoritative evidence.
 
-Its outcomes are deliberately limited:
-
-- `no_provider_eligible` when neither provider meets every evidence gate;
-- `one_provider_eligible` when only one does; or
-- `both_providers_eligible` when both do.
-
-These are evidence outcomes only. The evaluator has no candidate output and
-always sets `selection_authorized: false` and `release_authorized: false`.
-When both are evidence-eligible, it reports whether their worst-seed automatic
-latency is within a precommitted practical-equivalence margin of 100 ms p95 and
-250 ms maximum. A human review still owns the production choice.
+Any future matrix output must remain evidence-only, omit a candidate selection,
+and set both `selection_authorized: false` and `release_authorized: false`. A
+human review still owns provider selection and every release decision.
 
 ## Privacy And Operational Controls
 

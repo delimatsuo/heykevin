@@ -259,6 +259,15 @@ Corrections that cannot be resolved from the current turn and this context retur
 observation. Callback confirmation or rejection is accepted only when
 `callback_confirmation_pending` is true. `callback_number_present` proves that a
 number exists; it does not prove which question an ambiguous confirmation answers.
+Confirmation additionally requires `callback_number_present`, but it does not
+require the caller to repeat digits in the confirmation turn.
+
+A newly extracted `callback_phone_last_four` is accepted only when the same four
+digits are grounded in the current normalized caller transcript. Grounding uses
+Unicode decimal-digit normalization and bounded separator removal only; it does not
+add language-specific number-word tables. If the current transcript does not
+contain a matching numeric candidate, return no new last-four observation and let
+the planner clarify later.
 
 Local epoch, turn ID, fixture labels, and report metadata are never sent to the
 provider. The adapter reattaches local metadata only after transport returns.
@@ -292,9 +301,10 @@ Reject the entire observation rather than partially applying it when:
 - text is over-length or contains controls;
 - a phone value is not exactly four digits;
 - identity confirmation lacks `identity_present` or a pending confirmation;
-- callback confirmation or rejection lacks `callback_confirmation_pending`, or
-  confirmation lacks `callback_number_present` or a same-turn synthetic last-four
-  value;
+- callback confirmation or rejection lacks `callback_confirmation_pending`;
+- callback confirmation lacks `callback_number_present`;
+- a newly extracted callback last-four is not grounded by matching normalized
+  digits in the current caller turn;
 - urgency/emergency or callback values are inconsistent;
 - a service object copies unrelated instructions or contact/location content;
 - local epoch/turn state is stale, duplicate, cancelled, or closed.
@@ -335,6 +345,8 @@ At minimum:
 - indistinguishable-history collision pairs where identical caller text such as
   "yes" follows identity confirmation, callback confirmation, or no pending
   question;
+- callback confirmation where pending context and an existing number allow "yes"
+  without repeated digits, plus grounded and ungrounded new last-four pairs;
 - identity confirmation/denial with valid and invalid context;
 - in-scope, out-of-scope, and unclear requests;
 - ambiguous service action/object combinations;
@@ -560,7 +572,10 @@ plan and record a no-go ADR.
 **Tests first:** one generated schema source, exact context allowlist, no generic
 state serialization, bounds, language semantics, every semantic rejection,
 indistinguishable-history collision pairs for pending confirmations, deterministic
-envelopes, raw-data exclusion, and nonauthorization metadata.
+acceptance of pending callback confirmation without repeated digits, rejection when
+pending or existing-number context is absent, grounded last-four acceptance,
+ungrounded last-four rejection, deterministic envelopes, raw-data exclusion, and
+nonauthorization metadata.
 
 ### Task 2: Build semantic fixtures and evaluator
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate redacted receptionist replay fixtures and print aggregate JSON only."""
+"""Evaluate the redacted offline receptionist policy contract."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from app.services.receptionist_replay import (  # noqa: E402
     ReplaySuiteThresholds,
     evaluate_replay_suite,
     load_replay_fixture,
+    offline_policy_report_metadata,
 )
 
 
@@ -57,6 +58,7 @@ def main() -> int:
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         report = {
+            **offline_policy_report_metadata(),
             "status": "fail",
             "error": "fixture_load_failed",
         }

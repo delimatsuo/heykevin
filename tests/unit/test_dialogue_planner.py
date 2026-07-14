@@ -3,6 +3,7 @@
 from app.services.dialogue_planner import ActionName, plan_next_action
 from app.services.receptionist_state import (
     AddressNeed,
+    CallerObservation,
     CallbackConfirmation,
     CallbackIntent,
     IntakeState,
@@ -19,7 +20,13 @@ def test_planner_blocks_duplicate_service_action_and_object_questions():
         caller_source="customer_memory",
         caller_confidence=0.92,
     )
-    state.observe_caller_turn("How much to replace a toilet?")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.PRICING_QUESTION,
+            service_object="toilet",
+            service_action=ServiceAction.REPLACE,
+        )
+    )
 
     action = plan_next_action(state)
 
@@ -47,7 +54,12 @@ def test_planner_forbids_slots_already_asked_even_when_unknown():
 
 def test_planner_confirms_callback_last_four_only_after_callback_intent():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
-    state.observe_caller_turn("Can someone call me back today?")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.CALLBACK,
+            callback_intent=CallbackIntent.REQUESTED,
+        )
+    )
 
     action = plan_next_action(state)
 
@@ -60,7 +72,12 @@ def test_planner_confirms_callback_last_four_only_after_callback_intent():
 
 def test_planner_allows_callback_number_after_intent_when_caller_id_missing():
     state = IntakeState.new(call_sid="CA_test")
-    state.observe_caller_turn("Please call me back.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.CALLBACK,
+            callback_intent=CallbackIntent.REQUESTED,
+        )
+    )
 
     action = plan_next_action(state)
 
@@ -102,7 +119,13 @@ def test_planner_confirms_known_memory_instead_of_reasking_name():
         caller_confidence=0.94,
         memory_refs_used=("scoped-memory-ref-1",),
     )
-    state.observe_caller_turn("I need help with a faucet repair.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="faucet",
+            service_action=ServiceAction.REPAIR,
+        )
+    )
 
     action = plan_next_action(state)
 

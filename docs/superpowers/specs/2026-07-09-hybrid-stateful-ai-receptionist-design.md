@@ -4,6 +4,16 @@ Date: 2026-07-09
 Status: Approved strategy for implementation planning
 Scope: Hey Kevin business-mode AI receptionist architecture
 
+## Implementation Amendment (2026-07-14)
+
+The first offline controller slice uses typed, provider-neutral
+`CallerObservation` values as the only input to `IntakeState`. Raw transcript
+interpretation and language-specific phrase matching are not controller
+responsibilities. Replay fixtures provide structured observations explicitly,
+and both caller observations and assistant text are labeled as fixture-authored.
+Fixture timing can never be presented as live or measured evidence. Offline
+reports are nonauthorizing policy-contract results.
+
 ## Goal
 
 Make Kevin behave like a resilient AI receptionist by moving control out of accumulated prompt rules and into Hey Kevin-owned memory, call state, planning, tool orchestration, and evaluations.
@@ -86,7 +96,7 @@ Core fields:
 - `memory_refs_used`: IDs of business or customer memory facts used in the call
 - `side_effects_allowed`: whether Jobber writes, SMS, transfer, or scheduling actions are allowed
 
-`IntakeState` should be updated from transcript events and selected tool results. It should not depend on the model remembering prior turns correctly.
+`IntakeState` should be updated from provider-neutral structured observations and selected tool results. Transcript interpretation belongs behind an adapter boundary, and state should not depend on the model remembering prior turns correctly.
 
 ### 3. MemoryStore
 

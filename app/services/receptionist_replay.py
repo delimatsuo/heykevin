@@ -17,7 +17,16 @@ from app.services.instruction_composer import (
     SECRET_MARKER_PATTERN,
     compose_turn_instructions,
 )
-from app.services.receptionist_state import IntakeState
+from app.services.receptionist_state import CallerObservation, IntakeState
+
+
+UNSUPPORTED_FIXTURE_TIMING_POLICY_KEYS = frozenset(
+    {
+        "require_metrics",
+        "max_response_first_audio_ms",
+        "max_generated_audio_ms",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -27,8 +36,6 @@ class ReplayStepResult:
     next_action: NextAction
     instructions: str
     interrupted: bool = False
-    response_first_audio_ms: int | None = None
-    generated_audio_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -52,7 +59,6 @@ class ReplaySuiteThresholds:
     min_scenarios: int = 10
     min_assistant_turns: int = 10
     min_interrupted_assistant_turns: int = 1
-    metric_coverage: float = 1.0
     max_policy_violations: int = 0
 
 
@@ -61,12 +67,26 @@ def load_replay_fixture(path: str | Path) -> Any:
         return json.load(handle)
 
 
+def offline_policy_report_metadata() -> dict[str, object]:
+    return {
+        "decision_scope": "offline_policy_contract",
+        "caller_observation_source": "fixture",
+        "assistant_output_source": "fixture",
+        "latency_measured": False,
+        "live_behavior_validated": False,
+        "release_authorized": False,
+    }
+
+
 def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
     state = IntakeState.from_dict(scenario["initial_state"])
     private_memory_lines = tuple(scenario.get("private_memory_lines") or [])
     policy = dict(scenario.get("policy") or {})
     steps: list[ReplayStepResult] = []
-    violations: list[str] = []
+    violations = [
+        _violation(-1, "fixture_timing_policy_unsupported", key)
+        for key in sorted(UNSUPPORTED_FIXTURE_TIMING_POLICY_KEYS.intersection(policy))
+    ]
     pending_action: NextAction | None = None
     pending_instructions = ""
 
@@ -74,7 +94,22 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
         speaker = str(turn.get("speaker") or "")
         text = str(turn.get("text") or "")
         if speaker == "caller":
-            state.observe_caller_turn(text)
+            observation_data = turn.get("observation")
+            if not isinstance(observation_data, dict):
+                violations.append(
+                    _violation(
+                        index, "caller_observation_missing", "structured observation required"
+                    )
+                )
+            else:
+                try:
+                    state.apply_caller_observation(CallerObservation.from_dict(observation_data))
+                except (TypeError, ValueError):
+                    violations.append(
+                        _violation(
+                            index, "caller_observation_invalid", "invalid structured observation"
+                        )
+                    )
             action = plan_next_action(state)
             instructions = compose_turn_instructions(
                 state,
@@ -90,9 +125,7 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
                 action,
                 private_memory_lines=private_memory_lines,
             )
-            violations.extend(
-                _check_assistant_output(index, turn, action, text, policy)
-            )
+            violations.extend(_check_assistant_output(index, turn, action, text, policy))
             if not turn.get("interrupted"):
                 observed = turn.get("observed") or {}
                 for slot in observed.get("asked_slots") or []:
@@ -108,7 +141,6 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
             )
             violations.append(_violation(index, "unsupported_speaker", speaker or "missing"))
 
-        metrics = turn.get("metrics") or {}
         steps.append(
             ReplayStepResult(
                 speaker=speaker,
@@ -116,8 +148,6 @@ def run_replay_scenario(scenario: dict[str, Any]) -> ReplayResult:
                 next_action=action,
                 instructions=instructions,
                 interrupted=bool(turn.get("interrupted") or False),
-                response_first_audio_ms=_optional_int(metrics.get("response_first_audio_ms")),
-                generated_audio_ms=_optional_int(metrics.get("generated_audio_ms")),
             )
         )
         violations.extend(
@@ -143,11 +173,10 @@ def evaluate_replay_suite(
     *,
     thresholds: ReplaySuiteThresholds | None = None,
 ) -> dict[str, Any]:
-    """Return aggregate replay certification results without fixture payloads."""
+    """Return aggregate offline policy-contract results without fixture payloads."""
     limits = thresholds or ReplaySuiteThresholds()
     assistant_turns = 0
     interrupted_assistant_turns = 0
-    assistant_turns_with_metrics = 0
     violation_counts: Counter[str] = Counter()
 
     for scenario in scenarios:
@@ -158,12 +187,6 @@ def evaluate_replay_suite(
             assistant_turns += 1
             if turn.get("interrupted"):
                 interrupted_assistant_turns += 1
-            metrics = turn.get("metrics") or {}
-            if (
-                _optional_int(metrics.get("response_first_audio_ms")) is not None
-                and _optional_int(metrics.get("generated_audio_ms")) is not None
-            ):
-                assistant_turns_with_metrics += 1
 
         try:
             result = run_replay_scenario(scenario)
@@ -172,11 +195,6 @@ def evaluate_replay_suite(
             continue
         violation_counts.update(result.violation_codes)
 
-    metric_coverage = (
-        assistant_turns_with_metrics / assistant_turns
-        if assistant_turns
-        else 0.0
-    )
     violation_total = sum(violation_counts.values())
     gates = [
         _suite_gate(
@@ -198,12 +216,6 @@ def evaluate_replay_suite(
             f">= {limits.min_interrupted_assistant_turns}",
         ),
         _suite_gate(
-            "assistant_metric_coverage",
-            metric_coverage >= limits.metric_coverage,
-            round(metric_coverage, 4),
-            f">= {limits.metric_coverage}",
-        ),
-        _suite_gate(
             "policy_violations",
             violation_total <= limits.max_policy_violations,
             violation_total,
@@ -212,12 +224,12 @@ def evaluate_replay_suite(
     ]
 
     return {
+        **offline_policy_report_metadata(),
         "status": "pass" if all(gate["passed"] for gate in gates) else "fail",
         "sample": {
             "scenarios": len(scenarios),
             "assistant_turns": assistant_turns,
             "interrupted_assistant_turns": interrupted_assistant_turns,
-            "metric_coverage": round(metric_coverage, 4),
         },
         "violation_counts": dict(sorted(violation_counts.items())),
         "gates": gates,
@@ -246,62 +258,76 @@ def _check_expectations(
 
     expected_action = expect.get("service_action")
     if "service_action" in expect and state.service_action.value != expected_action:
-        violations.append(_violation(
-            index,
-            "expected_service_action",
-            f"expected {expected_action}, got {state.service_action.value}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_service_action",
+                f"expected {expected_action}, got {state.service_action.value}",
+            )
+        )
 
     expected_intent = expect.get("intent")
     if expected_intent and state.intent.value != expected_intent:
-        violations.append(_violation(
-            index,
-            "expected_intent",
-            f"expected {expected_intent}, got {state.intent.value}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_intent",
+                f"expected {expected_intent}, got {state.intent.value}",
+            )
+        )
 
     expected_urgency = expect.get("urgency")
     if expected_urgency and state.urgency.value != expected_urgency:
-        violations.append(_violation(
-            index,
-            "expected_urgency",
-            f"expected {expected_urgency}, got {state.urgency.value}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_urgency",
+                f"expected {expected_urgency}, got {state.urgency.value}",
+            )
+        )
 
     expected_callback_intent = expect.get("callback_intent")
     if expected_callback_intent and state.callback_intent.value != expected_callback_intent:
-        violations.append(_violation(
-            index,
-            "expected_callback_intent",
-            f"expected {expected_callback_intent}, got {state.callback_intent.value}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_callback_intent",
+                f"expected {expected_callback_intent}, got {state.callback_intent.value}",
+            )
+        )
 
     expected_callback_confirmation = expect.get("callback_confirmation")
     if (
         expected_callback_confirmation
         and state.callback_confirmation.value != expected_callback_confirmation
     ):
-        violations.append(_violation(
-            index,
-            "expected_callback_confirmation",
-            f"expected {expected_callback_confirmation}, got {state.callback_confirmation.value}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_callback_confirmation",
+                f"expected {expected_callback_confirmation}, got {state.callback_confirmation.value}",
+            )
+        )
 
     expected_language = expect.get("language")
     if expected_language and state.language != expected_language:
-        violations.append(_violation(
-            index,
-            "expected_language",
-            f"expected {expected_language}, got {state.language}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_language",
+                f"expected {expected_language}, got {state.language}",
+            )
+        )
 
     expected_action_name = expect.get("action_name")
     if expected_action_name and action.name.value != expected_action_name:
-        violations.append(_violation(
-            index,
-            "expected_action_name",
-            f"expected {expected_action_name}, got {action.name.value}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "expected_action_name",
+                f"expected {expected_action_name}, got {action.name.value}",
+            )
+        )
 
     for slot in expect.get("allowed_slots") or []:
         if slot not in action.allowed_slots:
@@ -329,19 +355,23 @@ def _check_expectations(
 
     for required_text in expect.get("instruction_includes") or []:
         if required_text not in instructions:
-            violations.append(_violation(
-                index,
-                "instruction_missing_text",
-                repr(required_text),
-            ))
+            violations.append(
+                _violation(
+                    index,
+                    "instruction_missing_text",
+                    repr(required_text),
+                )
+            )
 
     for forbidden_text in expect.get("instruction_excludes") or []:
         if forbidden_text in instructions:
-            violations.append(_violation(
-                index,
-                "instruction_forbidden_text",
-                repr(forbidden_text),
-            ))
+            violations.append(
+                _violation(
+                    index,
+                    "instruction_forbidden_text",
+                    repr(forbidden_text),
+                )
+            )
 
     for required_text in expect.get("output_includes") or []:
         if required_text not in output_text:
@@ -363,25 +393,37 @@ def _check_assistant_output(
 ) -> list[str]:
     violations: list[str] = []
     expect = turn.get("expect") or {}
-    metrics = turn.get("metrics") or {}
     observed = turn.get("observed") or {}
+
+    if "metrics" in turn:
+        violations.append(
+            _violation(
+                index,
+                "fixture_timing_not_evidence",
+                "fixture timing cannot represent measured latency",
+            )
+        )
 
     max_words = int(expect.get("max_words", policy.get("max_words", 40)))
     if len(text.split()) > max_words:
-        violations.append(_violation(
-            index,
-            "assistant_word_count",
-            f"{len(text.split())} > {max_words}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "assistant_word_count",
+                f"{len(text.split())} > {max_words}",
+            )
+        )
 
     max_questions = int(expect.get("max_questions", policy.get("max_questions", 1)))
     question_count = text.count("?")
     if question_count > max_questions:
-        violations.append(_violation(
-            index,
-            "assistant_question_count",
-            f"{question_count} > {max_questions}",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "assistant_question_count",
+                f"{question_count} > {max_questions}",
+            )
+        )
 
     if PRIVATE_SOURCE_PATTERN.search(text):
         violations.append(_violation(index, "assistant_private_source", "private source label"))
@@ -390,58 +432,20 @@ def _check_assistant_output(
     if PHONE_PATTERN.search(text) or CALLER_ID_SENTINEL_PATTERN.search(text):
         violations.append(_violation(index, "assistant_full_phone", "phone-shaped output"))
 
-    require_metrics = bool(policy.get("require_metrics") or expect.get("require_metrics"))
-    response_first_audio_ms = _optional_int(metrics.get("response_first_audio_ms"))
-    generated_audio_ms = _optional_int(metrics.get("generated_audio_ms"))
-    if require_metrics and response_first_audio_ms is None:
-        violations.append(_violation(index, "response_first_audio_missing", "metric missing"))
-    if require_metrics and generated_audio_ms is None:
-        violations.append(_violation(index, "generated_audio_missing", "metric missing"))
-
-    response_limit = int(
-        expect.get(
-            "max_response_first_audio_ms",
-            policy.get("max_response_first_audio_ms", 1500),
-        )
-    )
-    if response_first_audio_ms is not None and response_first_audio_ms > response_limit:
-        violations.append(_violation(
-            index,
-            "response_first_audio_budget",
-            f"{response_first_audio_ms} > {response_limit}",
-        ))
-
-    generated_limit = int(
-        expect.get(
-            "max_generated_audio_ms",
-            policy.get("max_generated_audio_ms", 6000),
-        )
-    )
-    if generated_audio_ms is not None and generated_audio_ms > generated_limit:
-        violations.append(_violation(
-            index,
-            "generated_audio_budget",
-            f"{generated_audio_ms} > {generated_limit}",
-        ))
-
     for slot in observed.get("asked_slots") or []:
         if slot not in action.allowed_slots:
             violations.append(_violation(index, "assistant_forbidden_slot", str(slot)))
 
     if turn.get("tool_calls") and not action.tool_calls_allowed:
-        violations.append(_violation(
-            index,
-            "assistant_tool_call_forbidden",
-            "tool call emitted while disabled",
-        ))
+        violations.append(
+            _violation(
+                index,
+                "assistant_tool_call_forbidden",
+                "tool call emitted while disabled",
+            )
+        )
 
     return violations
-
-
-def _optional_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return int(value)
 
 
 def _violation(index: int, code: str, detail: str) -> str:

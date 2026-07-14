@@ -31,6 +31,13 @@
     {
       "speaker": "caller",
       "text": "Hi, this is Jonathan. I wanted to know how much to replace a toilet.",
+      "observation": {
+        "language": "en",
+        "identity_confirmed": true,
+        "intent": "pricing_question",
+        "service_object": "toilet",
+        "service_action": "replace"
+      },
       "expect": {
         "service_object": "toilet",
         "service_action": "replace",

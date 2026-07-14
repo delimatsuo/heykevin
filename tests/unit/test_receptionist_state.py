@@ -2,8 +2,11 @@
 
 import json
 
+import pytest
+
 from app.services.receptionist_state import (
     AddressNeed,
+    CallerObservation,
     CallbackConfirmation,
     CallbackIntent,
     IntakePhase,
@@ -12,6 +15,27 @@ from app.services.receptionist_state import (
     ServiceAction,
     Urgency,
 )
+
+
+@pytest.mark.parametrize("language", ["en", "es", "pt-BR", "ja"])
+def test_intake_state_applies_provider_neutral_observations_in_any_language(language: str):
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.apply_caller_observation(
+        CallerObservation(
+            language=language,
+            intent=Intent.SERVICE_REQUEST,
+            service_object="water heater",
+            service_action=ServiceAction.REPAIR,
+            urgency=Urgency.ROUTINE,
+        )
+    )
+
+    assert state.language == language
+    assert state.intent == Intent.SERVICE_REQUEST
+    assert state.service_object == "water heater"
+    assert state.service_action == ServiceAction.REPAIR
+    assert state.urgency == Urgency.ROUTINE
 
 
 def test_intake_state_extracts_known_service_facts_and_redacts_phone():
@@ -24,7 +48,15 @@ def test_intake_state_extracts_known_service_facts_and_redacts_phone():
         memory_refs_used=("scoped-memory-ref-1",),
     )
 
-    state.observe_caller_turn("Hi, this is Jonathan. I wanted to know how much to replace a toilet.")
+    state.apply_caller_observation(
+        CallerObservation(
+            language="en",
+            identity_confirmed=True,
+            intent=Intent.PRICING_QUESTION,
+            service_object="toilet",
+            service_action=ServiceAction.REPLACE,
+        )
+    )
 
     assert state.phase == IntakePhase.UNDERSTAND_REQUEST
     assert state.intent == Intent.PRICING_QUESTION
@@ -51,7 +83,13 @@ def test_intake_state_extracts_known_service_facts_and_redacts_phone():
 def test_intake_state_tracks_callback_and_scheduling_intent():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
 
-    state.observe_caller_turn("Could someone call me back later today to schedule this?")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SCHEDULING,
+            callback_intent=CallbackIntent.REQUESTED,
+            address_need=AddressNeed.MAYBE_LATER,
+        )
+    )
 
     assert state.intent == Intent.SCHEDULING
     assert state.callback_intent == CallbackIntent.REQUESTED
@@ -63,7 +101,12 @@ def test_intake_state_tracks_callback_rejection_and_language():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     state.callback_intent = CallbackIntent.REQUESTED
 
-    state.observe_caller_turn("No, ese no es el numero correcto.")
+    state.apply_caller_observation(
+        CallerObservation(
+            language="es",
+            callback_confirmation=CallbackConfirmation.REJECTED,
+        )
+    )
 
     assert state.callback_confirmation == CallbackConfirmation.REJECTED
     assert state.language == "es"
@@ -92,7 +135,13 @@ def test_intake_state_log_dict_uses_last_four_only():
         caller_confidence=0.92,
         memory_refs_used=("scoped-memory-ref-1",),
     )
-    state.observe_caller_turn("I need a faucet repair.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="faucet",
+            service_action=ServiceAction.REPAIR,
+        )
+    )
 
     redacted = state.redacted_log_dict()
     assert redacted["caller_phone_last_four"] == "8667"
@@ -110,9 +159,21 @@ def test_intake_state_log_dict_uses_last_four_only():
 
 def test_intake_state_correction_replaces_stale_service_facts():
     state = IntakeState.new(call_sid="CA_test")
-    state.observe_caller_turn("I need to replace a toilet.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="toilet",
+            service_action=ServiceAction.REPLACE,
+        )
+    )
 
-    state.observe_caller_turn("Actually, it is the sink, and it needs repair, not replacement.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="sink",
+            service_action=ServiceAction.REPAIR,
+        )
+    )
 
     assert state.service_object == "sink"
     assert state.service_action == ServiceAction.REPAIR
@@ -125,7 +186,13 @@ def test_intake_state_correction_replaces_stale_service_facts():
 def test_intake_state_leaves_conflicting_service_objects_unresolved():
     state = IntakeState.new(call_sid="CA_test")
 
-    state.observe_caller_turn("I need toilet replacement in the sink.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="",
+            service_action=ServiceAction.REPLACE,
+        )
+    )
 
     assert state.service_object == ""
     assert state.service_action == ServiceAction.REPLACE
@@ -135,7 +202,12 @@ def test_intake_state_tracks_callback_confirmation_and_decline():
     confirmed = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     confirmed.callback_intent = CallbackIntent.REQUESTED
 
-    confirmed.observe_caller_turn("Yes, that number works for the callback.")
+    confirmed.apply_caller_observation(
+        CallerObservation(
+            callback_intent=CallbackIntent.ACCEPTED,
+            callback_confirmation=CallbackConfirmation.CONFIRMED,
+        )
+    )
 
     assert confirmed.callback_intent == CallbackIntent.ACCEPTED
     assert confirmed.callback_confirmation == CallbackConfirmation.CONFIRMED
@@ -143,7 +215,12 @@ def test_intake_state_tracks_callback_confirmation_and_decline():
     declined = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     declined.callback_intent = CallbackIntent.REQUESTED
 
-    declined.observe_caller_turn("Actually, I do not need a callback.")
+    declined.apply_caller_observation(
+        CallerObservation(
+            callback_intent=CallbackIntent.DECLINED,
+            callback_confirmation=CallbackConfirmation.REJECTED,
+        )
+    )
 
     assert declined.callback_intent == CallbackIntent.DECLINED
     assert declined.callback_confirmation == CallbackConfirmation.REJECTED
@@ -154,7 +231,12 @@ def test_intake_state_tracks_callback_confirmation_and_decline():
     )
     natural_confirmation.callback_intent = CallbackIntent.REQUESTED
 
-    natural_confirmation.observe_caller_turn("Yes, please call me back at that number.")
+    natural_confirmation.apply_caller_observation(
+        CallerObservation(
+            callback_intent=CallbackIntent.ACCEPTED,
+            callback_confirmation=CallbackConfirmation.CONFIRMED,
+        )
+    )
 
     assert natural_confirmation.callback_intent == CallbackIntent.ACCEPTED
     assert natural_confirmation.callback_confirmation == CallbackConfirmation.CONFIRMED
@@ -162,7 +244,12 @@ def test_intake_state_tracks_callback_confirmation_and_decline():
     natural_decline = IntakeState.new(call_sid="CA_test")
     natural_decline.callback_intent = CallbackIntent.REQUESTED
 
-    natural_decline.observe_caller_turn("Please do not call me back.")
+    natural_decline.apply_caller_observation(
+        CallerObservation(
+            callback_intent=CallbackIntent.DECLINED,
+            callback_confirmation=CallbackConfirmation.REJECTED,
+        )
+    )
 
     assert natural_decline.callback_intent == CallbackIntent.DECLINED
     assert natural_decline.callback_confirmation == CallbackConfirmation.REJECTED
@@ -171,7 +258,14 @@ def test_intake_state_tracks_callback_confirmation_and_decline():
 def test_intake_state_does_not_escalate_explicitly_negated_emergency():
     state = IntakeState.new(call_sid="CA_test")
 
-    state.observe_caller_turn("This is not an emergency, just a routine leaking faucet.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="faucet",
+            service_action=ServiceAction.REPAIR,
+            urgency=Urgency.ROUTINE,
+        )
+    )
 
     assert state.intent == Intent.SERVICE_REQUEST
     assert state.urgency == Urgency.ROUTINE

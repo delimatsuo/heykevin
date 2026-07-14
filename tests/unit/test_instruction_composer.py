@@ -2,7 +2,12 @@
 
 from app.services.dialogue_planner import plan_next_action
 from app.services.instruction_composer import compose_turn_instructions
-from app.services.receptionist_state import IntakeState
+from app.services.receptionist_state import (
+    CallerObservation,
+    IntakeState,
+    Intent,
+    ServiceAction,
+)
 
 
 def test_composer_includes_state_allowed_action_and_forbidden_repeats():
@@ -14,7 +19,13 @@ def test_composer_includes_state_allowed_action_and_forbidden_repeats():
         caller_confidence=0.93,
         memory_refs_used=("scoped-memory-ref-1",),
     )
-    state.observe_caller_turn("How much to replace a toilet?")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.PRICING_QUESTION,
+            service_object="toilet",
+            service_action=ServiceAction.REPLACE,
+        )
+    )
     action = plan_next_action(state)
 
     instructions = compose_turn_instructions(
@@ -44,7 +55,13 @@ def test_composer_includes_state_allowed_action_and_forbidden_repeats():
 
 def test_composer_omits_empty_memory_section():
     state = IntakeState.new(call_sid="CA_test")
-    state.observe_caller_turn("I need a faucet repair.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="faucet",
+            service_action=ServiceAction.REPAIR,
+        )
+    )
     action = plan_next_action(state)
 
     instructions = compose_turn_instructions(state, action)
@@ -56,7 +73,13 @@ def test_composer_omits_empty_memory_section():
 
 def test_composer_sanitizes_private_memory_before_model_context():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
-    state.observe_caller_turn("I need a faucet repair.")
+    state.apply_caller_observation(
+        CallerObservation(
+            intent=Intent.SERVICE_REQUEST,
+            service_object="faucet",
+            service_action=ServiceAction.REPAIR,
+        )
+    )
     action = plan_next_action(state)
 
     instructions = compose_turn_instructions(

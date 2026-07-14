@@ -10,6 +10,27 @@
 
 ---
 
+## Implementation Amendment (2026-07-14)
+
+The implemented offline contract is intentionally stricter than the original task
+snippets below:
+
+- `IntakeState` consumes typed, provider-neutral `CallerObservation` values. It
+  does not interpret transcript text or contain language/service phrase tables.
+- Replay caller turns must include structured observations. Transcript text is
+  retained only as fixture payload for policy assertions.
+- Assistant responses are fixture-authored. Fixture timing is rejected rather
+  than treated as measured latency.
+- Aggregate output is scoped as `offline_policy_contract` and always reports
+  `caller_observation_source: fixture`, `assistant_output_source: fixture`,
+  `latency_measured: false`, `live_behavior_validated: false`, and
+  `release_authorized: false`.
+
+Where the original execution snippets below conflict with this amendment, the
+amendment and current tests are authoritative.
+
+---
+
 ## Pre-Execution Gates
 
 - [ ] **Resolve branch and PR ownership before code work**
@@ -51,11 +72,11 @@ Before live wiring in a later plan, replay output must be reviewed as plain call
 
 ## File Structure
 
-- Create `app/services/receptionist_state.py`: serializable call-scoped intake state, redacted phone handling, deterministic caller-turn fact extraction, asked-slot tracking.
+- Create `app/services/receptionist_state.py`: serializable call-scoped intake state, redacted phone handling, deterministic structured-observation reduction, asked-slot tracking.
 - Create `app/services/dialogue_planner.py`: pure planner that converts `IntakeState` into a `NextAction` with allowed and forbidden slots.
 - Create `app/services/instruction_composer.py`: compact per-turn instruction composer generated from state and planner output.
 - Create `app/services/receptionist_replay.py`: replay helper for transcript/eval fixtures.
-- Create `tests/unit/test_receptionist_state.py`: tests state serialization, redaction, fact extraction, and asked-slot persistence.
+- Create `tests/unit/test_receptionist_state.py`: tests state serialization, redaction, structured fact reduction, and asked-slot persistence.
 - Create `tests/unit/test_dialogue_planner.py`: tests duplicate-slot, callback, address, and known-memory gating.
 - Create `tests/unit/test_instruction_composer.py`: tests compact instructions and sensitive-data exclusion.
 - Create `tests/unit/test_receptionist_replay.py`: tests the known staging failure fixture.

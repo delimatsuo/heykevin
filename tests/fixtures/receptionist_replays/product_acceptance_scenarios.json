@@ -26,6 +26,11 @@
       {
         "speaker": "caller",
         "text": "How much does it cost to replace a faucet?",
+        "observation": {
+          "intent": "pricing_question",
+          "service_object": "faucet",
+          "service_action": "replace"
+        },
         "expect": {
           "service_object": "faucet",
           "service_action": "replace",
@@ -62,6 +67,7 @@
       {
         "speaker": "caller",
         "text": "No, that is not the right number.",
+        "observation": {"callback_confirmation": "rejected"},
         "expect": {
           "action_name": "ask_callback_number",
           "allowed_slots": ["callback_number"],
@@ -97,6 +103,7 @@
       {
         "speaker": "caller",
         "text": "Please call me back.",
+        "observation": {"intent": "callback", "callback_intent": "requested"},
         "expect": {
           "action_name": "ask_callback_number",
           "allowed_slots": ["callback_number"],
@@ -132,6 +139,12 @@
       {
         "speaker": "caller",
         "text": "Hola, necesito precio para reemplazar un bano.",
+        "observation": {
+          "language": "es",
+          "intent": "service_request",
+          "service_object": "",
+          "service_action": "replace"
+        },
         "expect": {
           "language": "es",
           "service_action": "replace",
@@ -169,6 +182,11 @@
       {
         "speaker": "caller",
         "text": "Can you guarantee the exact price to replace a toilet?",
+        "observation": {
+          "intent": "pricing_question",
+          "service_object": "toilet",
+          "service_action": "replace"
+        },
         "expect": {
           "service_object": "toilet",
           "service_action": "replace",

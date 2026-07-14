@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-import re
 from typing import Any, Iterable
 
 
@@ -103,137 +102,140 @@ class CallerIdentity:
         )
 
 
-SERVICE_OBJECT_TERMS = (
-    "toilet",
-    "sink",
-    "faucet",
-    "water heater",
-    "dishwasher",
-    "garbage disposal",
-    "shower",
-    "tub",
-    "drain",
-    "pipe",
-)
+@dataclass(frozen=True)
+class CallerObservation:
+    """Provider-neutral facts extracted from one caller turn."""
 
-SERVICE_ACTION_PATTERNS: tuple[tuple[ServiceAction, tuple[str, ...]], ...] = (
-    (ServiceAction.REPLACE, ("replace", "replacement", "swap out", "upgrade", "reemplazar")),
-    (ServiceAction.REPAIR, ("repair", "fix", "leak", "broken", "not working")),
-    (ServiceAction.INSTALL, ("install", "installation", "new installation", "put in")),
-    (ServiceAction.INSPECT, ("inspect", "look at", "diagnose", "check out")),
-    (ServiceAction.QUOTE, ("quote", "estimate", "pricing", "price", "how much", "cost")),
-    (ServiceAction.MAINTAIN, ("maintain", "maintenance", "service tune")),
-)
+    language: str | None = None
+    identity_confirmed: bool | None = None
+    business_scope: BusinessScope | None = None
+    business_scope_reason: str | None = None
+    intent: Intent | None = None
+    service_object: str | None = None
+    service_action: ServiceAction | None = None
+    urgency: Urgency | None = None
+    callback_intent: CallbackIntent | None = None
+    callback_confirmation: CallbackConfirmation | None = None
+    address_need: AddressNeed | None = None
 
-CALLBACK_REQUEST_PATTERNS = (
-    "call me back",
-    "call back",
-    "get back to me",
-    "reach me",
-    "return my call",
-)
+    def __post_init__(self) -> None:
+        if self.identity_confirmed is not None and not isinstance(self.identity_confirmed, bool):
+            raise TypeError("identity_confirmed must be a boolean")
+        enum_fields = (
+            (self.business_scope, BusinessScope),
+            (self.intent, Intent),
+            (self.service_action, ServiceAction),
+            (self.urgency, Urgency),
+            (self.callback_intent, CallbackIntent),
+            (self.callback_confirmation, CallbackConfirmation),
+            (self.address_need, AddressNeed),
+        )
+        if any(
+            value is not None and not isinstance(value, enum_type)
+            for value, enum_type in enum_fields
+        ):
+            raise TypeError("caller observation enums must use controller enum values")
+        if self.language is not None:
+            object.__setattr__(self, "language", _normalize_language_code(self.language))
+        if self.service_object is not None:
+            object.__setattr__(
+                self,
+                "service_object",
+                _normalize_observation_text(self.service_object, max_length=80),
+            )
+        if self.business_scope_reason is not None:
+            object.__setattr__(
+                self,
+                "business_scope_reason",
+                _normalize_observation_text(self.business_scope_reason, max_length=160),
+            )
 
-SCHEDULING_PATTERNS = (
-    "schedule",
-    "appointment",
-    "book",
-    "come out",
-    "send someone",
-)
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CallerObservation":
+        allowed_fields = {
+            "language",
+            "identity_confirmed",
+            "business_scope",
+            "business_scope_reason",
+            "intent",
+            "service_object",
+            "service_action",
+            "urgency",
+            "callback_intent",
+            "callback_confirmation",
+            "address_need",
+        }
+        if set(data) - allowed_fields:
+            raise ValueError("unknown caller observation field")
 
-EMERGENCY_PATTERNS = (
-    "emergency",
-    "flood",
-    "flooding",
-    "burst pipe",
-    "gas leak",
-    "sewage",
-    "sparking",
-    "smoke",
-    "burning smell",
-)
+        identity_confirmed = data.get("identity_confirmed")
+        if identity_confirmed is not None and not isinstance(identity_confirmed, bool):
+            raise TypeError("identity_confirmed must be a boolean")
 
-SPANISH_PATTERNS = (
-    "hola",
-    "precio",
-    "bano",
-    "numero",
-    "correcto",
-    "llamar",
-)
+        return cls(
+            language=_optional_observation_text(data, "language"),
+            identity_confirmed=identity_confirmed,
+            business_scope=(
+                BusinessScope(data["business_scope"])
+                if data.get("business_scope") is not None
+                else None
+            ),
+            business_scope_reason=_optional_observation_text(data, "business_scope_reason"),
+            intent=Intent(data["intent"]) if data.get("intent") is not None else None,
+            service_object=_optional_observation_text(data, "service_object"),
+            service_action=(
+                ServiceAction(data["service_action"])
+                if data.get("service_action") is not None
+                else None
+            ),
+            urgency=Urgency(data["urgency"]) if data.get("urgency") is not None else None,
+            callback_intent=(
+                CallbackIntent(data["callback_intent"])
+                if data.get("callback_intent") is not None
+                else None
+            ),
+            callback_confirmation=(
+                CallbackConfirmation(data["callback_confirmation"])
+                if data.get("callback_confirmation") is not None
+                else None
+            ),
+            address_need=(
+                AddressNeed(data["address_need"]) if data.get("address_need") is not None else None
+            ),
+        )
 
-CALLBACK_REJECTION_PATTERNS = (
-    "not the right number",
-    "wrong number",
-    "different number",
-    "no es el numero correcto",
-)
 
-CALLBACK_CONFIRMATION_PATTERNS = (
-    "yes, that number",
-    "that number works",
-    "that number is fine",
-    "use that number",
-    "correct number",
-    "call me back at that number",
-)
+def _optional_observation_text(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{key} must be a string")
+    return value
 
-CALLBACK_DECLINE_PATTERNS = (
-    "do not need a callback",
-    "don't need a callback",
-    "do not call me back",
-    "don't call me back",
-    "no callback",
-    "never mind the callback",
-)
 
-NEGATION_SUFFIX_PATTERN = re.compile(
-    r"(?:\bnot|\bno|\bdon't|\bdo not|\binstead of|\brather than)\s+"
-    r"(?:(?:a|an|the)\s+)?$"
-)
+def _normalize_language_code(value: str) -> str:
+    code = value.strip()
+    parts = code.split("-")
+    if (
+        not code
+        or len(code) > 35
+        or any(not part or len(part) > 8 or not part.isalnum() for part in parts)
+    ):
+        raise ValueError("language must be a bounded language tag")
+    return code
+
+
+def _normalize_observation_text(value: str, *, max_length: int) -> str:
+    normalized = value.strip()
+    if len(normalized) > max_length or any(ord(character) < 32 for character in normalized):
+        raise ValueError("observation text is invalid")
+    return normalized
 
 
 def phone_last_four(phone: str) -> str:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return digits[-4:] if len(digits) >= 4 else ""
-
-
-def _contains_any(text: str, patterns: Iterable[str]) -> bool:
-    normalized = text.lower()
-    return any(pattern in normalized for pattern in patterns)
-
-
-def _has_unnegated_pattern(text: str, pattern: str) -> bool:
-    for match in re.finditer(re.escape(pattern), text):
-        prefix = text[max(0, match.start() - 24):match.start()]
-        if not NEGATION_SUFFIX_PATTERN.search(prefix):
-            return True
-    return False
-
-
-def _contains_unnegated_any(text: str, patterns: Iterable[str]) -> bool:
-    return any(_has_unnegated_pattern(text, pattern) for pattern in patterns)
-
-
-def _extract_service_object(text: str) -> str:
-    normalized = text.lower()
-    matches: list[str] = []
-    for term in SERVICE_OBJECT_TERMS:
-        if re.search(rf"\b{re.escape(term)}\b", normalized):
-            matches.append(term)
-    if len(matches) == 1:
-        return matches[0]
-
-    unnegated = [term for term in matches if _has_unnegated_pattern(normalized, term)]
-    return unnegated[0] if len(unnegated) == 1 else ""
-
-
-def _extract_service_action(text: str) -> ServiceAction:
-    normalized = text.lower()
-    for action, patterns in SERVICE_ACTION_PATTERNS:
-        if _contains_unnegated_any(normalized, patterns):
-            return action
-    return ServiceAction.UNKNOWN
 
 
 @dataclass
@@ -280,99 +282,65 @@ class IntakeState:
             memory_refs_used=set(memory_refs_used),
         )
 
-    def observe_caller_turn(self, text: str) -> None:
-        normalized = text.lower()
+    def apply_caller_observation(self, observation: CallerObservation) -> None:
         self.phase = IntakePhase.UNDERSTAND_REQUEST
 
-        if self.caller_identity.name and self.caller_identity.name.lower().split()[0] in normalized:
-            self.caller_identity.confirmed = True
+        if observation.identity_confirmed is not None:
+            self.caller_identity.confirmed = observation.identity_confirmed
+        if observation.language is not None:
+            self.language = observation.language.strip() or "unknown"
+        if observation.business_scope is not None:
+            self.business_scope = observation.business_scope
+        if observation.business_scope_reason is not None:
+            self.business_scope_reason = observation.business_scope_reason.strip()
+        if observation.intent is not None:
+            self.intent = observation.intent
+        if observation.address_need is not None:
+            self.address_need = observation.address_need
 
-        if _contains_any(normalized, SPANISH_PATTERNS):
-            self.language = "es"
-
-        callback_declined = _contains_any(normalized, CALLBACK_DECLINE_PATTERNS)
-        callback_rejected = _contains_any(normalized, CALLBACK_REJECTION_PATTERNS)
-        callback_confirmed = _contains_any(normalized, CALLBACK_CONFIRMATION_PATTERNS)
-        if self.callback_intent in {CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED}:
-            if callback_declined:
-                self.callback_intent = CallbackIntent.DECLINED
-                self.callback_confirmation = CallbackConfirmation.REJECTED
-                self._remember_slot("callback_intent", CallbackIntent.DECLINED.value)
-                self._remember_slot(
-                    "callback_confirmation",
-                    CallbackConfirmation.REJECTED.value,
-                )
-            elif callback_rejected:
-                self.callback_confirmation = CallbackConfirmation.REJECTED
-                self._remember_slot(
-                    "callback_confirmation",
-                    CallbackConfirmation.REJECTED.value,
-                )
-            elif callback_confirmed:
-                self.callback_intent = CallbackIntent.ACCEPTED
-                self.callback_confirmation = CallbackConfirmation.CONFIRMED
-                self._remember_slot("callback_intent", CallbackIntent.ACCEPTED.value)
-                self._remember_slot(
-                    "callback_confirmation",
-                    CallbackConfirmation.CONFIRMED.value,
-                )
-
-        emergency_detected = _contains_unnegated_any(normalized, EMERGENCY_PATTERNS)
-        emergency_mentioned = _contains_any(normalized, EMERGENCY_PATTERNS)
-        if emergency_mentioned and not emergency_detected:
-            self.urgency = Urgency.ROUTINE
-            if self.intent == Intent.EMERGENCY:
-                self.intent = Intent.UNKNOWN
-            self._remember_slot("urgency", Urgency.ROUTINE.value)
-
-        if emergency_detected:
-            self.intent = Intent.EMERGENCY
-            self.urgency = Urgency.EMERGENCY
-            self._remember_slot("urgency", Urgency.EMERGENCY.value)
-        elif _contains_any(normalized, SCHEDULING_PATTERNS):
-            self.intent = Intent.SCHEDULING
-            self.address_need = AddressNeed.MAYBE_LATER
-        elif (
-            _contains_any(normalized, CALLBACK_REQUEST_PATTERNS)
-            and not callback_declined
-            and not callback_confirmed
-        ):
-            self.intent = Intent.CALLBACK
-        elif any(term in normalized for term in ("how much", "cost", "price", "pricing", "estimate", "quote")):
-            self.intent = Intent.PRICING_QUESTION
-        elif _extract_service_object(normalized) or _extract_service_action(normalized) != ServiceAction.UNKNOWN:
-            self.intent = Intent.SERVICE_REQUEST
-
-        if (
-            _contains_any(normalized, CALLBACK_REQUEST_PATTERNS)
-            and not callback_declined
-            and not callback_confirmed
-        ):
-            self.callback_intent = CallbackIntent.REQUESTED
-            self._remember_slot("callback_intent", CallbackIntent.REQUESTED.value)
-
-        service_object = _extract_service_object(normalized)
-        if service_object:
-            self.service_object = service_object
-            self._remember_slot("service_object", service_object)
-
-        service_action = _extract_service_action(normalized)
-        if service_action != ServiceAction.UNKNOWN:
-            self.service_action = service_action
-            self._remember_slot("service_action", service_action.value)
+        if observation.service_object is not None:
+            self.service_object = observation.service_object.strip()
+            self._replace_known_slot("service_object", self.service_object)
+        if observation.service_action is not None:
+            self.service_action = observation.service_action
+            self._replace_known_slot(
+                "service_action",
+                ""
+                if observation.service_action == ServiceAction.UNKNOWN
+                else observation.service_action.value,
+            )
+        if observation.urgency is not None:
+            self.urgency = observation.urgency
+            self._replace_known_slot(
+                "urgency",
+                "" if observation.urgency == Urgency.UNKNOWN else observation.urgency.value,
+            )
+        if observation.callback_intent is not None:
+            self.callback_intent = observation.callback_intent
+            self._replace_known_slot(
+                "callback_intent",
+                ""
+                if observation.callback_intent == CallbackIntent.NONE
+                else observation.callback_intent.value,
+            )
+        if observation.callback_confirmation is not None:
+            self.callback_confirmation = observation.callback_confirmation
+            self._replace_known_slot(
+                "callback_confirmation",
+                ""
+                if observation.callback_confirmation == CallbackConfirmation.UNKNOWN
+                else observation.callback_confirmation.value,
+            )
 
     def mark_slot_asked(self, slot: str) -> None:
         if slot:
             self.asked_slots.add(slot)
 
-    def _remember(self, fact: str) -> None:
-        if fact not in self.known_facts:
-            self.known_facts.append(fact)
-
-    def _remember_slot(self, slot: str, value: str) -> None:
+    def _replace_known_slot(self, slot: str, value: str) -> None:
         prefix = f"{slot}:"
         self.known_facts = [fact for fact in self.known_facts if not fact.startswith(prefix)]
-        self.known_facts.append(f"{prefix}{value}")
+        if value:
+            self.known_facts.append(f"{prefix}{value}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -411,7 +379,9 @@ class IntakeState:
             urgency=Urgency(data.get("urgency") or Urgency.UNKNOWN.value),
             known_facts=list(data.get("known_facts") or []),
             asked_slots=set(data.get("asked_slots") or []),
-            callback_intent=CallbackIntent(data.get("callback_intent") or CallbackIntent.NONE.value),
+            callback_intent=CallbackIntent(
+                data.get("callback_intent") or CallbackIntent.NONE.value
+            ),
             callback_confirmation=CallbackConfirmation(
                 data.get("callback_confirmation") or CallbackConfirmation.UNKNOWN.value
             ),

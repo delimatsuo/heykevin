@@ -85,6 +85,7 @@ def test_provider_runbooks_document_explicit_provider_credentials(path):
     assert "Application Default Credentials" in runbook
     assert '--project "$GCP_PROJECT_ID"' in runbook
     assert "--location us-central1" in runbook
+    assert "It requires `GEMINI_API_KEY`" not in runbook
 
 
 def test_voice_turn_manifest_renders_live_codec_conditions():

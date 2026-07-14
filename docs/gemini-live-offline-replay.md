@@ -11,7 +11,8 @@ deployment workflow, or release decision.
   Twilio codec conditions, builds paired automatic/manual schedules, and
   evaluates aggregate gates.
 - `scripts/benchmark_gemini_turn_detection.py` is an opt-in provider diagnostic.
-  It requires `GEMINI_API_KEY` and an explicit non-latest model ID.
+  It requires an explicit provider and model plus provider-specific credentials:
+  `GEMINI_API_KEY` for Developer or Application Default Credentials for Vertex.
 - `scripts/build_fleurs_voice_fixtures.py` rebuilds the pinned FLEURS fixtures
   into an explicitly supplied directory and fails closed on dependency, source,
   format, or checksum drift.

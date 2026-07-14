@@ -60,7 +60,7 @@ def main() -> int:
                 min_interrupted_assistant_turns=args.min_interrupted_turns,
             ),
         )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, OverflowError, TypeError, ValueError, json.JSONDecodeError):
         report = {
             **offline_policy_report_metadata(),
             "status": "fail",

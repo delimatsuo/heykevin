@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from collections import Counter
 from dataclasses import dataclass
 import json
+from math import isfinite
 from pathlib import Path
 import re
 from typing import Any
@@ -250,6 +251,14 @@ def _validate_initial_state(initial_state: dict[str, Any]) -> list[str]:
             violations.append(
                 _violation(-1, "fixture_schema_invalid", f"initial_state.{key} must be a string")
             )
+    language = initial_state.get("language")
+    if isinstance(language, str):
+        try:
+            CallerObservation(language=language)
+        except ValueError:
+            violations.append(
+                _violation(-1, "fixture_schema_invalid", "initial_state.language is invalid")
+            )
 
     for key in ("known_facts", "memory_refs_used"):
         if key in initial_state and not _is_string_list(initial_state[key]):
@@ -307,9 +316,7 @@ def _validate_initial_state(initial_state: dict[str, Any]) -> list[str]:
                     _violation(-1, "fixture_schema_invalid", "caller identity text is invalid")
                 )
             confidence = identity.get("confidence")
-            if confidence is not None and (
-                isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-            ):
+            if confidence is not None and not _is_bounded_confidence(confidence):
                 violations.append(
                     _violation(-1, "fixture_schema_invalid", "caller confidence is invalid")
                 )
@@ -322,7 +329,7 @@ def _validate_initial_state(initial_state: dict[str, Any]) -> list[str]:
         return violations
     try:
         IntakeState.from_dict(initial_state)
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, OverflowError, TypeError, ValueError):
         violations.append(
             _violation(-1, "fixture_schema_invalid", "initial_state values are invalid")
         )
@@ -340,8 +347,11 @@ def _validate_turn(index: int, turn: object) -> list[str]:
 
     allowed_fields = CALLER_TURN_FIELDS if speaker == "caller" else ASSISTANT_TURN_FIELDS
     _check_unknown_fields(violations, index, turn, allowed_fields, f"{speaker} turn")
-    if not isinstance(turn.get("text"), str):
-        violations.append(_violation(index, "fixture_schema_invalid", "turn text must be a string"))
+    text = turn.get("text")
+    if not isinstance(text, str) or not text.strip():
+        violations.append(
+            _violation(index, "fixture_schema_invalid", "turn text must be a nonempty string")
+        )
 
     expectation = turn.get("expect", {})
     if not isinstance(expectation, dict):
@@ -411,9 +421,13 @@ def _validate_expectation(index: int, expectation: dict[str, Any]) -> list[str]:
     for key in EXPECTATION_SLOT_LIST_FIELDS.intersection(expectation):
         _validate_slot_list(violations, index, expectation[key], f"expect.{key}")
     for key in EXPECTATION_TEXT_LIST_FIELDS.intersection(expectation):
-        if not _is_string_list(expectation[key]):
+        if not _is_nonempty_string_list(expectation[key]):
             violations.append(
-                _violation(index, "fixture_schema_invalid", f"expect.{key} must be strings")
+                _violation(
+                    index,
+                    "fixture_schema_invalid",
+                    f"expect.{key} must contain nonempty strings",
+                )
             )
     for key in EXPECTATION_INTEGER_FIELDS.intersection(expectation):
         value = expectation[key]
@@ -438,6 +452,13 @@ def _validate_expectation(index: int, expectation: dict[str, Any]) -> list[str]:
                 violations.append(
                     _violation(index, "fixture_schema_invalid", f"expect.{key} is invalid")
                 )
+    if "language" in expectation and isinstance(expectation["language"], str):
+        try:
+            CallerObservation(language=expectation["language"])
+        except ValueError:
+            violations.append(
+                _violation(index, "fixture_schema_invalid", "expect.language is invalid")
+            )
     return violations
 
 
@@ -498,8 +519,28 @@ def _is_string_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
+def _is_nonempty_string_list(value: object) -> bool:
+    return _is_string_list(value) and all(item.strip() for item in value)
+
+
+def _is_bounded_confidence(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if value < 0 or value > 1:
+        return False
+    try:
+        return isfinite(value)
+    except OverflowError:
+        return False
+
+
 def run_replay_scenario(scenario: object) -> ReplayResult:
-    schema_violations = validate_replay_scenario(scenario)
+    try:
+        schema_violations = validate_replay_scenario(scenario)
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
+        schema_violations = (
+            _violation(-1, "fixture_schema_invalid", "scenario validation failed"),
+        )
     if not isinstance(scenario, dict):
         return ReplayResult(
             final_state=IntakeState(),
@@ -600,14 +641,18 @@ def evaluate_replay_suite(
     violation_counts: Counter[str] = Counter()
 
     for scenario in scenarios:
-        schema_violations = validate_replay_scenario(scenario)
+        try:
+            schema_violations = validate_replay_scenario(scenario)
+        except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
+            violation_counts["fixture_schema_invalid"] += 1
+            continue
         if schema_violations:
             violation_counts.update(_extract_violation_codes(schema_violations))
             continue
 
         try:
             result = run_replay_scenario(scenario)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, OverflowError, TypeError, ValueError):
             violation_counts["scenario_execution_error"] += 1
             continue
 
@@ -695,7 +740,7 @@ def _check_expectations(
         )
 
     expected_intent = expect.get("intent")
-    if expected_intent and state.intent.value != expected_intent:
+    if "intent" in expect and state.intent.value != expected_intent:
         violations.append(
             _violation(
                 index,
@@ -705,7 +750,7 @@ def _check_expectations(
         )
 
     expected_urgency = expect.get("urgency")
-    if expected_urgency and state.urgency.value != expected_urgency:
+    if "urgency" in expect and state.urgency.value != expected_urgency:
         violations.append(
             _violation(
                 index,
@@ -715,7 +760,7 @@ def _check_expectations(
         )
 
     expected_callback_intent = expect.get("callback_intent")
-    if expected_callback_intent and state.callback_intent.value != expected_callback_intent:
+    if "callback_intent" in expect and state.callback_intent.value != expected_callback_intent:
         violations.append(
             _violation(
                 index,
@@ -726,7 +771,7 @@ def _check_expectations(
 
     expected_callback_confirmation = expect.get("callback_confirmation")
     if (
-        expected_callback_confirmation
+        "callback_confirmation" in expect
         and state.callback_confirmation.value != expected_callback_confirmation
     ):
         violations.append(
@@ -738,7 +783,7 @@ def _check_expectations(
         )
 
     expected_language = expect.get("language")
-    if expected_language and state.language != expected_language:
+    if "language" in expect and state.language != expected_language:
         violations.append(
             _violation(
                 index,
@@ -748,7 +793,7 @@ def _check_expectations(
         )
 
     expected_action_name = expect.get("action_name")
-    if expected_action_name and action.name.value != expected_action_name:
+    if "action_name" in expect and action.name.value != expected_action_name:
         violations.append(
             _violation(
                 index,

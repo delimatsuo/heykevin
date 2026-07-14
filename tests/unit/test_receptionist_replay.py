@@ -1,5 +1,6 @@
 """Replay tests for receptionist planner regressions."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,97 @@ from scripts.evaluate_receptionist_replays import load_scenarios
 
 
 FIXTURE_DIR = Path("tests/fixtures/receptionist_replays")
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [
+        json.loads("1e1000"),
+        json.loads("NaN"),
+        json.loads("1" + ("0" * 1000)),
+        -0.01,
+        1.01,
+    ],
+)
+def test_replay_rejects_invalid_identity_confidence_without_raising(
+    confidence: object,
+):
+    initial_state = IntakeState.new(call_sid="CA_redacted").to_dict()
+    initial_state["caller_identity"] = {
+        "name": "Synthetic Caller",
+        "confidence": confidence,
+        "source": "fixture",
+        "confirmed": False,
+    }
+    scenario = {
+        "scenario": "invalid_identity_confidence",
+        "initial_state": initial_state,
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need help.",
+                "observation": {},
+            }
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+    report = evaluate_replay_suite(
+        [scenario],
+        thresholds=ReplaySuiteThresholds(
+            min_scenarios=1,
+            min_assistant_turns=0,
+            min_interrupted_assistant_turns=0,
+        ),
+    )
+
+    assert result.violation_codes == ("fixture_schema_invalid",)
+    assert report["status"] == "fail"
+    assert report["structured_contract_status"] == "fail"
+    assert report["violation_counts"] == {"fixture_schema_invalid": 1}
+
+
+def test_replay_rejects_empty_language_expectation():
+    scenario = {
+        "scenario": "empty_language_expectation",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "I need help.",
+                "observation": {"language": "en"},
+                "expect": {"language": ""},
+            }
+        ],
+    }
+
+    result = run_replay_scenario(scenario)
+
+    assert result.violation_codes == ("fixture_schema_invalid",)
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {"speaker": "caller", "text": "", "observation": {}},
+        {
+            "speaker": "caller",
+            "text": "I need help.",
+            "observation": {},
+            "expect": {"instruction_includes": [""]},
+        },
+    ],
+)
+def test_replay_rejects_empty_syntactic_evidence(turn: dict[str, object]):
+    scenario = {
+        "scenario": "empty_syntactic_evidence",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [turn],
+    }
+
+    result = run_replay_scenario(scenario)
+
+    assert result.violation_codes == ("fixture_schema_invalid",)
 
 
 def test_known_caller_toilet_replacement_replay_blocks_duplicate_question():

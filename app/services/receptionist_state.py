@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from math import isfinite
 from typing import Any, Iterable
 
 
@@ -102,6 +103,9 @@ class CallerIdentity:
     source: str = ""
     confirmed: bool = False
 
+    def __post_init__(self) -> None:
+        self.confidence = _normalize_confidence(self.confidence)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -113,9 +117,10 @@ class CallerIdentity:
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "CallerIdentity":
         data = data or {}
+        confidence = data.get("confidence")
         return cls(
             name=str(data.get("name") or ""),
-            confidence=float(data.get("confidence") or 0.0),
+            confidence=0.0 if confidence is None else confidence,
             source=str(data.get("source") or ""),
             confirmed=bool(data.get("confirmed") or False),
         )
@@ -255,6 +260,20 @@ def _normalize_language_code(value: str) -> str:
     ):
         raise ValueError("language must be a bounded language tag")
     return code
+
+
+def _normalize_confidence(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("confidence must be numeric")
+    if value < 0 or value > 1:
+        raise ValueError("confidence must be between zero and one")
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("confidence must be a finite number") from exc
+    if not isfinite(normalized):
+        raise ValueError("confidence must be a finite number")
+    return normalized
 
 
 def _normalize_observation_text(value: str, *, max_length: int) -> str:

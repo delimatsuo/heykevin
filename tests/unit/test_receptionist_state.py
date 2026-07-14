@@ -6,6 +6,7 @@ import pytest
 
 from app.services.receptionist_state import (
     AddressNeed,
+    CallerIdentity,
     CallerObservation,
     CallbackConfirmation,
     CallbackIntent,
@@ -15,6 +16,15 @@ from app.services.receptionist_state import (
     ServiceAction,
     Urgency,
 )
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [float("inf"), float("nan"), -0.01, 1.01, True, int("9" * 1000)],
+)
+def test_caller_identity_rejects_invalid_confidence(confidence: object):
+    with pytest.raises((TypeError, ValueError)):
+        CallerIdentity(name="Synthetic Caller", confidence=confidence)
 
 
 @pytest.mark.parametrize("language", ["en", "es", "pt-BR", "ja"])

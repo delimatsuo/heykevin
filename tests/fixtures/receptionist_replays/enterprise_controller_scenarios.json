@@ -233,5 +233,48 @@
         "observed": {"asked_slots": ["job_complexity"]}
       }
     ]
+  },
+  {
+    "scenario": "completed_intake_offers_followup_once_then_wraps",
+    "policy": {"max_questions": 1, "max_words": 40},
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "intent": "service_request",
+      "service_object": "faucet",
+      "service_action": "repair",
+      "asked_slots": ["job_complexity", "urgency"]
+    },
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "That covers the repair details.",
+        "observation": {},
+        "expect": {
+          "action_name": "offer_callback_or_scheduling",
+          "allowed_slots": ["callback_preference"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Would you like a callback or help with scheduling?",
+        "observed": {"asked_slots": ["callback_preference"]},
+        "expect": {"asked_slots_state": ["callback_preference"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "No, thank you.",
+        "observation": {"callback_intent": "declined"},
+        "expect": {
+          "callback_intent": "declined",
+          "action_name": "wrap_up",
+          "forbidden_slots": ["callback_number", "callback_preference"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Understood. The business has your repair details.",
+        "observed": {"asked_slots": []}
+      }
+    ]
   }
 ]

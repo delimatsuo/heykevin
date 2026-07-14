@@ -104,6 +104,7 @@ KNOWN_SLOTS = frozenset(
         "service_object",
         "callback_number",
         "callback_confirmation",
+        "callback_preference",
         "service_address",
         "job_complexity",
         "urgency",
@@ -159,9 +160,12 @@ def load_replay_fixture(path: str | Path) -> Any:
 
 def offline_policy_report_metadata() -> dict[str, object]:
     return {
-        "decision_scope": "offline_policy_contract",
+        "decision_scope": "offline_structured_policy_contract",
         "caller_observation_source": "fixture",
         "assistant_output_source": "fixture",
+        "assistant_observation_source": "fixture_annotation",
+        "assistant_text_semantics_validated": False,
+        "plain_text_acceptance_status": "review_required",
         "latency_measured": False,
         "live_behavior_validated": False,
         "release_authorized": False,
@@ -646,16 +650,18 @@ def evaluate_replay_suite(
             f">= {limits.min_interrupted_assistant_turns}",
         ),
         _suite_gate(
-            "policy_violations",
+            "structured_and_syntactic_violations",
             violation_total <= limits.max_policy_violations,
             violation_total,
             f"<= {limits.max_policy_violations}",
         ),
     ]
 
+    structured_contract_status = "pass" if all(gate["passed"] for gate in gates) else "fail"
     return {
         **offline_policy_report_metadata(),
-        "status": "pass" if all(gate["passed"] for gate in gates) else "fail",
+        "status": ("structured_contract_pass" if structured_contract_status == "pass" else "fail"),
+        "structured_contract_status": structured_contract_status,
         "sample": {
             "input_scenarios": len(scenarios),
             "scenarios": executed_scenarios,

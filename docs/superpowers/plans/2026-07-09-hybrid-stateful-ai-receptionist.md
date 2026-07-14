@@ -19,18 +19,23 @@ snippets below:
   does not interpret transcript text or contain language/service phrase tables.
 - Replay caller turns must include structured observations. Transcript text is
   retained only as fixture payload for policy assertions.
-- Assistant responses are fixture-authored. Fixture timing is rejected rather
-  than treated as measured latency.
+- Assistant responses are fixture-authored. The machine gate validates
+  structured annotations and narrow syntactic guardrails, not the semantic
+  consistency of fixture text. Plain-text acceptance remains a separate human
+  review.
+- Fixture timing is rejected rather than treated as measured latency.
 - Replay fixtures are schema-validated before execution. Every assistant turn
   must declare `observed.asked_slots`, and invalid fixtures do not count toward
   suite coverage gates.
 - A caller-ID rejection may capture only a replacement callback last four. The
   planner asks for the replacement once, confirms that last four once, and does
   not expose the rejected caller-ID value in composed instructions.
-- Aggregate output is scoped as `offline_policy_contract` and always reports
-  `caller_observation_source: fixture`, `assistant_output_source: fixture`,
-  `latency_measured: false`, `live_behavior_validated: false`, and
-  `release_authorized: false`.
+- Aggregate output is scoped as `offline_structured_policy_contract`. A clean
+  machine run reports `status: structured_contract_pass`,
+  `assistant_text_semantics_validated: false`, and
+  `plain_text_acceptance_status: review_required`; it never reports a generic
+  semantic pass. It also reports `latency_measured: false`,
+  `live_behavior_validated: false`, and `release_authorized: false`.
 
 Where the original execution snippets below conflict with this amendment, the
 amendment and current tests are authoritative.

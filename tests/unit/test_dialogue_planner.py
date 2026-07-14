@@ -1,6 +1,8 @@
 """Dialogue planner policy for receptionist next actions."""
 
-from app.services.dialogue_planner import ActionName, plan_next_action
+import pytest
+
+from app.services.dialogue_planner import ActionName, NextAction, plan_next_action
 from app.services.receptionist_state import (
     AddressNeed,
     CallerObservation,
@@ -160,6 +162,100 @@ def test_planner_does_not_repeat_unanswered_callback_confirmation():
     assert action.name == ActionName.TAKE_MESSAGE
     assert action.allowed_slots == ()
     assert "callback_confirmation" in action.forbidden_slots
+
+
+def test_planner_offers_followup_after_supported_intake_slots_are_exhausted():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.mark_slot_asked("job_complexity")
+    state.mark_slot_asked("urgency")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.OFFER_CALLBACK_OR_SCHEDULING
+    assert action.allowed_slots == ("callback_preference",)
+    assert action.question_required is True
+    assert set(action.allowed_slots).isdisjoint(action.forbidden_slots)
+
+
+def test_planner_wraps_up_after_followup_offer_is_exhausted():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.mark_slot_asked("job_complexity")
+    state.mark_slot_asked("urgency")
+    state.mark_slot_asked("callback_preference")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.WRAP_UP
+    assert action.allowed_slots == ()
+    assert action.question_required is False
+    assert "another question" in action.max_spoken_shape
+
+
+def test_planner_answers_pricing_without_question_when_intake_is_exhausted():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.PRICING_QUESTION
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPLACE
+    state.mark_slot_asked("job_complexity")
+    state.mark_slot_asked("urgency")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.ANSWER_DIRECT_QUESTION
+    assert action.allowed_slots == ()
+    assert action.question_required is False
+    assert "without another question" in action.max_spoken_shape
+
+
+def test_planner_does_not_repeat_required_address_question():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SCHEDULING
+    state.address_need = AddressNeed.REQUIRED_NOW
+    state.mark_slot_asked("service_address")
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.TAKE_MESSAGE
+    assert action.allowed_slots == ()
+    assert action.question_required is False
+    assert "service_address" in action.forbidden_slots
+
+
+def test_next_action_rejects_contradictory_question_contracts():
+    with pytest.raises(ValueError, match="question requires an allowed slot"):
+        NextAction(
+            name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
+            reason="invalid test action",
+            question_required=True,
+        )
+
+    with pytest.raises(ValueError, match="both allowed and forbidden"):
+        NextAction(
+            name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
+            reason="invalid test action",
+            allowed_slots=("urgency",),
+            forbidden_slots=("urgency",),
+            question_required=True,
+        )
+
+    with pytest.raises(ValueError, match="allowed slots require a question contract"):
+        NextAction(
+            name=ActionName.ANSWER_DIRECT_QUESTION,
+            reason="invalid test action",
+            allowed_slots=("urgency",),
+        )
+
+    with pytest.raises(ValueError, match="question-producing action"):
+        NextAction(
+            name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
+            reason="invalid test action",
+        )
 
 
 def test_planner_allows_address_only_when_state_requires_it():

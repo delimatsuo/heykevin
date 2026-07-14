@@ -33,6 +33,20 @@ class ActionName(str, Enum):
     SAFETY_GUIDANCE = "safety_guidance"
 
 
+QUESTION_ACTION_NAMES = frozenset(
+    {
+        ActionName.ASK_NAME,
+        ActionName.ASK_ONE_CLARIFYING_QUESTION,
+        ActionName.CONFIRM_KNOWN_PROPERTY,
+        ActionName.ASK_URGENCY,
+        ActionName.OFFER_PHOTO_LINK_AFTER_CALL,
+        ActionName.OFFER_CALLBACK_OR_SCHEDULING,
+        ActionName.CONFIRM_CALLBACK_LAST_FOUR,
+        ActionName.ASK_CALLBACK_NUMBER,
+    }
+)
+
+
 @dataclass(frozen=True)
 class NextAction:
     name: ActionName
@@ -42,6 +56,18 @@ class NextAction:
     memory_facts_safe_to_use: tuple[str, ...] = ()
     max_spoken_shape: str = "one or two short sentences, one question maximum"
     tool_calls_allowed: bool = False
+    question_required: bool = False
+
+    def __post_init__(self) -> None:
+        overlap = set(self.allowed_slots).intersection(self.forbidden_slots)
+        if overlap:
+            raise ValueError("slots cannot be both allowed and forbidden")
+        if self.question_required and not self.allowed_slots:
+            raise ValueError("question requires an allowed slot")
+        if self.allowed_slots and not self.question_required:
+            raise ValueError("allowed slots require a question contract")
+        if self.name in QUESTION_ACTION_NAMES and not self.question_required:
+            raise ValueError("question-producing action requires a question contract")
 
 
 def plan_next_action(state: IntakeState) -> NextAction:
@@ -49,14 +75,20 @@ def plan_next_action(state: IntakeState) -> NextAction:
     memory_facts = _safe_memory_facts(state)
 
     if state.urgency == Urgency.EMERGENCY or state.intent == Intent.EMERGENCY:
+        safety_slots = _allowed_slots(("safety_location",), forbidden)
         return NextAction(
             name=ActionName.SAFETY_GUIDANCE,
             reason="emergency intent detected",
-            allowed_slots=_allowed_slots(("safety_location",), forbidden),
+            allowed_slots=safety_slots,
             forbidden_slots=tuple(sorted(forbidden)),
             memory_facts_safe_to_use=memory_facts,
-            max_spoken_shape="give immediate safety guidance, then ask one relevant safety question",
+            max_spoken_shape=(
+                "give immediate safety guidance, then ask one relevant safety question"
+                if safety_slots
+                else "give immediate safety guidance without another question"
+            ),
             tool_calls_allowed=False,
+            question_required=bool(safety_slots),
         )
 
     if (
@@ -96,6 +128,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
                 memory_facts_safe_to_use=memory_facts,
                 max_spoken_shape="confirm the replacement callback number last four in one short question",
                 tool_calls_allowed=False,
+                question_required=True,
             )
         if (
             state.callback_confirmation == CallbackConfirmation.REJECTED
@@ -120,6 +153,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
                 memory_facts_safe_to_use=memory_facts,
                 max_spoken_shape="ask for the best callback number in one short question",
                 tool_calls_allowed=False,
+                question_required=True,
             )
         if "callback_confirmation" in state.asked_slots:
             return _take_callback_message(
@@ -135,28 +169,46 @@ def plan_next_action(state: IntakeState) -> NextAction:
             memory_facts_safe_to_use=memory_facts,
             max_spoken_shape="confirm the caller ID last four in one short question",
             tool_calls_allowed=False,
+            question_required=True,
         )
 
     if state.address_need == AddressNeed.REQUIRED_NOW:
+        address_slots = _allowed_slots(("service_address",), forbidden)
+        if not address_slots:
+            return NextAction(
+                name=ActionName.TAKE_MESSAGE,
+                reason="service address was requested once but remains unavailable",
+                forbidden_slots=tuple(sorted(forbidden | {"service_address"})),
+                memory_facts_safe_to_use=memory_facts,
+                max_spoken_shape="continue without asking for the service address again",
+                tool_calls_allowed=False,
+            )
         return NextAction(
             name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
             reason="address is required for the current scheduling or dispatch action",
-            allowed_slots=_allowed_slots(("service_address",), forbidden),
+            allowed_slots=address_slots,
             forbidden_slots=tuple(sorted(forbidden - {"service_address"})),
             memory_facts_safe_to_use=memory_facts,
             max_spoken_shape="ask one concise service-address question",
             tool_calls_allowed=False,
+            question_required=True,
         )
 
     if state.intent == Intent.PRICING_QUESTION:
+        pricing_slots = _allowed_slots(("job_complexity", "urgency"), forbidden)[:1]
         return NextAction(
             name=ActionName.ANSWER_DIRECT_QUESTION,
             reason="caller asked a direct pricing or scope question",
-            allowed_slots=_allowed_slots(("job_complexity", "urgency"), forbidden)[:1],
+            allowed_slots=pricing_slots,
             forbidden_slots=tuple(sorted(forbidden)),
             memory_facts_safe_to_use=memory_facts,
-            max_spoken_shape="answer briefly, then ask one useful next question",
+            max_spoken_shape=(
+                "answer briefly, then ask one useful next question"
+                if pricing_slots
+                else "answer briefly without another question"
+            ),
             tool_calls_allowed=False,
+            question_required=bool(pricing_slots),
         )
 
     if state.service_action == ServiceAction.UNKNOWN and "service_action" not in forbidden:
@@ -168,6 +220,7 @@ def plan_next_action(state: IntakeState) -> NextAction:
             memory_facts_safe_to_use=memory_facts,
             max_spoken_shape="ask only whether this is repair, replacement, installation, or inspection",
             tool_calls_allowed=False,
+            question_required=True,
         )
 
     if not state.service_object and "service_object" not in forbidden:
@@ -179,15 +232,43 @@ def plan_next_action(state: IntakeState) -> NextAction:
             memory_facts_safe_to_use=memory_facts,
             max_spoken_shape="ask one question about the fixture, appliance, or system",
             tool_calls_allowed=False,
+            question_required=True,
+        )
+
+    intake_slots = _allowed_slots(("job_complexity", "urgency"), forbidden)[:1]
+    if intake_slots:
+        return NextAction(
+            name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
+            reason="continue intake with one relevant detail",
+            allowed_slots=intake_slots,
+            forbidden_slots=tuple(sorted(forbidden)),
+            memory_facts_safe_to_use=memory_facts,
+            max_spoken_shape="ask one useful next question",
+            tool_calls_allowed=False,
+            question_required=True,
+        )
+
+    if (
+        state.callback_intent == CallbackIntent.NONE
+        and "callback_preference" not in state.asked_slots
+    ):
+        return NextAction(
+            name=ActionName.OFFER_CALLBACK_OR_SCHEDULING,
+            reason="supported intake details are complete; offer a follow-up option",
+            allowed_slots=("callback_preference",),
+            forbidden_slots=tuple(sorted(forbidden)),
+            memory_facts_safe_to_use=memory_facts,
+            max_spoken_shape="offer callback or scheduling in one short question",
+            tool_calls_allowed=False,
+            question_required=True,
         )
 
     return NextAction(
-        name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
-        reason="continue intake with one relevant detail",
-        allowed_slots=_allowed_slots(("job_complexity", "urgency"), forbidden)[:1],
+        name=ActionName.WRAP_UP,
+        reason="supported intake and follow-up questions are complete",
         forbidden_slots=tuple(sorted(forbidden)),
         memory_facts_safe_to_use=memory_facts,
-        max_spoken_shape="ask one useful next question",
+        max_spoken_shape="close briefly without another question",
         tool_calls_allowed=False,
     )
 

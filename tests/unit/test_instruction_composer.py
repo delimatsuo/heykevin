@@ -68,7 +68,7 @@ def test_composer_omits_empty_memory_section():
 
     assert "Private memory:" not in instructions
     assert "Allowed next action:" in instructions
-    assert "one question maximum" in instructions
+    assert "Ask one question using only the allowed slot." in instructions
 
 
 def test_composer_sanitizes_private_memory_before_model_context():
@@ -113,3 +113,21 @@ def test_composer_includes_only_replacement_callback_last_four():
     assert "Caller ID ending: 8667" not in instructions
     assert "caller-full-phone" not in instructions
     assert "caller-id-ending-8667" not in instructions
+
+
+def test_composer_forbids_questions_for_terminal_action():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+    state.mark_slot_asked("job_complexity")
+    state.mark_slot_asked("urgency")
+    state.mark_slot_asked("callback_preference")
+    action = plan_next_action(state)
+
+    instructions = compose_turn_instructions(state, action)
+
+    assert action.name.value == "wrap_up"
+    assert "Allowed slots: none." in instructions
+    assert "Do not ask another question." in instructions
+    assert "Ask one question using only the allowed slot." not in instructions

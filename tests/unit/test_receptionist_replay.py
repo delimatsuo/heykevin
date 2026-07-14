@@ -187,15 +187,19 @@ def test_replay_detects_output_privacy_and_side_effect_violations():
     } <= set(result.violation_codes)
 
 
-def test_enterprise_replay_suite_gate_reports_aggregate_pass_without_scenario_data():
+def test_enterprise_replay_suite_reports_structured_pass_and_text_review_required():
     scenarios = load_replay_fixture(FIXTURE_DIR / "enterprise_controller_scenarios.json")
 
     report = evaluate_replay_suite(scenarios)
 
-    assert report["status"] == "pass"
-    assert report["decision_scope"] == "offline_policy_contract"
+    assert report["status"] == "structured_contract_pass"
+    assert report["structured_contract_status"] == "pass"
+    assert report["decision_scope"] == "offline_structured_policy_contract"
     assert report["caller_observation_source"] == "fixture"
     assert report["assistant_output_source"] == "fixture"
+    assert report["assistant_observation_source"] == "fixture_annotation"
+    assert report["assistant_text_semantics_validated"] is False
+    assert report["plain_text_acceptance_status"] == "review_required"
     assert report["latency_measured"] is False
     assert report["live_behavior_validated"] is False
     assert report["release_authorized"] is False
@@ -207,6 +211,52 @@ def test_enterprise_replay_suite_gate_reports_aggregate_pass_without_scenario_da
     serialized = str(report)
     assert "caller_correction_replaces_stale_facts" not in serialized
     assert "Actually, it is the sink" not in serialized
+
+
+@pytest.mark.parametrize(
+    "assistant_text",
+    [
+        "What is your callback number?",
+        "The exact price is guaranteed to be $99.",
+    ],
+)
+def test_replay_never_claims_plain_text_semantic_validation(
+    assistant_text: str,
+):
+    scenario = {
+        "scenario": "fixture_text_requires_separate_review",
+        "initial_state": IntakeState.new(call_sid="CA_redacted").to_dict(),
+        "turns": [
+            {
+                "speaker": "caller",
+                "text": "How much is a faucet replacement?",
+                "observation": {
+                    "intent": "pricing_question",
+                    "service_object": "faucet",
+                    "service_action": "replace",
+                },
+            },
+            {
+                "speaker": "assistant",
+                "text": assistant_text,
+                "observed": {"asked_slots": []},
+            },
+        ],
+    }
+
+    report = evaluate_replay_suite(
+        [scenario],
+        thresholds=ReplaySuiteThresholds(
+            min_scenarios=1,
+            min_assistant_turns=1,
+            min_interrupted_assistant_turns=0,
+        ),
+    )
+
+    assert report["status"] == "structured_contract_pass"
+    assert report["structured_contract_status"] == "pass"
+    assert report["assistant_text_semantics_validated"] is False
+    assert report["plain_text_acceptance_status"] == "review_required"
 
 
 def test_replay_requires_a_structured_caller_observation():
@@ -417,6 +467,6 @@ def test_replay_suite_gate_fails_small_or_violating_sample():
         "minimum_scenarios",
         "minimum_assistant_turns",
         "minimum_interrupted_assistant_turns",
-        "policy_violations",
+        "structured_and_syntactic_violations",
     } <= failed
     assert report["violation_counts"] == {"assistant_question_count": 1}

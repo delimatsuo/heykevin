@@ -15,6 +15,7 @@ FORBIDDEN_SLOT_PHRASES = {
     "service_object": "which fixture, appliance, or object this is",
     "callback_number": "callback number",
     "callback_confirmation": "callback number confirmation",
+    "callback_preference": "callback or scheduling preference",
     "service_address": "service address",
 }
 
@@ -62,7 +63,10 @@ def compose_turn_instructions(
     sections.append("")
     sections.append("Speaking style:")
     sections.append("- Be brief, natural, and professional.")
-    sections.append("- Ask at most one question; one question maximum.")
+    if action.question_required:
+        sections.append("- Ask one question using only the allowed slot.")
+    else:
+        sections.append("- Do not ask another question.")
     sections.append("- Do not mention private memory sources.")
     sections.append("- Do not expose full phone numbers.")
     sections.append(

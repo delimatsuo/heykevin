@@ -64,11 +64,12 @@ def main() -> int:
         report = {
             **offline_policy_report_metadata(),
             "status": "fail",
+            "structured_contract_status": "fail",
             "error": "fixture_load_failed",
         }
 
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["status"] == "pass" else 1
+    return 0 if report["structured_contract_status"] == "pass" else 1
 
 
 if __name__ == "__main__":

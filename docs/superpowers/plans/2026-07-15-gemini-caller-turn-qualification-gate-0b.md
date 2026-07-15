@@ -643,6 +643,9 @@ Campaign ceilings may be lower but never higher, in which case execution remains
 non-runnable. An executable attempt authorization must reserve the exact
 preregistered per-run liability of 128 requests and USD 10 before its first custody
 claim; a smaller request or cost reservation blocks before credential lookup. A
+completed custody bundle is independently rejected by the evaluator unless both the
+signed authorization and replay-derived ledger reservation equal those same exact
+per-run caps, even when actual usage is lower. A
 request allowance is consumed immediately before connector construction. No retry
 occurs for a case, session, provider error, setup
 rejection, timeout, malformed response, or failed gate. A whole-run replacement is
@@ -757,8 +760,8 @@ signed Merkle root, no text in primitive/published evidence, recomputed normaliz
 assignment/CER/WER/critical spans, phase transitions, development-only selection,
 policy-lock binding, one selected-policy holdout, per-language sample thresholds,
 wire-interaction thresholds, exact Gate 0 assembly thresholds, contradictory records,
-partial-run no-go, small-cell publication suppression, and all nonauthorization
-fields.
+partial-run no-go, signed under-reservation rejection before capsule opening,
+small-cell publication suppression, and all nonauthorization fields.
 
 ### Task 6: Add the injected Gate 0B session executor
 

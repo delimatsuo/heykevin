@@ -316,7 +316,11 @@ def _signed_authorization(
     }
 
 
-def _custody_bundle():
+def _custody_bundle(
+    *,
+    provider_request_reservation: int = 128,
+    cost_reservation_microusd: int = 10_000_000,
+):
     artifact, _ = _artifact()
     development_usage = {
         "metadata_complete": True,
@@ -454,8 +458,8 @@ def _custody_bundle():
         "source_sha": source_sha,
         "issued_at": "2026-07-15T14:59:00Z",
         "expires_at": "2026-07-15T16:00:00Z",
-        "provider_request_reservation": 128,
-        "cost_reservation_microusd": 10_000_000,
+        "provider_request_reservation": provider_request_reservation,
+        "cost_reservation_microusd": cost_reservation_microusd,
     }
     campaign_envelope = _signed_authorization(
         approval_key,
@@ -524,8 +528,8 @@ def _custody_bundle():
             "lease_id_sha256": sha256(b"lease-capability-1").hexdigest(),
             "prior_attempt_id": None,
             "outage_enum": None,
-            "provider_requests_reserved": 128,
-            "cost_reserved_microusd": 10_000_000,
+            "provider_requests_reserved": provider_request_reservation,
+            "cost_reserved_microusd": cost_reservation_microusd,
         },
         at="2026-07-15T15:00:00Z",
     )
@@ -599,8 +603,8 @@ def _custody_bundle():
             "holdout_release_receipt_sha256": ledger["head_hash"],
             "selected_policy_ms": 100,
             "holdout_manifest_sha256": "4" * 64,
-            "provider_requests_remaining": 64,
-            "cost_remaining_microusd": 10_000_000 - development_cost,
+            "provider_requests_remaining": provider_request_reservation - 64,
+            "cost_remaining_microusd": cost_reservation_microusd - development_cost,
             "execution_nonce": "execution_nonce_1",
         },
         at="2026-07-15T15:13:00Z",
@@ -891,6 +895,52 @@ def test_custody_bundle_rejects_tampered_authorization_before_capsule_open(
         _derived,
     ) = _custody_bundle()
     bundle["campaign_envelope"]["signature"] = base64.b64encode(b"\x00" * 64).decode("ascii")
+    opened: list[str] = []
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: opened.append(envelope["kind"]),
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    "reservation_override",
+    (
+        {"provider_request_reservation": 120},
+        {"cost_reservation_microusd": 1_000_000},
+    ),
+)
+def test_custody_bundle_rejects_signed_under_reservation_before_capsule_open(
+    reservation_override: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        _derived,
+    ) = _custody_bundle(**reservation_override)
     opened: list[str] = []
     monkeypatch.setattr(
         evaluator_module,

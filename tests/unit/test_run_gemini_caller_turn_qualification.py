@@ -1628,11 +1628,14 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     )
 
 
-@pytest.mark.parametrize("durable_resume", (True, False))
+@pytest.mark.parametrize(
+    "resume_mode",
+    ("durable", "stale_snapshot", "substituted_lease"),
+)
 def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    durable_resume: bool,
+    resume_mode: str,
 ) -> None:
     approval_private, approval_public = _key_pair()
     audit_private, audit_public = _custodian_key_pair()
@@ -1713,12 +1716,19 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         public_key_sha256=ledger_public_sha,
         initial_state=state,
     )
-    if not durable_resume:
+    if resume_mode == "stale_snapshot":
         monkeypatch.setattr(
             runner_module,
             "validate_custody_ledger_snapshot",
             lambda *_args, **_kwargs: state,
         )
+    elif resume_mode == "substituted_lease":
+        original_resume = ledger.resume_holdout
+
+        def resume_with_substituted_lease(**values):
+            return replace(original_resume(**values), lease_id="8" * 64)
+
+        monkeypatch.setattr(ledger, "resume_holdout", resume_with_substituted_lease)
     sessions = [
         FakeSession(
             [
@@ -1768,16 +1778,22 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         custodian_key_id="audit_custodian_1",
         capsule_path=capsule_path,
     )
-    if not durable_resume:
-        with pytest.raises(ValueError, match="durably consume the holdout claim"):
+    if resume_mode != "durable":
+        error = (
+            "durably consume the holdout claim"
+            if resume_mode == "stale_snapshot"
+            else "substituted lease"
+        )
+        with pytest.raises(ValueError, match=error):
             asyncio.run(execution)
-        assert order == ["export_snapshot", "resume_holdout", "export_snapshot"]
+        expected_order = ["export_snapshot", "resume_holdout"]
+        if resume_mode == "stale_snapshot":
+            expected_order.append("export_snapshot")
+        assert order == expected_order
         assert not capsule_path.exists()
         return
 
-    result = asyncio.run(
-        execution
-    )
+    result = asyncio.run(execution)
 
     assert result.complete is True
     assert result.provider_request_count == 128

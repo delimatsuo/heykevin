@@ -460,7 +460,8 @@ def test_validly_signed_alternate_fork_cannot_satisfy_mutation_continuity(
         fork_records = fork["records"]
         assert isinstance(accepted_records, list)
         assert isinstance(fork_records, list)
-        del accepted_records[5:]
+        accepted_length = 6 if boundary == "terminal" else 5
+        del accepted_records[accepted_length:]
         accepted["head_hash"] = sha256(
             canonical_json_bytes(accepted_records[-1]["payload"])
         ).hexdigest()

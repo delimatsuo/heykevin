@@ -193,7 +193,13 @@ strictly sequenced, hash-chained, and replayed from genesis.
 
 An approved attempt must atomically consume its one-use authorization in that
 external ledger before source revalidation, credential lookup, provider DNS, or
-connector construction. One active attempt spans development checkpoint, policy
+connector construction. Before that claim, its authorization must reserve the exact
+preregistered per-run liability of 128 requests and USD 10. Every post-mutation
+snapshot must contain the previously accepted signed record sequence plus exactly
+one expected event; an independently valid alternate history is not continuity. The
+claim signs only the SHA-256 of its opaque lease capability, and the executor matches
+that digest before credential lookup and again at holdout resume. One active attempt
+spans development checkpoint, policy
 lock, holdout release, holdout execution, and terminal outcome. The custodian must
 append a signed one-shot `holdout_execution_claim` before the first holdout provider
 request; a missing or duplicate claim fails closed. A crash after that claim cannot
@@ -212,6 +218,9 @@ strict capsule accounting records. The custody bundle cannot supply top-level us
 or failure summaries. The evaluator derives both splits' accounting from opened
 capsules, recomputes cost, and checks the development and combined usage digests,
 actual totals, and signed reservation before producing a report.
+The evaluator also requires both the authorization and replay-derived reservation to
+equal the exact preregistered per-run liability; lower signed values are invalid even
+when they cover actual usage.
 
 Primitive records and published reports contain no text, audio, prompt, tool
 arguments, credential, path, subject identifier, caller identifier, provider ID, or

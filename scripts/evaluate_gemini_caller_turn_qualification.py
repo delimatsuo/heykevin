@@ -538,6 +538,10 @@ def _evaluate_custody_bundle(
         or state.provider_requests_reserved
         != authorization.provider_request_reservation
         or state.cost_reserved_microusd != authorization.cost_reservation_microusd
+        or authorization.provider_request_reservation
+        != immutable["usage_caps"]["provider_requests_per_run"]
+        or authorization.cost_reservation_microusd
+        != immutable["cost_caps_microusd"]["per_run"]
         or campaign.ledger_instance_id != immutable["ledger_instance_id"]
         or campaign.ledger_custodian_key_id != immutable["ledger_custodian_key_id"]
         or campaign.ledger_custodian_public_key_sha256

@@ -5,8 +5,8 @@
   "unit": "per_million_tokens",
   "input_audio_usd": "3.00",
   "output_audio_usd": "12.00",
-  "input_text_usd": "0.50",
-  "output_text_usd": "2.00",
+  "input_text_usd": "0.75",
+  "output_text_usd": "4.50",
   "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
   "retrieved_at": "2026-07-15T14:00:00Z"
 }

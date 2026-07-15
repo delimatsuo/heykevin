@@ -7,7 +7,7 @@ import argparse
 import asyncio
 import base64
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_CEILING
 from hashlib import sha256
@@ -39,7 +39,6 @@ from app.services.gemini_turn_events import (
 from app.services.voice_turn_replay import (
     DEVELOPER_PROVIDER,
     Gate0BReplayInput,
-    build_gemini_activity_message,
     build_gemini_audio_message,
 )
 from app.services.qualification_identity import (
@@ -60,11 +59,41 @@ PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 VALID_SPLITS = frozenset({"development", "holdout"})
 VALID_LANGUAGES = frozenset({"ar", "en", "es", "fr", "hi", "ht", "pt", "zh"})
 VALID_POLICIES_MS = frozenset({100, 250, 500, 750})
-MAX_OUTPUT_AUDIO_BYTES = 10 * 1024 * 1024
+MAX_OUTPUT_AUDIO_BYTES = 120 * 24_000 * 2
+MAX_OUTPUT_AUDIO_PER_RUN_BYTES = 1_800 * 24_000 * 2
+MAX_COST_PER_SESSION_MICROUSD = 250_000
 MAX_WHOLE_RUN_SECONDS = 3_600
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PINNED_APPROVAL_ROOT_PATH = (
+    REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
+)
+PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
+    {
+        "project",
+        "credential_reference",
+        "approval_key_id",
+        "approval_public_key_sha256",
+        "custodian_key_id",
+        "custodian_public_key_sha256",
+        "source_sha",
+        "environment_identity_sha256",
+        "manifest_sha256",
+        "corpus_sha256",
+        "development_schedule_sha256",
+        "setup_sha256",
+        "pricing_sha256",
+        "runner_sha256",
+        "evaluator_sha256",
+        "ledger_location_sha256",
+        "audit_capsule_location_sha256",
+        "evidence_location_sha256",
+        "consent_attestation_sha256",
+        "retention_attestation_sha256",
+        "zdr_or_residual_retention_acceptance_sha256",
+    }
+)
 
 
 class RunnerError(ValueError):
@@ -538,15 +567,21 @@ class _SessionProgress:
     epoch_count: int = 0
 
 
-def build_gate0b_setup_message(config: SessionExecutionConfig) -> dict[str, Any]:
+def build_gate0b_setup_message(
+    config: SessionExecutionConfig,
+    *,
+    include_tool: bool = False,
+) -> dict[str, Any]:
     if not isinstance(config, SessionExecutionConfig):
         raise TypeError("config must be a SessionExecutionConfig")
-    return {
+    if not isinstance(include_tool, bool):
+        raise TypeError("include_tool must be a boolean")
+    message = {
         "setup": {
             "model": config.model,
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
-                "temperature": 0.2,
+                "temperature": 0.4,
                 "speechConfig": {
                     "voiceConfig": {
                         "prebuiltVoiceConfig": {"voiceName": "Puck"},
@@ -576,18 +611,28 @@ def build_gate0b_setup_message(config: SessionExecutionConfig) -> dict[str, Any]
                 "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
             },
-            "tools": [
-                {
-                    "functionDeclarations": [
-                        {
-                            "name": "synthetic_lookup",
-                            "description": "Return one fixed synthetic qualification result.",
-                            "parameters": {"type": "OBJECT", "properties": {}},
-                        }
-                    ]
-                }
-            ],
         }
+    }
+    if include_tool:
+        message["setup"]["tools"] = [
+            {
+                "functionDeclarations": [
+                    {
+                        "name": "synthetic_lookup",
+                        "description": "Return one fixed synthetic qualification result.",
+                        "parameters": {"type": "OBJECT", "properties": {}},
+                    }
+                ]
+            }
+        ]
+    return message
+
+
+def build_gate0b_setup_identity(config: SessionExecutionConfig) -> dict[str, Any]:
+    """Canonical setup variants approved for standard and synthetic-tool scenarios."""
+    return {
+        "standard": build_gate0b_setup_message(config),
+        "synthetic_tool": build_gate0b_setup_message(config, include_tool=True),
     }
 
 
@@ -692,11 +737,26 @@ async def _execute_session_flow(
             error_code = "connector_failure"
             break
 
-        connection_usage: UsageCounts | None = None
+        connection_usage = UsageCounts()
+        usage_frame_count = 0
         last_receipt_ms = base_at_ms
+        sender_done = asyncio.Event()
+        observed_interactions: set[str] = set()
+        interaction_events = {
+            kind: asyncio.Event()
+            for kind in (
+                "expect_synchronous_tool",
+                "expect_tool_cancellation",
+                "expect_interruption",
+            )
+        }
+        sender_error: str | None = None
+        sender_task: asyncio.Task[None] | None = None
         try:
             try:
-                await session.send(build_gate0b_setup_message(config))
+                await session.send(
+                    build_gate0b_setup_message(config, include_tool=_plan_uses_tools(plan))
+                )
                 setup_response = await session.receive()
                 receipt_clock_ms()
             except ProviderSessionClosed:
@@ -709,49 +769,29 @@ async def _execute_session_flow(
                 error_code = "setup_rejected"
                 raise _AbortConnection
 
-            previous_at_ms = base_at_ms
-            observed_interactions: set[str] = set()
-            for replay_input in replay_inputs:
-                delay = replay_input.at_ms - previous_at_ms
-                if delay > 0:
-                    await sleep_ms(delay)
-                previous_at_ms = replay_input.at_ms
-                if replay_input.kind in {
-                    "expect_synchronous_tool",
-                    "expect_tool_cancellation",
-                    "expect_interruption",
-                }:
-                    if replay_input.kind in observed_interactions:
-                        continue
-                    (
-                        interaction_events,
-                        newly_observed,
-                        interaction_response,
-                        interaction_error,
-                    ) = await _receive_expected_interaction(
-                        session,
-                        expected_kind=replay_input.kind,
-                        config=config,
-                        adapter=adapter,
-                        secondary_reducer=secondary_reducer,
-                        receipt_clock_ms=receipt_clock_ms,
-                        first_sequence=sequence,
-                        epoch=epoch,
-                    )
-                    if interaction_error is not None:
-                        error_code = interaction_error
-                        break
-                    sequence += len(interaction_events)
-                    audit_events.extend(interaction_events)
-                    observed_interactions.update(newly_observed)
-                    if interaction_response is not None:
-                        await session.send(interaction_response)
-                    continue
-                outbound = _outbound_message(replay_input)
-                if outbound is not None:
-                    await session.send(outbound)
-            if error_code is not None:
-                raise _AbortConnection
+            async def send_replay_inputs() -> None:
+                nonlocal sender_error
+                previous_at_ms = base_at_ms
+                try:
+                    for replay_input in replay_inputs:
+                        delay = replay_input.at_ms - previous_at_ms
+                        if delay > 0:
+                            await sleep_ms(delay)
+                        previous_at_ms = replay_input.at_ms
+                        if replay_input.kind in interaction_events:
+                            await interaction_events[replay_input.kind].wait()
+                            continue
+                        outbound = _outbound_message(replay_input)
+                        if outbound is not None:
+                            await session.send(outbound)
+                except TimeoutError:
+                    raise
+                except Exception:
+                    sender_error = "connector_failure"
+                finally:
+                    sender_done.set()
+
+            sender_task = asyncio.create_task(send_replay_inputs())
 
             while True:
                 try:
@@ -770,10 +810,21 @@ async def _execute_session_flow(
                 except Exception:
                     error_code = "connector_failure"
                     break
+                if message is None:
+                    if not sender_done.is_set():
+                        pending_interactions = {
+                            replay_input.kind
+                            for replay_input in replay_inputs
+                            if replay_input.kind in interaction_events
+                            and replay_input.kind not in observed_interactions
+                        }
+                        if pending_interactions:
+                            error_code = "expected_interaction_missing"
+                            break
+                        await sender_done.wait()
+                    break
                 at_ms = receipt_clock_ms()
                 last_receipt_ms = at_ms
-                if message is None:
-                    break
                 if not isinstance(message, Mapping):
                     error_code = "malformed_message"
                     _increment_wire_counter(
@@ -832,12 +883,14 @@ async def _execute_session_flow(
                     except RunnerError:
                         error_code = "usage_metadata_inconsistent"
                         break
-                    if connection_usage is not None:
-                        error_code = "usage_metadata_duplicate"
-                        break
-                    connection_usage = parsed_usage
+                    connection_usage = _add_usage(connection_usage, parsed_usage)
+                    usage_frame_count += 1
                     if set(message) == {"usageMetadata"}:
-                        if active_response_activity is None:
+                        if (
+                            sender_done.is_set()
+                            and active_response_activity is None
+                            and len(terminal_activities) == len(plan.activities)
+                        ):
                             break
                         continue
 
@@ -902,6 +955,11 @@ async def _execute_session_flow(
                     break
                 if tool_response is not None:
                     await session.send(tool_response)
+
+                newly_observed = _observed_interaction_kinds(primary.events)
+                observed_interactions.update(newly_observed)
+                for kind in newly_observed:
+                    interaction_events[kind].set()
 
                 try:
                     audio_bytes = _extract_output_audio(message)
@@ -973,15 +1031,29 @@ async def _execute_session_flow(
                     last_response_audio_ms = None
                 if error_code is not None:
                     break
-                if connection_usage is not None and active_response_activity is None:
+                if (
+                    usage_frame_count
+                    and sender_done.is_set()
+                    and active_response_activity is None
+                    and len(terminal_activities) == len(plan.activities)
+                ):
                     break
 
-            if error_code is None and connection_usage is None:
+            if sender_task is not None:
+                if error_code is not None and not sender_task.done():
+                    sender_task.cancel()
+                try:
+                    await sender_task
+                except asyncio.CancelledError:
+                    pass
+            if error_code is None and sender_error is not None:
+                error_code = sender_error
+            if error_code is None and usage_frame_count == 0:
                 error_code = "usage_metadata_missing"
             if error_code is None and active_response_activity is not None:
                 wires[active_response_activity].response_timeout_count += 1
                 error_code = "response_terminal_missing"
-            if connection_usage is not None:
+            if usage_frame_count:
                 usage = _add_usage(usage, connection_usage)
         except _AbortConnection:
             pass
@@ -1334,11 +1406,11 @@ async def execute_authorized_attempt(
     plans: tuple[SessionPlan, ...],
     *,
     no_speech_plans: tuple[NoSpeechWindowPlan, ...] = (),
+    preregistration: Mapping[str, Any],
     config: AuthorizedAttemptConfig,
     session_config: SessionExecutionConfig,
     campaign_envelope: Mapping[str, Any],
     attempt_envelope: Mapping[str, Any],
-    approval_public_key: bytes,
     ledger: AttemptLedger,
     phase: CampaignPhase,
     holdout_materialized: bool,
@@ -1361,6 +1433,21 @@ async def execute_authorized_attempt(
         session_config=session_config,
         pricing=pricing,
     )
+    approval_public_key = _load_pinned_approval_public_key()
+    _verify_execution_preregistration(
+        preregistration,
+        config=config,
+        session_config=session_config,
+        approval_public_key=approval_public_key,
+        ledger=ledger,
+        phase=phase,
+        holdout_materialized=holdout_materialized,
+        plans=plans,
+        no_speech_plans=no_speech_plans,
+        pricing=pricing,
+        custodian_public_key=custodian_public_key,
+        custodian_key_id=custodian_key_id,
+    )
     campaign = verify_campaign_approval(
         campaign_envelope,
         public_key=approval_public_key,
@@ -1376,6 +1463,17 @@ async def execute_authorized_attempt(
         campaign=campaign,
         now=now,
     )
+    if compute_development_schedule_sha256(
+        plans,
+        no_speech_plans=no_speech_plans,
+    ) != preregistration["immutable_values"]["development_schedule_sha256"]:
+        raise RunnerError("preregistered development schedule digest mismatch")
+    _validate_exact_development_schedule(plans, no_speech_plans=no_speech_plans)
+    required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
+        no_speech_plans
+    )
+    if required_requests > authorization.provider_request_reservation:
+        raise RunnerError("signed request reservation is insufficient")
     claim = ledger.claim_attempt(
         campaign=campaign,
         authorization=authorization,
@@ -1422,6 +1520,8 @@ async def execute_authorized_attempt(
                         credential=credential,
                         receipt_clock_factory=receipt_clock_factory,
                         sleep_ms=sleep_ms,
+                        pricing=pricing,
+                        run_cost_limit_microusd=claim.cost_reserved_microusd,
                     ),
                     timeout=config.whole_run_timeout_seconds,
                 )
@@ -1510,11 +1610,15 @@ async def _execute_attempt_work(
     credential: SecretCredential,
     receipt_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
+    pricing: PricingSchedule,
+    run_cost_limit_microusd: int,
 ) -> tuple[
     list[tuple[SessionPlan, SessionExecutionResult]],
     list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]],
 ]:
     results: list[tuple[SessionPlan, SessionExecutionResult]] = []
+    running_usage = UsageCounts()
+    output_audio_bytes = 0
     for plan in plans:
         result = await execute_injected_session(
             plan,
@@ -1524,6 +1628,15 @@ async def _execute_attempt_work(
             receipt_clock_ms=receipt_clock_factory(plan),
             sleep_ms=sleep_ms,
         )
+        running_usage = _add_usage(running_usage, result.usage)
+        output_audio_bytes += result.output_audio_bytes
+        session_cost = _cost_microusd(pricing, result.usage)
+        if session_cost > MAX_COST_PER_SESSION_MICROUSD:
+            result = replace(result, complete=False, error_code="session_cost_cap_exceeded")
+        elif _cost_microusd(pricing, running_usage) > run_cost_limit_microusd:
+            result = replace(result, complete=False, error_code="cost_reservation_exhausted")
+        elif output_audio_bytes > MAX_OUTPUT_AUDIO_PER_RUN_BYTES:
+            result = replace(result, complete=False, error_code="run_output_audio_cap_exceeded")
         results.append((plan, result))
         if not result.complete:
             return results, []
@@ -1537,6 +1650,15 @@ async def _execute_attempt_work(
             receipt_clock_ms=receipt_clock_factory(plan),
             sleep_ms=sleep_ms,
         )
+        running_usage = _add_usage(running_usage, result.usage)
+        output_audio_bytes += result.output_audio_bytes
+        session_cost = _cost_microusd(pricing, result.usage)
+        if session_cost > MAX_COST_PER_SESSION_MICROUSD:
+            result = replace(result, complete=False, error_code="session_cost_cap_exceeded")
+        elif _cost_microusd(pricing, running_usage) > run_cost_limit_microusd:
+            result = replace(result, complete=False, error_code="cost_reservation_exhausted")
+        elif output_audio_bytes > MAX_OUTPUT_AUDIO_PER_RUN_BYTES:
+            result = replace(result, complete=False, error_code="run_output_audio_cap_exceeded")
         window_results.append((plan, result))
         if not result.complete:
             break
@@ -1571,6 +1693,19 @@ def _validate_attempt_inputs(
         raise RunnerError("attempt no-speech plans are invalid")
     if len({plan.window_ordinal for plan in no_speech_plans}) != len(no_speech_plans):
         raise RunnerError("attempt no-speech ordinals must be unique")
+    for plan in (*plans, *no_speech_plans):
+        for replay_input in plan.replay_inputs:
+            if replay_input.kind != "audio":
+                continue
+            expected_bytes = replay_input.duration_ms * 16_000 * 2 // 1_000
+            if (
+                replay_input.duration_ms <= 0
+                or not isinstance(replay_input.audio, bytes)
+                or not replay_input.audio
+                or len(replay_input.audio) % 2
+                or not expected_bytes - 2 <= len(replay_input.audio) <= expected_bytes
+            ):
+                raise RunnerError("audio bytes and declared duration are inconsistent")
     activity_ordinals = [
         activity.activity_ordinal for plan in plans for activity in plan.activities
     ]
@@ -1592,6 +1727,198 @@ def _validate_attempt_inputs(
         raise TypeError("pricing must be a PricingSchedule")
     if pricing.model != session_config.model.removeprefix("models/"):
         raise RunnerError("pricing and model identity mismatch")
+
+
+def _validate_exact_development_schedule(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+) -> None:
+    activities = tuple(activity for plan in plans for activity in plan.activities)
+    language_counts = Counter(activity.language for activity in activities)
+    condition_counts = Counter(activity.condition for activity in activities)
+    if (
+        len(activities) != 128
+        or len(no_speech_plans) != 32
+        or set(language_counts) != VALID_LANGUAGES
+        or set(language_counts.values()) != {16}
+        or condition_counts
+        != Counter(
+            {
+                "clean": 32,
+                "twilio_codec_only": 32,
+                "acoustic_impairment": 32,
+                "interaction_stress": 32,
+            }
+        )
+    ):
+        raise RunnerError("development schedule cardinality is invalid")
+
+
+def compute_development_schedule_sha256(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+) -> str:
+    """Bind replay order, references, timing, and audio bytes without publishing payloads."""
+    def replay_identity(replay_input: Gate0BReplayInput) -> dict[str, Any]:
+        return {
+            "kind": replay_input.kind,
+            "at_ms": replay_input.at_ms,
+            "epoch": replay_input.epoch,
+            "activity_ordinal": replay_input.activity_ordinal,
+            "duration_ms": replay_input.duration_ms,
+            "audio_sha256": (
+                sha256(replay_input.audio).hexdigest() if replay_input.audio else None
+            ),
+        }
+
+    value = {
+        "schema_id": "gate_0b_development_schedule_identity_v1",
+        "sessions": [
+            {
+                "session_ordinal": plan.session_ordinal,
+                "split": plan.split,
+                "activities": [
+                    {
+                        "activity_ordinal": activity.activity_ordinal,
+                        "split": activity.split,
+                        "language": activity.language,
+                        "condition": activity.condition,
+                        "scenario_tags": list(activity.scenario_tags),
+                        "reference_sha256": sha256(
+                            canonical_json_bytes(
+                                {
+                                    "text": activity.reference.text,
+                                    "critical_spans": [
+                                        {
+                                            "kind": span.kind.value,
+                                            "text": span.text,
+                                            "language": span.language,
+                                        }
+                                        for span in activity.reference.critical_spans
+                                    ],
+                                }
+                            )
+                        ).hexdigest(),
+                        "expected_lifecycle_status": activity.expected_lifecycle_status,
+                        "expected_epoch": activity.expected_epoch,
+                        "start_at_ms": activity.start_at_ms,
+                        "end_at_ms": activity.end_at_ms,
+                    }
+                    for activity in plan.activities
+                ],
+                "replay_inputs": [replay_identity(value) for value in plan.replay_inputs],
+            }
+            for plan in plans
+        ],
+        "no_speech_windows": [
+            {
+                "window_ordinal": plan.window_ordinal,
+                "split": plan.split,
+                "condition": plan.condition,
+                "replay_inputs": [replay_identity(value) for value in plan.replay_inputs],
+            }
+            for plan in no_speech_plans
+        ],
+    }
+    return sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _verify_execution_preregistration(
+    document: Mapping[str, Any],
+    *,
+    config: AuthorizedAttemptConfig,
+    session_config: SessionExecutionConfig,
+    approval_public_key: bytes,
+    ledger: AttemptLedger,
+    phase: CampaignPhase,
+    holdout_materialized: bool,
+    plans: tuple[SessionPlan, ...],
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+    pricing: PricingSchedule,
+    custodian_public_key: bytes,
+    custodian_key_id: str,
+) -> None:
+    """Recompute the approved document and bind every directly observable input."""
+    if not isinstance(document, Mapping):
+        raise RunnerError("preregistration document is invalid")
+    immutable = document.get("immutable_values")
+    if not isinstance(immutable, Mapping):
+        raise RunnerError("preregistration document is invalid")
+    try:
+        values = {
+            "schema_id": "gate_0b_preregistration_values_v1",
+            **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
+        }
+    except KeyError as exc:
+        raise RunnerError("preregistration document is invalid") from exc
+    expected = build_preregistration(values)
+    if dict(document) != expected:
+        raise RunnerError("preregistration document or digest mismatch")
+
+    ledger_path = getattr(ledger, "path", None)
+    if not isinstance(ledger_path, Path):
+        raise RunnerError("preregistration ledger binding is unavailable")
+    if not isinstance(approval_public_key, bytes) or not isinstance(custodian_public_key, bytes):
+        raise RunnerError("preregistration trust root is invalid")
+    observable = {
+        "preregistration_sha256": config.preregistration_sha256,
+        "source_sha": config.source_sha,
+        "approval_key_id": config.approval_key_id,
+        "credential_reference": config.credential_reference,
+        "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
+        "custodian_key_id": custodian_key_id,
+        "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
+        "model": session_config.model,
+        "endpoint": session_config.endpoint,
+        "project": session_config.project,
+        "setup_sha256": sha256(
+            canonical_json_bytes(build_gate0b_setup_identity(session_config))
+        ).hexdigest(),
+        "pricing_sha256": pricing.artifact_sha256,
+        "runner_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+        "evaluator_sha256": sha256(
+            (REPO_ROOT / "scripts/evaluate_gemini_caller_turn_qualification.py").read_bytes()
+        ).hexdigest(),
+        "ledger_location_sha256": sha256(str(ledger_path.resolve()).encode("utf-8")).hexdigest(),
+    }
+    expected_observable = {
+        "preregistration_sha256": expected["preregistration_sha256"],
+        **{field: immutable[field] for field in observable if field != "preregistration_sha256"},
+    }
+    if observable != expected_observable:
+        raise RunnerError("preregistration execution binding mismatch")
+    if (
+        config.policy_ms not in immutable["candidate_policies_ms"]
+        or session_config.session_timeout_seconds > immutable["usage_caps"][
+            "session_timeout_seconds"
+        ]
+        or config.whole_run_timeout_seconds
+        > immutable["usage_caps"]["whole_run_wall_clock_seconds"]
+    ):
+        raise RunnerError("preregistration execution cap mismatch")
+
+    all_splits = {plan.split for plan in (*plans, *no_speech_plans)}
+    if (
+        phase is not CampaignPhase.DEVELOPMENT_COLLECTION
+        or holdout_materialized
+        or all_splits != {"development"}
+    ):
+        raise RunnerError("holdout split is forbidden during development phase")
+
+
+def _load_pinned_approval_public_key() -> bytes:
+    path = PINNED_APPROVAL_ROOT_PATH
+    if path.is_symlink() or not path.is_file() or path.parent.is_symlink():
+        raise RunnerError("pinned approval trust root is unavailable")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise RunnerError("pinned approval trust root is unavailable") from exc
+    if len(data) != 32:
+        raise RunnerError("pinned approval trust root is unprovisioned")
+    return data
 
 
 def _build_audit_capsule(
@@ -1804,6 +2131,15 @@ async def _receive_expected_interaction(
     return primary.events, observed, response, None
 
 
+def _observed_interaction_kinds(events: Sequence[CallerTurnEvent]) -> set[str]:
+    markers = {
+        CallerTurnEventKind.TOOL_CALL_STARTED: "expect_synchronous_tool",
+        CallerTurnEventKind.TOOL_CALL_CANCELLED: "expect_tool_cancellation",
+        CallerTurnEventKind.INTERRUPTED: "expect_interruption",
+    }
+    return {markers[event.kind] for event in events if event.kind in markers}
+
+
 def independent_reduce_message(
     message: object,
     *,
@@ -1995,10 +2331,8 @@ def _connection_segments_from_inputs(
 
 
 def _outbound_message(replay_input: Gate0BReplayInput) -> dict[str, Any] | None:
-    if replay_input.kind == "caller_activity_start":
-        return build_gemini_activity_message("activity_start")
-    if replay_input.kind == "caller_activity_end":
-        return build_gemini_activity_message("activity_end")
+    if replay_input.kind in {"caller_activity_start", "caller_activity_end"}:
+        return None
     if replay_input.kind == "audio":
         return build_gemini_audio_message(replay_input.audio, provider=DEVELOPER_PROVIDER)
     if replay_input.kind in {
@@ -2011,26 +2345,54 @@ def _outbound_message(replay_input: Gate0BReplayInput) -> dict[str, Any] | None:
     raise RunnerError("unsupported replay input kind")
 
 
+def _plan_uses_tools(plan: SessionPlan) -> bool:
+    return any(
+        replay_input.kind
+        in {"expect_synchronous_tool", "expect_tool_cancellation"}
+        for replay_input in plan.replay_inputs
+    )
+
+
 def _parse_usage_metadata(raw: object) -> UsageCounts:
-    fields = {
+    required_fields = {
         "promptTokenCount",
-        "candidatesTokenCount",
+        "responseTokenCount",
+        "totalTokenCount",
         "promptTokensDetails",
-        "candidatesTokensDetails",
+        "responseTokensDetails",
     }
-    if not isinstance(raw, Mapping) or set(raw) != fields:
+    optional_fields = {"thoughtsTokenCount"}
+    if (
+        not isinstance(raw, Mapping)
+        or not required_fields <= set(raw)
+        or set(raw) - required_fields - optional_fields
+    ):
         raise RunnerError("usage metadata is inconsistent")
     prompt = _token_details(raw["promptTokensDetails"])
-    candidates = _token_details(raw["candidatesTokensDetails"])
-    if raw["promptTokenCount"] != sum(prompt.values()) or raw["candidatesTokenCount"] != sum(
-        candidates.values()
+    response = _token_details(raw["responseTokensDetails"])
+    prompt_count = _bounded_int(
+        raw["promptTokenCount"], label="prompt token count", maximum=100_000_000
+    )
+    response_count = _bounded_int(
+        raw["responseTokenCount"], label="response token count", maximum=100_000_000
+    )
+    thoughts_count = _bounded_int(
+        raw.get("thoughtsTokenCount", 0), label="thoughts token count", maximum=100_000_000
+    )
+    total_count = _bounded_int(
+        raw["totalTokenCount"], label="total token count", maximum=100_000_000
+    )
+    if (
+        prompt_count != sum(prompt.values())
+        or response_count != sum(response.values())
+        or total_count != prompt_count + response_count + thoughts_count
     ):
         raise RunnerError("usage metadata is inconsistent")
     return UsageCounts(
         input_audio_tokens=prompt.get("AUDIO", 0),
-        output_audio_tokens=candidates.get("AUDIO", 0),
+        output_audio_tokens=response.get("AUDIO", 0),
         input_text_tokens=prompt.get("TEXT", 0),
-        output_text_tokens=candidates.get("TEXT", 0),
+        output_text_tokens=response.get("TEXT", 0) + thoughts_count,
     )
 
 
@@ -2243,10 +2605,13 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "credential_reference": None,
             "approval_key_id": None,
             "approval_public_key_sha256": None,
+            "custodian_key_id": None,
+            "custodian_public_key_sha256": None,
             "source_sha": None,
             "environment_identity_sha256": None,
             "manifest_sha256": None,
             "corpus_sha256": None,
+            "development_schedule_sha256": None,
             "setup_sha256": None,
             "pricing_sha256": None,
             "runner_sha256": None,
@@ -2294,27 +2659,10 @@ def build_dry_run_preregistration() -> dict[str, Any]:
 
 def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
     """Fill the dry-run contract from one strict, externally reviewed value set."""
-    external_fields = {
-        "project",
-        "credential_reference",
-        "approval_key_id",
-        "approval_public_key_sha256",
-        "source_sha",
-        "environment_identity_sha256",
-        "manifest_sha256",
-        "corpus_sha256",
-        "setup_sha256",
-        "pricing_sha256",
-        "runner_sha256",
-        "evaluator_sha256",
-        "ledger_location_sha256",
-        "audit_capsule_location_sha256",
-        "evidence_location_sha256",
-        "consent_attestation_sha256",
-        "retention_attestation_sha256",
-        "zdr_or_residual_retention_acceptance_sha256",
-    }
-    if not isinstance(values, Mapping) or set(values) != {"schema_id", *external_fields}:
+    if not isinstance(values, Mapping) or set(values) != {
+        "schema_id",
+        *PREREGISTRATION_EXTERNAL_FIELDS,
+    }:
         raise RunnerError("preregistration values fields are invalid")
     if values.get("schema_id") != "gate_0b_preregistration_values_v1":
         raise RunnerError("preregistration values schema is invalid")
@@ -2328,16 +2676,17 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         raise RunnerError("preregistration project is invalid")
 
     validated: dict[str, str] = {"project": project}
-    for field in ("credential_reference", "approval_key_id"):
+    for field in ("credential_reference", "approval_key_id", "custodian_key_id"):
         validated[field] = _safe_id(values[field], label=field.replace("_", " "))
     source_sha = values["source_sha"]
     if not isinstance(source_sha, str) or not SOURCE_SHA.fullmatch(source_sha):
         raise RunnerError("preregistration source SHA is invalid")
     validated["source_sha"] = source_sha
-    for field in external_fields - {
+    for field in PREREGISTRATION_EXTERNAL_FIELDS - {
         "project",
         "credential_reference",
         "approval_key_id",
+        "custodian_key_id",
         "source_sha",
     }:
         value = values[field]

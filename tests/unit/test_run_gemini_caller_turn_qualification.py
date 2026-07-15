@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -36,9 +37,11 @@ from scripts.run_gemini_caller_turn_qualification import (
     SessionExecutionConfig,
     SessionPlan,
     build_gate0b_setup_message,
+    build_gate0b_setup_identity,
     build_dry_run_preregistration,
     build_parser,
     build_preregistration,
+    compute_development_schedule_sha256,
     execute_authorized_attempt,
     execute_injected_session,
     execute_injected_no_speech_window,
@@ -51,6 +54,9 @@ NOW = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
 PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
 KEY_ID = "qualification-reviewer-v1"
+PRICING_PATH = Path("tests/fixtures/caller_turn_qualification/pricing.json")
+LANGUAGES = ("ar", "en", "es", "fr", "hi", "ht", "pt", "zh")
+CONDITIONS = ("clean", "twilio_codec_only", "acoustic_impairment", "interaction_stress")
 
 
 class FakeSession:
@@ -92,18 +98,29 @@ class ReceiptClock:
         return next(self.values)
 
 
-def _usage_message():
+def _usage_message(
+    *,
+    input_audio_tokens: int = 8,
+    input_text_tokens: int = 2,
+    output_audio_tokens: int = 4,
+    output_text_tokens: int = 1,
+    thoughts_tokens: int = 0,
+):
+    prompt_tokens = input_audio_tokens + input_text_tokens
+    response_tokens = output_audio_tokens + output_text_tokens
     return {
         "usageMetadata": {
-            "promptTokenCount": 10,
-            "candidatesTokenCount": 5,
+            "promptTokenCount": prompt_tokens,
+            "responseTokenCount": response_tokens,
+            "thoughtsTokenCount": thoughts_tokens,
+            "totalTokenCount": prompt_tokens + response_tokens + thoughts_tokens,
             "promptTokensDetails": [
-                {"modality": "AUDIO", "tokenCount": 8},
-                {"modality": "TEXT", "tokenCount": 2},
+                {"modality": "AUDIO", "tokenCount": input_audio_tokens},
+                {"modality": "TEXT", "tokenCount": input_text_tokens},
             ],
-            "candidatesTokensDetails": [
-                {"modality": "AUDIO", "tokenCount": 4},
-                {"modality": "TEXT", "tokenCount": 1},
+            "responseTokensDetails": [
+                {"modality": "AUDIO", "tokenCount": output_audio_tokens},
+                {"modality": "TEXT", "tokenCount": output_text_tokens},
             ],
         }
     }
@@ -173,6 +190,77 @@ def _plan(*, two_activities: bool = False) -> SessionPlan:
         activities=activities,
         replay_inputs=inputs,
     )
+
+
+def _development_schedule() -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
+    plans = []
+    for session_ordinal in range(32):
+        activities = []
+        replay_inputs = []
+        for index in range(4):
+            ordinal = session_ordinal * 4 + index
+            start_ms = index * 150
+            end_ms = start_ms + 100
+            language = LANGUAGES[ordinal % len(LANGUAGES)]
+            condition = CONDITIONS[ordinal % len(CONDITIONS)]
+            activity = SessionActivityPlan(
+                activity_ordinal=ordinal,
+                split="development",
+                language=language,
+                condition=condition,
+                scenario_tags=("standard",),
+                reference=ActivityReference(
+                    ordinal,
+                    language,
+                    f"purpose recorded phrase {ordinal}",
+                ),
+                expected_lifecycle_status="retrospective_complete",
+                expected_epoch=1,
+                start_at_ms=start_ms,
+                end_at_ms=end_ms,
+            )
+            activities.append(activity)
+            replay_inputs.extend(
+                (
+                    Gate0BReplayInput("caller_activity_start", start_ms, 1, ordinal),
+                    Gate0BReplayInput(
+                        "audio",
+                        start_ms + 20,
+                        1,
+                        ordinal,
+                        audio=b"\x00\x00" * 319,
+                        duration_ms=20,
+                    ),
+                    Gate0BReplayInput("caller_activity_end", end_ms, 1, ordinal),
+                )
+            )
+        plans.append(
+            SessionPlan(
+                session_ordinal=session_ordinal,
+                split="development",
+                activities=tuple(activities),
+                replay_inputs=tuple(replay_inputs),
+            )
+        )
+    windows = tuple(
+        NoSpeechWindowPlan(
+            window_ordinal=ordinal,
+            split="development",
+            condition="background_noise",
+            replay_inputs=(
+                Gate0BReplayInput(
+                    "audio",
+                    0,
+                    1,
+                    None,
+                    audio=b"\x00\x00" * 319,
+                    duration_ms=20,
+                ),
+            ),
+        )
+        for ordinal in range(32)
+    )
+    return tuple(plans), windows
 
 
 def _restart_plan() -> SessionPlan:
@@ -272,6 +360,15 @@ def _key_pair() -> tuple[Ed25519PrivateKey, bytes]:
     return private, public
 
 
+def _custodian_key_pair() -> tuple[X25519PrivateKey, bytes]:
+    private = X25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    return private, public
+
+
 def _signed(private: Ed25519PrivateKey, payload: dict[str, object]) -> dict[str, object]:
     return {
         "key_id": KEY_ID,
@@ -283,6 +380,10 @@ def _signed(private: Ed25519PrivateKey, payload: dict[str, object]) -> dict[str,
 def _approval_envelopes(
     private: Ed25519PrivateKey,
     ledger_path: Path,
+    *,
+    preregistration_sha256: str = PREREGISTRATION_SHA,
+    provider_request_reservation: int = 128,
+    cost_reservation_microusd: int = 10_000_000,
 ) -> tuple[dict[str, object], dict[str, object]]:
     campaign = {
         "schema_id": "gate_0b_campaign_approval_v1",
@@ -290,7 +391,7 @@ def _approval_envelopes(
         "campaign_id": "campaign_001",
         "authorization_id": "authorization_001",
         "nonce": "nonce_001",
-        "preregistration_sha256": PREREGISTRATION_SHA,
+        "preregistration_sha256": preregistration_sha256,
         "source_sha": SOURCE_SHA,
         "issued_at": "2026-07-15T14:59:00Z",
         "expires_at": "2026-07-15T16:00:00Z",
@@ -312,22 +413,64 @@ def _approval_envelopes(
         "attempt_index": 1,
         "prior_attempt_id": None,
         "outage_enum": None,
-        "preregistration_sha256": PREREGISTRATION_SHA,
+        "preregistration_sha256": preregistration_sha256,
         "source_sha": SOURCE_SHA,
         "issued_at": "2026-07-15T14:59:00Z",
         "expires_at": "2026-07-15T16:00:00Z",
-        "provider_request_reservation": 128,
-        "cost_reservation_microusd": 10_000_000,
+        "provider_request_reservation": provider_request_reservation,
+        "cost_reservation_microusd": cost_reservation_microusd,
     }
     return _signed(private, campaign), _signed(private, attempt)
 
 
+def _preregistration(
+    approval_public_key: bytes,
+    ledger_path: Path,
+    custodian_public_key: bytes,
+) -> dict[str, object]:
+    setup_sha256 = sha256(canonical_json_bytes(build_gate0b_setup_identity(_config()))).hexdigest()
+    plans, no_speech_plans = _development_schedule()
+    return build_preregistration(
+        {
+            "schema_id": "gate_0b_preregistration_values_v1",
+            "project": _config().project,
+            "credential_reference": "qualification_secret_v1",
+            "approval_key_id": KEY_ID,
+            "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
+            "custodian_key_id": "audit_custodian_1",
+            "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
+            "source_sha": SOURCE_SHA,
+            "environment_identity_sha256": "2" * 64,
+            "manifest_sha256": "3" * 64,
+            "corpus_sha256": "4" * 64,
+            "development_schedule_sha256": compute_development_schedule_sha256(
+                plans,
+                no_speech_plans=no_speech_plans,
+            ),
+            "setup_sha256": setup_sha256,
+            "pricing_sha256": sha256(PRICING_PATH.read_bytes()).hexdigest(),
+            "runner_sha256": sha256(Path(runner_module.__file__).read_bytes()).hexdigest(),
+            "evaluator_sha256": sha256(
+                Path("scripts/evaluate_gemini_caller_turn_qualification.py").read_bytes()
+            ).hexdigest(),
+            "ledger_location_sha256": ledger_location_sha256(ledger_path),
+            "audit_capsule_location_sha256": "a" * 64,
+            "evidence_location_sha256": "b" * 64,
+            "consent_attestation_sha256": "c" * 64,
+            "retention_attestation_sha256": "d" * 64,
+            "zdr_or_residual_retention_acceptance_sha256": "e" * 64,
+        }
+    )
+
+
 def test_setup_and_connection_policy_are_exact_and_non_debuggable() -> None:
     setup = build_gate0b_setup_message(_config())
+    tool_setup = build_gate0b_setup_message(_config(), include_tool=True)
     policy = ConnectionPolicy()
 
     assert set(setup) == {"setup"}
     assert setup["setup"]["model"] == "models/gemini-3.1-flash-live-preview"
+    assert setup["setup"]["generationConfig"]["temperature"] == 0.4
     assert setup["setup"]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "minimal"}
     assert setup["setup"]["inputAudioTranscription"] == {}
     assert setup["setup"]["outputAudioTranscription"] == {}
@@ -341,6 +484,10 @@ def test_setup_and_connection_policy_are_exact_and_non_debuggable() -> None:
         "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
         "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
     }
+    assert "tools" not in setup["setup"]
+    assert tool_setup["setup"]["tools"][0]["functionDeclarations"][0]["name"] == (
+        "synthetic_lookup"
+    )
     assert policy.proxy is None
     assert policy.follow_redirects is False
     assert policy.debug is False
@@ -386,7 +533,7 @@ def test_injected_session_paces_audio_reduces_one_combined_event_and_discards_ou
     assert result.usage.input_audio_tokens == 8
     assert result.usage.output_audio_tokens == 4
     assert session.closed is True
-    assert session.messages == [None]
+    assert session.messages == []
     assert CANARY_SECRET not in repr(connector.requests[0])
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert base64.b64encode(b"\x01\x02\x03\x04").decode("ascii") not in json.dumps(
@@ -394,7 +541,92 @@ def test_injected_session_paces_audio_reduces_one_combined_event_and_discards_ou
     )
 
 
-def test_outbound_schedule_uses_activity_messages_and_pcm_without_payload_mutation() -> None:
+def test_receive_loop_is_live_while_the_paced_sender_is_still_running() -> None:
+    class CoordinatedSession:
+        def __init__(self) -> None:
+            self.sent = []
+            self.audio_sent = asyncio.Event()
+            self.response_received = asyncio.Event()
+            self.receive_index = 0
+            self.closed = False
+
+        async def send(self, message):
+            self.sent.append(message)
+            if isinstance(message.get("realtimeInput"), dict) and "audio" in message["realtimeInput"]:
+                self.audio_sent.set()
+
+        async def receive(self):
+            self.receive_index += 1
+            if self.receive_index == 1:
+                return {"setupComplete": {}}
+            if self.receive_index == 2:
+                await self.audio_sent.wait()
+                self.response_received.set()
+                return _server_event()
+            if self.receive_index == 3:
+                return _usage_message()
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    session = CoordinatedSession()
+    receiver_was_live_during_send = False
+
+    async def sleep_ms(value: int) -> None:
+        nonlocal receiver_was_live_during_send
+        if value == 80:
+            await asyncio.wait_for(session.response_received.wait(), timeout=0.1)
+            receiver_was_live_during_send = True
+        else:
+            await asyncio.sleep(0)
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130]),
+            sleep_ms=sleep_ms,
+        )
+    )
+
+    assert result.complete is True
+    assert receiver_was_live_during_send is True
+
+
+def test_multiple_official_usage_frames_are_accumulated() -> None:
+    first = _server_event(text="book service today 1")
+    second = _server_event(text="book service today 2")
+    session = FakeSession(
+        [
+            {"setupComplete": {}},
+            first,
+            _usage_message(),
+            second,
+            _usage_message(),
+            None,
+        ]
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(two_activities=True),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130, 300, 310]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is True
+    assert result.usage.input_audio_tokens == 16
+    assert result.usage.output_audio_tokens == 8
+
+
+def test_automatic_vad_schedule_keeps_activity_markers_local_and_sends_only_pcm() -> None:
     session = FakeSession([{"setupComplete": {}}, _usage_message(), None])
     connector = FakeConnector([session])
     asyncio.run(
@@ -408,12 +640,11 @@ def test_outbound_schedule_uses_activity_messages_and_pcm_without_payload_mutati
         )
     )
 
-    assert session.sent[1] == {"realtimeInput": {"activityStart": {}}}
-    assert session.sent[2]["realtimeInput"]["audio"]["mimeType"] == "audio/pcm;rate=16000"
-    assert base64.b64decode(session.sent[2]["realtimeInput"]["audio"]["data"]) == (
+    assert len(session.sent) == 2
+    assert session.sent[1]["realtimeInput"]["audio"]["mimeType"] == "audio/pcm;rate=16000"
+    assert base64.b64decode(session.sent[1]["realtimeInput"]["audio"]["data"]) == (
         b"\x00\x00" * 319
     )
-    assert session.sent[3] == {"realtimeInput": {"activityEnd": {}}}
 
 
 def test_synthetic_tool_calls_receive_synchronous_payload_free_responses() -> None:
@@ -437,7 +668,7 @@ def test_synthetic_tool_calls_receive_synchronous_payload_free_responses() -> No
     )
     result = asyncio.run(
         execute_injected_session(
-            _plan(),
+            _tool_interaction_plan(),
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
@@ -488,13 +719,13 @@ def test_synchronous_tool_response_precedes_the_next_caller_activity() -> None:
     )
 
     tool_index = next(index for index, value in enumerate(session.sent) if "toolResponse" in value)
-    activity_starts = [
+    audio_inputs = [
         index
         for index, value in enumerate(session.sent)
-        if value == {"realtimeInput": {"activityStart": {}}}
+        if isinstance(value.get("realtimeInput"), dict) and "audio" in value["realtimeInput"]
     ]
     assert result.complete is True
-    assert tool_index < activity_starts[1]
+    assert tool_index < audio_inputs[1]
 
 
 def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() -> None:
@@ -826,26 +1057,42 @@ def test_no_speech_window_records_false_activation_without_computing_verdict() -
 
 def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private, public = _key_pair()
     ledger_path = tmp_path / "attempt-ledger.json"
-    campaign, attempt = _approval_envelopes(private, ledger_path)
+    custodian, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
     order: list[str] = []
-    session = FakeSession([{"setupComplete": {}}, _server_event(), _usage_message(), None])
-    no_speech_session = FakeSession(
-        [{"setupComplete": {}}, _server_event(), _usage_message(), None]
-    )
-    connector = FakeConnector([session, no_speech_session])
-    custodian = X25519PrivateKey.generate()
-    custodian_public = custodian.public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
-    )
+    plans, no_speech_plans = _development_schedule()
+    sessions = [
+        FakeSession(
+            [
+                {"setupComplete": {}},
+                _server_event(text=plan.activities[0].reference.text),
+                _usage_message(),
+                None,
+            ]
+        )
+        for plan in plans
+    ]
+    no_speech_sessions = [
+        FakeSession([{"setupComplete": {}}, _server_event(), _usage_message(), None])
+        for _ in no_speech_plans
+    ]
+    connector = FakeConnector([*sessions, *no_speech_sessions])
     capsules: list[dict[str, object]] = []
 
     class RecordingLedger:
         def __init__(self) -> None:
             self.delegate = AttemptLedger(ledger_path)
+            self.path = self.delegate.path
 
         def claim_attempt(self, **kwargs):
             order.append("claim")
@@ -873,10 +1120,11 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
 
     result = asyncio.run(
         execute_authorized_attempt(
-            (_plan(),),
-            no_speech_plans=(_no_speech_plan(),),
+            plans,
+            no_speech_plans=no_speech_plans,
+            preregistration=preregistration,
             config=AuthorizedAttemptConfig(
-                preregistration_sha256=PREREGISTRATION_SHA,
+                preregistration_sha256=preregistration["preregistration_sha256"],
                 source_sha=SOURCE_SHA,
                 approval_key_id=KEY_ID,
                 credential_reference="qualification_secret_v1",
@@ -886,7 +1134,6 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            approval_public_key=public,
             ledger=RecordingLedger(),
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
@@ -905,36 +1152,40 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
 
     assert result.complete is True
     assert result.capsule_handed_off is True
-    assert result.provider_request_count == 2
-    assert result.cost_microusd == 150
-    assert order == [
-        "claim",
-        "source",
-        "credential:qualification_secret_v1",
-        "connector",
-        "connector",
-        "capsule",
-        "outcome",
-    ]
+    assert result.provider_request_count == 64
+    assert result.cost_microusd == 4_992
+    assert order[:3] == ["claim", "source", "credential:qualification_secret_v1"]
+    assert order[3:-2] == ["connector"] * 64
+    assert order[-2:] == ["capsule", "outcome"]
     opened = open_audit_capsule(
         capsules[0],
         custodian_private_key=custodian,
         expected_key_id="audit_custodian_1",
     )
-    assert opened["activities"][0]["reference_text"] == "book service today 1"
+    assert opened["activities"][0]["reference_text"] == "purpose recorded phrase 0"
     assert opened["no_speech_windows"][0]["wire_facts"][0]["kind"] == "false_activity"
     assert CANARY_SECRET not in json.dumps(capsules[0])
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert not hasattr(result, "audit_events")
     snapshot = AttemptLedger(ledger_path).snapshot()
     assert [record["event"] for record in snapshot["records"]] == ["claim", "outcome"]
-    assert snapshot["records"][-1]["actual_cost_microusd"] == 150
+    assert snapshot["records"][-1]["actual_cost_microusd"] == 4_992
 
 
-def test_invalid_approval_never_reads_secret_or_constructs_connector(tmp_path: Path) -> None:
+def test_invalid_approval_never_reads_secret_or_constructs_connector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     private, public = _key_pair()
     ledger_path = tmp_path / "attempt-ledger.json"
-    campaign, attempt = _approval_envelopes(private, ledger_path)
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
     campaign["signature"] = base64.b64encode(b"invalid").decode("ascii")
     touched: list[str] = []
 
@@ -942,8 +1193,9 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(tmp_path: P
         asyncio.run(
             execute_authorized_attempt(
                 (_plan(),),
+                preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
-                    preregistration_sha256=PREREGISTRATION_SHA,
+                    preregistration_sha256=preregistration["preregistration_sha256"],
                     source_sha=SOURCE_SHA,
                     approval_key_id=KEY_ID,
                     credential_reference="qualification_secret_v1",
@@ -953,7 +1205,6 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(tmp_path: P
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                approval_public_key=public,
                 ledger=AttemptLedger(ledger_path),
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
@@ -964,7 +1215,7 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(tmp_path: P
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
-                custodian_public_key=b"0" * 32,
+                custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_sink=lambda _capsule: None,
             )
@@ -974,24 +1225,409 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(tmp_path: P
     assert not ledger_path.exists()
 
 
-def test_connector_failure_consumes_request_records_outcome_and_never_retries(
+def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
     tmp_path: Path,
 ) -> None:
     private, public = _key_pair()
     ledger_path = tmp_path / "attempt-ledger.json"
-    campaign, attempt = _approval_envelopes(private, ledger_path)
-    connector_attempts = 0
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    touched: list[str] = []
 
-    def connector_factory(_credential: SecretCredential):
-        nonlocal connector_attempts
-        connector_attempts += 1
-        raise RuntimeError("transport detail " + CANARY_SECRET)
+    with pytest.raises(ValueError, match="trust root.*unprovisioned"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (_plan(),),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                source_identity_check=lambda: touched.append("source"),
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_sink=lambda _capsule: None,
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "preregistration_document",
+        "project",
+        "credential_reference",
+        "approval_public_key",
+        "custodian_public_key",
+        "pricing",
+    ),
+)
+def test_preregistration_binds_every_observable_execution_input_before_claim(
+    tmp_path: Path,
+    mutation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    config = AuthorizedAttemptConfig(
+        preregistration_sha256=preregistration["preregistration_sha256"],
+        source_sha=SOURCE_SHA,
+        approval_key_id=KEY_ID,
+        credential_reference="qualification_secret_v1",
+        policy_ms=250,
+        whole_run_timeout_seconds=30,
+    )
+    session_config = _config()
+    pricing = load_pricing(PRICING_PATH)
+    supplied_preregistration = preregistration
+    supplied_public = public
+    supplied_custodian = custodian_public
+
+    if mutation == "preregistration_document":
+        supplied_preregistration = json.loads(json.dumps(preregistration))
+        supplied_preregistration["immutable_values"]["project"] = "kevin-qualification-other"
+    elif mutation == "project":
+        session_config = replace(session_config, project="kevin-qualification-other")
+    elif mutation == "credential_reference":
+        config = replace(config, credential_reference="different_secret_v1")
+    elif mutation == "approval_public_key":
+        supplied_public = _key_pair()[1]
+    elif mutation == "custodian_public_key":
+        supplied_custodian = _custodian_key_pair()[1]
+    elif mutation == "pricing":
+        raw_pricing = json.loads(PRICING_PATH.read_text())
+        raw_pricing["input_text_usd"] = "0.74"
+        pricing = load_pricing(raw_pricing)
+    monkeypatch.setattr(
+        runner_module,
+        "_load_pinned_approval_public_key",
+        lambda: supplied_public,
+    )
+
+    touched: list[str] = []
+    with pytest.raises(ValueError, match="preregistration"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (_plan(),),
+                preregistration=supplied_preregistration,
+                config=config,
+                session_config=session_config,
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                source_identity_check=lambda: touched.append("source"),
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=pricing,
+                custodian_public_key=supplied_custodian,
+                custodian_key_id="audit_custodian_1",
+                capsule_sink=lambda _capsule: None,
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    development = _plan()
+    holdout_activity = replace(development.activities[0], split="holdout")
+    holdout_plan = replace(development, split="holdout", activities=(holdout_activity,))
+    holdout_window = replace(_no_speech_plan(), split="holdout")
+    touched: list[str] = []
+
+    with pytest.raises(ValueError, match="holdout|split|phase"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (holdout_plan,),
+                no_speech_plans=(holdout_window,),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                source_identity_check=lambda: touched.append("source"),
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_sink=lambda _capsule: None,
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    base = _plan()
+    bad_inputs = tuple(
+        replace(value, audio=b"\x00\x00" * 500_000, duration_ms=0)
+        if value.kind == "audio"
+        else value
+        for value in base.replay_inputs
+    )
+    bad_plan = replace(base, replay_inputs=bad_inputs)
+
+    with pytest.raises(ValueError, match="audio.*duration|duration.*audio"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (bad_plan,),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                source_identity_check=lambda: None,
+                credential_loader=lambda _reference: pytest.fail("secret must not be read"),
+                connector_factory=lambda _credential: pytest.fail("connector must not be built"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_sink=lambda _capsule: None,
+            )
+        )
+
+    assert not ledger_path.exists()
+
+
+def test_insufficient_signed_request_reservation_blocks_before_ledger_and_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+        provider_request_reservation=1,
+    )
+    plans, no_speech_plans = _development_schedule()
+    touched: list[str] = []
+
+    with pytest.raises(ValueError, match="request reservation"):
+        asyncio.run(
+            execute_authorized_attempt(
+                plans,
+                no_speech_plans=no_speech_plans,
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                source_identity_check=lambda: touched.append("source"),
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_sink=lambda _capsule: None,
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    touched: list[str] = []
+
+    with pytest.raises(ValueError, match="development schedule"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (_plan(),),
+                no_speech_plans=(_no_speech_plan(),),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                source_identity_check=lambda: touched.append("source"),
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_sink=lambda _capsule: None,
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+def test_per_session_cost_cap_stops_before_the_next_provider_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    plans, no_speech_plans = _development_schedule()
+    first = FakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(text="purpose recorded phrase 0"),
+            _usage_message(output_audio_tokens=21_000),
+            None,
+        ]
+    )
+    second = FakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(text="purpose recorded phrase 4"),
+            _usage_message(),
+            None,
+        ]
+    )
+    connector = FakeConnector([first, second])
 
     result = asyncio.run(
         execute_authorized_attempt(
-            (_plan(),),
+            plans,
+            no_speech_plans=no_speech_plans,
+            preregistration=preregistration,
             config=AuthorizedAttemptConfig(
-                preregistration_sha256=PREREGISTRATION_SHA,
+                preregistration_sha256=preregistration["preregistration_sha256"],
                 source_sha=SOURCE_SHA,
                 approval_key_id=KEY_ID,
                 credential_reference="qualification_secret_v1",
@@ -1001,7 +1637,66 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            approval_public_key=public,
+            ledger=AttemptLedger(ledger_path),
+            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+            holdout_materialized=False,
+            now=NOW,
+            source_identity_check=lambda: None,
+            credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
+            connector_factory=lambda _credential: connector,
+            receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+            pricing=load_pricing(PRICING_PATH),
+            custodian_public_key=custodian_public,
+            custodian_key_id="audit_custodian_1",
+            capsule_sink=lambda _capsule: pytest.fail("capsule must not be handed off"),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "session_cost_cap_exceeded"
+    assert result.provider_request_count == 1
+    assert len(connector.requests) == 1
+
+
+def test_connector_failure_consumes_request_records_outcome_and_never_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    plans, no_speech_plans = _development_schedule()
+    connector_attempts = 0
+
+    def connector_factory(_credential: SecretCredential):
+        nonlocal connector_attempts
+        connector_attempts += 1
+        raise RuntimeError("transport detail " + CANARY_SECRET)
+
+    result = asyncio.run(
+        execute_authorized_attempt(
+            plans,
+            no_speech_plans=no_speech_plans,
+            preregistration=preregistration,
+            config=AuthorizedAttemptConfig(
+                preregistration_sha256=preregistration["preregistration_sha256"],
+                source_sha=SOURCE_SHA,
+                approval_key_id=KEY_ID,
+                credential_reference="qualification_secret_v1",
+                policy_ms=250,
+                whole_run_timeout_seconds=30,
+            ),
+            session_config=_config(),
+            campaign_envelope=campaign,
+            attempt_envelope=attempt,
             ledger=AttemptLedger(ledger_path),
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
@@ -1012,9 +1707,7 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             receipt_clock_factory=lambda _plan: ReceiptClock([]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
-            custodian_public_key=X25519PrivateKey.generate()
-            .public_key()
-            .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw),
+            custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_sink=lambda _capsule: None,
         )
@@ -1036,7 +1729,15 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
 ) -> None:
     private, public = _key_pair()
     ledger_path = tmp_path / "attempt-ledger.json"
-    campaign, attempt = _approval_envelopes(private, ledger_path)
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    plans, no_speech_plans = _development_schedule()
 
     async def expire(*_args, **_kwargs):
         raise TimeoutError
@@ -1044,9 +1745,11 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
     monkeypatch.setattr(runner_module, "_execute_attempt_work", expire)
     result = asyncio.run(
         execute_authorized_attempt(
-            (_plan(),),
+            plans,
+            no_speech_plans=no_speech_plans,
+            preregistration=preregistration,
             config=AuthorizedAttemptConfig(
-                preregistration_sha256=PREREGISTRATION_SHA,
+                preregistration_sha256=preregistration["preregistration_sha256"],
                 source_sha=SOURCE_SHA,
                 approval_key_id=KEY_ID,
                 credential_reference="qualification_secret_v1",
@@ -1056,7 +1759,6 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            approval_public_key=public,
             ledger=AttemptLedger(ledger_path),
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
@@ -1067,9 +1769,7 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             receipt_clock_factory=lambda _plan: ReceiptClock([]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
-            custodian_public_key=X25519PrivateKey.generate()
-            .public_key()
-            .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw),
+            custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_sink=lambda _capsule: None,
         )
@@ -1097,8 +1797,11 @@ def test_cli_help_and_dry_run_name_every_immutable_value(
         "corpus_sha256",
         "cost_caps_microusd",
         "credential_reference",
+        "custodian_key_id",
+        "custodian_public_key_sha256",
         "endpoint",
         "environment_identity_sha256",
+        "development_schedule_sha256",
         "evaluator_sha256",
         "evidence_location_sha256",
         "ledger_location_sha256",
@@ -1137,10 +1840,13 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
         "credential_reference": "qualification_secret_v1",
         "approval_key_id": KEY_ID,
         "approval_public_key_sha256": "1" * 64,
+        "custodian_key_id": "audit_custodian_1",
+        "custodian_public_key_sha256": "f" * 64,
         "source_sha": SOURCE_SHA,
         "environment_identity_sha256": "2" * 64,
         "manifest_sha256": "3" * 64,
         "corpus_sha256": "4" * 64,
+        "development_schedule_sha256": "0" * 64,
         "setup_sha256": "5" * 64,
         "pricing_sha256": "6" * 64,
         "runner_sha256": "7" * 64,

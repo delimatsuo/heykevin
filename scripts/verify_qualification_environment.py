@@ -30,6 +30,7 @@ from app.services.qualification_identity import (  # noqa: E402
 EXPECTED_PYTHON = "3.12.13"
 EXPECTED_UV = "0.11.7"
 DEPENDENCY_PATHS = (
+    "config/qualification/gate_0b_approval_root.ed25519.pub",
     "app/services/caller_turn_qualification.py",
     "app/services/qualification_identity.py",
     "app/services/caller_turn_alignment.py",

@@ -184,6 +184,7 @@ class PricingSchedule:
     output_text_usd: Decimal
     source_url: str
     retrieved_at: str
+    artifact_sha256: str
 
     def cost_usd(
         self,
@@ -468,6 +469,19 @@ def load_corpus_manifest(
 
 
 def load_pricing(source: str | Path | Mapping[str, Any]) -> PricingSchedule:
+    if isinstance(source, Mapping):
+        artifact_bytes = json.dumps(
+            source,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    else:
+        try:
+            artifact_bytes = Path(source).read_bytes()
+        except OSError as exc:
+            raise QualificationContractError("pricing is unavailable or invalid") from exc
     raw, _ = _load_json_source(source, label="pricing")
     allowed = {
         "schema_id",
@@ -506,6 +520,7 @@ def load_pricing(source: str | Path | Mapping[str, Any]) -> PricingSchedule:
         output_text_usd=_decimal_rate(data.get("output_text_usd"), "output_text_usd"),
         source_url=source_url,
         retrieved_at=retrieved_at,
+        artifact_sha256=sha256(artifact_bytes).hexdigest(),
     )
 
 

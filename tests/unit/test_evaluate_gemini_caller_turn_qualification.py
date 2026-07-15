@@ -220,7 +220,7 @@ def _artifact(
             "wall_clock_seconds": 600,
             "input_audio_seconds": 300,
             "output_audio_seconds": 100,
-            "cost_microusd": 901_500,
+            "cost_microusd": 903_000,
             "input_audio_tokens": 100_000,
             "output_audio_tokens": 50_000,
             "input_text_tokens": 1_000,

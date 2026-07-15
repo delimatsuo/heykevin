@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "provenance": "fixture_authored_synthetic",
+  "cases": [
+    {
+      "name": "fragments_before_model_output",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Need a "},
+        {"kind": "input_transcript_fragment", "at_ms": 20, "sequence": 2, "epoch": 1, "text": "plumber"},
+        {"kind": "model_output_started", "at_ms": 30, "sequence": 3, "epoch": 1}
+      ],
+      "advance_to_ms": 130,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Need a plumber",
+          "status": "retrospective_complete",
+          "close_reason": "model_output_started",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 20,
+          "terminal_at_ms": 30,
+          "finalized_at_ms": 130,
+          "event_count": 3
+        }
+      ]
+    },
+    {
+      "name": "late_fragment_after_model_output",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Replace the "},
+        {"kind": "model_output_started", "at_ms": 20, "sequence": 2, "epoch": 1},
+        {"kind": "input_transcript_fragment", "at_ms": 50, "sequence": 3, "epoch": 1, "text": "toilet"}
+      ],
+      "advance_to_ms": 150,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Replace the toilet",
+          "status": "retrospective_complete",
+          "close_reason": "model_output_started",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 50,
+          "terminal_at_ms": 20,
+          "finalized_at_ms": 150,
+          "event_count": 3
+        }
+      ]
+    },
+    {
+      "name": "model_output_before_first_fragment",
+      "events": [
+        {"kind": "model_output_started", "at_ms": 10, "sequence": 1, "epoch": 1},
+        {"kind": "input_transcript_fragment", "at_ms": 40, "sequence": 2, "epoch": 1, "text": "Late transcript"}
+      ],
+      "advance_to_ms": 140,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Late transcript",
+          "status": "retrospective_complete",
+          "close_reason": "model_output_started",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 40,
+          "terminal_at_ms": 10,
+          "finalized_at_ms": 140,
+          "event_count": 2
+        }
+      ]
+    },
+    {
+      "name": "fragment_after_generation_complete",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "It is "},
+        {"kind": "generation_complete", "at_ms": 20, "sequence": 2, "epoch": 1},
+        {"kind": "input_transcript_fragment", "at_ms": 40, "sequence": 3, "epoch": 1, "text": "urgent"},
+        {"kind": "turn_complete", "at_ms": 50, "sequence": 4, "epoch": 1}
+      ],
+      "advance_to_ms": 150,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "It is urgent",
+          "status": "retrospective_complete",
+          "close_reason": "turn_complete",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 40,
+          "terminal_at_ms": 50,
+          "finalized_at_ms": 150,
+          "event_count": 4
+        }
+      ]
+    },
+    {
+      "name": "interrupted_then_turn_complete",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Sorry to interrupt"},
+        {"kind": "interrupted", "at_ms": 20, "sequence": 2, "epoch": 1},
+        {"kind": "turn_complete", "at_ms": 25, "sequence": 3, "epoch": 1}
+      ],
+      "advance_to_ms": 125,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Sorry to interrupt",
+          "status": "retrospective_complete",
+          "close_reason": "turn_complete",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 10,
+          "terminal_at_ms": 25,
+          "finalized_at_ms": 125,
+          "event_count": 3
+        }
+      ]
+    },
+    {
+      "name": "tool_call_terminal",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Check availability"},
+        {"kind": "tool_call_started", "at_ms": 20, "sequence": 2, "epoch": 1}
+      ],
+      "advance_to_ms": 120,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Check availability",
+          "status": "retrospective_complete",
+          "close_reason": "tool_call_started",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 10,
+          "terminal_at_ms": 20,
+          "finalized_at_ms": 120,
+          "event_count": 2
+        }
+      ]
+    },
+    {
+      "name": "duplicate_terminal_events",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Routine maintenance"},
+        {"kind": "turn_complete", "at_ms": 20, "sequence": 2, "epoch": 1},
+        {"kind": "turn_complete", "at_ms": 20, "sequence": 2, "epoch": 1}
+      ],
+      "advance_to_ms": 120,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Routine maintenance",
+          "status": "retrospective_complete",
+          "close_reason": "turn_complete",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 10,
+          "terminal_at_ms": 20,
+          "finalized_at_ms": 120,
+          "event_count": 2
+        }
+      ]
+    },
+    {
+      "name": "connection_close_is_partial",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Connection ended"},
+        {"kind": "connection_closed", "at_ms": 20, "sequence": 2, "epoch": 1}
+      ],
+      "advance_to_ms": 120,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Connection ended",
+          "status": "partial",
+          "close_reason": "connection_closed",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 10,
+          "terminal_at_ms": 20,
+          "finalized_at_ms": 20,
+          "event_count": 2
+        }
+      ]
+    },
+    {
+      "name": "pipeline_stop_is_partial",
+      "events": [
+        {"kind": "input_transcript_fragment", "at_ms": 10, "sequence": 1, "epoch": 1, "text": "Pipeline stopped"},
+        {"kind": "pipeline_stopped", "at_ms": 20, "sequence": 2, "epoch": 1}
+      ],
+      "advance_to_ms": 120,
+      "expected_turns": [
+        {
+          "schema_version": 1,
+          "epoch": 1,
+          "turn_id": 1,
+          "transcript": "Pipeline stopped",
+          "status": "partial",
+          "close_reason": "pipeline_stopped",
+          "first_event_at_ms": 10,
+          "last_transcript_at_ms": 10,
+          "terminal_at_ms": 20,
+          "finalized_at_ms": 20,
+          "event_count": 2
+        }
+      ]
+    },
+    {
+      "name": "empty_terminal_is_not_a_turn",
+      "events": [
+        {"kind": "turn_complete", "at_ms": 20, "sequence": 1, "epoch": 1}
+      ],
+      "advance_to_ms": 120,
+      "expected_turns": []
+    }
+  ]
+}

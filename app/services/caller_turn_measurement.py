@@ -47,7 +47,7 @@ from app.services.qualification_identity import canonical_json_bytes
 
 ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v1"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
-AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v3"
+AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v4"
 CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
 SEALED_CAPSULE_SCHEMA_ID = "gate_0b_sealed_capsule_v1"
 SIGNED_ROOT_SCHEMA_ID = "gate_0b_signed_record_root_v1"
@@ -976,6 +976,7 @@ def derive_primitive_records_from_capsule(
                 session["wire_facts"],
                 activity_ordinal=activity["activity_ordinal"],
                 scenario_tags=tuple(activity["scenario_tags"]),
+                speech_end_at_ms=activity["speech_end_at_ms"],
             )
             if activity["advance_to_ms"] < activity_end_ms + max(policies_ms):
                 raise MeasurementError("capsule observation window is shorter than policy set")
@@ -1280,6 +1281,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         for event in events:
             CallerTurnEvent.from_dict(event)
         _validate_wire_facts(session["wire_facts"])
+        _validate_response_wire_state(session["wire_facts"])
         session_index[session_ordinal] = session
     activity_ordinals: set[int] = set()
     for raw_activity in activities:
@@ -1296,6 +1298,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
                 "critical_spans",
                 "expected_lifecycle_status",
                 "expected_epoch",
+                "speech_end_at_ms",
                 "advance_to_ms",
             },
             label="audit capsule activity",
@@ -1344,6 +1347,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         if activity["expected_lifecycle_status"] not in VALID_LIFECYCLE_STATUSES:
             raise MeasurementError("audit capsule lifecycle status is invalid")
         _bounded_int(activity["expected_epoch"], label="expected epoch", maximum=1_000)
+        _bounded_int(activity["speech_end_at_ms"], label="speech end", maximum=120_000)
         _bounded_int(activity["advance_to_ms"], label="advance time", maximum=7_200_000)
     for raw_window in windows:
         window = _strict_mapping(
@@ -1355,6 +1359,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         _validate_split(window["split"])
         _safe_id(window["condition"], label="condition")
         _validate_wire_facts(window["wire_facts"])
+        _validate_response_wire_state(window["wire_facts"])
     activity_session_ordinals = {activity["session_ordinal"] for activity in activities}
     if activity_session_ordinals != set(session_index):
         raise MeasurementError("audit capsule session population is invalid")
@@ -1480,6 +1485,7 @@ def _capsule_wire_observation(
     *,
     activity_ordinal: int,
     scenario_tags: tuple[str, ...],
+    speech_end_at_ms: int,
 ) -> tuple[WireObservation, int]:
     ordered = sorted(facts, key=lambda value: (value["at_ms"], value["sequence"]))
     starts = [
@@ -1496,6 +1502,8 @@ def _capsule_wire_observation(
     ]
     if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
         raise MeasurementError("capsule activity boundaries are invalid")
+    if not starts[0] < speech_end_at_ms <= ends[0]:
+        raise MeasurementError("capsule speech boundary is invalid")
     response_opens = [
         value
         for value in ordered
@@ -1519,7 +1527,7 @@ def _capsule_wire_observation(
         raise MeasurementError("capsule response attribution is inconsistent")
     first_audio_ms = min((value["at_ms"] for value in target_audio), default=None)
     if first_audio_ms is not None:
-        first_audio_ms = max(0, first_audio_ms - ends[0])
+        first_audio_ms = max(0, first_audio_ms - speech_end_at_ms)
     premature_count = sum(value["at_ms"] < ends[0] for value in target_audio)
     terminal_facts = [
         value for value in ordered if value["kind"] == "response_terminal"
@@ -1674,6 +1682,7 @@ def _reject_forbidden_capsule_keys(value: object) -> None:
 def _validate_wire_facts(raw: object) -> None:
     if not isinstance(raw, list) or len(raw) > 10_000:
         raise MeasurementError("audit capsule wire facts are invalid")
+    previous_receipt_at_ms = -1
     for index, raw_fact in enumerate(raw):
         fact = _strict_mapping(
             raw_fact,
@@ -1690,7 +1699,15 @@ def _validate_wire_facts(raw: object) -> None:
         )
         if fact["kind"] not in WIRE_FACT_KINDS:
             raise MeasurementError("audit capsule wire fact kind is invalid")
-        _bounded_int(fact["at_ms"], label="wire fact time", maximum=7_200_000)
+        at_ms = _bounded_int(fact["at_ms"], label="wire fact time", maximum=7_200_000)
+        if fact["kind"] not in {
+            "caller_activity_start",
+            "caller_activity_end",
+            "caller_audio_sent",
+        }:
+            if at_ms < previous_receipt_at_ms:
+                raise MeasurementError("audit capsule receipt time moved backward")
+            previous_receipt_at_ms = at_ms
         _optional_bounded_int(
             fact["response_ordinal"],
             label="response ordinal",
@@ -1721,6 +1738,30 @@ def _validate_wire_facts(raw: object) -> None:
             "response_terminal",
         } and fact["response_ordinal"] is None:
             raise MeasurementError("response wire fact ordinal is missing")
+
+
+def _validate_response_wire_state(raw: list[Mapping[str, Any]]) -> None:
+    active: tuple[int, int | None, int] | None = None
+    opened: set[int] = set()
+    closed: set[tuple[int, int | None, int]] = set()
+    for fact in raw:
+        kind = fact["kind"]
+        response_ordinal = fact["response_ordinal"]
+        identity = (response_ordinal, fact["activity_ordinal"], fact["epoch"])
+        if kind == "response_open":
+            if response_ordinal in opened or active is not None:
+                raise MeasurementError("capsule response-open facts are invalid")
+            opened.add(response_ordinal)
+            active = identity
+        elif kind == "audio_received":
+            if active == identity or identity in closed:
+                continue
+            raise MeasurementError("capsule response audio is not causally attributable")
+        elif kind == "response_terminal":
+            if active != identity:
+                raise MeasurementError("capsule response-terminal facts are invalid")
+            closed.add(identity)
+            active = None
 
 
 def _event_dict(event: CallerTurnEvent) -> dict[str, Any]:

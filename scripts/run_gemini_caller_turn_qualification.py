@@ -155,6 +155,10 @@ class _AbortConnection(Exception):
     pass
 
 
+class _ReceiptClockError(Exception):
+    pass
+
+
 class SecretCredential:
     """Opaque credential whose string representations are always redacted."""
 
@@ -308,6 +312,7 @@ class SessionActivityPlan:
     expected_lifecycle_status: str
     expected_epoch: int
     start_at_ms: int
+    speech_end_at_ms: int
     end_at_ms: int
 
     def __post_init__(self) -> None:
@@ -343,8 +348,9 @@ class SessionActivityPlan:
             raise RunnerError("activity lifecycle expectation is invalid")
         _bounded_int(self.expected_epoch, label="expected epoch", maximum=1_000)
         _bounded_int(self.start_at_ms, label="activity start", maximum=120_000)
+        _bounded_int(self.speech_end_at_ms, label="speech end", maximum=120_000)
         _bounded_int(self.end_at_ms, label="activity end", maximum=120_000)
-        if self.end_at_ms <= self.start_at_ms:
+        if not self.start_at_ms < self.speech_end_at_ms <= self.end_at_ms:
             raise RunnerError("activity timing is invalid")
 
 
@@ -718,6 +724,7 @@ async def execute_injected_session(
     if not isinstance(credential, SecretCredential):
         raise TypeError("credential must be a SecretCredential")
     reducer = secondary_reducer or independent_reduce_message
+    validated_receipt_clock = _monotonic_receipt_clock(receipt_clock_ms)
     progress = _SessionProgress(
         wires={value.activity_ordinal: _MutableWire() for value in plan.activities}
     )
@@ -728,7 +735,7 @@ async def execute_injected_session(
                 config=config,
                 connector=connector,
                 credential=credential,
-                receipt_clock_ms=receipt_clock_ms,
+                receipt_clock_ms=validated_receipt_clock,
                 sleep_ms=sleep_ms,
                 secondary_reducer=reducer,
                 request_reserver=request_reserver,
@@ -816,8 +823,6 @@ async def _execute_session_flow(
         except Exception:
             error_code = "connector_failure"
             break
-        _record_wire_fact(wire_facts, "connection_open", base_at_ms, epoch=epoch)
-
         connection_usage = UsageCounts()
         usage_frame_count = 0
         last_receipt_ms = base_at_ms
@@ -843,7 +848,17 @@ async def _execute_session_flow(
                     build_gate0b_setup_message(config, include_tool=_plan_uses_tools(plan))
                 )
                 setup_response = await session.receive()
-                receipt_clock_ms()
+                setup_at_ms = receipt_clock_ms()
+                last_receipt_ms = setup_at_ms
+                _record_wire_fact(
+                    wire_facts,
+                    "connection_open",
+                    setup_at_ms,
+                    epoch=epoch,
+                )
+            except _ReceiptClockError:
+                error_code = "receipt_clock_invalid"
+                raise _AbortConnection from None
             except ProviderSessionClosed:
                 error_code = "provider_closed"
                 raise _AbortConnection from None
@@ -900,7 +915,16 @@ async def _execute_session_flow(
 
             while True:
                 try:
-                    message = await session.receive()
+                    message, quiet_period_elapsed = await _receive_with_completion_drain(
+                        session,
+                        sender_done=sender_done,
+                        completion_pending=(
+                            usage_frame_count > 0
+                            and active_response_activity is None
+                            and len(terminal_activities) == len(plan.activities)
+                        ),
+                        quiet_timeout_ms=config.response_gap_limit_ms,
+                    )
                 except ProviderSessionClosed:
                     error_code = "provider_closed"
                     _record_wire_fact(
@@ -921,6 +945,8 @@ async def _execute_session_flow(
                     break
                 except Exception:
                     error_code = "connector_failure"
+                    break
+                if quiet_period_elapsed:
                     break
                 if message is None:
                     if not sender_done.is_set():
@@ -1032,12 +1058,6 @@ async def _execute_session_flow(
                     connection_usage = parsed_usage
                     usage_frame_count += 1
                     if set(message) == {"usageMetadata"}:
-                        if (
-                            sender_done.is_set()
-                            and active_response_activity is None
-                            and len(terminal_activities) == len(plan.activities)
-                        ):
-                            break
                         continue
 
                 primary_batch = adapter.adapt_message(
@@ -1103,6 +1123,28 @@ async def _execute_session_flow(
                             epoch=epoch,
                             activity_ordinal=latest_ordinal,
                         )
+
+                if (
+                    cancellation_scenario
+                    and any(
+                        event.kind is CallerTurnEventKind.TOOL_CALL_STARTED
+                        for event in primary.events
+                    )
+                    and active_response_activity is None
+                ):
+                    if latest_activity is None:
+                        error_code = "unattributed_response"
+                        break
+                    active_response_activity = latest_activity.activity_ordinal
+                    response_ordinal += 1
+                    _record_wire_fact(
+                        wire_facts,
+                        "response_open",
+                        at_ms,
+                        epoch=epoch,
+                        response_ordinal=response_ordinal,
+                        activity_ordinal=active_response_activity,
+                    )
 
                 try:
                     tool_response = _synthetic_tool_response(message)
@@ -1204,13 +1246,6 @@ async def _execute_session_flow(
                             response_ordinal=response_ordinal,
                             activity_ordinal=active_response_activity,
                         )
-                        if at_ms < activity.end_at_ms:
-                            wires[activity.activity_ordinal].premature_current_audio_count += 1
-                            error_code = "premature_current_response"
-                        elif wires[activity.activity_ordinal].first_audio_ms is None:
-                            wires[activity.activity_ordinal].first_audio_ms = (
-                                at_ms - activity.end_at_ms
-                            )
                     else:
                         newer = _latest_activity(plan.activities, at_ms, epoch=epoch)
                         if (
@@ -1220,6 +1255,21 @@ async def _execute_session_flow(
                         ):
                             wires[newer.activity_ordinal].interruption_tail_ms = (
                                 at_ms - newer.start_at_ms
+                            )
+                    response_activity = next(
+                        value
+                        for value in plan.activities
+                        if value.activity_ordinal == active_response_activity
+                    )
+                    if wires[active_response_activity].first_audio_ms is None:
+                        if at_ms < response_activity.end_at_ms:
+                            wires[
+                                active_response_activity
+                            ].premature_current_audio_count += 1
+                            error_code = "premature_current_response"
+                        else:
+                            wires[active_response_activity].first_audio_ms = (
+                                at_ms - response_activity.speech_end_at_ms
                             )
                     if last_response_audio_ms is not None and (
                         at_ms - last_response_audio_ms > config.response_gap_limit_ms
@@ -1238,26 +1288,37 @@ async def _execute_session_flow(
                             audio_bytes=chunk_size,
                         )
 
-                if _has_response_terminal(message) and active_response_activity is not None:
-                    _record_wire_fact(
-                        wire_facts,
-                        "response_terminal",
-                        at_ms,
-                        epoch=epoch,
-                        response_ordinal=response_ordinal,
-                        activity_ordinal=active_response_activity,
-                    )
-                    terminal_activities.add(active_response_activity)
-                    active_response_activity = None
-                    last_response_audio_ms = None
+                if _has_response_terminal(message):
+                    if active_response_activity is None:
+                        _record_wire_fact(
+                            wire_facts,
+                            "malformed",
+                            at_ms,
+                            epoch=epoch,
+                            activity_ordinal=latest_ordinal,
+                        )
+                        _increment_wire_counter(
+                            wires,
+                            plan.activities,
+                            "malformed_count",
+                            epoch=epoch,
+                            at_ms=at_ms,
+                            preferred_ordinal=latest_ordinal,
+                        )
+                        error_code = "malformed_message"
+                    else:
+                        _record_wire_fact(
+                            wire_facts,
+                            "response_terminal",
+                            at_ms,
+                            epoch=epoch,
+                            response_ordinal=response_ordinal,
+                            activity_ordinal=active_response_activity,
+                        )
+                        terminal_activities.add(active_response_activity)
+                        active_response_activity = None
+                        last_response_audio_ms = None
                 if error_code is not None:
-                    break
-                if (
-                    usage_frame_count
-                    and sender_done.is_set()
-                    and active_response_activity is None
-                    and len(terminal_activities) == len(plan.activities)
-                ):
                     break
 
             if sender_task is not None:
@@ -1288,17 +1349,36 @@ async def _execute_session_flow(
                 at_ms=last_receipt_ms,
                 preferred_ordinal=active_response_activity,
             )
+        except _ReceiptClockError:
+            error_code = "receipt_clock_invalid"
         except TimeoutError:
             raise
         except Exception:
             error_code = "connector_failure"
         finally:
+            teardown_at_ms = max(
+                last_receipt_ms,
+                max(
+                    (
+                        fact.at_ms
+                        for fact in wire_facts
+                        if fact.epoch == epoch
+                        and fact.kind
+                        in {
+                            "caller_activity_start",
+                            "caller_activity_end",
+                            "caller_audio_sent",
+                        }
+                    ),
+                    default=last_receipt_ms,
+                ),
+            )
             try:
                 await session.close()
                 _record_wire_fact(
                     wire_facts,
                     "teardown_complete",
-                    last_receipt_ms,
+                    teardown_at_ms,
                     epoch=epoch,
                     activity_ordinal=active_response_activity,
                 )
@@ -1306,7 +1386,7 @@ async def _execute_session_flow(
                 _record_wire_fact(
                     wire_facts,
                     "teardown_failed",
-                    last_receipt_ms,
+                    teardown_at_ms,
                     epoch=epoch,
                     activity_ordinal=active_response_activity,
                 )
@@ -1367,6 +1447,7 @@ async def execute_injected_no_speech_window(
         raise TypeError("config must be a SessionExecutionConfig")
     if not isinstance(credential, SecretCredential):
         raise TypeError("credential must be a SecretCredential")
+    validated_receipt_clock = _monotonic_receipt_clock(receipt_clock_ms)
     try:
         return await asyncio.wait_for(
             _execute_no_speech_flow(
@@ -1374,7 +1455,7 @@ async def execute_injected_no_speech_window(
                 config=config,
                 connector=connector,
                 credential=credential,
-                receipt_clock_ms=receipt_clock_ms,
+                receipt_clock_ms=validated_receipt_clock,
                 sleep_ms=sleep_ms,
                 secondary_reducer=secondary_reducer or independent_reduce_message,
                 request_reserver=request_reserver,
@@ -1468,7 +1549,12 @@ async def _execute_no_speech_flow(
 
             while error_code is None:
                 try:
-                    message = await session.receive()
+                    message, quiet_period_elapsed = await _receive_with_completion_drain(
+                        session,
+                        sender_done=sender_done,
+                        completion_pending=usage_frame_count > 0 and not response_open,
+                        quiet_timeout_ms=config.response_gap_limit_ms,
+                    )
                 except ProviderSessionClosed:
                     abnormal_close_count += 1
                     error_code = "provider_closed"
@@ -1478,6 +1564,8 @@ async def _execute_no_speech_flow(
                         last_receipt_ms,
                         epoch=1,
                     )
+                    break
+                if quiet_period_elapsed:
                     break
                 if message is None:
                     if not sender_done.is_set():
@@ -1525,8 +1613,6 @@ async def _execute_no_speech_flow(
                     usage = parsed_usage
                     usage_frame_count += 1
                     if set(message) == {"usageMetadata"}:
-                        if sender_done.is_set() and not response_open:
-                            break
                         continue
 
                 primary_batch = adapter.adapt_message(
@@ -1632,18 +1718,20 @@ async def _execute_no_speech_flow(
                         error_code = "runaway_output"
                         break
 
-                if _has_response_terminal(message) and response_open:
-                    response_open = False
-                    response_terminal = True
-                    _record_wire_fact(
-                        wire_facts,
-                        "response_terminal",
-                        at_ms,
-                        epoch=1,
-                        response_ordinal=1,
-                    )
-                if usage_frame_count and sender_done.is_set() and not response_open:
-                    break
+                if _has_response_terminal(message):
+                    if not response_open:
+                        error_code = "malformed_message"
+                        _record_wire_fact(wire_facts, "malformed", at_ms, epoch=1)
+                    else:
+                        response_open = False
+                        response_terminal = True
+                        _record_wire_fact(
+                            wire_facts,
+                            "response_terminal",
+                            at_ms,
+                            epoch=1,
+                            response_ordinal=1,
+                        )
 
             if sender_task is not None:
                 if error_code is not None and not sender_task.done():
@@ -1667,6 +1755,8 @@ async def _execute_no_speech_flow(
             last_receipt_ms,
             epoch=1,
         )
+    except _ReceiptClockError:
+        error_code = "receipt_clock_invalid"
     except TimeoutError:
         raise
     except Exception:
@@ -2930,6 +3020,7 @@ def _compute_schedule_sha256(
                         "expected_lifecycle_status": activity.expected_lifecycle_status,
                         "expected_epoch": activity.expected_epoch,
                         "start_at_ms": activity.start_at_ms,
+                        "speech_end_at_ms": activity.speech_end_at_ms,
                         "end_at_ms": activity.end_at_ms,
                     }
                     for activity in plan.activities
@@ -3148,6 +3239,7 @@ def _build_audit_capsule(
                     ],
                     "expected_lifecycle_status": activity.expected_lifecycle_status,
                     "expected_epoch": activity.expected_epoch,
+                    "speech_end_at_ms": activity.speech_end_at_ms,
                     "advance_to_ms": max(
                         activity.end_at_ms + max(VALID_POLICIES_MS),
                         latest_event_ms,
@@ -3171,7 +3263,7 @@ def _build_audit_capsule(
     if len(splits) != 1:
         raise RunnerError("audit capsule results must contain exactly one split")
     return {
-        "schema_id": "gate_0b_audit_capsule_v3",
+        "schema_id": "gate_0b_audit_capsule_v4",
         "campaign_id": campaign_id,
         "policy_ms": policy_ms,
         "accounting": {
@@ -3946,6 +4038,80 @@ def _bounded_int(value: object, *, label: str, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
         raise RunnerError(f"{label} is outside its fixed bound")
     return value
+
+
+def _monotonic_receipt_clock(source: Callable[[], int]) -> Callable[[], int]:
+    if not callable(source):
+        raise TypeError("receipt clock must be callable")
+    previous = -1
+
+    def read() -> int:
+        nonlocal previous
+        try:
+            value = source()
+        except Exception:
+            raise _ReceiptClockError from None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 7_200_000
+            or value < previous
+        ):
+            raise _ReceiptClockError
+        previous = value
+        return value
+
+    return read
+
+
+async def _receive_with_completion_drain(
+    session: InjectedSession,
+    *,
+    sender_done: asyncio.Event,
+    completion_pending: bool,
+    quiet_timeout_ms: int,
+) -> tuple[object | None, bool]:
+    if not completion_pending:
+        return await session.receive(), False
+
+    receive_task = asyncio.create_task(session.receive())
+    sender_wait_task: asyncio.Task[bool] | None = None
+    receive_resolved = False
+    try:
+        if not sender_done.is_set():
+            sender_wait_task = asyncio.create_task(sender_done.wait())
+            completed, _ = await asyncio.wait(
+                (receive_task, sender_wait_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in completed:
+                receive_resolved = True
+                return await receive_task, False
+
+        receive_resolved = True
+        try:
+            message = await asyncio.wait_for(
+                receive_task,
+                timeout=quiet_timeout_ms / 1_000,
+            )
+        except TimeoutError:
+            return None, True
+        return message, False
+    finally:
+        if sender_wait_task is not None:
+            if not sender_wait_task.done():
+                sender_wait_task.cancel()
+            try:
+                await sender_wait_task
+            except asyncio.CancelledError:
+                pass
+        if not receive_resolved:
+            if not receive_task.done():
+                receive_task.cancel()
+            try:
+                await receive_task
+            except asyncio.CancelledError:
+                pass
 
 
 def build_dry_run_preregistration() -> dict[str, Any]:

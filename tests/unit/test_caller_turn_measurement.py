@@ -91,7 +91,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         serialization.PublicFormat.Raw,
     )
     payload = {
-        "schema_id": "gate_0b_audit_capsule_v3",
+        "schema_id": "gate_0b_audit_capsule_v4",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -145,6 +145,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
                 ],
                 "expected_lifecycle_status": "retrospective_complete",
                 "expected_epoch": 1,
+                "speech_end_at_ms": 80,
                 "advance_to_ms": 300,
             }
         ],
@@ -209,7 +210,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
 
 def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v3",
+        "schema_id": "gate_0b_audit_capsule_v4",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -349,6 +350,7 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
                 ],
                 "expected_lifecycle_status": "retrospective_complete",
                 "expected_epoch": 1,
+                "speech_end_at_ms": 80,
                 "advance_to_ms": 900,
             }
         ],
@@ -369,7 +371,7 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
     )
 
     assert [record.policy_ms for record in activity_records] == [100, 250, 500, 750]
-    assert all(record.first_audio_ms == 120 for record in activity_records)
+    assert all(record.first_audio_ms == 140 for record in activity_records)
     assert all(record.commitment for record in activity_records)
     assert len(no_speech_records) == 1
     assert no_speech_records[0].commitment
@@ -410,7 +412,7 @@ def _literal_wire_capsule() -> dict[str, object]:
         }
 
     return {
-        "schema_id": "gate_0b_audit_capsule_v3",
+        "schema_id": "gate_0b_audit_capsule_v4",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -488,6 +490,7 @@ def _literal_wire_capsule() -> dict[str, object]:
                 "critical_spans": [],
                 "expected_lifecycle_status": "retrospective_complete",
                 "expected_epoch": 1,
+                "speech_end_at_ms": 80,
                 "advance_to_ms": 900,
             }
         ],
@@ -522,8 +525,8 @@ def test_literal_capsule_wire_mutations_derive_failing_primitives(
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
     assert isinstance(facts, list)
     if mutation == "premature":
-        facts[3]["at_ms"] = 90
-        facts[4]["at_ms"] = 90
+        facts[3]["at_ms"] = 70
+        facts[4]["at_ms"] = 70
     elif mutation == "gap":
         facts.insert(
             5,
@@ -556,6 +559,25 @@ def test_literal_capsule_wire_mutations_derive_failing_primitives(
     assert getattr(records[0], field) == 1
     if mutation == "premature":
         assert records[0].first_audio_ms == 0
+
+
+def test_capsule_first_audio_latency_uses_labeled_speech_end() -> None:
+    capsule = _literal_wire_capsule()
+    activity = capsule["activities"][0]  # type: ignore[index]
+    activity.update(
+        {
+            "speech_end_at_ms": 80,
+        }
+    )
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert records[0].first_audio_ms == 140
+    assert records[0].premature_current_audio_count == 0
 
 
 def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> None:
@@ -646,6 +668,7 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
             "critical_spans": [],
             "expected_lifecycle_status": "retrospective_complete",
             "expected_epoch": 1,
+            "speech_end_at_ms": 80,
             "advance_to_ms": 800,
         },
         {
@@ -659,6 +682,7 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
             "critical_spans": [],
             "expected_lifecycle_status": "retrospective_complete",
             "expected_epoch": 1,
+            "speech_end_at_ms": 280,
             "advance_to_ms": 800,
         },
     ]
@@ -782,6 +806,7 @@ def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> 
             "critical_spans": [],
             "expected_lifecycle_status": "retrospective_complete",
             "expected_epoch": 1,
+            "speech_end_at_ms": 80,
             "advance_to_ms": 900,
         },
         {
@@ -795,6 +820,7 @@ def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> 
             "critical_spans": [],
             "expected_lifecycle_status": "retrospective_complete",
             "expected_epoch": 1,
+            "speech_end_at_ms": 530,
             "advance_to_ms": 900,
         },
     ]
@@ -837,9 +863,53 @@ def test_duplicate_terminal_cannot_hide_audio_after_the_first_terminal() -> None
         )
 
 
+def test_orphan_terminal_is_rejected_by_capsule_recomputation() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    facts.insert(
+        5,
+        {
+            **facts[5],
+            "at_ms": 225,
+            "response_ordinal": 99,
+        },
+    )
+    _normalize_wire_sequences(capsule)
+
+    with pytest.raises(MeasurementError, match="response-terminal"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
+def test_audio_reusing_closed_response_ordinal_with_wrong_identity_is_rejected() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    facts.insert(
+        6,
+        {
+            **facts[4],
+            "at_ms": 235,
+            "activity_ordinal": 4,
+        },
+    )
+    _normalize_wire_sequences(capsule)
+
+    with pytest.raises(MeasurementError, match="causally attributable"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
 def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v3",
+        "schema_id": "gate_0b_audit_capsule_v4",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {

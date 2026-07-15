@@ -170,6 +170,21 @@ class FakeSession:
         self.closed = True
 
 
+class YieldingFakeSession(FakeSession):
+    async def receive(self):
+        for _ in range(8):
+            await asyncio.sleep(0)
+        return await super().receive()
+
+
+class HangingAfterMessagesSession(YieldingFakeSession):
+    async def receive(self):
+        if self.messages:
+            return await super().receive()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class FakeConnector:
     def __init__(self, sessions):
         self.sessions = list(sessions)
@@ -447,6 +462,7 @@ def _activity(
         expected_lifecycle_status="retrospective_complete",
         expected_epoch=1,
         start_at_ms=start_ms,
+        speech_end_at_ms=end_ms - 20,
         end_at_ms=end_ms,
     )
 
@@ -529,6 +545,7 @@ def _split_schedule(
                         expected_lifecycle_status="retrospective_complete",
                         expected_epoch=epoch,
                         start_at_ms=start_ms,
+                        speech_end_at_ms=end_ms - 20,
                         end_at_ms=end_ms,
                     )
                 )
@@ -600,6 +617,7 @@ def _restart_plan() -> SessionPlan:
         expected_lifecycle_status="retrospective_complete",
         expected_epoch=2,
         start_at_ms=150,
+        speech_end_at_ms=230,
         end_at_ms=250,
     )
     return SessionPlan(
@@ -640,6 +658,10 @@ def _successful_sessions_for_plans(plans: tuple[SessionPlan, ...]) -> list[FakeS
     sessions: list[FakeSession] = []
     for plan in plans:
         activities = {value.activity_ordinal: value for value in plan.activities}
+        has_cancellation = any(
+            "tool_cancellation_interruption" in value.scenario_tags
+            for value in plan.activities
+        )
         for epoch, _base_at_ms, replay_inputs in runner_module._connection_segments(plan):
             ordinals = tuple(
                 dict.fromkeys(
@@ -651,7 +673,13 @@ def _successful_sessions_for_plans(plans: tuple[SessionPlan, ...]) -> list[FakeS
             messages: list[object] = [{"setupComplete": {}}]
             for ordinal in ordinals:
                 activity = activities[ordinal]
-                message = _server_event(text=activity.reference.text)
+                message = _server_event(
+                    text=activity.reference.text,
+                    terminal=not (
+                        has_cancellation
+                        and "synchronous_tool_use" in activity.scenario_tags
+                    ),
+                )
                 if "synchronous_tool_use" in activity.scenario_tags:
                     message["toolCall"] = {
                         "functionCalls": [
@@ -676,8 +704,10 @@ def _receipt_times_for_plan(plan: SessionPlan | NoSpeechWindowPlan) -> list[int]
     if isinstance(plan, NoSpeechWindowPlan):
         return [0, 30]
     values: list[int] = []
+    previous = 0
     for _epoch, base_at_ms, replay_inputs in runner_module._connection_segments(plan):
-        values.append(base_at_ms)
+        previous = max(previous, base_at_ms)
+        values.append(previous)
         ordinals = tuple(
             dict.fromkeys(
                 value.activity_ordinal
@@ -686,8 +716,14 @@ def _receipt_times_for_plan(plan: SessionPlan | NoSpeechWindowPlan) -> list[int]
             )
         )
         activities = {value.activity_ordinal: value for value in plan.activities}
-        values.extend(activities[ordinal].end_at_ms + 20 for ordinal in ordinals)
-        values.append(max((activities[ordinal].end_at_ms for ordinal in ordinals), default=0) + 30)
+        for ordinal in ordinals:
+            previous = max(previous, activities[ordinal].end_at_ms + 20)
+            values.append(previous)
+        previous = max(
+            previous,
+            max((activities[ordinal].end_at_ms for ordinal in ordinals), default=0) + 30,
+        )
+        values.append(previous)
     return values
 
 
@@ -1563,6 +1599,32 @@ def test_current_response_before_activity_end_is_rejected() -> None:
     assert result.wire_observations[1].premature_current_audio_count == 1
 
 
+def test_first_audio_latency_uses_speech_end_before_trailing_silence() -> None:
+    base = _plan()
+    plan = replace(
+        base,
+        activities=(replace(base.activities[0], speech_end_at_ms=80),),
+    )
+    session = FakeSession(
+        [{"setupComplete": {}}, _server_event(), _usage_message(), None]
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            plan,
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is True
+    assert result.wire_observations[1].first_audio_ms == 40
+    assert result.wire_observations[1].premature_current_audio_count == 0
+
+
 def test_open_prior_response_remains_prior_during_next_activity() -> None:
     first_audio = _server_event(text="first", terminal=False)
     first_audio["serverContent"].pop("inputTranscription")
@@ -1704,6 +1766,133 @@ def test_audio_after_turn_terminal_is_rejected_and_counted() -> None:
 
     assert result.error_code == "audio_after_terminal"
     assert result.wire_observations[1].audio_after_terminal_count == 1
+
+
+def test_duplicate_response_terminal_is_recorded_as_malformed_and_rejected() -> None:
+    session = FakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(),
+            {"serverContent": {"turnComplete": True}},
+            _usage_message(),
+            None,
+        ]
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "malformed_message"
+    assert result.wire_observations[1].malformed_count == 1
+    assert [fact.kind for fact in result.wire_facts].count("malformed") == 1
+
+
+def test_decreasing_receipt_clock_fails_closed() -> None:
+    session = FakeSession(
+        [{"setupComplete": {}}, _server_event(), _usage_message(), None]
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 110]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "receipt_clock_invalid"
+
+
+def test_usage_metadata_does_not_hide_delayed_audio_after_terminal() -> None:
+    late = _server_event(terminal=False)
+    late["serverContent"].pop("inputTranscription")
+    session = YieldingFakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(),
+            _usage_message(),
+            late,
+            None,
+        ]
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "audio_after_terminal"
+    assert result.wire_observations[1].audio_after_terminal_count == 1
+
+
+def test_no_speech_usage_metadata_does_not_hide_delayed_activation() -> None:
+    session = YieldingFakeSession(
+        [
+            {"setupComplete": {}},
+            _usage_message(),
+            _server_event(),
+            None,
+        ]
+    )
+
+    result = asyncio.run(
+        execute_injected_no_speech_window(
+            _no_speech_plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is True
+    assert result.false_activity_count == 1
+    assert result.model_audio_chunk_count == 1
+
+
+def test_usage_completion_uses_bounded_quiet_drain_when_stream_stays_open() -> None:
+    session = HangingAfterMessagesSession(
+        [
+            {"setupComplete": {}},
+            _usage_message(),
+        ]
+    )
+
+    result = asyncio.run(
+        execute_injected_no_speech_window(
+            _no_speech_plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is True
+    assert result.error_code is None
+    assert session.closed is True
 
 
 def test_no_speech_window_records_false_activation_without_computing_verdict() -> None:

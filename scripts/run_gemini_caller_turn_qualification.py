@@ -13,6 +13,8 @@ from decimal import ROUND_CEILING
 from hashlib import sha256
 import inspect
 import json
+import os
+from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
@@ -24,7 +26,11 @@ from app.services.caller_turn_measurement import (
     require_reducer_agreement,
     seal_audit_capsule,
 )
-from app.services.caller_turn_qualification import CampaignPhase, PricingSchedule
+from app.services.caller_turn_qualification import (
+    CampaignPhase,
+    PricingSchedule,
+    empty_evidence_flags,
+)
 from app.services.caller_turns import CallerTurnEvent, CallerTurnEventKind
 from app.services.gemini_turn_events import (
     GeminiTurnEventAdapter,
@@ -58,6 +64,7 @@ MAX_OUTPUT_AUDIO_BYTES = 10 * 1024 * 1024
 MAX_WHOLE_RUN_SECONDS = 3_600
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RunnerError(ValueError):
@@ -2221,9 +2228,187 @@ def _bounded_int(value: object, *, label: str, maximum: int) -> int:
     return value
 
 
+def build_dry_run_preregistration() -> dict[str, Any]:
+    """Describe the exact Gate 0B contract without creating executable approval."""
+    return {
+        "schema_id": "gate_0b_preregistration_dry_run_v1",
+        "scope": "gate_0b_purpose_recorded_turn_assembly",
+        "status": "implementation_only_not_executable",
+        "immutable_values": {
+            "model": EXACT_MODEL,
+            "api_version": "v1beta",
+            "endpoint": OFFICIAL_ENDPOINT,
+            "transport": "websocket_bidi_tls",
+            "project": None,
+            "credential_reference": None,
+            "approval_key_id": None,
+            "approval_public_key_sha256": None,
+            "source_sha": None,
+            "environment_identity_sha256": None,
+            "manifest_sha256": None,
+            "corpus_sha256": None,
+            "setup_sha256": None,
+            "pricing_sha256": None,
+            "runner_sha256": None,
+            "evaluator_sha256": None,
+            "ledger_location_sha256": None,
+            "audit_capsule_location_sha256": None,
+            "evidence_location_sha256": None,
+            "consent_attestation_sha256": None,
+            "retention_attestation_sha256": None,
+            "zdr_or_residual_retention_acceptance_sha256": None,
+            "python_version": "3.12.13",
+            "uv_version": "0.11.7",
+            "candidate_policies_ms": [100, 250, 500, 750],
+            "languages": ["ar", "en", "es", "fr", "hi", "ht", "pt", "zh"],
+            "attempt_caps": {
+                "whole_run_attempts": 3,
+                "sessions_per_run": 64,
+                "eligible_activities_per_run": 256,
+                "holdout_activities": 128,
+                "no_speech_windows_per_run": 64,
+                "activities_per_session": 10,
+                "fresh_connection_restarts_per_session": 1,
+            },
+            "usage_caps": {
+                "provider_requests_per_run": 128,
+                "provider_requests_per_campaign": 384,
+                "session_timeout_seconds": 120,
+                "whole_run_wall_clock_seconds": 3_600,
+            },
+            "audio_caps": {
+                "input_audio_seconds_per_run": 3_600,
+                "output_audio_seconds_per_run": 1_800,
+            },
+            "cost_caps_microusd": {
+                "per_session": 250_000,
+                "per_run": 10_000_000,
+                "per_campaign": 30_000_000,
+            },
+        },
+        "credential_default_present": False,
+        "provider_execution_authorized": False,
+        "evidence": empty_evidence_flags(),
+    }
+
+
+def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Fill the dry-run contract from one strict, externally reviewed value set."""
+    external_fields = {
+        "project",
+        "credential_reference",
+        "approval_key_id",
+        "approval_public_key_sha256",
+        "source_sha",
+        "environment_identity_sha256",
+        "manifest_sha256",
+        "corpus_sha256",
+        "setup_sha256",
+        "pricing_sha256",
+        "runner_sha256",
+        "evaluator_sha256",
+        "ledger_location_sha256",
+        "audit_capsule_location_sha256",
+        "evidence_location_sha256",
+        "consent_attestation_sha256",
+        "retention_attestation_sha256",
+        "zdr_or_residual_retention_acceptance_sha256",
+    }
+    if not isinstance(values, Mapping) or set(values) != {"schema_id", *external_fields}:
+        raise RunnerError("preregistration values fields are invalid")
+    if values.get("schema_id") != "gate_0b_preregistration_values_v1":
+        raise RunnerError("preregistration values schema is invalid")
+    project = values["project"]
+    if (
+        not isinstance(project, str)
+        or not PROJECT_ID.fullmatch(project)
+        or "prod" in project
+        or project == "kevin-491315"
+    ):
+        raise RunnerError("preregistration project is invalid")
+
+    validated: dict[str, str] = {"project": project}
+    for field in ("credential_reference", "approval_key_id"):
+        validated[field] = _safe_id(values[field], label=field.replace("_", " "))
+    source_sha = values["source_sha"]
+    if not isinstance(source_sha, str) or not SOURCE_SHA.fullmatch(source_sha):
+        raise RunnerError("preregistration source SHA is invalid")
+    validated["source_sha"] = source_sha
+    for field in external_fields - {
+        "project",
+        "credential_reference",
+        "approval_key_id",
+        "source_sha",
+    }:
+        value = values[field]
+        if not isinstance(value, str) or not SHA256.fullmatch(value):
+            raise RunnerError("preregistration digest is invalid")
+        validated[field] = value
+
+    document = build_dry_run_preregistration()
+    document["status"] = "preregistered_pending_separate_approval"
+    document["immutable_values"].update(validated)
+    document["preregistration_sha256"] = sha256(canonical_json_bytes(document)).hexdigest()
+    return document
+
+
+def _load_external_values(path_value: str) -> Mapping[str, Any]:
+    path = Path(path_value)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise RunnerError("preregistration values file is invalid")
+    resolved = path.resolve()
+    if resolved.is_relative_to(REPO_ROOT) or resolved.stat().st_size > 64 * 1024:
+        raise RunnerError("preregistration values file is invalid")
+    try:
+        decoded = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerError("preregistration values file is invalid") from exc
+    if not isinstance(decoded, Mapping):
+        raise RunnerError("preregistration values file is invalid")
+    return decoded
+
+
+def _write_dry_run_output(path_value: str, document: Mapping[str, Any]) -> None:
+    path = Path(path_value)
+    if not path.is_absolute():
+        raise RunnerError("dry-run output path must be absolute")
+    if path.exists() and path.is_symlink():
+        raise RunnerError("dry-run output path must not be a symlink")
+    parent = path.parent.resolve()
+    if not parent.is_dir():
+        raise RunnerError("dry-run output parent is unavailable")
+    resolved = parent / path.name
+    if resolved.is_relative_to(REPO_ROOT):
+        raise RunnerError("dry-run output must be outside the repository")
+    descriptor = os.open(resolved, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, canonical_json_bytes(document) + b"\n")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def build_parser() -> argparse.ArgumentParser:
+    immutable_fields = "\n".join(
+        f"  {field}" for field in sorted(build_dry_run_preregistration()["immutable_values"])
+    )
     parser = argparse.ArgumentParser(
         description="Validate Gate 0B runner availability without network execution.",
+        epilog="Immutable dry-run fields:\n" + immutable_fields,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Emit the non-executable preregistration contract (default behavior).",
+    )
+    parser.add_argument(
+        "--output",
+        help="Absolute owner-only output path outside the repository.",
+    )
+    parser.add_argument(
+        "--values",
+        help="Absolute external JSON values file; requires --output.",
     )
     parser.add_argument("--execute", action="store_true")
     return parser
@@ -2232,7 +2417,28 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.execute:
+        print('{"error_code":"provider_execution_not_authorized","status":"blocked"}')
         return 2
+    if args.values is not None and args.output is None:
+        print('{"error_code":"dry_run_output_required","status":"blocked"}')
+        return 2
+    try:
+        document = (
+            build_preregistration(_load_external_values(args.values))
+            if args.values is not None
+            else build_dry_run_preregistration()
+        )
+    except RunnerError:
+        print('{"error_code":"preregistration_values_rejected","status":"blocked"}')
+        return 2
+    if args.output is not None:
+        try:
+            _write_dry_run_output(args.output, document)
+        except (OSError, RunnerError):
+            print('{"error_code":"dry_run_output_rejected","status":"blocked"}')
+            return 2
+    else:
+        print(json.dumps(document, sort_keys=True, separators=(",", ":")))
     return 0
 
 

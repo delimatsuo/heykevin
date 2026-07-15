@@ -36,6 +36,9 @@ from scripts.run_gemini_caller_turn_qualification import (
     SessionExecutionConfig,
     SessionPlan,
     build_gate0b_setup_message,
+    build_dry_run_preregistration,
+    build_parser,
+    build_preregistration,
     execute_authorized_attempt,
     execute_injected_session,
     execute_injected_no_speech_window,
@@ -1077,6 +1080,143 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
     outcome = AttemptLedger(ledger_path).snapshot()["records"][-1]
     assert outcome["outcome"] == "failed"
     assert outcome["actual_provider_requests"] == 0
+
+
+def test_cli_help_and_dry_run_name_every_immutable_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    help_text = build_parser().format_help()
+    required_fields = {
+        "api_version",
+        "approval_key_id",
+        "approval_public_key_sha256",
+        "attempt_caps",
+        "audio_caps",
+        "audit_capsule_location_sha256",
+        "consent_attestation_sha256",
+        "corpus_sha256",
+        "cost_caps_microusd",
+        "credential_reference",
+        "endpoint",
+        "environment_identity_sha256",
+        "evaluator_sha256",
+        "evidence_location_sha256",
+        "ledger_location_sha256",
+        "manifest_sha256",
+        "model",
+        "pricing_sha256",
+        "project",
+        "retention_attestation_sha256",
+        "runner_sha256",
+        "setup_sha256",
+        "source_sha",
+        "transport",
+        "usage_caps",
+        "zdr_or_residual_retention_acceptance_sha256",
+    }
+
+    document = build_dry_run_preregistration()
+
+    assert required_fields <= set(document["immutable_values"])
+    assert all(field in help_text for field in required_fields)
+    assert document["immutable_values"]["project"] is None
+    assert document["immutable_values"]["credential_reference"] is None
+    assert document["credential_default_present"] is False
+    assert document["provider_execution_authorized"] is False
+    assert all(value is False for value in document["evidence"].values())
+    assert main(["--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out) == document
+
+
+def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
+    tmp_path: Path,
+) -> None:
+    values = {
+        "schema_id": "gate_0b_preregistration_values_v1",
+        "project": "kevin-qualification-test",
+        "credential_reference": "qualification_secret_v1",
+        "approval_key_id": KEY_ID,
+        "approval_public_key_sha256": "1" * 64,
+        "source_sha": SOURCE_SHA,
+        "environment_identity_sha256": "2" * 64,
+        "manifest_sha256": "3" * 64,
+        "corpus_sha256": "4" * 64,
+        "setup_sha256": "5" * 64,
+        "pricing_sha256": "6" * 64,
+        "runner_sha256": "7" * 64,
+        "evaluator_sha256": "8" * 64,
+        "ledger_location_sha256": "9" * 64,
+        "audit_capsule_location_sha256": "a" * 64,
+        "evidence_location_sha256": "b" * 64,
+        "consent_attestation_sha256": "c" * 64,
+        "retention_attestation_sha256": "d" * 64,
+        "zdr_or_residual_retention_acceptance_sha256": "e" * 64,
+    }
+
+    document = build_preregistration(values)
+    unsigned = dict(document)
+    digest = unsigned.pop("preregistration_sha256")
+
+    assert digest == sha256(canonical_json_bytes(unsigned)).hexdigest()
+    assert document["status"] == "preregistered_pending_separate_approval"
+    assert document["immutable_values"]["credential_reference"] == ("qualification_secret_v1")
+    assert document["credential_default_present"] is False
+    assert all(value is False for value in document["evidence"].values())
+
+    values_path = tmp_path / "values.json"
+    output_path = tmp_path / "preregistration.json"
+    values_path.write_text(json.dumps(values))
+    assert (
+        main(
+            [
+                "--dry-run",
+                "--values",
+                str(values_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(output_path.read_text()) == document
+
+    with pytest.raises(ValueError, match="fields"):
+        build_preregistration({**values, "unexpected": True})
+
+
+def test_dry_run_output_must_be_outside_repository(tmp_path: Path) -> None:
+    outside = tmp_path / "gate0b-preregistration.json"
+    inside = Path("docs/gate0b-preregistration.invalid.json").resolve()
+
+    assert main(["--dry-run", "--output", str(outside)]) == 0
+    assert json.loads(outside.read_text()) == build_dry_run_preregistration()
+    assert outside.stat().st_mode & 0o777 == 0o600
+    assert main(["--dry-run", "--output", str(inside)]) == 2
+    assert not inside.exists()
+
+
+def test_gate0b_runbook_is_pending_external_only_and_non_authorizing() -> None:
+    runbook = Path("docs/gemini-caller-turn-qualification-gate-0b.md").read_text()
+    adr = Path("docs/adr/0001-gemini-retrospective-caller-turns.md").read_text()
+    required_flags = {
+        "future_execution_authorized",
+        "model_migration_authorized",
+        "runtime_wiring_authorized",
+        "staging_authorized",
+        "deployment_authorized",
+        "production_authorized",
+        "release_authorized",
+    }
+
+    assert "Status: Implementation-only; provider execution not approved" in runbook
+    assert "/var/lib/hey-kevin-qualification/" in runbook
+    assert "--dry-run" in runbook
+    assert "--output" in runbook
+    assert "--credential" not in runbook
+    assert "GEMINI_" + "API_KEY=" not in runbook
+    assert required_flags <= set(runbook.split())
+    assert "Pending Gate 0B; no go decision" in adr
+    assert "does not authorize provider execution" in adr
 
 
 def test_cli_execute_is_hard_blocked_and_dry_run_has_no_connector() -> None:

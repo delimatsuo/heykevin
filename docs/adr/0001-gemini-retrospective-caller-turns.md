@@ -1,6 +1,6 @@
 # ADR 0001: Gemini Retrospective Caller Turns
 
-- Status: Proposed, pending Gate 0B empirical evidence
+- Status: Pending Gate 0B; no go decision
 - Date: 2026-07-14
 - Decision owners: Hey Kevin voice and controller maintainers
 - Scope: Offline caller-turn assembly qualification only
@@ -56,6 +56,12 @@ Gate 0A. Therefore:
 - no final quiescence policy has been selected;
 - no runtime or shadow plan is authorized.
 
+The offline Gate 0B executor, evaluator, encrypted-capsule contract, approval
+identity, and preregistration mechanism are implementation evidence only. This
+implementation review does not authorize provider execution and records no go or
+no-go result. Provider execution requires a separate exact-digest approval after the
+implementation merges.
+
 ## Gate 0B Decision Rule
 
 A later run cannot use the Gate 0A command, whose provider execution path is
@@ -96,6 +102,8 @@ them:
 ## References
 
 - `docs/superpowers/plans/2026-07-14-typed-receptionist-observation-qualification.md`
+- `docs/superpowers/plans/2026-07-15-gemini-caller-turn-qualification-gate-0b.md`
+- `docs/gemini-caller-turn-qualification-gate-0b.md`
 - Gemini Live API: <https://ai.google.dev/api/live>
 - Gemini Live capabilities: <https://ai.google.dev/gemini-api/docs/live-api/capabilities>
 - Gemini Live tools: <https://ai.google.dev/gemini-api/docs/live-api/tools>

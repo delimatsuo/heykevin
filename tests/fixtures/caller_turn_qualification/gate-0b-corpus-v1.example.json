@@ -1,0 +1,20 @@
+{
+  "schema_id": "gate_0b_corpus_v1",
+  "collection_status": "pending",
+  "corpus_root": ".",
+  "lower_resource_language": "ht",
+  "attestations": {
+    "consent_registry_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "holdout_custodian_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "paid_project_attestation_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "retention_policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "provider_retention_decision": "pending",
+    "real_call_data_prohibited": true,
+    "production_audio_prohibited": true,
+    "voiceprint_extraction_prohibited": true
+  },
+  "subjects": [],
+  "sessions": [],
+  "activities": [],
+  "no_speech_windows": []
+}

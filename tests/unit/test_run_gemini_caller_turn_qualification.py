@@ -690,7 +690,7 @@ def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> 
     assert receiver_was_live_during_send is True
 
 
-def test_multiple_official_usage_frames_are_accumulated() -> None:
+def test_multiple_official_usage_frames_use_latest_cumulative_snapshot() -> None:
     first = _server_event(text="book service today 1")
     second = _server_event(text="book service today 2")
     session = FakeSession(
@@ -699,7 +699,12 @@ def test_multiple_official_usage_frames_are_accumulated() -> None:
             first,
             _usage_message(),
             second,
-            _usage_message(),
+            _usage_message(
+                input_audio_tokens=12,
+                input_text_tokens=3,
+                output_audio_tokens=6,
+                output_text_tokens=2,
+            ),
             None,
         ]
     )
@@ -716,8 +721,37 @@ def test_multiple_official_usage_frames_are_accumulated() -> None:
     )
 
     assert result.complete is True
-    assert result.usage.input_audio_tokens == 16
-    assert result.usage.output_audio_tokens == 8
+    assert result.usage.input_audio_tokens == 12
+    assert result.usage.output_audio_tokens == 6
+
+
+def test_decreasing_cumulative_usage_snapshot_fails_closed() -> None:
+    first = _server_event(text="book service today 1")
+    second = _server_event(text="book service today 2")
+    session = FakeSession(
+        [
+            {"setupComplete": {}},
+            first,
+            _usage_message(input_audio_tokens=12, output_audio_tokens=6),
+            second,
+            _usage_message(input_audio_tokens=8, output_audio_tokens=4),
+            None,
+        ]
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(two_activities=True),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130, 300, 310]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "usage_metadata_inconsistent"
 
 
 def test_automatic_vad_schedule_keeps_activity_markers_local_and_sends_only_pcm() -> None:

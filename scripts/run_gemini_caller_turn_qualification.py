@@ -904,7 +904,13 @@ async def _execute_session_flow(
                     except RunnerError:
                         error_code = "usage_metadata_inconsistent"
                         break
-                    connection_usage = _add_usage(connection_usage, parsed_usage)
+                    if usage_frame_count and not _usage_snapshot_is_monotonic(
+                        connection_usage,
+                        parsed_usage,
+                    ):
+                        error_code = "usage_metadata_inconsistent"
+                        break
+                    connection_usage = parsed_usage
                     usage_frame_count += 1
                     if set(message) == {"usageMetadata"}:
                         if (
@@ -1286,7 +1292,13 @@ async def _execute_no_speech_flow(
                     except RunnerError:
                         error_code = "usage_metadata_inconsistent"
                         break
-                    usage = _add_usage(usage, parsed_usage)
+                    if usage_frame_count and not _usage_snapshot_is_monotonic(
+                        usage,
+                        parsed_usage,
+                    ):
+                        error_code = "usage_metadata_inconsistent"
+                        break
+                    usage = parsed_usage
                     usage_frame_count += 1
                     if set(message) == {"usageMetadata"}:
                         if sender_done.is_set() and not response_open:
@@ -2164,6 +2176,17 @@ def _add_usage(left: UsageCounts, right: UsageCounts) -> UsageCounts:
         output_audio_tokens=left.output_audio_tokens + right.output_audio_tokens,
         input_text_tokens=left.input_text_tokens + right.input_text_tokens,
         output_text_tokens=left.output_text_tokens + right.output_text_tokens,
+    )
+
+
+def _usage_snapshot_is_monotonic(previous: UsageCounts, current: UsageCounts) -> bool:
+    return all(
+        current_value >= previous_value
+        for current_value, previous_value in zip(
+            current.to_dict().values(),
+            previous.to_dict().values(),
+            strict=True,
+        )
     )
 
 

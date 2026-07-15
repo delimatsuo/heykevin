@@ -623,11 +623,11 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
         fact("audio_received", 150, 4, activity=2, response=1, audio_bytes=320),
         fact("tool_call_open", 160, 5, activity=2),
         fact("caller_activity_start", 200, 6, activity=3),
-        fact("caller_audio_sent", 200, 7, activity=3, audio_bytes=640),
-        fact("audio_received", 200, 8, activity=2, response=1, audio_bytes=320),
-        fact("tool_call_cancelled", 200, 9, activity=3),
-        fact("interrupted", 200, 10, activity=3),
-        fact("response_terminal", 200, 11, activity=2, response=1),
+        fact("caller_audio_sent", 250, 7, activity=3, audio_bytes=640),
+        fact("audio_received", 250, 8, activity=2, response=1, audio_bytes=320),
+        fact("tool_call_cancelled", 250, 9, activity=3),
+        fact("interrupted", 250, 10, activity=3),
+        fact("response_terminal", 250, 11, activity=2, response=1),
         fact("caller_activity_end", 300, 12, activity=3),
         fact("response_open", 400, 13, activity=3, response=2),
         fact("audio_received", 400, 14, activity=3, response=2, audio_bytes=320),
@@ -685,6 +685,36 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
     )
     cancellation = next(record for record in records if record.activity_ordinal == 3)
     assert cancellation.interruption_tail_ms is None
+
+    wrong_epoch = deepcopy(capsule)
+    open_fact = next(
+        fact
+        for fact in wrong_epoch["sessions"][0]["wire_facts"]  # type: ignore[index]
+        if fact["kind"] == "tool_call_open"
+    )
+    open_fact["epoch"] = 2
+    records, _ = derive_primitive_records_from_capsule(
+        wrong_epoch,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+    cancellation = next(record for record in records if record.activity_ordinal == 3)
+    assert cancellation.interruption_tail_ms is None
+
+
+def test_duplicate_terminal_cannot_hide_audio_after_the_first_terminal() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    facts.insert(6, {**facts[5], "at_ms": 240})
+    _normalize_wire_sequences(capsule)
+
+    with pytest.raises(MeasurementError, match="response-terminal"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
 
 
 def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:

@@ -2515,6 +2515,50 @@ def test_stale_privacy_receipt_blocks_asset_ledger_secret_and_connector(
     assert not ledger_path.exists()
 
 
+def test_asset_loader_failure_suppresses_sensitive_exception_chain() -> None:
+    class FailingLoader:
+        def load(self, _authorization):
+            raise RuntimeError(CANARY_SECRET)
+
+    authorization = runner_module.PrivacyCustodyAuthorization(
+        campaign_id="campaign_1",
+        authorization_id="authorization_1",
+        attempt_id="attempt_1",
+        split="development",
+        preregistration_sha256="a" * 64,
+        source_sha="b" * 40,
+        schedule_sha256="c" * 64,
+        corpus_sha256="d" * 64,
+        project="kevin-qualification-test",
+        model="models/gemini-3.1-flash-live-preview",
+        consent_registry_sha256="e" * 64,
+        withdrawal_registry_sha256="f" * 64,
+        purpose_attestation_sha256="1" * 64,
+        rights_attestation_sha256="2" * 64,
+        provider_disclosure_sha256="3" * 64,
+        subject_set_sha256="4" * 64,
+        retention_policy_sha256="5" * 64,
+        provider_retention_decision="zdr_verified",
+        residual_retention_acceptance_sha256="6" * 64,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(minutes=5),
+        deletion_deadline=NOW + timedelta(days=29),
+        nonce="privacy_nonce_1",
+        signed_payload_sha256="7" * 64,
+    )
+    release = AuthorizedAssetRelease(
+        loader=FailingLoader(),
+        privacy_envelope={},
+        privacy_public_key=PRIVACY_PUBLIC_KEY,
+    )
+
+    with pytest.raises(ValueError, match="could not be released") as caught:
+        runner_module._materialize_qualification_assets(release, authorization)
+
+    assert caught.value.__cause__ is None
+    assert CANARY_SECRET not in repr(caught.value)
+
+
 def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
     tmp_path: Path,
 ) -> None:

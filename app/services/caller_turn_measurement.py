@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections import Counter
 from dataclasses import dataclass, replace
 import hashlib
 import hmac
@@ -1417,10 +1418,14 @@ def _capsule_wire_observation(
     if first_audio_ms is not None:
         first_audio_ms = max(0, first_audio_ms - ends[0])
     premature_count = sum(value["at_ms"] < ends[0] for value in target_audio)
+    terminal_facts = [
+        value for value in ordered if value["kind"] == "response_terminal"
+    ]
+    terminal_counts = Counter(value["response_ordinal"] for value in terminal_facts)
+    if any(count != 1 for count in terminal_counts.values()):
+        raise MeasurementError("capsule response-terminal facts are invalid")
     terminals = {
-        value["response_ordinal"]: value["at_ms"]
-        for value in ordered
-        if value["kind"] == "response_terminal"
+        value["response_ordinal"]: value["at_ms"] for value in terminal_facts
     }
     audio_after_terminal_count = sum(
         value["response_ordinal"] in terminals
@@ -1453,6 +1458,7 @@ def _capsule_wire_observation(
                 for value in ordered
                 if value["kind"] == "tool_call_open"
                 and value["activity_ordinal"] != activity_ordinal
+                and value["epoch"] == trigger["epoch"]
                 and (value["at_ms"], value["sequence"])
                 < (trigger["at_ms"], trigger["sequence"])
             ]
@@ -1461,6 +1467,7 @@ def _capsule_wire_observation(
                 for value in ordered
                 if value["kind"] == "tool_call_cancelled"
                 and value["activity_ordinal"] == activity_ordinal
+                and value["epoch"] == trigger["epoch"]
                 and (value["at_ms"], value["sequence"])
                 >= (trigger["at_ms"], trigger["sequence"])
             ]
@@ -1469,6 +1476,7 @@ def _capsule_wire_observation(
                 for value in ordered
                 if value["kind"] == "interrupted"
                 and value["activity_ordinal"] == activity_ordinal
+                and value["epoch"] == trigger["epoch"]
                 and (value["at_ms"], value["sequence"])
                 >= (trigger["at_ms"], trigger["sequence"])
             ]
@@ -1479,11 +1487,14 @@ def _capsule_wire_observation(
                     for value in ordered
                     if value["kind"] == "audio_received"
                     and value["activity_ordinal"] == prior_ordinal
+                    and value["epoch"] == trigger["epoch"]
                     and value["at_ms"] >= trigger["at_ms"]
                     and value["at_ms"] <= cancellations[0]["at_ms"]
                 ]
                 interruption_tail_ms = (
-                    max(value - starts[0] for value in tail_audio) if tail_audio else 0
+                    max(value - trigger["at_ms"] for value in tail_audio)
+                    if tail_audio
+                    else 0
                 )
     applicable = [
         value

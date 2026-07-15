@@ -2783,8 +2783,8 @@ def _materialize_qualification_assets(
 ) -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
     try:
         assets = release.loader.load(authorization)
-    except Exception as exc:
-        raise RunnerError("qualification assets could not be released") from exc
+    except Exception:
+        raise RunnerError("qualification assets could not be released") from None
     if not isinstance(assets, QualificationAssets):
         raise RunnerError("qualification asset release is invalid")
     if not isinstance(assets.plans, tuple) or not isinstance(

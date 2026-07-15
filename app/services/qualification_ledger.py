@@ -51,6 +51,14 @@ class LedgerReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class LedgerCustodyIdentity:
+    ledger_instance_id: str
+    key_id: str
+    public_key_sha256: str
+    ledger_location_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class CustodyLedgerState:
     phase: str
     phase_history: tuple[str, ...]
@@ -68,6 +76,8 @@ class CustodyLedgerState:
 @runtime_checkable
 class LedgerCustodyClient(Protocol):
     """Local IPC boundary owned by a separate durable ledger custodian."""
+
+    def identity(self) -> LedgerCustodyIdentity: ...
 
     def claim_attempt(self, **values: Any) -> Any: ...
 
@@ -553,8 +563,7 @@ def _replay_holdout_release(
     ):
         raise CustodyLedgerError("holdout release phase is invalid")
     if (
-        _digest(body["policy_lock_receipt_sha256"], label="policy lock receipt")
-        != previous_hash
+        _digest(body["policy_lock_receipt_sha256"], label="policy lock receipt") != previous_hash
         or body["selected_policy_ms"] != state.selected_policy
         or _digest(body["policy_lock_sha256"], label="policy lock") != state.policy_lock
     ):

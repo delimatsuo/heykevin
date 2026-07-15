@@ -41,13 +41,13 @@ from app.services.voice_turn_replay import (
     build_gemini_audio_message,
 )
 from app.services.qualification_identity import (
-    AttemptLedger,
     canonical_json_bytes,
     capture_environment_identity,
     capture_source_identity,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
+from app.services.qualification_ledger import LedgerCustodyClient, LedgerCustodyIdentity
 
 
 OFFICIAL_ENDPOINT = (
@@ -67,9 +67,7 @@ MAX_WHOLE_RUN_SECONDS = 3_600
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PINNED_APPROVAL_ROOT_PATH = (
-    REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
-)
+PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
 EXPECTED_PYTHON = "3.12.13"
 EXPECTED_UV = "0.11.7"
 EXECUTION_DEPENDENCY_PATHS = (
@@ -1232,6 +1230,7 @@ async def _execute_no_speech_flow(
         if setup != {"setupComplete": {}}:
             error_code = "setup_rejected"
         else:
+
             async def send_replay_inputs() -> None:
                 nonlocal sender_error
                 previous_at_ms = 0
@@ -1482,7 +1481,7 @@ async def execute_authorized_attempt(
     session_config: SessionExecutionConfig,
     campaign_envelope: Mapping[str, Any],
     attempt_envelope: Mapping[str, Any],
-    ledger: AttemptLedger,
+    ledger: LedgerCustodyClient,
     now: datetime,
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
@@ -1523,6 +1522,16 @@ async def execute_authorized_attempt(
         expected_source_sha=config.source_sha,
         now=now,
     )
+    ledger_identity = ledger.identity()
+    if not isinstance(ledger_identity, LedgerCustodyIdentity):
+        raise RunnerError("preregistration ledger custody identity is invalid")
+    if (
+        campaign.ledger_instance_id != ledger_identity.ledger_instance_id
+        or campaign.ledger_custodian_key_id != ledger_identity.key_id
+        or campaign.ledger_custodian_public_key_sha256 != ledger_identity.public_key_sha256
+        or campaign.ledger_location_sha256 != ledger_identity.ledger_location_sha256
+    ):
+        raise RunnerError("campaign ledger custody binding mismatch")
     authorization = verify_attempt_authorization(
         attempt_envelope,
         public_key=approval_public_key,
@@ -1530,10 +1539,13 @@ async def execute_authorized_attempt(
         campaign=campaign,
         now=now,
     )
-    if compute_development_schedule_sha256(
-        plans,
-        no_speech_plans=no_speech_plans,
-    ) != preregistration["immutable_values"]["development_schedule_sha256"]:
+    if (
+        compute_development_schedule_sha256(
+            plans,
+            no_speech_plans=no_speech_plans,
+        )
+        != preregistration["immutable_values"]["development_schedule_sha256"]
+    ):
         raise RunnerError("preregistered development schedule digest mismatch")
     _validate_exact_development_schedule(plans, no_speech_plans=no_speech_plans)
     required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
@@ -1552,6 +1564,7 @@ async def execute_authorized_attempt(
     error_code: str | None = None
     capsule_handed_off = False
     capsule_sha256: str | None = None
+    usage = UsageCounts()
     session_results: list[tuple[SessionPlan, SessionExecutionResult]] = []
     no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
 
@@ -1616,7 +1629,6 @@ async def execute_authorized_attempt(
             if failed_window is not None:
                 error_code = failed_window.error_code or "no_speech_window_failed"
 
-        usage = UsageCounts()
         for _, result in session_results:
             usage = _add_usage(usage, result.usage)
         for _, result in no_speech_results:
@@ -1648,15 +1660,32 @@ async def execute_authorized_attempt(
                     error_code = "capsule_handoff_failed"
     finally:
         complete = error_code is None and capsule_handed_off
-        ledger.record_outcome(
-            claim,
-            outcome="completed" if complete else "failed",
-            outage_enum=None,
-            actual_provider_requests=budget.consumed,
-            actual_cost_microusd=cost_microusd,
-            capsule_sha256=capsule_sha256 if complete else None,
-            now=now,
+        usage_evidence_sha256 = _usage_evidence_sha256(
+            usage,
+            provider_requests=budget.consumed,
+            cost_microusd=cost_microusd,
         )
+        if complete:
+            assert capsule_sha256 is not None
+            ledger.record_development_checkpoint(
+                claim=claim,
+                development_capsule_sha256=capsule_sha256,
+                usage_evidence_sha256=usage_evidence_sha256,
+                actual_provider_requests=budget.consumed,
+                actual_cost_microusd=cost_microusd,
+                now=now,
+            )
+        else:
+            ledger.record_terminal_outcome(
+                claim=claim,
+                outcome="failed",
+                outage_enum=None,
+                holdout_capsule_sha256=None,
+                usage_evidence_sha256=usage_evidence_sha256,
+                actual_provider_requests=budget.consumed,
+                actual_cost_microusd=cost_microusd,
+                now=now,
+            )
 
     return AttemptExecutionResult(
         complete=complete,
@@ -1827,6 +1856,7 @@ def compute_development_schedule_sha256(
     no_speech_plans: tuple[NoSpeechWindowPlan, ...],
 ) -> str:
     """Bind replay order, references, timing, and audio bytes without publishing payloads."""
+
     def replay_identity(replay_input: Gate0BReplayInput) -> dict[str, Any]:
         return {
             "kind": replay_input.kind,
@@ -1897,7 +1927,7 @@ def _verify_execution_preregistration(
     config: AuthorizedAttemptConfig,
     session_config: SessionExecutionConfig,
     approval_public_key: bytes,
-    ledger: AttemptLedger,
+    ledger: LedgerCustodyClient,
     plans: tuple[SessionPlan, ...],
     no_speech_plans: tuple[NoSpeechWindowPlan, ...],
     pricing: PricingSchedule,
@@ -1922,9 +1952,11 @@ def _verify_execution_preregistration(
     if dict(document) != expected:
         raise RunnerError("preregistration document or digest mismatch")
 
-    ledger_path = getattr(ledger, "path", None)
-    if not isinstance(ledger_path, Path):
-        raise RunnerError("preregistration ledger binding is unavailable")
+    if not isinstance(ledger, LedgerCustodyClient):
+        raise RunnerError("preregistration ledger custody client is unavailable")
+    ledger_identity = ledger.identity()
+    if not isinstance(ledger_identity, LedgerCustodyIdentity):
+        raise RunnerError("preregistration ledger custody identity is invalid")
     if not isinstance(approval_public_key, bytes) or not isinstance(custodian_public_key, bytes):
         raise RunnerError("preregistration trust root is invalid")
     observable = {
@@ -1946,7 +1978,10 @@ def _verify_execution_preregistration(
         "evaluator_sha256": sha256(
             (REPO_ROOT / "scripts/evaluate_gemini_caller_turn_qualification.py").read_bytes()
         ).hexdigest(),
-        "ledger_location_sha256": sha256(str(ledger_path.resolve()).encode("utf-8")).hexdigest(),
+        "ledger_instance_id": ledger_identity.ledger_instance_id,
+        "ledger_custodian_key_id": ledger_identity.key_id,
+        "ledger_custodian_public_key_sha256": ledger_identity.public_key_sha256,
+        "ledger_location_sha256": ledger_identity.ledger_location_sha256,
         "audit_capsule_location_sha256": artifact_location_sha256(capsule_path),
     }
     expected_observable = {
@@ -1957,9 +1992,8 @@ def _verify_execution_preregistration(
         raise RunnerError("preregistration execution binding mismatch")
     if (
         config.policy_ms not in immutable["candidate_policies_ms"]
-        or session_config.session_timeout_seconds > immutable["usage_caps"][
-            "session_timeout_seconds"
-        ]
+        or session_config.session_timeout_seconds
+        > immutable["usage_caps"]["session_timeout_seconds"]
         or config.whole_run_timeout_seconds
         > immutable["usage_caps"]["whole_run_wall_clock_seconds"]
     ):
@@ -2171,6 +2205,24 @@ def _wire_fact(
 def _cost_microusd(pricing: PricingSchedule, usage: UsageCounts) -> int:
     value = pricing.cost_usd(**usage.to_dict()) * 1_000_000
     return int(value.to_integral_value(rounding=ROUND_CEILING))
+
+
+def _usage_evidence_sha256(
+    usage: UsageCounts,
+    *,
+    provider_requests: int,
+    cost_microusd: int,
+) -> str:
+    return sha256(
+        canonical_json_bytes(
+            {
+                "schema_id": "gate_0b_usage_evidence_v1",
+                "provider_requests": provider_requests,
+                "cost_microusd": cost_microusd,
+                **usage.to_dict(),
+            }
+        )
+    ).hexdigest()
 
 
 def _add_usage(left: UsageCounts, right: UsageCounts) -> UsageCounts:
@@ -2497,8 +2549,7 @@ def _outbound_message(replay_input: Gate0BReplayInput) -> dict[str, Any] | None:
 
 def _plan_uses_tools(plan: SessionPlan) -> bool:
     return any(
-        replay_input.kind
-        in {"expect_synchronous_tool", "expect_tool_cancellation"}
+        replay_input.kind in {"expect_synchronous_tool", "expect_tool_cancellation"}
         for replay_input in plan.replay_inputs
     )
 

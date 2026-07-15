@@ -20,10 +20,11 @@ from app.services.caller_turn_measurement import open_audit_capsule
 from app.services.caller_turn_qualification import load_pricing
 from app.services.caller_turns import CallerTurnEventKind
 from app.services.qualification_identity import (
-    AttemptLedger,
+    AttemptClaim,
     canonical_json_bytes,
     ledger_location_sha256,
 )
+from app.services.qualification_ledger import LedgerCustodyIdentity, LedgerReceipt
 from app.services.voice_turn_replay import Gate0BReplayInput
 from scripts.run_gemini_caller_turn_qualification import (
     OFFICIAL_ENDPOINT,
@@ -64,6 +65,8 @@ def _fixed_execution_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         "_capture_current_execution_identity",
         lambda *, expected_source_sha: "2" * 64,
     )
+
+
 PRICING_PATH = Path("tests/fixtures/caller_turn_qualification/pricing.json")
 LANGUAGES = ("ar", "en", "es", "fr", "hi", "ht", "pt", "zh")
 CONDITIONS = ("clean", "twilio_codec_only", "acoustic_impairment", "interaction_stress")
@@ -106,6 +109,59 @@ class ReceiptClock:
 
     def __call__(self):
         return next(self.values)
+
+
+class FakeCustodyLedger:
+    def __init__(self, path: Path, *, order: list[str] | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._order = order
+        self._identity = LedgerCustodyIdentity(
+            ledger_instance_id="ledger_instance_1",
+            key_id="ledger_custodian_1",
+            public_key_sha256="8" * 64,
+            ledger_location_sha256=ledger_location_sha256(path),
+        )
+
+    def identity(self) -> LedgerCustodyIdentity:
+        return self._identity
+
+    def claim_attempt(self, **values):
+        self._record("claim", values)
+        campaign = values["campaign"]
+        authorization = values["authorization"]
+        return AttemptClaim(
+            campaign_id=campaign.campaign_id,
+            attempt_id=authorization.attempt_id,
+            attempt_index=authorization.attempt_index,
+            lease_id="7" * 64,
+            provider_requests_reserved=authorization.provider_request_reservation,
+            cost_reserved_microusd=authorization.cost_reservation_microusd,
+        )
+
+    def record_development_checkpoint(self, **values) -> LedgerReceipt:
+        self._record("development_checkpoint", values)
+        return LedgerReceipt("development_checkpoint", 3, "6" * 64, "development_collection")
+
+    def record_policy_lock(self, **values) -> LedgerReceipt:
+        self._record("policy_lock", values)
+        return LedgerReceipt("policy_lock", 4, "5" * 64, "policy_selection_locked")
+
+    def release_holdout(self, **values) -> LedgerReceipt:
+        self._record("holdout_release", values)
+        return LedgerReceipt("holdout_release", 5, "4" * 64, "holdout_collection")
+
+    def record_terminal_outcome(self, **values) -> LedgerReceipt:
+        self._record("terminal_outcome", values)
+        return LedgerReceipt("terminal_outcome", 6, "3" * 64, "aborted")
+
+    def export_snapshot(self):
+        self._record("export_snapshot", {})
+        return {}
+
+    def _record(self, name: str, values: dict[str, object]) -> None:
+        self.calls.append((name, values))
+        if self._order is not None:
+            self._order.append(name)
 
 
 def _usage_message(
@@ -472,9 +528,7 @@ def _preregistration(
                 Path("scripts/evaluate_gemini_caller_turn_qualification.py").read_bytes()
             ).hexdigest(),
             "ledger_location_sha256": ledger_location_sha256(ledger_path),
-            "audit_capsule_location_sha256": artifact_location_sha256(
-                _capsule_path(ledger_path)
-            ),
+            "audit_capsule_location_sha256": artifact_location_sha256(_capsule_path(ledger_path)),
             "evidence_location_sha256": "b" * 64,
             "consent_attestation_sha256": "c" * 64,
             "retention_attestation_sha256": "d" * 64,
@@ -576,7 +630,10 @@ def test_receive_loop_is_live_while_the_paced_sender_is_still_running() -> None:
 
         async def send(self, message):
             self.sent.append(message)
-            if isinstance(message.get("realtimeInput"), dict) and "audio" in message["realtimeInput"]:
+            if (
+                isinstance(message.get("realtimeInput"), dict)
+                and "audio" in message["realtimeInput"]
+            ):
                 self.audio_sent.set()
 
         async def receive(self):
@@ -631,7 +688,10 @@ def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> 
 
         async def send(self, message):
             self.sent.append(message)
-            if isinstance(message.get("realtimeInput"), dict) and "audio" in message["realtimeInput"]:
+            if (
+                isinstance(message.get("realtimeInput"), dict)
+                and "audio" in message["realtimeInput"]
+            ):
                 self.audio_sent.set()
 
         async def receive(self):
@@ -1223,18 +1283,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     connector = FakeConnector([*sessions, *no_speech_sessions])
     capsule_path = _capsule_path(ledger_path)
 
-    class RecordingLedger:
-        def __init__(self) -> None:
-            self.delegate = AttemptLedger(ledger_path)
-            self.path = self.delegate.path
-
-        def claim_attempt(self, **kwargs):
-            order.append("claim")
-            return self.delegate.claim_attempt(**kwargs)
-
-        def record_outcome(self, *args, **kwargs):
-            order.append("outcome")
-            return self.delegate.record_outcome(*args, **kwargs)
+    ledger = FakeCustodyLedger(ledger_path, order=order)
 
     def source_identity_check(*, expected_source_sha: str) -> str:
         assert expected_source_sha == SOURCE_SHA
@@ -1271,7 +1320,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            ledger=RecordingLedger(),
+            ledger=ledger,
             now=NOW,
             credential_loader=credential_loader,
             connector_factory=connector_factory,
@@ -1291,7 +1340,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert stat.S_IMODE(capsule_path.stat().st_mode) == 0o600
     assert order[:3] == ["claim", "source", "credential:qualification_secret_v1"]
     assert order[3:-1] == ["connector"] * 64
-    assert order[-1:] == ["outcome"]
+    assert order[-1:] == ["development_checkpoint"]
     envelope = json.loads(capsule_path.read_bytes())
     opened = open_audit_capsule(
         envelope,
@@ -1303,16 +1352,13 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert CANARY_SECRET not in json.dumps(envelope)
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert not hasattr(result, "audit_events")
-    snapshot = AttemptLedger(ledger_path).snapshot()
-    assert [record["event"] for record in snapshot["records"]] == [
-        "phase_transition",
-        "claim",
-        "outcome",
-    ]
-    assert snapshot["records"][-1]["actual_cost_microusd"] == 4_992
-    assert snapshot["records"][-1]["capsule_sha256"] == sha256(
-        capsule_path.read_bytes().rstrip(b"\n")
-    ).hexdigest()
+    assert [name for name, _ in ledger.calls] == ["claim", "development_checkpoint"]
+    checkpoint = ledger.calls[-1][1]
+    assert checkpoint["actual_cost_microusd"] == 4_992
+    assert (
+        checkpoint["development_capsule_sha256"]
+        == sha256(capsule_path.read_bytes().rstrip(b"\n")).hexdigest()
+    )
 
 
 def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
@@ -1336,6 +1382,7 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
         preregistration_sha256=preregistration["preregistration_sha256"],
     )
     touched: list[str] = []
+    ledger = FakeCustodyLedger(ledger_path)
 
     result = asyncio.run(
         execute_authorized_attempt(
@@ -1353,7 +1400,7 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            ledger=AttemptLedger(ledger_path),
+            ledger=ledger,
             now=NOW,
             credential_loader=lambda _reference: touched.append("credential"),
             connector_factory=lambda _credential: touched.append("connector"),
@@ -1369,13 +1416,8 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
     assert result.complete is False
     assert result.error_code == "source_identity_failed"
     assert touched == []
-    snapshot = AttemptLedger(ledger_path).snapshot()
-    assert [record["event"] for record in snapshot["records"]] == [
-        "phase_transition",
-        "claim",
-        "outcome",
-    ]
-    assert snapshot["records"][-1]["outcome"] == "failed"
+    assert [name for name, _ in ledger.calls] == ["claim", "terminal_outcome"]
+    assert ledger.calls[-1][1]["outcome"] == "failed"
 
 
 def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
@@ -1410,7 +1452,7 @@ def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1467,7 +1509,7 @@ def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
@@ -1516,7 +1558,7 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1563,7 +1605,7 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1588,6 +1630,7 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
         "credential_reference",
         "approval_public_key",
         "custodian_public_key",
+        "ledger_custodian",
         "pricing",
     ),
 )
@@ -1618,6 +1661,7 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
     supplied_preregistration = preregistration
     supplied_public = public
     supplied_custodian = custodian_public
+    ledger = FakeCustodyLedger(ledger_path)
 
     if mutation == "preregistration_document":
         supplied_preregistration = json.loads(json.dumps(preregistration))
@@ -1630,6 +1674,8 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
         supplied_public = _key_pair()[1]
     elif mutation == "custodian_public_key":
         supplied_custodian = _custodian_key_pair()[1]
+    elif mutation == "ledger_custodian":
+        ledger._identity = replace(ledger.identity(), public_key_sha256="0" * 64)
     elif mutation == "pricing":
         raw_pricing = json.loads(PRICING_PATH.read_text())
         raw_pricing["input_text_usd"] = "0.74"
@@ -1650,7 +1696,7 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
                 session_config=session_config,
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=ledger,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1665,6 +1711,13 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
 
     assert touched == []
     assert not ledger_path.exists()
+
+
+def test_runner_has_no_local_attempt_ledger_dependency() -> None:
+    source = Path(runner_module.__file__).read_text()
+
+    assert "AttemptLedger" not in source
+    assert "LedgerCustodyClient" in source
 
 
 def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
@@ -1704,7 +1757,7 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1760,7 +1813,7 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
@@ -1811,7 +1864,7 @@ def test_insufficient_signed_request_reservation_blocks_before_ledger_and_secret
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1861,7 +1914,7 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=AttemptLedger(ledger_path),
+                ledger=FakeCustodyLedger(ledger_path),
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1927,7 +1980,7 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            ledger=AttemptLedger(ledger_path),
+            ledger=FakeCustodyLedger(ledger_path),
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: connector,
@@ -1962,6 +2015,7 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
     )
     plans, no_speech_plans = _development_schedule()
     connector_attempts = 0
+    ledger = FakeCustodyLedger(ledger_path)
 
     def connector_factory(_credential: SecretCredential):
         nonlocal connector_attempts
@@ -1984,7 +2038,7 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            ledger=AttemptLedger(ledger_path),
+            ledger=ledger,
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=connector_factory,
@@ -2002,9 +2056,8 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
     assert result.provider_request_count == 1
     assert connector_attempts == 1
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
-    outcome = AttemptLedger(ledger_path).snapshot()["records"][-1]
-    assert outcome["event"] == "outcome"
-    assert outcome["actual_provider_requests"] == 1
+    assert [name for name, _ in ledger.calls] == ["claim", "terminal_outcome"]
+    assert ledger.calls[-1][1]["actual_provider_requests"] == 1
 
 
 def test_whole_run_deadline_records_failed_consumed_attempt(
@@ -2022,6 +2075,7 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
         preregistration_sha256=preregistration["preregistration_sha256"],
     )
     plans, no_speech_plans = _development_schedule()
+    ledger = FakeCustodyLedger(ledger_path)
 
     async def expire(*_args, **_kwargs):
         raise TimeoutError
@@ -2043,7 +2097,7 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             session_config=_config(),
             campaign_envelope=campaign,
             attempt_envelope=attempt,
-            ledger=AttemptLedger(ledger_path),
+            ledger=ledger,
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: pytest.fail("connector must not be built"),
@@ -2058,9 +2112,9 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
 
     assert result.error_code == "whole_run_timeout"
     assert result.provider_request_count == 0
-    outcome = AttemptLedger(ledger_path).snapshot()["records"][-1]
-    assert outcome["outcome"] == "failed"
-    assert outcome["actual_provider_requests"] == 0
+    assert [name for name, _ in ledger.calls] == ["claim", "terminal_outcome"]
+    assert ledger.calls[-1][1]["outcome"] == "failed"
+    assert ledger.calls[-1][1]["actual_provider_requests"] == 0
 
 
 def test_cli_help_and_dry_run_name_every_immutable_value(

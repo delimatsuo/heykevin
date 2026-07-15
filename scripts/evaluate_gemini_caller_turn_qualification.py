@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import defaultdict
 from datetime import datetime
 from decimal import ROUND_CEILING
@@ -59,6 +60,7 @@ from app.services.qualification_identity import (  # noqa: E402
 from app.services.qualification_ledger import (  # noqa: E402
     validate_custody_ledger_snapshot,
 )
+from app.services.qualification_privacy import verify_privacy_custody  # noqa: E402
 from app.services.qualification_private_paths import (  # noqa: E402
     PrivatePathError,
     read_private_file,
@@ -70,8 +72,8 @@ from scripts.run_gemini_caller_turn_qualification import (  # noqa: E402
 )
 
 
-EVIDENCE_SCHEMA_ID = "gate_0b_evidence_v1"
-CUSTODY_BUNDLE_SCHEMA_ID = "gate_0b_custody_bundle_v1"
+EVIDENCE_SCHEMA_ID = "gate_0b_evidence_v2"
+CUSTODY_BUNDLE_SCHEMA_ID = "gate_0b_custody_bundle_v2"
 REPORT_SCHEMA_ID = "gate_0b_evaluation_report_v1"
 EXPECTED_POLICIES = (100, 250, 500, 750)
 EXPECTED_PHASE_HISTORY = (
@@ -101,7 +103,7 @@ THRESHOLDS = {
     "interruption_tail_p95_ms": 250,
     "interruption_tail_max_ms": 500,
 }
-EVIDENCE_CONTEXT_HMAC_DOMAIN = b"gate-0b-evidence-context-v1\x00"
+EVIDENCE_CONTEXT_HMAC_DOMAIN = b"gate-0b-evidence-context-v2\x00"
 FINAL_IDENTITY_FIELDS = frozenset(
     {
         "source_sha256",
@@ -180,6 +182,9 @@ def compute_evidence_context_commitment(
     fields = {
         "schema_id",
         "campaign_id",
+        "attempt_authorization_validated",
+        "authorization_consumed",
+        "provider_execution_started",
         "attempt_completed",
         "phase_history",
         "candidate_policies_ms",
@@ -262,6 +267,13 @@ def evaluate_evidence_artifact(
     failures.update(cardinality_failures)
     if tuple(parsed["phase_history"]) != EXPECTED_PHASE_HISTORY:
         failures["phase_history_invalid"] = 1
+    for name in (
+        "attempt_authorization_validated",
+        "authorization_consumed",
+        "provider_execution_started",
+    ):
+        if not parsed[name]:
+            failures[f"{name}_missing"] = 1
     if not parsed["attempt_completed"]:
         failures["attempt_incomplete"] = 1
     if not parsed["holdout_materialized_after_lock"]:
@@ -345,6 +357,15 @@ def evaluate_evidence_artifact(
     evidence = empty_evidence_flags()
     evidence.update(
         {
+            "attempt_authorization_validated": (
+                parsed["attempt_authorization_validated"] and context_valid
+            ),
+            "authorization_consumed": parsed["authorization_consumed"] and context_valid,
+            "provider_execution_started": (
+                parsed["provider_execution_started"]
+                and context_valid
+                and parsed["usage"]["provider_requests"] > 0
+            ),
             "attempt_completed": parsed["attempt_completed"] and root_valid and context_valid,
             "assembly_sample_passed": assembly_passed,
             "transcription_fidelity_sample_passed": fidelity_passed,
@@ -417,6 +438,9 @@ def _evaluate_custody_bundle(
         "campaign_id",
         "development_capsule",
         "holdout_capsule",
+        "development_privacy_envelope",
+        "holdout_privacy_envelope",
+        "privacy_custodian_public_key",
         "ledger",
         "preregistration",
         "campaign_envelope",
@@ -478,6 +502,7 @@ def _evaluate_custody_bundle(
         state.phase != "completed"
         or state.phase_history != EXPECTED_PHASE_HISTORY
         or not state.holdout_execution_claimed
+        or state.holdout_execution_claimed_at is None
         or state.selected_policy_ms is None
         or state.policy_lock_sha256 is None
     ):
@@ -536,6 +561,53 @@ def _evaluate_custody_bundle(
         campaign=campaign,
         now=claim_time,
     )
+    encoded_privacy_public_key = bundle["privacy_custodian_public_key"]
+    if not isinstance(encoded_privacy_public_key, str):
+        raise EvaluationError("privacy custodian public key is invalid")
+    try:
+        privacy_public_key = base64.b64decode(
+            encoded_privacy_public_key,
+            validate=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise EvaluationError("privacy custodian public key is invalid") from exc
+    if (
+        len(privacy_public_key) != 32
+        or hashlib.sha256(privacy_public_key).hexdigest()
+        != immutable["privacy_custodian_public_key_sha256"]
+    ):
+        raise EvaluationError("privacy custodian root is not preregistered")
+    privacy_arguments = {
+        "public_key": privacy_public_key,
+        "expected_key_id": immutable["privacy_custodian_key_id"],
+        "expected_campaign_id": campaign.campaign_id,
+        "expected_authorization_id": campaign.authorization_id,
+        "expected_attempt_id": authorization.attempt_id,
+        "expected_preregistration_sha256": preregistration["preregistration_sha256"],
+        "expected_source_sha": immutable["source_sha"],
+        "expected_corpus_sha256": immutable["corpus_sha256"],
+        "expected_project": immutable["project"],
+        "expected_model": immutable["model"],
+        "expected_consent_registry_sha256": immutable["consent_attestation_sha256"],
+        "expected_retention_policy_sha256": immutable["retention_attestation_sha256"],
+        "expected_residual_retention_acceptance_sha256": immutable[
+            "zdr_or_residual_retention_acceptance_sha256"
+        ],
+    }
+    verify_privacy_custody(
+        bundle["development_privacy_envelope"],
+        **privacy_arguments,
+        expected_split="development",
+        expected_schedule_sha256=immutable["development_schedule_sha256"],
+        now=claim_time,
+    )
+    verify_privacy_custody(
+        bundle["holdout_privacy_envelope"],
+        **privacy_arguments,
+        expected_split="holdout",
+        expected_schedule_sha256=state.holdout_manifest_sha256,
+        now=state.holdout_execution_claimed_at,
+    )
     if (
         ledger["preregistration_sha256"] != preregistration["preregistration_sha256"]
         or ledger["source_sha"] != immutable["source_sha"]
@@ -547,6 +619,14 @@ def _evaluate_custody_bundle(
         or state.provider_requests_reserved
         != authorization.provider_request_reservation
         or state.cost_reserved_microusd != authorization.cost_reservation_microusd
+        or campaign.max_attempts != immutable["attempt_caps"]["whole_run_attempts"]
+        or campaign.max_provider_requests
+        != immutable["usage_caps"]["provider_requests_per_campaign"]
+        or campaign.max_cost_microusd
+        != immutable["cost_caps_microusd"]["per_campaign"]
+        or state.campaign_max_attempts != campaign.max_attempts
+        or state.campaign_max_provider_requests != campaign.max_provider_requests
+        or state.campaign_max_cost_microusd != campaign.max_cost_microusd
         or authorization.provider_request_reservation
         != immutable["usage_caps"]["provider_requests_per_run"]
         or authorization.cost_reservation_microusd
@@ -611,6 +691,7 @@ def _evaluate_custody_bundle(
     )
     if (
         development_failures
+        or development_usage["provider_requests"] != 64
         or state.development_usage_evidence_sha256 != development_usage_digest
         or state.development_provider_requests != development_usage["provider_requests"]
         or state.development_cost_microusd != development_cost_microusd
@@ -663,7 +744,9 @@ def _evaluate_custody_bundle(
     usage_with_cost = {**usage, "cost_microusd": cost_microusd}
     run_failures = (*development_failures, *holdout_failures)
     if (
-        state.final_usage_evidence_sha256
+        holdout_usage["provider_requests"] != 64
+        or usage["provider_requests"] != 128
+        or state.final_usage_evidence_sha256
         != combined_usage_evidence_sha256(
             development_usage_evidence_sha256=development_usage_digest,
             holdout_usage_evidence_sha256=holdout_usage_digest,
@@ -688,6 +771,9 @@ def _evaluate_custody_bundle(
     artifact = {
         "schema_id": EVIDENCE_SCHEMA_ID,
         "campaign_id": campaign_id,
+        "attempt_authorization_validated": True,
+        "authorization_consumed": True,
+        "provider_execution_started": usage["provider_requests"] > 0,
         "attempt_completed": True,
         "phase_history": list(state.phase_history),
         "candidate_policies_ms": list(EXPECTED_POLICIES),
@@ -717,6 +803,9 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
     fields = {
         "schema_id",
         "campaign_id",
+        "attempt_authorization_validated",
+        "authorization_consumed",
+        "provider_execution_started",
         "attempt_completed",
         "phase_history",
         "candidate_policies_ms",
@@ -736,7 +825,13 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
     if raw["schema_id"] != EVIDENCE_SCHEMA_ID:
         raise EvaluationError("evidence artifact schema is invalid")
     campaign_id = _safe_id(raw["campaign_id"], label="campaign ID")
-    for name in ("attempt_completed", "holdout_materialized_after_lock"):
+    for name in (
+        "attempt_authorization_validated",
+        "authorization_consumed",
+        "provider_execution_started",
+        "attempt_completed",
+        "holdout_materialized_after_lock",
+    ):
         if not isinstance(raw[name], bool):
             raise EvaluationError(f"{name} must be boolean")
     phase_history = _safe_id_list(raw["phase_history"], label="phase history", maximum=8)
@@ -769,6 +864,9 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
     run_failures = _safe_id_list(raw["run_failures"], label="run failures", maximum=64)
     return {
         "campaign_id": campaign_id,
+        "attempt_authorization_validated": raw["attempt_authorization_validated"],
+        "authorization_consumed": raw["authorization_consumed"],
+        "provider_execution_started": raw["provider_execution_started"],
         "attempt_completed": raw["attempt_completed"],
         "phase_history": phase_history,
         "candidate_policies_ms": policies,
@@ -1406,7 +1504,7 @@ def _usage_is_complete_and_bounded(usage: Mapping[str, Any]) -> bool:
     expected_cost_microusd = _cost_microusd_from_usage(usage)
     return (
         usage["metadata_complete"]
-        and usage["provider_requests"] <= 128
+        and usage["provider_requests"] == 128
         and usage["wall_clock_seconds"] <= 3_600
         and usage["input_audio_seconds"] <= 3_600
         and usage["output_audio_seconds"] <= 1_800

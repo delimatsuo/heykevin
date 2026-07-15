@@ -250,6 +250,7 @@ class FakeCustodyLedger:
                 development_ledger_head_sha256=None,
                 holdout_manifest_sha256=None,
                 holdout_execution_claimed=False,
+                holdout_execution_claimed_at=None,
                 holdout_capsule_sha256=None,
                 development_usage_evidence_sha256=None,
                 final_usage_evidence_sha256=None,
@@ -257,6 +258,9 @@ class FakeCustodyLedger:
                 development_cost_microusd=0,
                 actual_provider_requests=0,
                 actual_cost_microusd=0,
+                campaign_max_attempts=payload["max_attempts"],
+                campaign_max_provider_requests=payload["max_provider_requests"],
+                campaign_max_cost_microusd=payload["max_cost_microusd"],
                 record_sha256s=("1" * 64,),
                 record_events=("genesis",),
                 final_ledger_head_sha256="1" * 64,
@@ -302,6 +306,7 @@ class FakeCustodyLedger:
             development_ledger_head_sha256=None,
             holdout_manifest_sha256=None,
             holdout_execution_claimed=False,
+            holdout_execution_claimed_at=None,
             holdout_capsule_sha256=None,
             development_usage_evidence_sha256=None,
             final_usage_evidence_sha256=None,
@@ -309,6 +314,9 @@ class FakeCustodyLedger:
             development_cost_microusd=0,
             actual_provider_requests=0,
             actual_cost_microusd=0,
+            campaign_max_attempts=prior_state.campaign_max_attempts,
+            campaign_max_provider_requests=prior_state.campaign_max_provider_requests,
+            campaign_max_cost_microusd=prior_state.campaign_max_cost_microusd,
             record_sha256s=(*prior_state.record_sha256s, "2" * 64),
             record_events=(*prior_state.record_events, "claim"),
             final_ledger_head_sha256="2" * 64,
@@ -338,6 +346,7 @@ class FakeCustodyLedger:
         self._state = replace(
             self._state,
             holdout_execution_claimed=True,
+            holdout_execution_claimed_at=values["now"],
             record_sha256s=(*self._state.record_sha256s, "6" * 64),
             record_events=(*self._state.record_events, "holdout_execution_claim"),
             final_ledger_head_sha256="6" * 64,
@@ -849,6 +858,9 @@ def _approval_envelopes(
     preregistration_sha256: str = PREREGISTRATION_SHA,
     provider_request_reservation: int = 128,
     cost_reservation_microusd: int = 10_000_000,
+    max_attempts: int = 3,
+    max_provider_requests: int = 384,
+    max_cost_microusd: int = 30_000_000,
     ledger_custodian_public_key_sha256: str = LEDGER_PUBLIC_KEY_SHA256,
 ) -> tuple[dict[str, object], dict[str, object]]:
     campaign = {
@@ -861,9 +873,9 @@ def _approval_envelopes(
         "source_sha": SOURCE_SHA,
         "issued_at": "2026-07-15T14:59:00Z",
         "expires_at": "2026-07-15T16:00:00Z",
-        "max_attempts": 3,
-        "max_provider_requests": 384,
-        "max_cost_microusd": 30_000_000,
+        "max_attempts": max_attempts,
+        "max_provider_requests": max_provider_requests,
+        "max_cost_microusd": max_cost_microusd,
         "ledger_instance_id": "ledger_instance_1",
         "ledger_custodian_key_id": "ledger_custodian_1",
         "ledger_custodian_public_key_sha256": ledger_custodian_public_key_sha256,
@@ -2067,7 +2079,13 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
 
 @pytest.mark.parametrize(
     "resume_mode",
-    ("durable", "stale_snapshot", "substituted_lease", "stale_privacy"),
+    (
+        "durable",
+        "stale_snapshot",
+        "substituted_lease",
+        "wrong_claim_time",
+        "stale_privacy",
+    ),
 )
 def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
     tmp_path: Path,
@@ -2128,6 +2146,7 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         development_ledger_head_sha256="3" * 64,
         holdout_manifest_sha256=holdout_manifest_sha256,
         holdout_execution_claimed=False,
+        holdout_execution_claimed_at=None,
         holdout_capsule_sha256=None,
         development_usage_evidence_sha256="4" * 64,
         final_usage_evidence_sha256=None,
@@ -2135,6 +2154,9 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         development_cost_microusd=4_992,
         actual_provider_requests=0,
         actual_cost_microusd=0,
+        campaign_max_attempts=3,
+        campaign_max_provider_requests=384,
+        campaign_max_cost_microusd=30_000_000,
         record_sha256s=("1" * 64, "2" * 64, "3" * 64, "4" * 64, "5" * 64),
         record_events=(
             "genesis",
@@ -2166,6 +2188,19 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
             return replace(original_resume(**values), lease_id="8" * 64)
 
         monkeypatch.setattr(ledger, "resume_holdout", resume_with_substituted_lease)
+    elif resume_mode == "wrong_claim_time":
+        original_resume = ledger.resume_holdout
+
+        def resume_with_wrong_claim_time(**values):
+            claim = original_resume(**values)
+            assert ledger._state is not None
+            ledger._state = replace(
+                ledger._state,
+                holdout_execution_claimed_at=NOW - timedelta(seconds=1),
+            )
+            return claim
+
+        monkeypatch.setattr(ledger, "resume_holdout", resume_with_wrong_claim_time)
     sessions = _successful_sessions_for_plans(plans)
     no_speech_sessions = [
         FakeSession([{"setupComplete": {}}, _usage_message(), None])
@@ -2230,6 +2265,8 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
             if resume_mode == "stale_snapshot"
             else "substituted lease"
             if resume_mode == "substituted_lease"
+            else "durably consume the holdout claim"
+            if resume_mode == "wrong_claim_time"
             else "fresh"
         )
         with pytest.raises(ValueError, match=error):
@@ -2239,7 +2276,7 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
             if resume_mode == "stale_privacy"
             else ["export_snapshot", "asset", "resume_holdout"]
         )
-        if resume_mode == "stale_snapshot":
+        if resume_mode in {"stale_snapshot", "wrong_claim_time"}:
             expected_order.append("export_snapshot")
         assert order == expected_order
         assert not capsule_path.exists()
@@ -3099,6 +3136,161 @@ def test_insufficient_signed_liability_blocks_before_ledger_and_secret(
 
     assert touched == []
     assert not ledger_path.exists()
+
+
+@pytest.mark.parametrize("request_count", (63, 65))
+def test_each_split_requires_exactly_half_the_preregistered_requests(
+    request_count: int,
+) -> None:
+    with pytest.raises(ValueError, match="split request cardinality"):
+        runner_module._require_exact_split_request_count(
+            request_count,
+            build_dry_run_preregistration(),
+        )
+
+
+@pytest.mark.parametrize(
+    "campaign_override",
+    (
+        {"max_attempts": 2},
+        {"max_provider_requests": 383},
+        {"max_cost_microusd": 29_999_999},
+    ),
+)
+def test_nonexact_campaign_ceiling_blocks_before_assets_ledger_and_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    campaign_override: dict[str, int],
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+        **campaign_override,
+    )
+    plans, no_speech_plans = _development_schedule()
+    release = _asset_release(
+        plans,
+        no_speech_plans,
+        preregistration,
+        campaign,
+        attempt,
+        split="development",
+    )
+    ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
+    touched: list[str] = []
+
+    with pytest.raises(ValueError, match="campaign ceiling"):
+        asyncio.run(
+            execute_authorized_attempt(
+                release,
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=ledger,
+                ledger_custodian_public_key=LEDGER_PUBLIC_KEY,
+                now=NOW,
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_path=_capsule_path(ledger_path),
+            )
+        )
+
+    loader = release.loader
+    assert isinstance(loader, FakeAssetLoader)
+    assert loader.authorizations == []
+    assert ledger.calls == []
+    assert touched == []
+
+
+@pytest.mark.parametrize(
+    ("state_field", "value"),
+    (
+        ("campaign_max_attempts", 2),
+        ("campaign_max_provider_requests", 383),
+        ("campaign_max_cost_microusd", 29_999_999),
+    ),
+)
+def test_ledger_genesis_ceiling_mismatch_blocks_before_claim_and_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_field: str,
+    value: int,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    plans, no_speech_plans = _development_schedule()
+    ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
+    assert ledger._state is not None
+    ledger._state = replace(ledger._state, **{state_field: value})
+    touched: list[str] = []
+
+    with pytest.raises(ValueError, match="ledger campaign ceiling"):
+        asyncio.run(
+            execute_authorized_attempt(
+                _asset_release(
+                    plans,
+                    no_speech_plans,
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=ledger,
+                ledger_custodian_public_key=LEDGER_PUBLIC_KEY,
+                now=NOW,
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_path=_capsule_path(ledger_path),
+            )
+        )
+
+    assert [name for name, _ in ledger.calls] == ["export_snapshot"]
+    assert touched == []
 
 
 def test_toy_development_schedule_is_rejected_before_ledger_and_secret(

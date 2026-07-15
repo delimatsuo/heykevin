@@ -1921,6 +1921,44 @@ def _require_preregistered_attempt_liability(
         raise RunnerError("signed attempt reservation does not cover preregistered liability")
 
 
+def _require_exact_split_request_count(
+    required_requests: int,
+    preregistration: Mapping[str, Any],
+) -> None:
+    per_run = preregistration["immutable_values"]["usage_caps"][
+        "provider_requests_per_run"
+    ]
+    if per_run % 2 or required_requests != per_run // 2:
+        raise RunnerError("sealed split request cardinality is not exact")
+
+
+def _require_exact_campaign_ceiling(
+    campaign: CampaignApproval,
+    preregistration: Mapping[str, Any],
+) -> None:
+    immutable = preregistration["immutable_values"]
+    if (
+        campaign.max_attempts != immutable["attempt_caps"]["whole_run_attempts"]
+        or campaign.max_provider_requests
+        != immutable["usage_caps"]["provider_requests_per_campaign"]
+        or campaign.max_cost_microusd
+        != immutable["cost_caps_microusd"]["per_campaign"]
+    ):
+        raise RunnerError("signed campaign ceiling does not match preregistration")
+
+
+def _require_ledger_campaign_ceiling(
+    state: CustodyLedgerState,
+    campaign: CampaignApproval,
+) -> None:
+    if (
+        state.campaign_max_attempts != campaign.max_attempts
+        or state.campaign_max_provider_requests != campaign.max_provider_requests
+        or state.campaign_max_cost_microusd != campaign.max_cost_microusd
+    ):
+        raise RunnerError("signed ledger campaign ceiling does not match approval")
+
+
 def _require_single_signed_append(
     before: CustodyLedgerState,
     after: CustodyLedgerState,
@@ -1988,6 +2026,7 @@ def _require_postclaim_state(
         or state.cost_reserved_microusd != authorization.cost_reservation_microusd
         or state.development_capsule_sha256 is not None
         or state.holdout_execution_claimed
+        or state.holdout_execution_claimed_at is not None
     ):
         raise RunnerError("signed ledger did not durably consume the attempt claim")
 
@@ -2042,6 +2081,7 @@ async def execute_authorized_attempt(
         expected_source_sha=config.source_sha,
         now=now,
     )
+    _require_exact_campaign_ceiling(campaign, preregistration)
     authorization = verify_attempt_authorization(
         attempt_envelope,
         public_key=approval_public_key,
@@ -2099,6 +2139,7 @@ async def execute_authorized_attempt(
     required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
         no_speech_plans
     )
+    _require_exact_split_request_count(required_requests, preregistration)
     if required_requests > authorization.provider_request_reservation:
         raise RunnerError("signed request reservation is insufficient")
     _require_preregistered_attempt_liability(authorization, preregistration)
@@ -2115,6 +2156,7 @@ async def execute_authorized_attempt(
         campaign=campaign,
         authorization=authorization,
     )
+    _require_ledger_campaign_ceiling(preclaim_state, campaign)
     _require_preclaim_state(
         preclaim_state,
         campaign=campaign,
@@ -2137,6 +2179,7 @@ async def execute_authorized_attempt(
         campaign=campaign,
         authorization=authorization,
     )
+    _require_ledger_campaign_ceiling(claimed_state, campaign)
     _require_postclaim_state(
         claimed_state,
         campaign=campaign,
@@ -2219,6 +2262,8 @@ async def execute_authorized_attempt(
             )
             if failed_window is not None:
                 error_code = failed_window.error_code or "no_speech_window_failed"
+        if error_code is None and budget.consumed != required_requests:
+            error_code = "provider_request_count_mismatch"
 
         for _, result in session_results:
             usage = _add_usage(usage, result.usage)
@@ -2298,6 +2343,7 @@ async def execute_authorized_attempt(
                 campaign=campaign,
                 authorization=authorization,
             )
+            _require_ledger_campaign_ceiling(final_state, campaign)
             if (
                 final_state.phase != "development_collection"
                 or final_state.active_attempt_id != authorization.attempt_id
@@ -2331,6 +2377,7 @@ async def execute_authorized_attempt(
                 campaign=campaign,
                 authorization=authorization,
             )
+            _require_ledger_campaign_ceiling(final_state, campaign)
             if (
                 final_state.phase != "aborted"
                 or final_state.active_attempt_id is not None
@@ -2406,6 +2453,7 @@ async def execute_authorized_holdout(
         expected_source_sha=config.source_sha,
         now=now,
     )
+    _require_exact_campaign_ceiling(campaign, preregistration)
     authorization = verify_attempt_authorization(
         attempt_envelope,
         public_key=approval_public_key,
@@ -2426,6 +2474,7 @@ async def execute_authorized_holdout(
         campaign=campaign,
         authorization=authorization,
     )
+    _require_ledger_campaign_ceiling(state, campaign)
     if not isinstance(state, CustodyLedgerState) or (
         state.phase != "holdout_collection"
         or state.active_attempt_id != authorization.attempt_id
@@ -2436,6 +2485,7 @@ async def execute_authorized_holdout(
         or not isinstance(state.holdout_manifest_sha256, str)
         or not SHA256.fullmatch(state.holdout_manifest_sha256)
         or state.holdout_execution_claimed
+        or state.holdout_execution_claimed_at is not None
         or state.development_usage_evidence_sha256 is None
         or state.lease_id_sha256 is None
     ):
@@ -2486,6 +2536,7 @@ async def execute_authorized_holdout(
     required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
         no_speech_plans
     )
+    _require_exact_split_request_count(required_requests, preregistration)
     remaining_requests = authorization.provider_request_reservation - (
         state.development_provider_requests
     )
@@ -2521,6 +2572,7 @@ async def execute_authorized_holdout(
         campaign=campaign,
         authorization=authorization,
     )
+    _require_ledger_campaign_ceiling(resumed_state, campaign)
     if (
         resumed_state.phase != "holdout_collection"
         or resumed_state.active_attempt_id != authorization.attempt_id
@@ -2530,6 +2582,7 @@ async def execute_authorized_holdout(
         or resumed_state.selected_policy_ms != config.policy_ms
         or resumed_state.holdout_manifest_sha256 != holdout_manifest_sha256
         or not resumed_state.holdout_execution_claimed
+        or resumed_state.holdout_execution_claimed_at != now
         or resumed_state.provider_requests_reserved
         != authorization.provider_request_reservation
         or resumed_state.cost_reserved_microusd
@@ -2610,6 +2663,8 @@ async def execute_authorized_holdout(
             )
             if failed_window is not None:
                 error_code = failed_window.error_code or "no_speech_window_failed"
+        if error_code is None and budget.consumed != required_requests:
+            error_code = "provider_request_count_mismatch"
 
         for _, result in session_results:
             usage = _add_usage(usage, result.usage)
@@ -2683,6 +2738,7 @@ async def execute_authorized_holdout(
             campaign=campaign,
             authorization=authorization,
         )
+        _require_ledger_campaign_ceiling(final_state, campaign)
         if (
             final_state.phase != ("completed" if complete else "aborted")
             or final_state.active_attempt_id is not None
@@ -2695,6 +2751,7 @@ async def execute_authorized_holdout(
             or final_state.actual_cost_microusd != total_cost_microusd
             or final_state.holdout_capsule_sha256
             != (capsule_sha256 if complete else None)
+            or final_state.holdout_execution_claimed_at != now
         ):
             raise RunnerError("signed holdout terminal outcome is not durable")
         _require_single_signed_append(

@@ -302,11 +302,15 @@ def test_signed_custody_ledger_replays_one_attempt_across_both_splits() -> None:
     assert state.attempt_claimed_at == NOW + timedelta(seconds=1)
     assert state.provider_requests_reserved == 128
     assert state.cost_reserved_microusd == 10_000_000
+    assert state.campaign_max_attempts == 3
+    assert state.campaign_max_provider_requests == 384
+    assert state.campaign_max_cost_microusd == 30_000_000
     assert state.selected_policy_ms == 100
     assert state.development_ledger_head_sha256 is not None
     assert state.development_usage_evidence_sha256 == "2" * 64
     assert state.final_usage_evidence_sha256 == "6" * 64
     assert state.holdout_execution_claimed is True
+    assert state.holdout_execution_claimed_at == NOW + timedelta(seconds=5)
     assert state.actual_provider_requests == 120
     assert state.actual_cost_microusd == 2_000_000
     assert state.final_ledger_head_sha256 == snapshot["head_hash"]

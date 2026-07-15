@@ -234,8 +234,11 @@ def _artifact(
         key_id=ROOT_KEY_ID,
     )
     artifact = {
-        "schema_id": "gate_0b_evidence_v1",
+        "schema_id": "gate_0b_evidence_v2",
         "campaign_id": "campaign_1",
+        "attempt_authorization_validated": True,
+        "authorization_consumed": True,
+        "provider_execution_started": True,
         "attempt_completed": attempt_completed,
         "phase_history": [
             "preregistered",
@@ -262,7 +265,7 @@ def _artifact(
         "signed_record_root": signed_root,
         "usage": {
             "metadata_complete": True,
-            "provider_requests": 64,
+            "provider_requests": 128,
             "wall_clock_seconds": 600,
             "input_audio_seconds": 300,
             "output_audio_seconds": 100,
@@ -378,6 +381,11 @@ def _custody_bundle(
     *,
     provider_request_reservation: int = 128,
     cost_reservation_microusd: int = 10_000_000,
+    holdout_provider_requests: int = 64,
+    campaign_max_provider_requests: int = 384,
+    ledger_max_provider_requests: int | None = None,
+    holdout_privacy_issued_at: str = "2026-07-15T15:12:00+00:00",
+    holdout_privacy_expires_at: str = "2026-07-15T15:27:00+00:00",
 ):
     artifact, _ = _artifact()
     development_usage = {
@@ -393,7 +401,7 @@ def _custody_bundle(
     }
     holdout_usage = {
         "metadata_complete": True,
-        "provider_requests": 56,
+        "provider_requests": holdout_provider_requests,
         "wall_clock_seconds": 240,
         "input_audio_seconds": 120,
         "output_audio_seconds": 40,
@@ -423,6 +431,7 @@ def _custody_bundle(
     root_key = Ed25519PrivateKey.generate()
     approval_key = Ed25519PrivateKey.generate()
     ledger_key = Ed25519PrivateKey.generate()
+    privacy_key = Ed25519PrivateKey.generate()
     approval_public_key = approval_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
@@ -436,6 +445,10 @@ def _custody_bundle(
         serialization.PublicFormat.Raw,
     )
     ledger_public_key = ledger_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    privacy_public_key = privacy_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
@@ -455,7 +468,9 @@ def _custody_bundle(
             "custodian_key_id": "audit_custodian_1",
             "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
             "privacy_custodian_key_id": "privacy_custodian_1",
-            "privacy_custodian_public_key_sha256": "1" * 64,
+            "privacy_custodian_public_key_sha256": sha256(
+                privacy_public_key
+            ).hexdigest(),
             "record_root_key_id": ROOT_KEY_ID,
             "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
             "ledger_instance_id": "ledger_instance_1",
@@ -494,7 +509,7 @@ def _custody_bundle(
         "issued_at": "2026-07-15T14:59:00Z",
         "expires_at": "2026-07-15T16:00:00Z",
         "max_attempts": 3,
-        "max_provider_requests": 384,
+        "max_provider_requests": campaign_max_provider_requests,
         "max_cost_microusd": 30_000_000,
         "ledger_instance_id": "ledger_instance_1",
         "ledger_custodian_key_id": "ledger_custodian_1",
@@ -530,6 +545,77 @@ def _custody_bundle(
         approval_key,
         attempt_payload,
         key_id=approval_key_id,
+    )
+
+    def privacy_envelope(
+        *,
+        split: str,
+        schedule_sha256: str,
+        issued_at: str,
+        expires_at: str,
+        deletion_deadline: str,
+        nonce: str,
+    ) -> dict[str, object]:
+        payload = {
+            "schema_id": "gate_0b_privacy_custody_authorization_v1",
+            "campaign_id": "campaign_1",
+            "authorization_id": "authorization_1",
+            "attempt_id": "attempt_1",
+            "split": split,
+            "preregistration_sha256": preregistration["preregistration_sha256"],
+            "source_sha": source_sha,
+            "schedule_sha256": schedule_sha256,
+            "corpus_sha256": preregistration["immutable_values"]["corpus_sha256"],
+            "project": preregistration["immutable_values"]["project"],
+            "model": preregistration["immutable_values"]["model"],
+            "consent_registry_sha256": preregistration["immutable_values"][
+                "consent_attestation_sha256"
+            ],
+            "withdrawal_registry_sha256": "1" * 64,
+            "purpose_attestation_sha256": "2" * 64,
+            "rights_attestation_sha256": "3" * 64,
+            "provider_disclosure_sha256": "4" * 64,
+            "subject_set_sha256": "5" * 64,
+            "retention_policy_sha256": preregistration["immutable_values"][
+                "retention_attestation_sha256"
+            ],
+            "provider_retention_decision": "zdr_verified",
+            "residual_retention_acceptance_sha256": preregistration[
+                "immutable_values"
+            ]["zdr_or_residual_retention_acceptance_sha256"],
+            "consent_active": True,
+            "withdrawal_clear": True,
+            "purpose_limited": True,
+            "usage_rights_active": True,
+            "provider_disclosures_current": True,
+            "issued_at": issued_at,
+            "expires_at": expires_at,
+            "deletion_deadline": deletion_deadline,
+            "nonce": nonce,
+        }
+        return _signed_authorization(
+            privacy_key,
+            payload,
+            key_id="privacy_custodian_1",
+        )
+
+    development_privacy_envelope = privacy_envelope(
+        split="development",
+        schedule_sha256=preregistration["immutable_values"][
+            "development_schedule_sha256"
+        ],
+        issued_at="2026-07-15T14:59:00+00:00",
+        expires_at="2026-07-15T15:14:00+00:00",
+        deletion_deadline="2026-08-13T14:59:00+00:00",
+        nonce="development_privacy_nonce_1",
+    )
+    holdout_privacy_envelope = privacy_envelope(
+        split="holdout",
+        schedule_sha256="4" * 64,
+        issued_at=holdout_privacy_issued_at,
+        expires_at=holdout_privacy_expires_at,
+        deletion_deadline="2026-08-13T15:12:00+00:00",
+        nonce="holdout_privacy_nonce_1",
     )
     campaign_approval_sha = sha256(canonical_json_bytes(campaign_payload)).hexdigest()
     authorization_sha = sha256(canonical_json_bytes(attempt_payload)).hexdigest()
@@ -570,7 +656,11 @@ def _custody_bundle(
         body={
             "campaign_approval_sha256": campaign_approval_sha,
             "max_attempts": 3,
-            "max_provider_requests": 384,
+            "max_provider_requests": (
+                campaign_max_provider_requests
+                if ledger_max_provider_requests is None
+                else ledger_max_provider_requests
+            ),
             "max_cost_microusd": 30_000_000,
         },
         at="2026-07-15T14:59:59Z",
@@ -688,22 +778,27 @@ def _custody_bundle(
                 ),
                 holdout_usage_evidence_sha256=usage_evidence_sha256(
                     holdout_usage,
-                    provider_requests=56,
+                    provider_requests=holdout_provider_requests,
                     cost_microusd=evaluator_module._cost_microusd_from_usage(holdout_usage),
                 ),
-                provider_requests=120,
+                provider_requests=64 + holdout_provider_requests,
                 cost_microusd=final_cost,
             ),
-            "actual_provider_requests": 120,
+            "actual_provider_requests": 64 + holdout_provider_requests,
             "actual_cost_microusd": final_cost,
         },
         at="2026-07-15T15:20:00Z",
     )
     bundle = {
-        "schema_id": "gate_0b_custody_bundle_v1",
+        "schema_id": "gate_0b_custody_bundle_v2",
         "campaign_id": "campaign_1",
         "development_capsule": development_envelope,
         "holdout_capsule": holdout_envelope,
+        "development_privacy_envelope": development_privacy_envelope,
+        "holdout_privacy_envelope": holdout_privacy_envelope,
+        "privacy_custodian_public_key": base64.b64encode(
+            privacy_public_key
+        ).decode("ascii"),
         "ledger": ledger,
         "preregistration": preregistration,
         "campaign_envelope": campaign_envelope,
@@ -770,6 +865,159 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
     assert "attempt_completed" not in bundle
     assert "usage" not in bundle
     assert "run_failures" not in bundle
+
+
+def test_custody_bundle_requires_both_signed_privacy_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
+    bundle.pop("development_privacy_envelope")
+    bundle.pop("holdout_privacy_envelope")
+    bundle.pop("privacy_custodian_public_key")
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: {
+            "campaign_id": "campaign_1",
+            "kind": envelope["kind"],
+        },
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+
+
+def test_custody_bundle_rejects_signed_stale_holdout_privacy_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        _derived,
+    ) = _custody_bundle(
+        holdout_privacy_issued_at="2026-07-15T15:00:00+00:00",
+        holdout_privacy_expires_at="2026-07-15T15:15:00+00:00",
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: opened.append(envelope["kind"]),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    "bundle_override",
+    (
+        {"holdout_provider_requests": 63},
+        {"campaign_max_provider_requests": 383},
+        {"ledger_max_provider_requests": 383},
+    ),
+)
+def test_custody_bundle_rejects_nonexact_requests_and_campaign_ceilings(
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_override: dict[str, int],
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle(**bundle_override)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: {
+            "campaign_id": "campaign_1",
+            "kind": envelope["kind"],
+        },
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
 
 
 def test_custody_bundle_rejects_capsule_accounting_that_disagrees_with_signed_ledger(
@@ -1130,6 +1378,10 @@ def test_evaluator_recomputes_complete_gate_and_publishes_only_aggregates() -> N
 
     assert report["status"] == "pass"
     assert report["selected_policy_ms"] == 100
+    assert report["attempt_authorization_validated"] is True
+    assert report["authorization_consumed"] is True
+    assert report["provider_execution_started"] is True
+    assert report["attempt_completed"] is True
     assert report["assembly_sample_passed"] is True
     assert report["transcription_fidelity_sample_passed"] is True
     assert report["provider_interaction_integrity_sample_passed"] is True
@@ -1186,6 +1438,20 @@ def test_nonselected_holdout_policy_and_phase_or_partial_runs_fail_closed() -> N
     assert {"attempt_incomplete", "phase_history_invalid"} <= set(partial_report["failures"])
     assert "context_commitment_invalid" in partial_report["failures"]
     assert partial_report["gate_0b_sample_passed"] is False
+
+
+def test_complete_artifact_requires_exact_provider_request_count() -> None:
+    artifact, public_key = _artifact()
+    artifact["usage"]["provider_requests"] = 127  # type: ignore[index]
+    artifact["context_commitment"] = compute_evidence_context_commitment(
+        artifact,
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    report = _evaluate(artifact, public_key)
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"usage_or_budget_invalid": 1}
 
 
 def test_policy_replays_cannot_drift_immutable_wire_or_reference_facts() -> None:

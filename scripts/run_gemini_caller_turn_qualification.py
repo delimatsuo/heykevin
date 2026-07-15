@@ -11,11 +11,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_CEILING
 from hashlib import sha256
-import inspect
 import json
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
@@ -44,6 +44,8 @@ from app.services.voice_turn_replay import (
 from app.services.qualification_identity import (
     AttemptLedger,
     canonical_json_bytes,
+    capture_environment_identity,
+    capture_source_identity,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -68,6 +70,33 @@ SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PINNED_APPROVAL_ROOT_PATH = (
     REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
+)
+EXPECTED_PYTHON = "3.12.13"
+EXPECTED_UV = "0.11.7"
+EXECUTION_DEPENDENCY_PATHS = (
+    "config/qualification/gate_0b_approval_root.ed25519.pub",
+    "app/services/caller_turn_qualification.py",
+    "app/services/qualification_identity.py",
+    "app/services/caller_turn_alignment.py",
+    "app/services/caller_turn_measurement.py",
+    "app/services/caller_turns.py",
+    "app/services/gemini_turn_events.py",
+    "app/services/voice_turn_replay.py",
+    "app/utils/audio.py",
+    "scripts/run_gemini_caller_turn_qualification.py",
+    "scripts/evaluate_gemini_caller_turn_qualification.py",
+    "scripts/verify_qualification_environment.py",
+    "app/services/gemini_pipeline.py",
+    "app/services/voice_pipeline.py",
+    "app/config.py",
+    "uv.lock",
+)
+EXECUTION_IMPORT_NAMES = (
+    "websockets",
+    "cryptography",
+    "app.services.caller_turn_qualification",
+    "app.services.qualification_identity",
+    "app.utils.audio",
 )
 PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
     {
@@ -520,15 +549,6 @@ class AttemptExecutionResult:
             "production_authorized": False,
             "release_authorized": False,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class CapsuleHandoffReceipt:
-    envelope_sha256: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.envelope_sha256, str) or not SHA256.fullmatch(self.envelope_sha256):
-            raise RunnerError("capsule handoff digest is invalid")
 
 
 @dataclass(slots=True)
@@ -1450,7 +1470,6 @@ async def execute_authorized_attempt(
     phase: CampaignPhase,
     holdout_materialized: bool,
     now: datetime,
-    source_identity_check: Callable[[], None],
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
     receipt_clock_factory: Callable[[object], Callable[[], int]],
@@ -1458,7 +1477,7 @@ async def execute_authorized_attempt(
     pricing: PricingSchedule,
     custodian_public_key: bytes,
     custodian_key_id: str,
-    capsule_sink: Callable[[Mapping[str, Any]], object],
+    capsule_path: Path,
 ) -> AttemptExecutionResult:
     """Execute one consumed attempt using only injected secret, transport, and sinks."""
     _validate_attempt_inputs(
@@ -1482,6 +1501,7 @@ async def execute_authorized_attempt(
         pricing=pricing,
         custodian_public_key=custodian_public_key,
         custodian_key_id=custodian_key_id,
+        capsule_path=capsule_path,
     )
     campaign = verify_campaign_approval(
         campaign_envelope,
@@ -1526,7 +1546,14 @@ async def execute_authorized_attempt(
 
     try:
         try:
-            source_identity_check()
+            environment_identity_sha256 = _capture_current_execution_identity(
+                expected_source_sha=config.source_sha
+            )
+            if (
+                environment_identity_sha256
+                != preregistration["immutable_values"]["environment_identity_sha256"]
+            ):
+                raise RunnerError("execution environment identity mismatch")
         except Exception:
             error_code = "source_identity_failed"
 
@@ -1604,15 +1631,7 @@ async def execute_authorized_attempt(
                 error_code = "audit_capsule_failed"
             else:
                 try:
-                    handoff = capsule_sink(sealed)
-                    if inspect.isawaitable(handoff):
-                        handoff = await handoff
-                    expected_digest = sha256(canonical_json_bytes(sealed)).hexdigest()
-                    if (
-                        not isinstance(handoff, CapsuleHandoffReceipt)
-                        or handoff.envelope_sha256 != expected_digest
-                    ):
-                        raise RunnerError("capsule handoff receipt mismatch")
+                    _write_sealed_capsule(capsule_path, sealed)
                     capsule_handed_off = True
                 except Exception:
                     error_code = "capsule_handoff_failed"
@@ -1874,6 +1893,7 @@ def _verify_execution_preregistration(
     pricing: PricingSchedule,
     custodian_public_key: bytes,
     custodian_key_id: str,
+    capsule_path: Path,
 ) -> None:
     """Recompute the approved document and bind every directly observable input."""
     if not isinstance(document, Mapping):
@@ -1917,6 +1937,7 @@ def _verify_execution_preregistration(
             (REPO_ROOT / "scripts/evaluate_gemini_caller_turn_qualification.py").read_bytes()
         ).hexdigest(),
         "ledger_location_sha256": sha256(str(ledger_path.resolve()).encode("utf-8")).hexdigest(),
+        "audit_capsule_location_sha256": artifact_location_sha256(capsule_path),
     }
     expected_observable = {
         "preregistration_sha256": expected["preregistration_sha256"],
@@ -1954,6 +1975,82 @@ def _load_pinned_approval_public_key() -> bytes:
     if len(data) != 32:
         raise RunnerError("pinned approval trust root is unprovisioned")
     return data
+
+
+def _capture_current_execution_identity(*, expected_source_sha: str) -> str:
+    source = capture_source_identity(
+        REPO_ROOT,
+        expected_source_sha=expected_source_sha,
+        dependency_paths=EXECUTION_DEPENDENCY_PATHS,
+    )
+    environment = capture_environment_identity(
+        repo_root=REPO_ROOT,
+        expected_python=EXPECTED_PYTHON,
+        expected_uv=EXPECTED_UV,
+        import_names=EXECUTION_IMPORT_NAMES,
+    )
+    report = {
+        "schema_id": "gate_0b_environment_identity_v1",
+        "source": source.redacted_report_dict(),
+        "environment": environment.redacted_report_dict(),
+    }
+    return sha256(canonical_json_bytes(report)).hexdigest()
+
+
+def artifact_location_sha256(path: Path) -> str:
+    """Hash one validated, absent, outside-repository artifact destination."""
+    canonical = _canonical_artifact_path(path)
+    return sha256(str(canonical).encode("utf-8")).hexdigest()
+
+
+def _canonical_artifact_path(path: Path) -> Path:
+    if not isinstance(path, Path) or not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise RunnerError("artifact destination is invalid")
+    if path.exists() or path.is_symlink():
+        raise RunnerError("artifact destination must be absent")
+    for ancestor in path.parents:
+        if ancestor.is_symlink():
+            raise RunnerError("artifact destination ancestors must not be symlinks")
+    parent = path.parent.resolve()
+    if not parent.is_dir():
+        raise RunnerError("artifact destination parent is unavailable")
+    canonical = parent / path.name
+    try:
+        canonical.relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return canonical
+    raise RunnerError("artifact destination must be outside the repository")
+
+
+def _write_sealed_capsule(path: Path, envelope: Mapping[str, Any]) -> str:
+    canonical = _canonical_artifact_path(path)
+    payload = canonical_json_bytes(envelope) + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(canonical, flags, 0o600)
+    except OSError as exc:
+        raise RunnerError("capsule destination is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise RunnerError("capsule destination is not a private regular file")
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise RunnerError("capsule write did not make progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = os.open(canonical.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return sha256(payload[:-1]).hexdigest()
 
 
 def _build_audit_capsule(

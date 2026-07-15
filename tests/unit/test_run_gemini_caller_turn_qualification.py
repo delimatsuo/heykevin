@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+import stat
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -27,7 +28,6 @@ from app.services.voice_turn_replay import Gate0BReplayInput
 from scripts.run_gemini_caller_turn_qualification import (
     OFFICIAL_ENDPOINT,
     AuthorizedAttemptConfig,
-    CapsuleHandoffReceipt,
     ConnectionPolicy,
     NoSpeechWindowPlan,
     ProviderSessionClosed,
@@ -36,6 +36,7 @@ from scripts.run_gemini_caller_turn_qualification import (
     SessionActivityPlan,
     SessionExecutionConfig,
     SessionPlan,
+    artifact_location_sha256,
     build_gate0b_setup_message,
     build_gate0b_setup_identity,
     build_dry_run_preregistration,
@@ -54,6 +55,15 @@ NOW = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
 PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
 KEY_ID = "qualification-reviewer-v1"
+
+
+@pytest.fixture(autouse=True)
+def _fixed_execution_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner_module,
+        "_capture_current_execution_identity",
+        lambda *, expected_source_sha: "2" * 64,
+    )
 PRICING_PATH = Path("tests/fixtures/caller_turn_qualification/pricing.json")
 LANGUAGES = ("ar", "en", "es", "fr", "hi", "ht", "pt", "zh")
 CONDITIONS = ("clean", "twilio_codec_only", "acoustic_impairment", "interaction_stress")
@@ -454,13 +464,19 @@ def _preregistration(
                 Path("scripts/evaluate_gemini_caller_turn_qualification.py").read_bytes()
             ).hexdigest(),
             "ledger_location_sha256": ledger_location_sha256(ledger_path),
-            "audit_capsule_location_sha256": "a" * 64,
+            "audit_capsule_location_sha256": artifact_location_sha256(
+                _capsule_path(ledger_path)
+            ),
             "evidence_location_sha256": "b" * 64,
             "consent_attestation_sha256": "c" * 64,
             "retention_attestation_sha256": "d" * 64,
             "zdr_or_residual_retention_acceptance_sha256": "e" * 64,
         }
     )
+
+
+def _capsule_path(ledger_path: Path) -> Path:
+    return ledger_path.with_name("gate-0b-capsule.json")
 
 
 def test_setup_and_connection_policy_are_exact_and_non_debuggable() -> None:
@@ -1163,7 +1179,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         for _ in no_speech_plans
     ]
     connector = FakeConnector([*sessions, *no_speech_sessions])
-    capsules: list[dict[str, object]] = []
+    capsule_path = _capsule_path(ledger_path)
 
     class RecordingLedger:
         def __init__(self) -> None:
@@ -1178,8 +1194,16 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             order.append("outcome")
             return self.delegate.record_outcome(*args, **kwargs)
 
-    def source_identity_check() -> None:
+    def source_identity_check(*, expected_source_sha: str) -> str:
+        assert expected_source_sha == SOURCE_SHA
         order.append("source")
+        return "2" * 64
+
+    monkeypatch.setattr(
+        runner_module,
+        "_capture_current_execution_identity",
+        source_identity_check,
+    )
 
     def credential_loader(reference: str) -> SecretCredential:
         order.append("credential:" + reference)
@@ -1188,11 +1212,6 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     def connector_factory(_credential: SecretCredential):
         order.append("connector")
         return connector
-
-    async def capsule_sink(envelope):
-        order.append("capsule")
-        capsules.append(envelope)
-        return CapsuleHandoffReceipt(sha256(canonical_json_bytes(envelope)).hexdigest())
 
     result = asyncio.run(
         execute_authorized_attempt(
@@ -1214,7 +1233,6 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
             now=NOW,
-            source_identity_check=source_identity_check,
             credential_loader=credential_loader,
             connector_factory=connector_factory,
             receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
@@ -1222,7 +1240,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
-            capsule_sink=capsule_sink,
+            capsule_path=capsule_path,
         )
     )
 
@@ -1230,22 +1248,194 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert result.capsule_handed_off is True
     assert result.provider_request_count == 64
     assert result.cost_microusd == 4_992
+    assert stat.S_IMODE(capsule_path.stat().st_mode) == 0o600
     assert order[:3] == ["claim", "source", "credential:qualification_secret_v1"]
-    assert order[3:-2] == ["connector"] * 64
-    assert order[-2:] == ["capsule", "outcome"]
+    assert order[3:-1] == ["connector"] * 64
+    assert order[-1:] == ["outcome"]
+    envelope = json.loads(capsule_path.read_bytes())
     opened = open_audit_capsule(
-        capsules[0],
+        envelope,
         custodian_private_key=custodian,
         expected_key_id="audit_custodian_1",
     )
     assert opened["activities"][0]["reference_text"] == "purpose recorded phrase 0"
     assert opened["no_speech_windows"][0]["wire_facts"][0]["kind"] == "false_activity"
-    assert CANARY_SECRET not in json.dumps(capsules[0])
+    assert CANARY_SECRET not in json.dumps(envelope)
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert not hasattr(result, "audit_events")
     snapshot = AttemptLedger(ledger_path).snapshot()
     assert [record["event"] for record in snapshot["records"]] == ["claim", "outcome"]
     assert snapshot["records"][-1]["actual_cost_microusd"] == 4_992
+
+
+def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    plans, no_speech_plans = _development_schedule()
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module,
+        "_capture_current_execution_identity",
+        lambda *, expected_source_sha: "f" * 64,
+    )
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    touched: list[str] = []
+
+    result = asyncio.run(
+        execute_authorized_attempt(
+            plans,
+            no_speech_plans=no_speech_plans,
+            preregistration=preregistration,
+            config=AuthorizedAttemptConfig(
+                preregistration_sha256=preregistration["preregistration_sha256"],
+                source_sha=SOURCE_SHA,
+                approval_key_id=KEY_ID,
+                credential_reference="qualification_secret_v1",
+                policy_ms=250,
+                whole_run_timeout_seconds=30,
+            ),
+            session_config=_config(),
+            campaign_envelope=campaign,
+            attempt_envelope=attempt,
+            ledger=AttemptLedger(ledger_path),
+            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+            holdout_materialized=False,
+            now=NOW,
+            credential_loader=lambda _reference: touched.append("credential"),
+            connector_factory=lambda _credential: touched.append("connector"),
+            receipt_clock_factory=lambda _plan: ReceiptClock([]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+            pricing=load_pricing(PRICING_PATH),
+            custodian_public_key=custodian_public,
+            custodian_key_id="audit_custodian_1",
+            capsule_path=_capsule_path(ledger_path),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "source_identity_failed"
+    assert touched == []
+    snapshot = AttemptLedger(ledger_path).snapshot()
+    assert [record["event"] for record in snapshot["records"]] == ["claim", "outcome"]
+    assert snapshot["records"][-1]["outcome"] == "failed"
+
+
+def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    touched: list[str] = []
+
+    with pytest.raises(ValueError, match="binding"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (_plan(),),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_path=tmp_path / "substituted-capsule.json",
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+@pytest.mark.parametrize("occupied_kind", ["file", "symlink"])
+def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    occupied_kind: str,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    capsule_path = _capsule_path(ledger_path)
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    if occupied_kind == "file":
+        capsule_path.write_text("occupied")
+    else:
+        target = tmp_path / "outside-capsule.json"
+        target.write_text("occupied")
+        capsule_path.symlink_to(target)
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+
+    with pytest.raises(ValueError, match="artifact destination"):
+        asyncio.run(
+            execute_authorized_attempt(
+                (_plan(),),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=AttemptLedger(ledger_path),
+                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
+                holdout_materialized=False,
+                now=NOW,
+                credential_loader=lambda _reference: pytest.fail("secret must not be read"),
+                connector_factory=lambda _credential: pytest.fail("connector must not be built"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_path=capsule_path,
+            )
+        )
+
+    assert not ledger_path.exists()
 
 
 def test_invalid_approval_never_reads_secret_or_constructs_connector(
@@ -1285,7 +1475,6 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: touched.append("source"),
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1293,7 +1482,7 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1335,7 +1524,6 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: touched.append("source"),
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1343,7 +1531,7 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1425,7 +1613,6 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: touched.append("source"),
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1433,7 +1620,7 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
                 pricing=pricing,
                 custodian_public_key=supplied_custodian,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1482,7 +1669,6 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: touched.append("source"),
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1490,7 +1676,7 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1541,7 +1727,6 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: None,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1549,7 +1734,7 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1595,7 +1780,6 @@ def test_insufficient_signed_request_reservation_blocks_before_ledger_and_secret
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: touched.append("source"),
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1603,7 +1787,7 @@ def test_insufficient_signed_request_reservation_blocks_before_ledger_and_secret
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1648,7 +1832,6 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
                 phase=CampaignPhase.DEVELOPMENT_COLLECTION,
                 holdout_materialized=False,
                 now=NOW,
-                source_identity_check=lambda: touched.append("source"),
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
                 receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1656,7 +1839,7 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
-                capsule_sink=lambda _capsule: None,
+                capsule_path=_capsule_path(ledger_path),
             )
         )
 
@@ -1717,7 +1900,6 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
             now=NOW,
-            source_identity_check=lambda: None,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: connector,
             receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
@@ -1725,7 +1907,7 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
             pricing=load_pricing(PRICING_PATH),
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
-            capsule_sink=lambda _capsule: pytest.fail("capsule must not be handed off"),
+            capsule_path=_capsule_path(ledger_path),
         )
     )
 
@@ -1777,7 +1959,6 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
             now=NOW,
-            source_identity_check=lambda: None,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=connector_factory,
             receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1785,7 +1966,7 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
-            capsule_sink=lambda _capsule: None,
+            capsule_path=_capsule_path(ledger_path),
         )
     )
 
@@ -1839,7 +2020,6 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             phase=CampaignPhase.DEVELOPMENT_COLLECTION,
             holdout_materialized=False,
             now=NOW,
-            source_identity_check=lambda: None,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: pytest.fail("connector must not be built"),
             receipt_clock_factory=lambda _plan: ReceiptClock([]),
@@ -1847,7 +2027,7 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
-            capsule_sink=lambda _capsule: None,
+            capsule_path=_capsule_path(ledger_path),
         )
     )
 

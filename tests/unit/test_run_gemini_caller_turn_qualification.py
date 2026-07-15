@@ -596,6 +596,82 @@ def test_receive_loop_is_live_while_the_paced_sender_is_still_running() -> None:
     assert receiver_was_live_during_send is True
 
 
+def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> None:
+    class CoordinatedSession:
+        def __init__(self) -> None:
+            self.sent = []
+            self.audio_sent = asyncio.Event()
+            self.response_received = asyncio.Event()
+            self.receive_index = 0
+            self.closed = False
+
+        async def send(self, message):
+            self.sent.append(message)
+            if isinstance(message.get("realtimeInput"), dict) and "audio" in message["realtimeInput"]:
+                self.audio_sent.set()
+
+        async def receive(self):
+            self.receive_index += 1
+            if self.receive_index == 1:
+                return {"setupComplete": {}}
+            if self.receive_index == 2:
+                await self.audio_sent.wait()
+                self.response_received.set()
+                return _server_event()
+            if self.receive_index == 3:
+                return _usage_message()
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    plan = replace(
+        _no_speech_plan(),
+        replay_inputs=(
+            Gate0BReplayInput(
+                "audio",
+                0,
+                1,
+                None,
+                audio=b"\x00\x00" * 319,
+                duration_ms=20,
+            ),
+            Gate0BReplayInput(
+                "audio",
+                80,
+                1,
+                None,
+                audio=b"\x00\x00" * 319,
+                duration_ms=20,
+            ),
+        ),
+    )
+    session = CoordinatedSession()
+    receiver_was_live_during_send = False
+
+    async def sleep_ms(value: int) -> None:
+        nonlocal receiver_was_live_during_send
+        if value == 80:
+            await asyncio.wait_for(session.response_received.wait(), timeout=0.1)
+            receiver_was_live_during_send = True
+        else:
+            await asyncio.sleep(0)
+
+    result = asyncio.run(
+        execute_injected_no_speech_window(
+            plan,
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            receipt_clock_ms=ReceiptClock([0, 120, 130]),
+            sleep_ms=sleep_ms,
+        )
+    )
+
+    assert result.complete is True
+    assert receiver_was_live_during_send is True
+
+
 def test_multiple_official_usage_frames_are_accumulated() -> None:
     first = _server_event(text="book service today 1")
     second = _server_event(text="book service today 2")

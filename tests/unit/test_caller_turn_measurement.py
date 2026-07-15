@@ -196,6 +196,42 @@ def test_measurement_recomputes_alignment_lifecycle_and_keyed_commitment() -> No
     assert verify_record_commitment(tampered, commitment_key=CAMPAIGN_KEY) is False
 
 
+def test_measurement_counts_prior_epoch_events_as_stale_and_fails_fidelity() -> None:
+    current = _activity_input()
+    measurement = replace(
+        current,
+        expected_epoch=2,
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                5,
+                1,
+                1,
+                "stale prior epoch text",
+            ),
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                2,
+                2,
+                "book service today",
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 3, 2),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.stale_count == 1
+    assert record.cross_epoch_acceptance_count == 0
+    assert record.observed_lifecycle_status == "retrospective_complete"
+    assert record.insertions + record.substitutions + record.deletions > 0
+
+
 def test_measurement_preserves_low_fidelity_and_duplicate_failures() -> None:
     duplicated = replace(
         _activity_input(),

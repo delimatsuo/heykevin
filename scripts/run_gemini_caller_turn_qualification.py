@@ -1179,7 +1179,8 @@ async def _execute_no_speech_flow(
     except Exception:
         return _failed_no_speech("connector_failure", provider_request_count=1)
 
-    usage: UsageCounts | None = None
+    usage = UsageCounts()
+    usage_frame_count = 0
     error_code: str | None = None
     false_activity_count = 0
     model_audio_chunk_count = 0
@@ -1191,6 +1192,9 @@ async def _execute_no_speech_flow(
     response_terminal = False
     sequence = 0
     adapter = GeminiTurnEventAdapter()
+    sender_done = asyncio.Event()
+    sender_error: str | None = None
+    sender_task: asyncio.Task[None] | None = None
     try:
         await session.send(build_gate0b_setup_message(config))
         setup = await session.receive()
@@ -1198,18 +1202,29 @@ async def _execute_no_speech_flow(
         if setup != {"setupComplete": {}}:
             error_code = "setup_rejected"
         else:
-            previous_at_ms = 0
-            for replay_input in plan.replay_inputs:
-                delay = replay_input.at_ms - previous_at_ms
-                if delay > 0:
-                    await sleep_ms(delay)
-                previous_at_ms = replay_input.at_ms
-                await session.send(
-                    build_gemini_audio_message(
-                        replay_input.audio,
-                        provider=DEVELOPER_PROVIDER,
-                    )
-                )
+            async def send_replay_inputs() -> None:
+                nonlocal sender_error
+                previous_at_ms = 0
+                try:
+                    for replay_input in plan.replay_inputs:
+                        delay = replay_input.at_ms - previous_at_ms
+                        if delay > 0:
+                            await sleep_ms(delay)
+                        previous_at_ms = replay_input.at_ms
+                        await session.send(
+                            build_gemini_audio_message(
+                                replay_input.audio,
+                                provider=DEVELOPER_PROVIDER,
+                            )
+                        )
+                except TimeoutError:
+                    raise
+                except Exception:
+                    sender_error = "connector_failure"
+                finally:
+                    sender_done.set()
+
+            sender_task = asyncio.create_task(send_replay_inputs())
 
             while error_code is None:
                 try:
@@ -1218,9 +1233,11 @@ async def _execute_no_speech_flow(
                     abnormal_close_count += 1
                     error_code = "provider_closed"
                     break
-                at_ms = receipt_clock_ms()
                 if message is None:
+                    if not sender_done.is_set():
+                        await sender_done.wait()
                     break
+                at_ms = receipt_clock_ms()
                 if not isinstance(message, Mapping):
                     error_code = "malformed_message"
                     break
@@ -1248,12 +1265,12 @@ async def _execute_no_speech_flow(
                     except RunnerError:
                         error_code = "usage_metadata_inconsistent"
                         break
-                    if usage is not None:
-                        error_code = "usage_metadata_duplicate"
-                        break
-                    usage = parsed_usage
-                    if set(message) == {"usageMetadata"} and not response_open:
-                        break
+                    usage = _add_usage(usage, parsed_usage)
+                    usage_frame_count += 1
+                    if set(message) == {"usageMetadata"}:
+                        if sender_done.is_set() and not response_open:
+                            break
+                        continue
 
                 primary_batch = adapter.adapt_message(
                     message,
@@ -1338,19 +1355,37 @@ async def _execute_no_speech_flow(
                 if _has_response_terminal(message) and response_open:
                     response_open = False
                     response_terminal = True
-                if usage is not None and not response_open:
+                if usage_frame_count and sender_done.is_set() and not response_open:
                     break
 
-            if error_code is None and usage is None:
+            if sender_task is not None:
+                if error_code is not None and not sender_task.done():
+                    sender_task.cancel()
+                try:
+                    await sender_task
+                except asyncio.CancelledError:
+                    pass
+            if error_code is None and sender_error is not None:
+                error_code = sender_error
+            if error_code is None and usage_frame_count == 0:
                 error_code = "usage_metadata_missing"
             if error_code is None and response_open:
                 error_code = "response_terminal_missing"
     except ProviderSessionClosed:
         abnormal_close_count += 1
         error_code = "provider_closed"
+    except TimeoutError:
+        raise
     except Exception:
         error_code = "connector_failure"
     finally:
+        if sender_task is not None:
+            if not sender_task.done():
+                sender_task.cancel()
+            try:
+                await sender_task
+            except (asyncio.CancelledError, TimeoutError):
+                pass
         try:
             await session.close()
         except Exception:
@@ -1365,7 +1400,7 @@ async def _execute_no_speech_flow(
         abnormal_close_count=abnormal_close_count,
         audio_after_teardown_count=audio_after_teardown_count,
         output_audio_bytes=output_audio_bytes,
-        usage=usage or UsageCounts(),
+        usage=usage,
         provider_request_count=1,
         wire_facts=tuple(wire_facts),
     )

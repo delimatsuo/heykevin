@@ -147,6 +147,96 @@ class AuthorizedAssetRelease:
     privacy_public_key: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class CapsuleHandoffRequest:
+    path: Path
+    payload: bytes
+    campaign_id: str
+    attempt_id: str
+    split: str
+    capsule_sha256: str
+    location_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.path, Path)
+            or not self.path.is_absolute()
+            or not isinstance(self.payload, bytes)
+            or not self.payload.endswith(b"\n")
+            or not isinstance(self.campaign_id, str)
+            or not SAFE_ID.fullmatch(self.campaign_id)
+            or not isinstance(self.attempt_id, str)
+            or not SAFE_ID.fullmatch(self.attempt_id)
+            or not isinstance(self.split, str)
+            or self.split not in VALID_SPLITS
+            or not isinstance(self.capsule_sha256, str)
+            or not SHA256.fullmatch(self.capsule_sha256)
+            or not isinstance(self.location_sha256, str)
+            or not SHA256.fullmatch(self.location_sha256)
+            or sha256(self.payload[:-1]).hexdigest() != self.capsule_sha256
+        ):
+            raise RunnerError("capsule handoff request is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CapsuleHandoffReceipt:
+    campaign_id: str
+    attempt_id: str
+    split: str
+    capsule_sha256: str
+    location_sha256: str
+    durable: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.campaign_id, str)
+            or not SAFE_ID.fullmatch(self.campaign_id)
+            or not isinstance(self.attempt_id, str)
+            or not SAFE_ID.fullmatch(self.attempt_id)
+            or not isinstance(self.split, str)
+            or self.split not in VALID_SPLITS
+            or not isinstance(self.capsule_sha256, str)
+            or not SHA256.fullmatch(self.capsule_sha256)
+            or not isinstance(self.location_sha256, str)
+            or not SHA256.fullmatch(self.location_sha256)
+            or not isinstance(self.durable, bool)
+        ):
+            raise RunnerError("capsule handoff receipt is invalid")
+
+
+class CapsuleSink(Protocol):
+    def handoff(self, request: CapsuleHandoffRequest) -> CapsuleHandoffReceipt: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateFileCapsuleSink:
+    """Durable local sink that must be explicitly injected by the executor caller."""
+
+    repo_root: Path = REPO_ROOT
+
+    def handoff(self, request: CapsuleHandoffRequest) -> CapsuleHandoffReceipt:
+        if not isinstance(request, CapsuleHandoffRequest):
+            raise RunnerError("capsule handoff request is invalid")
+        try:
+            written = write_private_file(
+                request.path,
+                request.payload,
+                repo_root=self.repo_root,
+            )
+        except PrivatePathError as exc:
+            raise RunnerError("capsule destination is unavailable") from exc
+        if written != request.path:
+            raise RunnerError("capsule sink changed the bound destination")
+        return CapsuleHandoffReceipt(
+            campaign_id=request.campaign_id,
+            attempt_id=request.attempt_id,
+            split=request.split,
+            capsule_sha256=request.capsule_sha256,
+            location_sha256=request.location_sha256,
+            durable=True,
+        )
+
+
 class RequestReservationError(RunnerError):
     """Raised when the signed request reservation has been consumed."""
 
@@ -2050,8 +2140,10 @@ async def execute_authorized_attempt(
     custodian_public_key: bytes,
     custodian_key_id: str,
     capsule_path: Path,
+    capsule_sink: CapsuleSink,
 ) -> AttemptExecutionResult:
     """Execute one consumed attempt using only injected secret, transport, and sinks."""
+    _require_capsule_sink(capsule_sink)
     _validate_asset_release(asset_release)
     _validate_attempt_configuration(
         config=config,
@@ -2314,7 +2406,14 @@ async def execute_authorized_attempt(
                 error_code = "audit_capsule_failed"
             else:
                 try:
-                    capsule_sha256 = _write_sealed_capsule(capsule_path, sealed)
+                    capsule_sha256 = _handoff_sealed_capsule(
+                        capsule_path,
+                        sealed,
+                        sink=capsule_sink,
+                        campaign_id=campaign.campaign_id,
+                        attempt_id=authorization.attempt_id,
+                        split="development",
+                    )
                     capsule_handed_off = True
                 except Exception:
                     error_code = "capsule_handoff_failed"
@@ -2422,8 +2521,10 @@ async def execute_authorized_holdout(
     custodian_public_key: bytes,
     custodian_key_id: str,
     capsule_path: Path,
+    capsule_sink: CapsuleSink,
 ) -> AttemptExecutionResult:
     """Resume one active post-lock attempt and execute its released holdout once."""
+    _require_capsule_sink(capsule_sink)
     _validate_asset_release(asset_release)
     _validate_attempt_configuration(
         config=config,
@@ -2702,7 +2803,14 @@ async def execute_authorized_holdout(
                 error_code = "audit_capsule_failed"
             else:
                 try:
-                    capsule_sha256 = _write_sealed_capsule(capsule_path, sealed)
+                    capsule_sha256 = _handoff_sealed_capsule(
+                        capsule_path,
+                        sealed,
+                        sink=capsule_sink,
+                        campaign_id=campaign.campaign_id,
+                        attempt_id=authorization.attempt_id,
+                        split="holdout",
+                    )
                     capsule_handed_off = True
                 except Exception:
                     error_code = "capsule_handoff_failed"
@@ -3225,13 +3333,54 @@ def _canonical_artifact_path(path: Path) -> Path:
         raise RunnerError("artifact destination is invalid") from exc
 
 
-def _write_sealed_capsule(path: Path, envelope: Mapping[str, Any]) -> str:
+def _require_capsule_sink(sink: object) -> None:
+    if not callable(getattr(sink, "handoff", None)):
+        raise RunnerError("capsule sink is not configured")
+
+
+def _handoff_sealed_capsule(
+    path: Path,
+    envelope: Mapping[str, Any],
+    *,
+    sink: CapsuleSink,
+    campaign_id: str,
+    attempt_id: str,
+    split: str,
+) -> str:
     payload = canonical_json_bytes(envelope) + b"\n"
+    canonical = _canonical_artifact_path(path)
+    capsule_sha256 = sha256(payload[:-1]).hexdigest()
+    request = CapsuleHandoffRequest(
+        path=canonical,
+        payload=payload,
+        campaign_id=campaign_id,
+        attempt_id=attempt_id,
+        split=split,
+        capsule_sha256=capsule_sha256,
+        location_sha256=sha256(str(canonical).encode("utf-8")).hexdigest(),
+    )
     try:
-        write_private_file(path, payload, repo_root=REPO_ROOT)
+        receipt = sink.handoff(request)
+        persisted = read_private_file(
+            canonical,
+            repo_root=REPO_ROOT,
+            maximum_bytes=len(payload),
+        )
     except PrivatePathError as exc:
-        raise RunnerError("capsule destination is unavailable") from exc
-    return sha256(payload[:-1]).hexdigest()
+        raise RunnerError("capsule content was not durably persisted") from exc
+    expected_receipt = CapsuleHandoffReceipt(
+        campaign_id=campaign_id,
+        attempt_id=attempt_id,
+        split=split,
+        capsule_sha256=capsule_sha256,
+        location_sha256=request.location_sha256,
+        durable=True,
+    )
+    if not isinstance(receipt, CapsuleHandoffReceipt) or receipt != expected_receipt:
+        raise RunnerError("capsule handoff receipt does not match its request")
+    if persisted != payload:
+        raise RunnerError("capsule content was not durably persisted")
+    return capsule_sha256
 
 
 def _build_audit_capsule(

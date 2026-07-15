@@ -44,9 +44,11 @@ from scripts.run_gemini_caller_turn_qualification import (
     OFFICIAL_ENDPOINT,
     AuthorizedAssetRelease,
     AuthorizedAttemptConfig,
+    CapsuleHandoffReceipt,
     ConnectionPolicy,
     NoSpeechWindowPlan,
     ProviderSessionClosed,
+    PrivateFileCapsuleSink,
     ReductionResult,
     SecretCredential,
     SessionActivityPlan,
@@ -83,6 +85,24 @@ PRIVACY_PUBLIC_KEY = PRIVACY_PRIVATE_KEY.public_key().public_bytes(
     serialization.Encoding.Raw,
     serialization.PublicFormat.Raw,
 )
+
+
+class _WrongCapsuleReceiptSink:
+    def handoff(self, request):
+        receipt = PrivateFileCapsuleSink().handoff(request)
+        return replace(receipt, capsule_sha256="0" * 64)
+
+
+class _ReceiptWithoutPersistenceSink:
+    def handoff(self, request):
+        return CapsuleHandoffReceipt(
+            campaign_id=request.campaign_id,
+            attempt_id=request.attempt_id,
+            split=request.split,
+            capsule_sha256=request.capsule_sha256,
+            location_sha256=request.location_sha256,
+            durable=True,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -1057,6 +1077,50 @@ def _holdout_capsule_path(ledger_path: Path) -> Path:
     return ledger_path.with_name("gate-0b-holdout-capsule.json")
 
 
+def test_capsule_handoff_requires_context_bound_durable_receipt(tmp_path: Path) -> None:
+    custody = tmp_path / "capsule-custody"
+    custody.mkdir(mode=0o700)
+    capsule_path = custody / "capsule.json"
+
+    capsule_sha256 = runner_module._handoff_sealed_capsule(
+        capsule_path,
+        {"sealed": "capsule"},
+        sink=PrivateFileCapsuleSink(),
+        campaign_id="campaign-1",
+        attempt_id="attempt-1",
+        split="development",
+    )
+
+    assert capsule_sha256 == sha256(canonical_json_bytes({"sealed": "capsule"})).hexdigest()
+    assert capsule_path.read_bytes() == canonical_json_bytes({"sealed": "capsule"}) + b"\n"
+
+
+@pytest.mark.parametrize(
+    "sink,error",
+    (
+        (_WrongCapsuleReceiptSink(), "receipt"),
+        (_ReceiptWithoutPersistenceSink(), "persisted"),
+    ),
+)
+def test_capsule_handoff_rejects_false_acknowledgment(
+    tmp_path: Path,
+    sink: object,
+    error: str,
+) -> None:
+    custody = tmp_path / error
+    custody.mkdir(mode=0o700)
+
+    with pytest.raises(ValueError, match=error):
+        runner_module._handoff_sealed_capsule(
+            custody / "capsule.json",
+            {"sealed": "capsule"},
+            sink=sink,
+            campaign_id="campaign-1",
+            attempt_id="attempt-1",
+            split="development",
+        )
+
+
 def test_setup_and_connection_policy_are_exact_and_non_debuggable() -> None:
     setup = build_gate0b_setup_message(_config())
     tool_setup = build_gate0b_setup_message(_config(), include_tool=True)
@@ -2020,6 +2084,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_path=capsule_path,
+            capsule_sink=PrivateFileCapsuleSink(),
         )
     )
 
@@ -2258,6 +2323,7 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         custodian_public_key=audit_public,
         custodian_key_id="audit_custodian_1",
         capsule_path=capsule_path,
+        capsule_sink=PrivateFileCapsuleSink(),
     )
     if resume_mode != "durable":
         error = (
@@ -2411,6 +2477,7 @@ def test_development_claim_boundary_fails_closed_before_secret_lookup(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -2473,6 +2540,7 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_path=_capsule_path(ledger_path),
+            capsule_sink=PrivateFileCapsuleSink(),
         )
     )
 
@@ -2539,6 +2607,7 @@ def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=tmp_path / "substituted-capsule.json",
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -2604,6 +2673,7 @@ def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=capsule_path,
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -2661,6 +2731,7 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -2732,6 +2803,7 @@ def test_stale_privacy_receipt_blocks_asset_ledger_secret_and_connector(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -2833,6 +2905,7 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -2932,6 +3005,7 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
                 custodian_public_key=supplied_custodian,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3000,6 +3074,7 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3065,6 +3140,7 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3131,6 +3207,7 @@ def test_insufficient_signed_liability_blocks_before_ledger_and_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3212,6 +3289,7 @@ def test_nonexact_campaign_ceiling_blocks_before_assets_ledger_and_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3286,6 +3364,7 @@ def test_ledger_genesis_ceiling_mismatch_blocks_before_claim_and_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3343,6 +3422,7 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
                 custodian_public_key=custodian_public,
                 custodian_key_id="audit_custodian_1",
                 capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
             )
         )
 
@@ -3462,6 +3542,7 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_path=_capsule_path(ledger_path),
+            capsule_sink=PrivateFileCapsuleSink(),
         )
     )
 
@@ -3527,6 +3608,7 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_path=_capsule_path(ledger_path),
+            capsule_sink=PrivateFileCapsuleSink(),
         )
     )
 
@@ -3599,6 +3681,7 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             custodian_public_key=custodian_public,
             custodian_key_id="audit_custodian_1",
             capsule_path=_capsule_path(ledger_path),
+            capsule_sink=PrivateFileCapsuleSink(),
         )
     )
 

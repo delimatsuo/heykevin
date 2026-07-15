@@ -45,7 +45,8 @@ from app.services.qualification_identity import canonical_json_bytes
 
 ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v1"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
-AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v1"
+AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v2"
+CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
 SEALED_CAPSULE_SCHEMA_ID = "gate_0b_sealed_capsule_v1"
 SIGNED_ROOT_SCHEMA_ID = "gate_0b_signed_record_root_v1"
 POLICIES_MS = frozenset({100, 250, 500, 750})
@@ -67,6 +68,9 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 MAX_COUNTER = 100_000
 MAX_TEXT_LENGTH = 16_000
 MAX_CAPSULE_BYTES = 16 * 1024 * 1024
+MAX_ACCOUNTING_COUNTER = 100_000_000
+MAX_ACCOUNTING_ELAPSED_MS = 120_000
+MAX_ACCOUNTING_OUTPUT_BYTES = 120 * 24_000 * 2
 RECORD_HMAC_DOMAIN = b"gate-0b-record-v1\x00"
 CAPSULE_KDF_INFO = b"gate-0b-audit-capsule-v1"
 FORBIDDEN_CAPSULE_KEYS = frozenset(
@@ -105,6 +109,37 @@ WIRE_FACT_KINDS = frozenset(
         "response_timeout",
         "runaway_output",
         "teardown",
+    }
+)
+CAPSULE_FAILURE_CODES = frozenset(
+    {
+        "audio_after_terminal",
+        "connector_failure",
+        "cost_reservation_exhausted",
+        "expected_interaction_missing",
+        "expected_tool_call_missing",
+        "interaction_message_missing",
+        "malformed_message",
+        "message_too_large",
+        "premature_current_response",
+        "premature_usage_metadata",
+        "provider_closed",
+        "provider_goaway",
+        "provider_request_reservation_exhausted",
+        "reducer_disagreement",
+        "response_crossed_restart",
+        "response_gap_exceeded",
+        "response_terminal_missing",
+        "run_output_audio_cap_exceeded",
+        "runaway_output",
+        "session_cost_cap_exceeded",
+        "session_timeout",
+        "setup_rejected",
+        "teardown_failure",
+        "unattributed_response",
+        "unexpected_interaction_audio",
+        "usage_metadata_inconsistent",
+        "usage_metadata_missing",
     }
 )
 
@@ -779,6 +814,75 @@ def open_audit_capsule(
     return _validate_audit_capsule(decoded)
 
 
+def derive_audit_capsule_accounting(
+    capsule: Mapping[str, Any],
+) -> tuple[dict[str, int | bool], tuple[str, ...]]:
+    """Aggregate bounded usage facts from one independently opened capsule."""
+    data = _validate_audit_capsule(capsule)
+    units = data["accounting"]["units"]
+    total_elapsed_ms = sum(unit["observed_elapsed_ms"] for unit in units)
+    total_input_audio_ms = sum(unit["input_audio_duration_ms"] for unit in units)
+    total_output_audio_bytes = sum(unit["output_audio_bytes"] for unit in units)
+    usage: dict[str, int | bool] = {
+        "metadata_complete": all(unit["metadata_complete"] for unit in units),
+        "provider_requests": sum(unit["provider_request_count"] for unit in units),
+        "wall_clock_seconds": (total_elapsed_ms + 999) // 1_000,
+        "input_audio_seconds": (total_input_audio_ms + 999) // 1_000,
+        "output_audio_seconds": (total_output_audio_bytes + 47_999) // 48_000,
+        "input_audio_tokens": sum(unit["input_audio_tokens"] for unit in units),
+        "output_audio_tokens": sum(unit["output_audio_tokens"] for unit in units),
+        "input_text_tokens": sum(unit["input_text_tokens"] for unit in units),
+        "output_text_tokens": sum(unit["output_text_tokens"] for unit in units),
+    }
+    failures = tuple(
+        unit["error_code"]
+        for unit in units
+        if not unit["complete"] and unit["error_code"] is not None
+    )
+    return usage, failures
+
+
+def usage_evidence_sha256(
+    usage: Mapping[str, Any],
+    *,
+    provider_requests: int,
+    cost_microusd: int,
+) -> str:
+    """Digest the token, request, and cost facts signed into custody receipts."""
+    token_fields = (
+        "input_audio_tokens",
+        "output_audio_tokens",
+        "input_text_tokens",
+        "output_text_tokens",
+    )
+    values = {
+        field: _bounded_int(
+            usage.get(field),
+            label=f"usage {field}",
+            maximum=MAX_ACCOUNTING_COUNTER,
+        )
+        for field in token_fields
+    }
+    values["provider_requests"] = _bounded_int(
+        provider_requests,
+        label="usage provider requests",
+        maximum=1_000,
+    )
+    values["cost_microusd"] = _bounded_int(
+        cost_microusd,
+        label="usage cost",
+        maximum=100_000_000,
+    )
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_id": "gate_0b_usage_evidence_v1",
+                **values,
+            }
+        )
+    ).hexdigest()
+
+
 def derive_primitive_records_from_capsule(
     capsule: Mapping[str, Any],
     *,
@@ -995,6 +1099,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             "schema_id",
             "campaign_id",
             "policy_ms",
+            "accounting",
             "activities",
             "no_speech_windows",
         },
@@ -1010,6 +1115,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise MeasurementError("audit capsule activities are invalid")
     if not isinstance(windows, list) or len(windows) > 64:
         raise MeasurementError("audit capsule no-speech windows are invalid")
+    accounting = _validate_capsule_accounting(data["accounting"])
     for raw_activity in activities:
         activity = _strict_mapping(
             raw_activity,
@@ -1083,7 +1189,105 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         _validate_split(window["split"])
         _safe_id(window["condition"], label="condition")
         _validate_wire_facts(window["wire_facts"])
+    expected_units = {
+        *(('session', activity["session_ordinal"]) for activity in activities),
+        *(('no_speech_window', window["window_ordinal"]) for window in windows),
+    }
+    actual_units = {(unit["kind"], unit["ordinal"]) for unit in accounting["units"]}
+    evidence_splits = {
+        *(activity["split"] for activity in activities),
+        *(window["split"] for window in windows),
+    }
+    if (
+        not expected_units
+        or actual_units != expected_units
+        or evidence_splits != {accounting["split"]}
+    ):
+        raise MeasurementError("audit capsule accounting identity is invalid")
     return json.loads(canonical_json_bytes(data))
+
+
+def _validate_capsule_accounting(raw: object) -> dict[str, Any]:
+    accounting = _strict_mapping(
+        raw,
+        {"schema_id", "split", "units"},
+        label="audit capsule accounting",
+    )
+    if accounting["schema_id"] != CAPSULE_ACCOUNTING_SCHEMA_ID:
+        raise MeasurementError("audit capsule accounting schema is invalid")
+    split = _validate_split(accounting["split"])
+    raw_units = accounting["units"]
+    if not isinstance(raw_units, list) or not 1 <= len(raw_units) <= 128:
+        raise MeasurementError("audit capsule accounting units are invalid")
+    units = []
+    identities: set[tuple[str, int]] = set()
+    counter_fields = {
+        "provider_request_count",
+        "input_audio_tokens",
+        "output_audio_tokens",
+        "input_text_tokens",
+        "output_text_tokens",
+    }
+    for raw_unit in raw_units:
+        unit = _strict_mapping(
+            raw_unit,
+            {
+                "kind",
+                "ordinal",
+                "metadata_complete",
+                "complete",
+                "error_code",
+                "provider_request_count",
+                "observed_elapsed_ms",
+                "input_audio_duration_ms",
+                "output_audio_bytes",
+                "input_audio_tokens",
+                "output_audio_tokens",
+                "input_text_tokens",
+                "output_text_tokens",
+            },
+            label="audit capsule accounting unit",
+        )
+        if unit["kind"] not in {"session", "no_speech_window"}:
+            raise MeasurementError("audit capsule accounting unit kind is invalid")
+        ordinal = _bounded_int(unit["ordinal"], label="accounting ordinal", maximum=63)
+        identity = (unit["kind"], ordinal)
+        if identity in identities:
+            raise MeasurementError("audit capsule accounting unit identity is duplicated")
+        identities.add(identity)
+        if not isinstance(unit["metadata_complete"], bool) or not isinstance(
+            unit["complete"], bool
+        ):
+            raise MeasurementError("audit capsule accounting completion is invalid")
+        error_code = unit["error_code"]
+        if unit["complete"]:
+            if not unit["metadata_complete"] or error_code is not None:
+                raise MeasurementError("audit capsule accounting success is inconsistent")
+        elif error_code not in CAPSULE_FAILURE_CODES:
+            raise MeasurementError("audit capsule accounting failure code is invalid")
+        for field in counter_fields:
+            _bounded_int(
+                unit[field],
+                label=f"accounting {field}",
+                maximum=MAX_ACCOUNTING_COUNTER,
+            )
+        _bounded_int(
+            unit["observed_elapsed_ms"],
+            label="accounting observed elapsed time",
+            maximum=MAX_ACCOUNTING_ELAPSED_MS,
+        )
+        _bounded_int(
+            unit["input_audio_duration_ms"],
+            label="accounting input audio duration",
+            maximum=MAX_ACCOUNTING_ELAPSED_MS,
+        )
+        _bounded_int(
+            unit["output_audio_bytes"],
+            label="accounting output audio bytes",
+            maximum=MAX_ACCOUNTING_OUTPUT_BYTES,
+        )
+        units.append(unit)
+    return {"schema_id": CAPSULE_ACCOUNTING_SCHEMA_ID, "split": split, "units": units}
 
 
 def _capsule_reference(activity: Mapping[str, Any]) -> ActivityReference:

@@ -25,6 +25,7 @@ from app.services.caller_turn_measurement import (
     MeasurementError,
     WireObservation,
     build_signed_record_root,
+    derive_audit_capsule_accounting,
     derive_primitive_records_from_capsule,
     measure_activity,
     open_audit_capsule,
@@ -90,9 +91,30 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         serialization.PublicFormat.Raw,
     )
     payload = {
-        "schema_id": "gate_0b_audit_capsule_v1",
+        "schema_id": "gate_0b_audit_capsule_v2",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
+        "accounting": {
+            "schema_id": "gate_0b_capsule_accounting_v1",
+            "split": "development",
+            "units": [
+                {
+                    "kind": "session",
+                    "ordinal": 1,
+                    "metadata_complete": True,
+                    "complete": True,
+                    "error_code": None,
+                    "provider_request_count": 1,
+                    "observed_elapsed_ms": 300,
+                    "input_audio_duration_ms": 20,
+                    "output_audio_bytes": 48_000,
+                    "input_audio_tokens": 8,
+                    "output_audio_tokens": 4,
+                    "input_text_tokens": 2,
+                    "output_text_tokens": 1,
+                }
+            ],
+        },
         "activities": [
             {
                 "activity_ordinal": 3,
@@ -178,9 +200,45 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
 
 def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v1",
+        "schema_id": "gate_0b_audit_capsule_v2",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
+        "accounting": {
+            "schema_id": "gate_0b_capsule_accounting_v1",
+            "split": "development",
+            "units": [
+                {
+                    "kind": "session",
+                    "ordinal": 1,
+                    "metadata_complete": True,
+                    "complete": True,
+                    "error_code": None,
+                    "provider_request_count": 1,
+                    "observed_elapsed_ms": 300,
+                    "input_audio_duration_ms": 20,
+                    "output_audio_bytes": 48_000,
+                    "input_audio_tokens": 8,
+                    "output_audio_tokens": 4,
+                    "input_text_tokens": 2,
+                    "output_text_tokens": 1,
+                },
+                {
+                    "kind": "no_speech_window",
+                    "ordinal": 0,
+                    "metadata_complete": True,
+                    "complete": True,
+                    "error_code": None,
+                    "provider_request_count": 1,
+                    "observed_elapsed_ms": 100,
+                    "input_audio_duration_ms": 20,
+                    "output_audio_bytes": 0,
+                    "input_audio_tokens": 6,
+                    "output_audio_tokens": 0,
+                    "input_text_tokens": 1,
+                    "output_text_tokens": 0,
+                },
+            ],
+        },
         "activities": [
             {
                 "activity_ordinal": 3,
@@ -261,6 +319,54 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
     assert all(record.commitment for record in activity_records)
     assert len(no_speech_records) == 1
     assert no_speech_records[0].commitment
+
+    usage, failures = derive_audit_capsule_accounting(capsule)
+    assert usage == {
+        "metadata_complete": True,
+        "provider_requests": 2,
+        "wall_clock_seconds": 1,
+        "input_audio_seconds": 1,
+        "output_audio_seconds": 1,
+        "input_audio_tokens": 14,
+        "output_audio_tokens": 4,
+        "input_text_tokens": 3,
+        "output_text_tokens": 1,
+    }
+    assert failures == ()
+
+
+def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:
+    capsule = {
+        "schema_id": "gate_0b_audit_capsule_v2",
+        "campaign_id": "campaign_1",
+        "policy_ms": 250,
+        "accounting": {
+            "schema_id": "gate_0b_capsule_accounting_v1",
+            "split": "development",
+            "units": [
+                {
+                    "kind": "session",
+                    "ordinal": 9,
+                    "metadata_complete": False,
+                    "complete": False,
+                    "error_code": "private provider exception text",
+                    "provider_request_count": 1,
+                    "observed_elapsed_ms": 1,
+                    "input_audio_duration_ms": 1,
+                    "output_audio_bytes": 0,
+                    "input_audio_tokens": 0,
+                    "output_audio_tokens": 0,
+                    "input_text_tokens": 0,
+                    "output_text_tokens": 0,
+                }
+            ],
+        },
+        "activities": [],
+        "no_speech_windows": [],
+    }
+
+    with pytest.raises(MeasurementError, match="accounting"):
+        derive_audit_capsule_accounting(capsule)
 
 
 def test_measurement_recomputes_alignment_lifecycle_and_keyed_commitment() -> None:

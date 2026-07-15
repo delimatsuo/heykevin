@@ -663,7 +663,6 @@ def _replay_terminal_outcome(
     )
     if requests < state.development_requests or cost < state.development_cost:
         raise CustodyLedgerError("terminal outcome understates development usage")
-    _digest(body["usage_evidence_sha256"], label="usage evidence")
     final_usage = _digest(body["usage_evidence_sha256"], label="usage evidence")
     outcome = body["outcome"]
     outage = body["outage_enum"]

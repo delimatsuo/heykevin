@@ -23,8 +23,10 @@ from app.services.caller_turn_alignment import ActivityReference
 from app.services.caller_turn_measurement import (
     MeasurementError,
     WireObservation,
+    derive_audit_capsule_accounting,
     require_reducer_agreement,
     seal_audit_capsule,
+    usage_evidence_sha256,
 )
 from app.services.caller_turn_qualification import (
     PricingSchedule,
@@ -1647,6 +1649,30 @@ async def execute_authorized_attempt(
                     session_results=session_results,
                     no_speech_results=no_speech_results,
                 )
+                capsule_usage, capsule_failures = derive_audit_capsule_accounting(capsule)
+                expected_capsule_usage = {
+                    **usage.to_dict(),
+                    "provider_requests": budget.consumed,
+                }
+                if (
+                    capsule_failures
+                    or not capsule_usage["metadata_complete"]
+                    or any(
+                        capsule_usage[field] != value
+                        for field, value in expected_capsule_usage.items()
+                    )
+                    or _cost_microusd(
+                        pricing,
+                        UsageCounts(
+                            input_audio_tokens=int(capsule_usage["input_audio_tokens"]),
+                            output_audio_tokens=int(capsule_usage["output_audio_tokens"]),
+                            input_text_tokens=int(capsule_usage["input_text_tokens"]),
+                            output_text_tokens=int(capsule_usage["output_text_tokens"]),
+                        ),
+                    )
+                    != cost_microusd
+                ):
+                    raise RunnerError("audit capsule accounting mismatch")
                 sealed = seal_audit_capsule(
                     capsule,
                     custodian_public_key=custodian_public_key,
@@ -1662,8 +1688,8 @@ async def execute_authorized_attempt(
                     error_code = "capsule_handoff_failed"
     finally:
         complete = error_code is None and capsule_handed_off
-        usage_evidence_sha256 = _usage_evidence_sha256(
-            usage,
+        usage_evidence_digest = usage_evidence_sha256(
+            usage.to_dict(),
             provider_requests=budget.consumed,
             cost_microusd=cost_microusd,
         )
@@ -1672,7 +1698,7 @@ async def execute_authorized_attempt(
             ledger.record_development_checkpoint(
                 claim=claim,
                 development_capsule_sha256=capsule_sha256,
-                usage_evidence_sha256=usage_evidence_sha256,
+                usage_evidence_sha256=usage_evidence_digest,
                 actual_provider_requests=budget.consumed,
                 actual_cost_microusd=cost_microusd,
                 now=now,
@@ -1683,7 +1709,7 @@ async def execute_authorized_attempt(
                 outcome="failed",
                 outage_enum=None,
                 holdout_capsule_sha256=None,
-                usage_evidence_sha256=usage_evidence_sha256,
+                usage_evidence_sha256=usage_evidence_digest,
                 actual_provider_requests=budget.consumed,
                 actual_cost_microusd=cost_microusd,
                 now=now,
@@ -2103,6 +2129,7 @@ def _build_audit_capsule(
     no_speech_results: Sequence[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]],
 ) -> dict[str, Any]:
     activities: list[dict[str, Any]] = []
+    accounting_units: list[dict[str, Any]] = []
     for plan, result in session_results:
         events = [
             {
@@ -2115,6 +2142,18 @@ def _build_audit_capsule(
             for event in result.audit_events
         ]
         latest_event_ms = max((event.at_ms for event in result.audit_events), default=0)
+        accounting_units.append(
+            _accounting_unit(
+                kind="session",
+                ordinal=plan.session_ordinal,
+                replay_inputs=plan.replay_inputs,
+                observed_elapsed_ms=max(
+                    latest_event_ms,
+                    _replay_observation_end_ms(plan.replay_inputs),
+                ),
+                result=result,
+            )
+        )
         for activity in plan.activities:
             wire = result.wire_observations[activity.activity_ordinal]
             activities.append(
@@ -2144,10 +2183,31 @@ def _build_audit_capsule(
                     "wire_facts": _wire_facts(activity, wire),
                 }
             )
+    accounting_units.extend(
+        _accounting_unit(
+            kind="no_speech_window",
+            ordinal=plan.window_ordinal,
+            replay_inputs=plan.replay_inputs,
+            observed_elapsed_ms=max(
+                _replay_observation_end_ms(plan.replay_inputs),
+                max((fact.at_ms for fact in result.wire_facts), default=0),
+            ),
+            result=result,
+        )
+        for plan, result in no_speech_results
+    )
+    splits = {plan.split for plan, _ in (*session_results, *no_speech_results)}
+    if len(splits) != 1:
+        raise RunnerError("audit capsule results must contain exactly one split")
     return {
-        "schema_id": "gate_0b_audit_capsule_v1",
+        "schema_id": "gate_0b_audit_capsule_v2",
         "campaign_id": campaign_id,
         "policy_ms": policy_ms,
+        "accounting": {
+            "schema_id": "gate_0b_capsule_accounting_v1",
+            "split": next(iter(splits)),
+            "units": accounting_units,
+        },
         "activities": activities,
         "no_speech_windows": [
             {
@@ -2159,6 +2219,40 @@ def _build_audit_capsule(
             for plan, result in no_speech_results
         ],
     }
+
+
+def _accounting_unit(
+    *,
+    kind: str,
+    ordinal: int,
+    replay_inputs: Sequence[Gate0BReplayInput],
+    observed_elapsed_ms: int,
+    result: SessionExecutionResult | NoSpeechExecutionResult,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "ordinal": ordinal,
+        "metadata_complete": result.complete and result.error_code is None,
+        "complete": result.complete,
+        "error_code": result.error_code,
+        "provider_request_count": result.provider_request_count,
+        "observed_elapsed_ms": observed_elapsed_ms,
+        "input_audio_duration_ms": sum(
+            value.duration_ms for value in replay_inputs if value.kind == "audio"
+        ),
+        "output_audio_bytes": result.output_audio_bytes,
+        **result.usage.to_dict(),
+    }
+
+
+def _replay_observation_end_ms(replay_inputs: Sequence[Gate0BReplayInput]) -> int:
+    return max(
+        (
+            value.at_ms + (value.duration_ms if value.kind == "audio" else 0)
+            for value in replay_inputs
+        ),
+        default=0,
+    )
 
 
 def _wire_facts(
@@ -2207,24 +2301,6 @@ def _wire_fact(
 def _cost_microusd(pricing: PricingSchedule, usage: UsageCounts) -> int:
     value = pricing.cost_usd(**usage.to_dict()) * 1_000_000
     return int(value.to_integral_value(rounding=ROUND_CEILING))
-
-
-def _usage_evidence_sha256(
-    usage: UsageCounts,
-    *,
-    provider_requests: int,
-    cost_microusd: int,
-) -> str:
-    return sha256(
-        canonical_json_bytes(
-            {
-                "schema_id": "gate_0b_usage_evidence_v1",
-                "provider_requests": provider_requests,
-                "cost_microusd": cost_microusd,
-                **usage.to_dict(),
-            }
-        )
-    ).hexdigest()
 
 
 def _add_usage(left: UsageCounts, right: UsageCounts) -> UsageCounts:

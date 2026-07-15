@@ -34,10 +34,12 @@ from app.services.caller_turn_measurement import (  # noqa: E402
     NoSpeechPrimitiveRecord,
     build_signed_record_root,
     compute_record_merkle_root,
+    derive_audit_capsule_accounting,
     derive_primitive_records_from_capsule,
     open_audit_capsule,
     verify_record_commitment,
     verify_signed_record_root,
+    usage_evidence_sha256,
 )
 from app.services.caller_turn_qualification import (  # noqa: E402
     assert_payload_safe,
@@ -409,8 +411,6 @@ def _evaluate_custody_bundle(
         "preregistration",
         "campaign_envelope",
         "attempt_envelope",
-        "usage",
-        "run_failures",
     }
     if not isinstance(bundle, Mapping) or set(bundle) != fields:
         raise EvaluationError("custody bundle fields are invalid")
@@ -565,6 +565,20 @@ def _evaluate_custody_bundle(
         policies_ms=EXPECTED_POLICIES,
         commitment_key=commitment_key,
     )
+    development_usage, development_failures = derive_audit_capsule_accounting(
+        development_capsule
+    )
+    development_cost_microusd = _cost_microusd_from_usage(development_usage)
+    if (
+        development_failures
+        or state.development_usage_evidence_sha256
+        != usage_evidence_sha256(
+            development_usage,
+            provider_requests=int(development_usage["provider_requests"]),
+            cost_microusd=development_cost_microusd,
+        )
+    ):
+        raise EvaluationError("development capsule accounting is invalid")
     candidate_samples = {
         policy: _evaluate_sample(
             tuple(record for record in development_records if record.policy_ms == policy),
@@ -600,6 +614,24 @@ def _evaluate_custody_bundle(
         policies_ms=(selected_policy_ms,),
         commitment_key=commitment_key,
     )
+    holdout_usage, holdout_failures = derive_audit_capsule_accounting(holdout_capsule)
+    usage = _combine_usage(development_usage, holdout_usage)
+    cost_microusd = _cost_microusd_from_usage(usage)
+    usage_with_cost = {**usage, "cost_microusd": cost_microusd}
+    run_failures = (*development_failures, *holdout_failures)
+    if (
+        state.final_usage_evidence_sha256
+        != usage_evidence_sha256(
+            usage,
+            provider_requests=int(usage["provider_requests"]),
+            cost_microusd=cost_microusd,
+        )
+        or state.actual_provider_requests != usage["provider_requests"]
+        or state.actual_cost_microusd != cost_microusd
+        or usage["provider_requests"] > authorization.provider_request_reservation
+        or cost_microusd > authorization.cost_reservation_microusd
+    ):
+        raise EvaluationError("final capsule accounting and custody receipt disagree")
     activity_records = (*development_records, *holdout_records)
     no_speech_records = (*development_windows, *holdout_windows)
     signed_root = build_signed_record_root(
@@ -622,8 +654,8 @@ def _evaluate_custody_bundle(
         "activity_records": [record.to_dict() for record in activity_records],
         "no_speech_records": [record.to_dict() for record in no_speech_records],
         "signed_record_root": signed_root,
-        "usage": bundle["usage"],
-        "run_failures": bundle["run_failures"],
+        "usage": usage_with_cost,
+        "run_failures": list(run_failures),
     }
     artifact["context_commitment"] = compute_evidence_context_commitment(
         artifact,
@@ -1256,19 +1288,56 @@ def _validate_usage(raw: object) -> dict[str, Any]:
     return result
 
 
-def _usage_is_complete_and_bounded(usage: Mapping[str, Any]) -> bool:
+def _combine_usage(
+    left: Mapping[str, int | bool],
+    right: Mapping[str, int | bool],
+) -> dict[str, int | bool]:
+    fields = {
+        "metadata_complete",
+        "provider_requests",
+        "wall_clock_seconds",
+        "input_audio_seconds",
+        "output_audio_seconds",
+        "input_audio_tokens",
+        "output_audio_tokens",
+        "input_text_tokens",
+        "output_text_tokens",
+    }
+    if set(left) != fields or set(right) != fields:
+        raise EvaluationError("capsule usage fields are invalid")
+    combined: dict[str, int | bool] = {
+        "metadata_complete": left["metadata_complete"] is True
+        and right["metadata_complete"] is True
+    }
+    for field in fields - {"metadata_complete"}:
+        left_value = left[field]
+        right_value = right[field]
+        if (
+            isinstance(left_value, bool)
+            or not isinstance(left_value, int)
+            or isinstance(right_value, bool)
+            or not isinstance(right_value, int)
+            or left_value < 0
+            or right_value < 0
+        ):
+            raise EvaluationError("capsule usage value is invalid")
+        combined[field] = left_value + right_value
+    return combined
+
+
+def _cost_microusd_from_usage(usage: Mapping[str, int | bool]) -> int:
     pricing = load_pricing(PRICING_PATH)
-    expected_cost_microusd = int(
-        (
-            pricing.cost_usd(
-                input_audio_tokens=usage["input_audio_tokens"],
-                output_audio_tokens=usage["output_audio_tokens"],
-                input_text_tokens=usage["input_text_tokens"],
-                output_text_tokens=usage["output_text_tokens"],
-            )
-            * 1_000_000
-        ).to_integral_value(rounding=ROUND_CEILING)
+    value = pricing.cost_usd(
+        input_audio_tokens=int(usage["input_audio_tokens"]),
+        output_audio_tokens=int(usage["output_audio_tokens"]),
+        input_text_tokens=int(usage["input_text_tokens"]),
+        output_text_tokens=int(usage["output_text_tokens"]),
     )
+    return int((value * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
+
+
+def _usage_is_complete_and_bounded(usage: Mapping[str, Any]) -> bool:
+    expected_cost_microusd = _cost_microusd_from_usage(usage)
     return (
         usage["metadata_complete"]
         and usage["provider_requests"] <= 128

@@ -19,6 +19,7 @@ from app.services.caller_turn_measurement import (
     CriticalSpanFact,
     NoSpeechPrimitiveRecord,
     build_signed_record_root,
+    usage_evidence_sha256,
 )
 from app.services.qualification_identity import canonical_json_bytes
 from scripts.evaluate_gemini_caller_turn_qualification import (
@@ -316,6 +317,31 @@ def _signed_authorization(
 
 def _custody_bundle():
     artifact, _ = _artifact()
+    development_usage = {
+        "metadata_complete": True,
+        "provider_requests": 64,
+        "wall_clock_seconds": 360,
+        "input_audio_seconds": 180,
+        "output_audio_seconds": 60,
+        "input_audio_tokens": 60_000,
+        "output_audio_tokens": 30_000,
+        "input_text_tokens": 600,
+        "output_text_tokens": 300,
+    }
+    holdout_usage = {
+        "metadata_complete": True,
+        "provider_requests": 56,
+        "wall_clock_seconds": 240,
+        "input_audio_seconds": 120,
+        "output_audio_seconds": 40,
+        "input_audio_tokens": 40_000,
+        "output_audio_tokens": 20_000,
+        "input_text_tokens": 400,
+        "output_text_tokens": 200,
+    }
+    development_cost = evaluator_module._cost_microusd_from_usage(development_usage)
+    final_usage = evaluator_module._combine_usage(development_usage, holdout_usage)
+    final_cost = evaluator_module._cost_microusd_from_usage(final_usage)
     activity_records = tuple(
         ActivityPrimitiveRecord.from_dict(value) for value in artifact["activity_records"]
     )
@@ -509,9 +535,13 @@ def _custody_bundle():
         attempt_id="attempt_1",
         body={
             "development_capsule_sha256": development_digest,
-            "usage_evidence_sha256": "2" * 64,
+            "usage_evidence_sha256": usage_evidence_sha256(
+                development_usage,
+                provider_requests=64,
+                cost_microusd=development_cost,
+            ),
             "actual_provider_requests": 64,
-            "actual_cost_microusd": artifact["usage"]["cost_microusd"],
+            "actual_cost_microusd": development_cost,
         },
         at="2026-07-15T15:10:00Z",
     )
@@ -566,9 +596,13 @@ def _custody_bundle():
             "outcome": "completed",
             "outage_enum": None,
             "holdout_capsule_sha256": holdout_digest,
-            "usage_evidence_sha256": "6" * 64,
+            "usage_evidence_sha256": usage_evidence_sha256(
+                final_usage,
+                provider_requests=120,
+                cost_microusd=final_cost,
+            ),
             "actual_provider_requests": 120,
-            "actual_cost_microusd": artifact["usage"]["cost_microusd"],
+            "actual_cost_microusd": final_cost,
         },
         at="2026-07-15T15:20:00Z",
     )
@@ -581,12 +615,14 @@ def _custody_bundle():
         "preregistration": preregistration,
         "campaign_envelope": campaign_envelope,
         "attempt_envelope": attempt_envelope,
-        "usage": artifact["usage"],
-        "run_failures": [],
     }
     derived = {
         "development": (development_records, development_windows),
         "holdout": (holdout_records, holdout_windows),
+        "accounting": {
+            "development": (development_usage, ()),
+            "holdout": (holdout_usage, ()),
+        },
     }
     return bundle, custodian_key, root_key, approval_public_key, ledger_public_key, derived
 
@@ -615,6 +651,11 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
     monkeypatch.setattr(evaluator_module, "derive_primitive_records_from_capsule", derive)
     monkeypatch.setattr(
         evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
         "_load_pinned_approval_public_key",
         lambda: approval_public_key,
     )
@@ -634,6 +675,59 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
     assert "activity_records" not in bundle
     assert "phase_history" not in bundle
     assert "attempt_completed" not in bundle
+    assert "usage" not in bundle
+    assert "run_failures" not in bundle
+
+
+def test_custody_bundle_rejects_capsule_accounting_that_disagrees_with_signed_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
+    opened: list[str] = []
+
+    def open_capsule(envelope, **_kwargs):
+        opened.append(envelope["kind"])
+        return {"campaign_id": "campaign_1", "kind": envelope["kind"]}
+
+    def changed_accounting(capsule):
+        usage, failures = derived["accounting"][capsule["kind"]]
+        if capsule["kind"] == "holdout":
+            usage = {**usage, "provider_requests": usage["provider_requests"] + 1}
+        return usage, failures
+
+    monkeypatch.setattr(evaluator_module, "open_audit_capsule", open_capsule)
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(evaluator_module, "derive_audit_capsule_accounting", changed_accounting)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == ["development", "holdout"]
 
 
 def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption(
@@ -689,6 +783,11 @@ def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption
         evaluator_module,
         "derive_primitive_records_from_capsule",
         lambda _capsule, **_kwargs: (failing_development, derived["development"][1]),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
     )
 
     blocked = evaluate_custody_bundle(
@@ -1031,6 +1130,11 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         evaluator_module,
         "derive_primitive_records_from_capsule",
         lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
     )
     monkeypatch.setattr(
         evaluator_module,

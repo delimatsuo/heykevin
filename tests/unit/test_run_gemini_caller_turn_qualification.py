@@ -16,7 +16,11 @@ import pytest
 import scripts.run_gemini_caller_turn_qualification as runner_module
 
 from app.services.caller_turn_alignment import ActivityReference
-from app.services.caller_turn_measurement import open_audit_capsule
+from app.services.caller_turn_measurement import (
+    derive_audit_capsule_accounting,
+    open_audit_capsule,
+    usage_evidence_sha256,
+)
 from app.services.caller_turn_qualification import load_pricing
 from app.services.caller_turns import CallerTurnEventKind
 from app.services.qualification_identity import (
@@ -1349,12 +1353,23 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     )
     assert opened["activities"][0]["reference_text"] == "purpose recorded phrase 0"
     assert opened["no_speech_windows"][0]["wire_facts"][0]["kind"] == "false_activity"
+    usage, failures = derive_audit_capsule_accounting(opened)
+    assert usage["provider_requests"] == 64
+    assert usage["input_audio_seconds"] == 4
+    assert usage["output_audio_seconds"] == 1
+    assert len(opened["accounting"]["units"]) == 64
+    assert failures == ()
     assert CANARY_SECRET not in json.dumps(envelope)
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert not hasattr(result, "audit_events")
     assert [name for name, _ in ledger.calls] == ["claim", "development_checkpoint"]
     checkpoint = ledger.calls[-1][1]
     assert checkpoint["actual_cost_microusd"] == 4_992
+    assert checkpoint["usage_evidence_sha256"] == usage_evidence_sha256(
+        usage,
+        provider_requests=64,
+        cost_microusd=4_992,
+    )
     assert (
         checkpoint["development_capsule_sha256"]
         == sha256(capsule_path.read_bytes().rstrip(b"\n")).hexdigest()

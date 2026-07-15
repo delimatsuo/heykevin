@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timedelta, timezone
-import json
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+import app.services.qualification_identity as identity_module
 
 from app.services.qualification_identity import (
-    AttemptLedger,
     IdentityError,
     canonical_json_bytes,
     capture_environment_identity,
     capture_source_identity,
-    derive_ledger_campaign_state,
     ledger_location_sha256,
     verify_attempt_authorization,
     verify_campaign_approval,
@@ -258,272 +256,14 @@ def test_signature_expiry_unknown_fields_and_identity_mismatch_fail_closed() -> 
         )
 
 
-def test_ledger_consumes_attempt_before_work_and_blocks_concurrency(tmp_path: Path) -> None:
-    private, public = _key_pair()
-    ledger_path = tmp_path / "ledger.json"
-    campaign = verify_campaign_approval(
-        _signed(
-            private,
-            _campaign_payload(ledger_location_sha256=ledger_location_sha256(ledger_path)),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        expected_preregistration_sha256=PREREGISTRATION_SHA,
-        expected_source_sha=SOURCE_SHA,
-        now=NOW,
-    )
-    attempt = verify_attempt_authorization(
-        _signed(private, _attempt_payload()),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        campaign=campaign,
-        now=NOW,
-    )
-    ledger = AttemptLedger(ledger_path)
+def test_ledger_location_digest_binds_one_canonical_external_custody_path(
+    tmp_path: Path,
+) -> None:
+    approved = tmp_path / "custody" / "ledger.json"
+    same = approved.parent / "." / approved.name
+    different = tmp_path / "custody" / "other-ledger.json"
 
-    claim = ledger.claim_attempt(
-        campaign=campaign,
-        authorization=attempt,
-        now=NOW,
-    )
-
-    assert claim.attempt_id == "attempt_001"
-    assert claim.provider_requests_reserved == 128
-    with pytest.raises(IdentityError, match="active attempt|already consumed"):
-        ledger.claim_attempt(
-            campaign=campaign,
-            authorization=attempt,
-            now=NOW + timedelta(seconds=1),
-        )
-
-
-def test_replacement_requires_prelock_outage_and_new_signed_attempt(tmp_path: Path) -> None:
-    private, public = _key_pair()
-    ledger_path = tmp_path / "ledger.json"
-    campaign = verify_campaign_approval(
-        _signed(
-            private,
-            _campaign_payload(ledger_location_sha256=ledger_location_sha256(ledger_path)),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        expected_preregistration_sha256=PREREGISTRATION_SHA,
-        expected_source_sha=SOURCE_SHA,
-        now=NOW,
-    )
-    first = verify_attempt_authorization(
-        _signed(private, _attempt_payload()),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        campaign=campaign,
-        now=NOW,
-    )
-    second = verify_attempt_authorization(
-        _signed(
-            private,
-            _attempt_payload(
-                2,
-                prior_attempt_id="attempt_001",
-                outage_enum="provider_dns_outage",
-            ),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        campaign=campaign,
-        now=NOW,
-    )
-    ledger = AttemptLedger(ledger_path)
-    first_claim = ledger.claim_attempt(
-        campaign=campaign,
-        authorization=first,
-        now=NOW,
-    )
-    ledger.record_outcome(
-        first_claim,
-        outcome="infrastructure_outage",
-        outage_enum="provider_dns_outage",
-        actual_provider_requests=0,
-        actual_cost_microusd=0,
-        now=NOW + timedelta(seconds=1),
-    )
-
-    replacement = ledger.claim_attempt(
-        campaign=campaign,
-        authorization=second,
-        now=NOW + timedelta(seconds=2),
-    )
-    assert replacement.attempt_id == "attempt_002"
-
-    other_path = tmp_path / "other-ledger.json"
-    other_campaign = verify_campaign_approval(
-        _signed(
-            private,
-            _campaign_payload(ledger_location_sha256=ledger_location_sha256(other_path)),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        expected_preregistration_sha256=PREREGISTRATION_SHA,
-        expected_source_sha=SOURCE_SHA,
-        now=NOW,
-    )
-    other_ledger = AttemptLedger(other_path)
-    other_claim = other_ledger.claim_attempt(
-        campaign=other_campaign,
-        authorization=first,
-        now=NOW,
-    )
-    other_ledger.record_outcome(
-        other_claim,
-        outcome="completed",
-        outage_enum=None,
-        actual_provider_requests=0,
-        actual_cost_microusd=0,
-        capsule_sha256="d" * 64,
-        now=NOW + timedelta(seconds=1),
-    )
-    other_ledger.record_policy_lock(
-        campaign_id=other_campaign.campaign_id,
-        selected_policy_ms=250,
-        policy_lock_sha256="e" * 64,
-        development_capsule_sha256="d" * 64,
-        now=NOW + timedelta(seconds=2),
-    )
-    with pytest.raises(IdentityError, match="before policy lock|holdout"):
-        other_ledger.claim_attempt(
-            campaign=other_campaign,
-            authorization=second,
-            now=NOW + timedelta(seconds=3),
-        )
-
-
-def test_ledger_replays_policy_lock_holdout_release_and_completion_state(tmp_path: Path) -> None:
-    private, public = _key_pair()
-    ledger_path = tmp_path / "ledger.json"
-    campaign = verify_campaign_approval(
-        _signed(
-            private,
-            _campaign_payload(ledger_location_sha256=ledger_location_sha256(ledger_path)),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        expected_preregistration_sha256=PREREGISTRATION_SHA,
-        expected_source_sha=SOURCE_SHA,
-        now=NOW,
-    )
-    attempt = verify_attempt_authorization(
-        _signed(private, _attempt_payload()),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        campaign=campaign,
-        now=NOW,
-    )
-    ledger = AttemptLedger(ledger_path)
-    claim = ledger.claim_attempt(campaign=campaign, authorization=attempt, now=NOW)
-    ledger.record_outcome(
-        claim,
-        outcome="completed",
-        outage_enum=None,
-        actual_provider_requests=64,
-        actual_cost_microusd=1_000,
-        capsule_sha256="d" * 64,
-        now=NOW + timedelta(seconds=1),
-    )
-    ledger.record_policy_lock(
-        campaign_id=campaign.campaign_id,
-        selected_policy_ms=250,
-        policy_lock_sha256="e" * 64,
-        development_capsule_sha256="d" * 64,
-        now=NOW + timedelta(seconds=2),
-    )
-    locked = derive_ledger_campaign_state(ledger.snapshot())
-    assert locked.phase.value == "policy_selection_locked"
-    assert locked.holdout_materialized is False
-    assert locked.selected_policy_ms == 250
-
-    ledger.record_holdout_materialized(
-        campaign_id=campaign.campaign_id,
-        policy_lock_sha256="e" * 64,
-        now=NOW + timedelta(seconds=3),
-    )
-    ledger.record_completed(
-        campaign_id=campaign.campaign_id,
-        holdout_capsule_sha256="f" * 64,
-        now=NOW + timedelta(seconds=4),
-    )
-
-    completed = derive_ledger_campaign_state(ledger.snapshot())
-    assert [phase.value for phase in completed.phase_history] == [
-        "preregistered",
-        "development_collection",
-        "policy_selection_locked",
-        "holdout_collection",
-        "completed",
-    ]
-    assert completed.phase.value == "completed"
-    assert completed.holdout_materialized is True
-    assert completed.policy_lock_sha256 == "e" * 64
-
-
-def test_ledger_hash_chain_detects_tampering(tmp_path: Path) -> None:
-    private, public = _key_pair()
-    path = tmp_path / "ledger.json"
-    campaign = verify_campaign_approval(
-        _signed(
-            private,
-            _campaign_payload(ledger_location_sha256=ledger_location_sha256(path)),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        expected_preregistration_sha256=PREREGISTRATION_SHA,
-        expected_source_sha=SOURCE_SHA,
-        now=NOW,
-    )
-    attempt = verify_attempt_authorization(
-        _signed(private, _attempt_payload()),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        campaign=campaign,
-        now=NOW,
-    )
-    ledger = AttemptLedger(path)
-    ledger.claim_attempt(
-        campaign=campaign,
-        authorization=attempt,
-        now=NOW,
-    )
-    raw = json.loads(path.read_text())
-    raw["records"][1]["provider_requests_reserved"] = 1
-    path.write_text(json.dumps(raw))
-
-    with pytest.raises(IdentityError, match="ledger hash chain"):
-        ledger.snapshot()
-
-
-def test_campaign_approval_binds_exact_ledger_location(tmp_path: Path) -> None:
-    private, public = _key_pair()
-    approved_path = tmp_path / "approved.json"
-    campaign = verify_campaign_approval(
-        _signed(
-            private,
-            _campaign_payload(ledger_location_sha256=ledger_location_sha256(approved_path)),
-        ),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        expected_preregistration_sha256=PREREGISTRATION_SHA,
-        expected_source_sha=SOURCE_SHA,
-        now=NOW,
-    )
-    attempt = verify_attempt_authorization(
-        _signed(private, _attempt_payload()),
-        public_key=public,
-        expected_key_id=KEY_ID,
-        campaign=campaign,
-        now=NOW,
-    )
-
-    with pytest.raises(IdentityError, match="ledger location mismatch"):
-        AttemptLedger(tmp_path / "different.json").claim_attempt(
-            campaign=campaign,
-            authorization=attempt,
-            now=NOW,
-        )
+    assert ledger_location_sha256(approved) == ledger_location_sha256(same)
+    assert ledger_location_sha256(approved) != ledger_location_sha256(different)
+    assert not hasattr(identity_module, "AttemptLedger")
+    assert not hasattr(identity_module, "validate_ledger_snapshot")

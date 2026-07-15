@@ -7,9 +7,12 @@ mechanism. It does not authorize a Gemini request, credential creation, corpus
 collection, holdout access, staging, production, deployment, release, model
 migration, or live-pipeline wiring.
 
-The checked-in runner has no network connector and no credential default. Its CLI
-can emit a non-executable template or a canonical preregistration assembled from
-reviewed external identity values. The `--execute` path is intentionally blocked.
+The checked-in runner has only an injected connector protocol and no concrete
+network connector, credential loader, custody service, custody storage backend, or
+credential default. Its CLI can emit a non-executable template or a canonical
+preregistration assembled from reviewed external identity values. The `--execute`
+path is intentionally blocked. The checked-in approval root contains exactly
+`UNPROVISIONED`, so campaign approval verification cannot succeed.
 
 ## Fixed Boundary
 
@@ -40,12 +43,29 @@ Run from a clean worktree at the reviewed implementation commit:
 ```bash
 uv lock --check
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -m pytest tests/unit/test_run_gemini_caller_turn_qualification.py -q
+  python -m pytest \
+  tests/unit/test_qualification_identity.py \
+  tests/unit/test_qualification_ledger.py \
+  tests/unit/test_caller_turn_measurement.py \
+  tests/unit/test_run_gemini_caller_turn_qualification.py \
+  tests/unit/test_evaluate_gemini_caller_turn_qualification.py -q
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  ruff check scripts/run_gemini_caller_turn_qualification.py \
-  tests/unit/test_run_gemini_caller_turn_qualification.py
+  ruff check app/services/qualification_identity.py \
+  app/services/qualification_ledger.py \
+  app/services/caller_turn_measurement.py \
+  scripts/run_gemini_caller_turn_qualification.py \
+  scripts/evaluate_gemini_caller_turn_qualification.py \
+  tests/unit/test_qualification_identity.py \
+  tests/unit/test_qualification_ledger.py \
+  tests/unit/test_caller_turn_measurement.py \
+  tests/unit/test_run_gemini_caller_turn_qualification.py \
+  tests/unit/test_evaluate_gemini_caller_turn_qualification.py
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  bandit -q -lll scripts/run_gemini_caller_turn_qualification.py
+  bandit -q -lll app/services/qualification_identity.py \
+  app/services/qualification_ledger.py \
+  app/services/caller_turn_measurement.py \
+  scripts/run_gemini_caller_turn_qualification.py \
+  scripts/evaluate_gemini_caller_turn_qualification.py
 ```
 
 These commands perform no DNS lookup, socket connection, provider request, secret
@@ -90,16 +110,25 @@ project
 credential_reference
 approval_key_id
 approval_public_key_sha256
+custodian_key_id
+custodian_public_key_sha256
+record_root_key_id
+record_root_public_key_sha256
+ledger_instance_id
+ledger_custodian_key_id
+ledger_custodian_public_key_sha256
 source_sha
 environment_identity_sha256
 manifest_sha256
 corpus_sha256
+development_schedule_sha256
 setup_sha256
 pricing_sha256
 runner_sha256
 evaluator_sha256
 ledger_location_sha256
 audit_capsule_location_sha256
+holdout_capsule_location_sha256
 evidence_location_sha256
 consent_attestation_sha256
 retention_attestation_sha256
@@ -155,9 +184,20 @@ decisions.
 
 ## Attempt And Evidence Handling
 
-An approved attempt must atomically consume its one-use authorization in the
-external hash-chained ledger before source revalidation, credential lookup, provider
-DNS, or connector construction. Each provider request consumes reserved allowance
+The executor depends only on `LedgerCustodyClient`, an IPC protocol owned by a
+separate durable custodian. There is no in-process or file-backed ledger authority
+in the application. The custodian identity binds a random ledger instance ID, an
+Ed25519 key ID and public-key digest, and an external ledger-location digest into
+preregistration and campaign approval. Every exported receipt is signature-checked,
+strictly sequenced, hash-chained, and replayed from genesis.
+
+An approved attempt must atomically consume its one-use authorization in that
+external ledger before source revalidation, credential lookup, provider DNS, or
+connector construction. One active attempt spans development checkpoint, policy
+lock, holdout release, holdout execution, and terminal outcome. The custodian must
+append a signed one-shot `holdout_execution_claim` before the first holdout provider
+request; a missing or duplicate claim fails closed. A crash after that claim cannot
+resume or replace the holdout. Each provider request consumes reserved allowance
 immediately before connector construction. There are no case, session, setup,
 provider, malformed-message, timeout, or gate retries.
 
@@ -165,6 +205,13 @@ Raw provider messages are reduced independently twice and then discarded. Output
 audio is counted and discarded. Canonical references and transcript fragments may
 exist only inside the allowlisted encrypted audit capsule. The storage sink must
 return a digest-matched handoff receipt before an attempt can be marked complete.
+
+Request counts, modality token totals, input duration, output bytes, observed
+elapsed time, completion state, and bounded failure enums are also stored only in
+strict capsule accounting records. The custody bundle cannot supply top-level usage
+or failure summaries. The evaluator derives both splits' accounting from opened
+capsules, recomputes cost, and checks the development and combined usage digests,
+actual totals, and signed reservation before producing a report.
 
 Primitive records and published reports contain no text, audio, prompt, tool
 arguments, credential, path, subject identifier, caller identifier, provider ID, or
@@ -200,7 +247,8 @@ request reservation, cost reservation, or ledger record is missing or mismatched
 
 Also stop if the model or official API behavior changes, the transport can expose a
 credential, either reducer disagrees, a payload escapes the encrypted capsule, a
-holdout asset is touched before policy lock, or a live-pipeline import/diff appears.
+holdout asset is touched before policy lock, the external custodian cannot provide
+an atomic signed append/anti-replay registry, or a live-pipeline import/diff appears.
 
 ## References
 

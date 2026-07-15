@@ -116,6 +116,9 @@ class CampaignApproval:
     max_attempts: int
     max_provider_requests: int
     max_cost_microusd: int
+    ledger_instance_id: str
+    ledger_custodian_key_id: str
+    ledger_custodian_public_key_sha256: str
     ledger_location_sha256: str
     real_caller_data_authorized: bool
     runtime_wiring_authorized: bool
@@ -309,6 +312,9 @@ def verify_campaign_approval(
         "max_attempts",
         "max_provider_requests",
         "max_cost_microusd",
+        "ledger_instance_id",
+        "ledger_custodian_key_id",
+        "ledger_custodian_public_key_sha256",
         "ledger_location_sha256",
         "real_caller_data_authorized",
         "runtime_wiring_authorized",
@@ -337,6 +343,15 @@ def verify_campaign_approval(
         1,
         MAX_COST_PER_CAMPAIGN_MICROUSD,
     )
+    ledger_instance_id = _safe_id(data.get("ledger_instance_id"), "ledger_instance_id")
+    ledger_custodian_key_id = _safe_id(
+        data.get("ledger_custodian_key_id"),
+        "ledger_custodian_key_id",
+    )
+    ledger_custodian_public_key_sha256 = _sha(
+        data.get("ledger_custodian_public_key_sha256"),
+        "ledger custodian public key",
+    )
     ledger_location = _sha(data.get("ledger_location_sha256"), "ledger location")
     nonauthorization_fields = (
         "real_caller_data_authorized",
@@ -359,6 +374,9 @@ def verify_campaign_approval(
         max_attempts=max_attempts,
         max_provider_requests=max_requests,
         max_cost_microusd=max_cost,
+        ledger_instance_id=ledger_instance_id,
+        ledger_custodian_key_id=ledger_custodian_key_id,
+        ledger_custodian_public_key_sha256=ledger_custodian_public_key_sha256,
         ledger_location_sha256=ledger_location,
         real_caller_data_authorized=False,
         runtime_wiring_authorized=False,

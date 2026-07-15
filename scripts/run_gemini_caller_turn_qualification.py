@@ -107,6 +107,9 @@ PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
         "custodian_public_key_sha256",
         "record_root_key_id",
         "record_root_public_key_sha256",
+        "ledger_instance_id",
+        "ledger_custodian_key_id",
+        "ledger_custodian_public_key_sha256",
         "source_sha",
         "environment_identity_sha256",
         "manifest_sha256",
@@ -2756,6 +2759,9 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "custodian_public_key_sha256": None,
             "record_root_key_id": None,
             "record_root_public_key_sha256": None,
+            "ledger_instance_id": None,
+            "ledger_custodian_key_id": None,
+            "ledger_custodian_public_key_sha256": None,
             "source_sha": None,
             "environment_identity_sha256": None,
             "manifest_sha256": None,
@@ -2830,6 +2836,8 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         "approval_key_id",
         "custodian_key_id",
         "record_root_key_id",
+        "ledger_instance_id",
+        "ledger_custodian_key_id",
     ):
         validated[field] = _safe_id(values[field], label=field.replace("_", " "))
     source_sha = values["source_sha"]
@@ -2842,6 +2850,8 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         "approval_key_id",
         "custodian_key_id",
         "record_root_key_id",
+        "ledger_instance_id",
+        "ledger_custodian_key_id",
         "source_sha",
     }:
         value = values[field]

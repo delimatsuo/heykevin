@@ -83,6 +83,9 @@ def _campaign_payload(**overrides: object) -> dict[str, object]:
         "max_attempts": 3,
         "max_provider_requests": 384,
         "max_cost_microusd": 30_000_000,
+        "ledger_instance_id": "ledger_instance_1",
+        "ledger_custodian_key_id": "ledger_custodian_1",
+        "ledger_custodian_public_key_sha256": "f" * 64,
         "ledger_location_sha256": "c" * 64,
         "real_caller_data_authorized": False,
         "runtime_wiring_authorized": False,
@@ -211,6 +214,9 @@ def test_signed_campaign_and_attempt_are_exact_short_lived_and_non_authorizing()
     )
 
     assert campaign.max_attempts == 3
+    assert campaign.ledger_instance_id == "ledger_instance_1"
+    assert campaign.ledger_custodian_key_id == "ledger_custodian_1"
+    assert campaign.ledger_custodian_public_key_sha256 == "f" * 64
     assert attempt.attempt_index == 1
     assert campaign.production_authorized is False
 

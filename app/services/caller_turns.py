@@ -242,12 +242,17 @@ class CallerTurnAssembler:
         if event.epoch < self._active_epoch:
             self.stale_event_count += 1
             return ()
+        if (
+            event.epoch > self._active_epoch
+            and event.kind is not CallerTurnEventKind.RECONNECT_STARTED
+        ):
+            self.stale_event_count += 1
+            return ()
+        if event.at_ms < self._last_at_ms:
+            raise ValueError("event time must be monotonic within an epoch")
 
-        emitted: list[RetrospectiveCallerTurn] = []
+        emitted = list(self._finalize_expired(event.at_ms))
         if event.epoch > self._active_epoch:
-            if event.kind is not CallerTurnEventKind.RECONNECT_STARTED:
-                self.stale_event_count += 1
-                return ()
             emitted.extend(
                 self._finalize(
                     at_ms=event.at_ms,
@@ -260,8 +265,6 @@ class CallerTurnAssembler:
             self._seen_sequence_order.clear()
             self._last_at_ms = event.at_ms
 
-        if event.at_ms < self._last_at_ms:
-            raise ValueError("event time must be monotonic within an epoch")
         self._last_at_ms = event.at_ms
 
         if event.sequence in self._seen_sequences:
@@ -326,14 +329,7 @@ class CallerTurnAssembler:
         if at_ms < self._last_at_ms:
             raise ValueError("time must be monotonic")
         self._last_at_ms = at_ms
-        if self._deadline_ms is None or at_ms < self._deadline_ms:
-            return ()
-        reason = self._close_reason or CallerTurnCloseReason.TURN_COMPLETE
-        return self._finalize(
-            at_ms=at_ms,
-            status=CallerTurnCompletionStatus.RETROSPECTIVE_COMPLETE,
-            reason=reason,
-        )
+        return self._finalize_expired(at_ms)
 
     def finish(
         self,
@@ -375,6 +371,20 @@ class CallerTurnAssembler:
             status=CallerTurnCompletionStatus.DROPPED,
             reason=CallerTurnCloseReason.RESOURCE_LIMIT,
             retain_transcript=False,
+        )
+
+    def _finalize_expired(
+        self,
+        observed_at_ms: int,
+    ) -> tuple[RetrospectiveCallerTurn, ...]:
+        if self._deadline_ms is None or observed_at_ms < self._deadline_ms:
+            return ()
+        deadline_ms = self._deadline_ms
+        reason = self._close_reason or CallerTurnCloseReason.TURN_COMPLETE
+        return self._finalize(
+            at_ms=deadline_ms,
+            status=CallerTurnCompletionStatus.RETROSPECTIVE_COMPLETE,
+            reason=reason,
         )
 
     def _finalize(

@@ -17,15 +17,18 @@ from scripts.qualify_gemini_caller_turn_assembly import (
     build_preregistration,
     canonical_json_sha256,
     canonicalize_qualification_setup,
+    current_git_head_sha,
+    immutable_pipeline_setup_projection,
     run_qualification,
     run_session_attempt,
     validate_audio_manifest,
 )
 
 
-SOURCE_SHA = "b" * 40
+SOURCE_SHA = current_git_head_sha()
 MODEL_RESOURCE = "models/gemini-3.1-flash-live-preview"
 ENDPOINT = next(iter(OFFICIAL_ENDPOINTS))
+MOCK_ENDPOINT = "wss://mock.provider.invalid"
 CURRENT_MANIFEST = Path("tests/fixtures/caller_turn_audio/manifest.json")
 RUNNER_PATH = Path("scripts/qualify_gemini_caller_turn_assembly.py")
 EVALUATOR_PATH = Path("scripts/evaluate_caller_turn_assembly.py")
@@ -93,44 +96,6 @@ def _provider_setup() -> dict[str, object]:
             "source_sha": SOURCE_SHA,
             "file_sha256": _file_sha(EVALUATOR_PATH),
         },
-        "immutable_pipeline_identity": {
-            "source_sha": SOURCE_SHA,
-            "file_sha256": _file_sha(PIPELINE_PATH),
-        },
-    }
-    setup = document["setup"]
-    document["immutable_pipeline_setup"] = {
-        "api_version": "v1beta",
-        "endpoint": ENDPOINT,
-        "model_resource": "models/gemini-2.5-flash-native-audio-latest",
-        "system_instruction_sha256": canonical_json_sha256(
-            setup["system_instruction"]
-        ),
-        "synthetic_prompt_fixture_sha256": "c" * 64,
-        "generation_config": {
-            **setup["generation_config"],
-            "temperature": 0.4,
-            "thinking_config": {"thinking_budget": 0},
-        },
-        "input_audio_transcription": setup["input_audio_transcription"],
-        "output_audio_transcription": setup["output_audio_transcription"],
-        "realtime_input_config": setup["realtime_input_config"],
-        "tool_declarations_sha256": canonical_json_sha256(setup["tools"]),
-        "tool_response_policy": "live_tool_execution",
-        "reconnect_policy": {
-            "max_attempts": 1,
-            "context_restoration": "bounded_transcript_text",
-            "retry_backoff_ms": [0],
-        },
-        "turn_assembly_policy": {"quiescence_ms": None},
-        "websocket_policy": {
-            "max_message_bytes": 10485760,
-            "open_timeout_seconds": 10,
-            "setup_timeout_seconds": 10,
-            "ping_interval_seconds": 20,
-            "ping_timeout_seconds": 20,
-            "close_timeout_seconds": 10,
-        },
     }
     return document
 
@@ -144,9 +109,6 @@ def _behavior_projection(document: dict[str, object]) -> dict[str, object]:
         "system_instruction_sha256": canonical_json_sha256(
             setup["system_instruction"]
         ),
-        "synthetic_prompt_fixture_sha256": document[
-            "synthetic_prompt_fixture_sha256"
-        ],
         "generation_config": setup["generation_config"],
         "input_audio_transcription": setup["input_audio_transcription"],
         "output_audio_transcription": setup["output_audio_transcription"],
@@ -174,6 +136,82 @@ def _write_json(path: Path, value: object) -> str:
     return _file_sha(path)
 
 
+def _write_ready_manifest(tmp_path: Path) -> Path:
+    languages = [
+        "en-US",
+        "es-US",
+        "pt-BR",
+        "fr-FR",
+        "zh-CN",
+        "hi-IN",
+        "ar-EG",
+        "sw-KE",
+    ]
+    scenarios = [
+        "standard",
+        "long_pause",
+        "self_correction",
+        "number_dictation",
+        "barge_in",
+        "tool_call",
+        "tool_cancellation",
+        "reconnect",
+        "code_switch_forward",
+        "code_switch_reverse",
+    ]
+    conditions = [
+        "clean",
+        "telephony_codec_loss",
+        "background_noise",
+        "packet_timing_variation",
+        "fast_speech",
+    ]
+    cases = []
+    for index in range(200):
+        audio = index.to_bytes(4, "big") + b"synthetic-pcm"
+        audio_path = tmp_path / f"case-{index}.pcm"
+        audio_path.write_bytes(audio)
+        cases.append(
+            {
+                "id": f"case_{index}",
+                "audio_path": audio_path.name,
+                "audio_sha256": sha256(audio).hexdigest(),
+                "script_sha256": sha256(f"synthetic-{index}".encode()).hexdigest(),
+                "script_provenance": "synthetic",
+                "speaker_id": "speaker_1",
+                "language": languages[index % len(languages)],
+                "codec": "pcm_s16le_16000",
+                "condition": conditions[index % len(conditions)],
+                "split": "holdout" if index % 5 == 0 else "development",
+                "scenario": scenarios[index % len(scenarios)],
+            }
+        )
+    manifest = tmp_path / "ready-manifest.json"
+    _write_json(
+        manifest,
+        {
+            "version": 1,
+            "collection_status": "ready",
+            "provenance_policy": {
+                "synthetic_scripts_only": True,
+                "purpose_recorded_adult_speakers_only": True,
+                "real_call_data_prohibited": True,
+                "production_audio_prohibited": True,
+            },
+            "speakers": [
+                {
+                    "id": "speaker_1",
+                    "adult_consent": True,
+                    "usage_rights": "qualification_only",
+                    "consent_record_sha256": "e" * 64,
+                }
+            ],
+            "cases": cases,
+        },
+    )
+    return manifest
+
+
 def _qualification_config(tmp_path: Path, **overrides) -> QualificationConfig:
     manifest = tmp_path / "manifest.json"
     manifest_sha = _write_json(
@@ -196,7 +234,7 @@ def _qualification_config(tmp_path: Path, **overrides) -> QualificationConfig:
     setup_sha = _write_json(setup, setup_document)
     deviations = tmp_path / "deviations.json"
     diff = _diff_leaves(
-        setup_document["immutable_pipeline_setup"],
+        immutable_pipeline_setup_projection(),
         _behavior_projection(setup_document),
     )
     deviations_sha = _write_json(
@@ -219,6 +257,7 @@ def _qualification_config(tmp_path: Path, **overrides) -> QualificationConfig:
         json.loads(setup.read_text()),
         setup_file_sha256=setup_sha,
         deviations_sha256=deviations_sha,
+        source_sha=SOURCE_SHA,
     )
     values = {
         "execute": False,
@@ -249,7 +288,7 @@ def test_preregistration_contains_exact_identity_caps_setup_and_deviations(tmp_p
     registration = build_preregistration(_qualification_config(tmp_path))
 
     assert registration["schema_version"] == 1
-    assert registration["execution_requested"] is False
+    assert "execution_requested" not in registration
     assert registration["model_resource"] == MODEL_RESOURCE
     assert registration["api_version"] == "v1beta"
     assert registration["endpoint"] == ENDPOINT
@@ -275,6 +314,9 @@ def test_preregistration_contains_exact_identity_caps_setup_and_deviations(tmp_p
     assert registration["canonical_setup"]["evaluator_identity"][
         "file_sha256"
     ] == _file_sha(EVALUATOR_PATH)
+    assert registration["canonical_setup"]["immutable_source_dependencies"][
+        "gemini_pipeline"
+    ]["file_sha256"] == _file_sha(PIPELINE_PATH)
     assert {item["field"] for item in registration["deviations"]} >= {
         "model_resource",
         "generation_config.temperature",
@@ -316,6 +358,29 @@ def test_default_dry_run_never_reads_credential_or_calls_transport(tmp_path):
     assert report["release_authorized"] is False
 
 
+def test_execute_mode_is_hard_disabled_before_credentials_or_transport(tmp_path):
+    config = replace(_qualification_config(tmp_path), execute=True)
+
+    def forbidden_connect(*_args, **_kwargs):
+        raise AssertionError("Gate 0A execute mode must not connect")
+
+    class CredentialTrap(dict):
+        def __getitem__(self, key):
+            raise AssertionError(f"Gate 0A execute mode read credential {key}")
+
+    report = asyncio.run(
+        run_qualification(
+            config,
+            connect=forbidden_connect,
+            environ=CredentialTrap({config.credential_ref: "valid-looking-secret"}),
+        )
+    )
+
+    assert report["status"] == "execution_blocked"
+    assert report["failure_counts"] == {"provider_execution_not_implemented": 1}
+    assert report["provider_execution_authorized"] is False
+
+
 @pytest.mark.parametrize(
     ("changes", "code"),
     [
@@ -332,6 +397,7 @@ def test_default_dry_run_never_reads_credential_or_calls_transport(tmp_path):
         ({"max_cost_usd": 0}, "cost_cap_invalid"),
         ({"max_cost_per_attempt_usd": 0}, "cost_cap_invalid"),
         ({"max_cost_per_attempt_usd": 2}, "cost_cap_invalid"),
+        ({"source_sha": "b" * 40}, "source_sha_not_head"),
     ],
 )
 def test_preregistration_rejects_unsafe_or_unbounded_configuration(
@@ -395,6 +461,7 @@ def test_unexplained_immutable_pipeline_deviation_is_a_hard_failure(tmp_path):
         setup_document,
         setup_file_sha256=config.setup_file_sha256,
         deviations_sha256=deviations_sha,
+        source_sha=SOURCE_SHA,
     )
     changed = replace(
         config,
@@ -419,6 +486,7 @@ def test_canonical_setup_rejects_payload_hidden_in_reported_configuration(tmp_pa
             document,
             setup_file_sha256=setup_sha,
             deviations_sha256="d" * 64,
+            source_sha=SOURCE_SHA,
         )
 
     assert caught.value.code == "setup_document_contains_payload"
@@ -460,6 +528,45 @@ def test_manifest_rejects_missing_consent_policy_or_real_call_label(
         validate_audio_manifest(path, require_execution_ready=False)
 
     assert caught.value.code == "manifest_provenance_invalid"
+
+
+def test_ready_manifest_enforces_language_scenario_condition_and_split_coverage(
+    tmp_path,
+):
+    manifest = _write_ready_manifest(tmp_path)
+
+    summary = validate_audio_manifest(manifest, require_execution_ready=True)
+
+    assert summary.execution_ready is True
+    assert summary.case_count == 200
+    assert len(summary.language_counts) == 8
+    assert summary.split_counts == {"development": 160, "holdout": 40}
+
+
+def test_ready_manifest_rejects_missing_scenario_stratum(tmp_path):
+    manifest = _write_ready_manifest(tmp_path)
+    document = json.loads(manifest.read_text())
+    for case in document["cases"]:
+        case["scenario"] = "standard"
+    _write_json(manifest, document)
+
+    with pytest.raises(QualificationError) as caught:
+        validate_audio_manifest(manifest, require_execution_ready=True)
+
+    assert caught.value.code == "manifest_coverage_incomplete"
+
+
+def test_ready_manifest_rejects_duplicate_audio_evidence(tmp_path):
+    manifest = _write_ready_manifest(tmp_path)
+    document = json.loads(manifest.read_text())
+    document["cases"][1]["audio_path"] = document["cases"][0]["audio_path"]
+    document["cases"][1]["audio_sha256"] = document["cases"][0]["audio_sha256"]
+    _write_json(manifest, document)
+
+    with pytest.raises(QualificationError) as caught:
+        validate_audio_manifest(manifest, require_execution_ready=True)
+
+    assert caught.value.code == "manifest_duplicate_audio"
 
 
 class _FakeSocket:
@@ -511,7 +618,7 @@ class _FakeConnect:
 def _attempt(connect, *, timeout=1, reconnects=0):
     return asyncio.run(
         run_session_attempt(
-            endpoint=ENDPOINT,
+            endpoint=MOCK_ENDPOINT,
             credential="test-only-credential",
             provider_setup=_provider_setup()["setup"],
             audio_bytes=b"synthetic-audio",

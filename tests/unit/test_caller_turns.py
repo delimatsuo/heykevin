@@ -362,6 +362,41 @@ def test_receipt_deduplication_memory_is_bounded_across_a_long_epoch():
     assert assembler.retained_sequence_count == 3
 
 
+def test_event_at_expired_deadline_finalizes_before_starting_next_turn():
+    assembler = CallerTurnAssembler(active_epoch=1, quiescence_ms=100)
+    assembler.ingest(
+        _event(
+            CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+            at_ms=0,
+            sequence=1,
+            text="First activity",
+        )
+    )
+    assembler.ingest(
+        _event(CallerTurnEventKind.TURN_COMPLETE, at_ms=10, sequence=2)
+    )
+
+    first = assembler.ingest(
+        _event(
+            CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+            at_ms=110,
+            sequence=3,
+            text="Second activity",
+        )
+    )
+    assembler.ingest(
+        _event(CallerTurnEventKind.TURN_COMPLETE, at_ms=120, sequence=4)
+    )
+    second = assembler.advance_time(500)
+
+    assert [turn.transcript for turn in (*first, *second)] == [
+        "First activity",
+        "Second activity",
+    ]
+    assert first[0].finalized_at_ms == 110
+    assert second[0].finalized_at_ms == 220
+
+
 def test_redacted_report_excludes_transcript_and_event_payloads():
     assembler = CallerTurnAssembler(active_epoch=1, quiescence_ms=100)
     assembler.ingest(

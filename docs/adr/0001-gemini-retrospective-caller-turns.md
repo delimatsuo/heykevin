@@ -58,10 +58,12 @@ Gate 0A. Therefore:
 
 ## Gate 0B Decision Rule
 
-A later, separately approved run may finalize this ADR only when its immutable
-pre-registration names the exact model, API version, endpoint, non-production
-project, dedicated credential reference, manifest digest, setup digest, source SHA,
-attempt cap, wall-clock cap, timeout, and cost cap.
+A later run cannot use the Gate 0A command, whose provider execution path is
+deliberately disabled. A separately reviewed successor may finalize this ADR only
+when its immutable preregistration names the exact model, API version, endpoint,
+non-production project, dedicated credential reference, manifest digest, setup
+digest, source SHA, attempt cap, wall-clock cap, timeout, and cost cap and binds
+those values to a machine-checked approval artifact before connection.
 
 Retrospective assembly receives a go decision only if the sealed holdout meets every
 threshold in the approved qualification plan, including at least 99 percent exact
@@ -88,6 +90,7 @@ them:
 - importing these modules from `gemini_pipeline.py` or `voice_pipeline.py`;
 - extracting semantic observations or mutating `IntakeState`;
 - using real caller audio, transcripts, identifiers, or credentials;
+- enabling the provider execution path without a new reviewed successor;
 - staging, production, deployment, feature flags, or release claims.
 
 ## References

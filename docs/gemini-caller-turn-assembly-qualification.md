@@ -2,9 +2,11 @@
 
 ## Status and Boundary
 
-This runbook covers the offline Gate 0A qualification command only. It does not
-authorize a Gemini request, real caller data, live-pipeline wiring, staging,
-production, deployment, feature flags, or release.
+This runbook covers the offline Gate 0A preregistration command only. It does not
+contain an executable Gemini provider path and does not authorize a Gemini request,
+real caller data, live-pipeline wiring, staging, production, deployment, feature
+flags, or release. `--execute` is fail-closed with
+`provider_execution_not_implemented`.
 
 The checked-in audio manifest is intentionally `collection_status: pending`. It
 contains no audio, speakers, transcripts, or consent claims. An execution attempt
@@ -33,13 +35,16 @@ The setup document must explicitly contain:
 - complete generation, transcription, VAD, activity, and turn-coverage settings;
 - synthetic prompt-fixture digest and tool-response policy;
 - reconnect, context-restoration, retry, quiescence, and WebSocket policies;
-- runner, evaluator, and immutable-pipeline source/file identities;
-- a payload-free immutable-pipeline setup projection.
+- runner and evaluator source/file identities;
+- code-owned source/file identities for `gemini_pipeline.py`, `voice_pipeline.py`,
+  and `config.py` at the actual current Git HEAD;
+- a code-owned, payload-free immutable-pipeline setup projection.
 
 No behavior-affecting value has a command default. The deviations file must contain
-one digest-backed entry for every leaf that differs between the immutable-pipeline
-projection and qualification setup. Missing, extra, duplicate, or stale entries
-fail closed.
+one digest-backed entry for every leaf that differs between the code-owned
+immutable-pipeline projection and qualification setup. Missing, extra, duplicate,
+or stale entries fail closed. A caller-supplied baseline cannot replace that
+projection.
 
 ## Corpus Contract
 
@@ -56,11 +61,12 @@ Every case requires:
 - BCP-47 language, codec, condition, scenario, and development/holdout split;
 - no real-call, production-audio, biometric, caller-ID, or transcript field.
 
-Execution additionally requires at least 200 cases, at least eight language groups,
-and at least 20 cases in each qualifying language group. The manifest must include
-clean/noisy telephony conditions, pauses, corrections, numbers, barge-in, tool use,
-tool cancellation, reconnect, and both code-switch directions defined by the
-reviewed plan.
+The current validator records at least 200 cases, eight language groups, and 20
+cases in each qualifying group as minimum corpus readiness checks. These checks are
+not a Gate 0B execution gate. A successor runner must additionally enforce
+clean/noisy telephony conditions, codec loss, packet timing, pauses, corrections,
+numbers, barge-in, tool use, tool cancellation, reconnect, sealed holdout balance,
+and both code-switch directions before any provider approval.
 
 ## Dry Run
 
@@ -94,6 +100,7 @@ canonical = canonicalize_qualification_setup(
     json.loads(setup_path.read_text()),
     setup_file_sha256=setup_sha,
     deviations_sha256=deviations_sha,
+    source_sha=os.environ["SOURCE_SHA"],
 )
 print(json.dumps({
     "canonical_setup": canonical,
@@ -133,10 +140,21 @@ Default invocation and `--dry-run` do not read the credential environment variab
 resolve DNS, create a socket, or import the WebSocket client. `dry_run_blocked` is
 the expected result while the checked-in manifest remains pending.
 
-## Separate Execution Approval
+## Provider Execution Is Deferred
 
-Do not use `--execute` during Gate 0A. A later approval must quote the exact
-machine-readable preregistration block and name all of these immutable values:
+`--execute` is deliberately nonfunctional in this Gate 0A slice. It validates the
+preregistration and then returns `execution_blocked` without reading a credential,
+resolving DNS, creating a socket, or importing a WebSocket client. The internal
+session reducer accepts mock `.invalid` endpoints and test-only credentials only.
+
+A new reviewed successor plan and implementation are required before Gate 0B. That
+work must add paced, codec-aware streaming; real monotonic receipt timing; exact
+activity-to-turn assignment and contamination metrics; complete corpus-strata
+validation; total timeout/cost enforcement across reconnects; and a digest-bound
+approval artifact before connector creation.
+
+Any later approval must quote the exact machine-readable preregistration block and
+name all of these immutable values:
 
 - source, runner, evaluator, immutable-pipeline, manifest, setup, deviation, and
   canonical-setup digests;
@@ -151,8 +169,8 @@ services, scoped to the non-production project, and revocable immediately. Never
 reuse `GEMINI_API_KEY`, a live-call key, an admin bearer token, or a production
 service credential.
 
-Only after that separate approval may the identical dry-run command add
-`--execute`. Any digest or value drift voids the approval and requires a new review.
+Approval alone cannot enable this command. The successor implementation must merge
+first, and any digest or value drift then voids approval and requires a new review.
 
 ## Output and Stop Conditions
 
@@ -161,10 +179,9 @@ event/status/failure counts, bounded error codes, and evidence-taxonomy booleans
 They contain no prompt, tool declarations, transcript, raw message, audio, caller or
 contractor ID, credential, file path, or exception body.
 
-A partial, cancelled, timed-out, malformed, oversized, setup-rejected, reconnected,
-or abnormally closed run remains nonauthorizing. All evidence booleans remain false
-in this runner; Gate 0B evaluation and ADR review decide whether
-`turn_assembly_validated` can change.
+Mock lifecycle outcomes remain nonauthorizing. All evidence booleans remain false
+in this preregistration runner; a successor Gate 0B evaluator and ADR review decide
+whether `turn_assembly_validated` can change.
 
 Stop immediately when a cap is reached, an input digest changes, an unlisted setup
 deviation appears, provenance or consent fails, a payload reaches output/logging, or

@@ -10,11 +10,9 @@ from collections import Counter
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
 import re
 import sys
-import time
 from typing import Any, Callable, Mapping, Sequence
 
 
@@ -47,6 +45,26 @@ MAX_AUDIO_FILE_BYTES = 10 * 1024 * 1024
 MIN_EXECUTION_CASES = 200
 MIN_LANGUAGE_CASES = 20
 MIN_LANGUAGE_GROUPS = 8
+MIN_HOLDOUT_CASES = 40
+REQUIRED_SCENARIOS = {
+    "standard",
+    "long_pause",
+    "self_correction",
+    "number_dictation",
+    "barge_in",
+    "tool_call",
+    "tool_cancellation",
+    "reconnect",
+    "code_switch_forward",
+    "code_switch_reverse",
+}
+REQUIRED_CONDITIONS = {
+    "clean",
+    "telephony_codec_loss",
+    "background_noise",
+    "packet_timing_variation",
+    "fast_speech",
+}
 OFFICIAL_ENDPOINTS = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
@@ -59,12 +77,25 @@ LANGUAGE_PATTERN = re.compile(r"[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-[0-9]
 RUNNER_PATH = Path(__file__).resolve()
 EVALUATOR_PATH = REPO_ROOT / "scripts/evaluate_caller_turn_assembly.py"
 PIPELINE_PATH = REPO_ROOT / "app/services/gemini_pipeline.py"
+VOICE_PIPELINE_PATH = REPO_ROOT / "app/services/voice_pipeline.py"
+CONFIG_PATH = REPO_ROOT / "app/config.py"
+IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256 = (
+    "33a0744b27e2c7e9ecfaeb8c15e276776cd7b22770e1783a63bdd0f5602ec3d4"
+)
+IMMUTABLE_VOICE_PIPELINE_SUPPORTED_FILE_SHA256 = (
+    "9bdfea211568d1b8ca447677cb6b5dd807d81d099f6063053390114509249c8d"
+)
+IMMUTABLE_CONFIG_SUPPORTED_FILE_SHA256 = (
+    "ae3e085976eb3409f79b18b9461e5957e4f768e3ce2e524f7da3e3dfb7f28018"
+)
+IMMUTABLE_SYNTHETIC_PROFILE_SHA256 = (
+    "882a4c064f23fcb0c7800c3536561b77b09faace3a2e34835e67579600fd720a"
+)
 BEHAVIOR_PROJECTION_FIELDS = {
     "api_version",
     "endpoint",
     "model_resource",
     "system_instruction_sha256",
-    "synthetic_prompt_fixture_sha256",
     "generation_config",
     "input_audio_transcription",
     "output_audio_transcription",
@@ -112,6 +143,9 @@ class AudioManifestSummary:
     case_count: int
     speaker_count: int
     language_counts: dict[str, int]
+    scenario_counts: dict[str, int]
+    condition_counts: dict[str, int]
+    split_counts: dict[str, int]
 
     @property
     def execution_ready(self) -> bool:
@@ -123,6 +157,9 @@ class AudioManifestSummary:
             "case_count": self.case_count,
             "speaker_count": self.speaker_count,
             "language_counts": dict(sorted(self.language_counts.items())),
+            "scenario_counts": dict(sorted(self.scenario_counts.items())),
+            "condition_counts": dict(sorted(self.condition_counts.items())),
+            "split_counts": dict(sorted(self.split_counts.items())),
             "execution_ready": self.execution_ready,
         }
 
@@ -163,11 +200,132 @@ def canonical_json_sha256(value: object) -> str:
     return sha256(encoded).hexdigest()
 
 
+def current_git_head_sha() -> str:
+    git_marker = REPO_ROOT / ".git"
+    if git_marker.is_file():
+        marker = git_marker.read_text().strip()
+        if not marker.startswith("gitdir: "):
+            raise QualificationError("source_sha_unavailable")
+        git_dir = Path(marker.removeprefix("gitdir: ")).resolve()
+    elif git_marker.is_dir():
+        git_dir = git_marker.resolve()
+    else:
+        raise QualificationError("source_sha_unavailable")
+
+    head = (git_dir / "HEAD").read_text().strip()
+    if not head.startswith("ref: "):
+        value = head
+    else:
+        ref = head.removeprefix("ref: ")
+        common_dir = git_dir
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            common_dir = (git_dir / common_marker.read_text().strip()).resolve()
+        ref_path = common_dir / ref
+        if ref_path.is_file():
+            value = ref_path.read_text().strip()
+        else:
+            value = _read_packed_ref(common_dir / "packed-refs", ref)
+    if not SOURCE_SHA_PATTERN.fullmatch(value):
+        raise QualificationError("source_sha_unavailable")
+    return value
+
+
+def _read_packed_ref(path: Path, ref: str) -> str:
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith(("#", "^")):
+                continue
+            value, separator, candidate = line.partition(" ")
+            if separator and candidate == ref:
+                return value
+    except OSError as exc:
+        raise QualificationError("source_sha_unavailable") from exc
+    raise QualificationError("source_sha_unavailable")
+
+
+def _authoritative_source_dependencies(source_sha: str) -> dict[str, dict[str, str]]:
+    if source_sha != current_git_head_sha():
+        raise QualificationError("source_sha_not_head")
+    dependencies = {
+        "gemini_pipeline": (
+            PIPELINE_PATH,
+            IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256,
+        ),
+        "voice_pipeline": (
+            VOICE_PIPELINE_PATH,
+            IMMUTABLE_VOICE_PIPELINE_SUPPORTED_FILE_SHA256,
+        ),
+        "config": (CONFIG_PATH, IMMUTABLE_CONFIG_SUPPORTED_FILE_SHA256),
+    }
+    identities = {}
+    for name, (path, supported_digest) in dependencies.items():
+        current_digest = _file_sha256(path, "immutable_source_mismatch")
+        if current_digest != supported_digest:
+            raise QualificationError("immutable_source_mismatch")
+        identities[name] = {
+            "source_sha": source_sha,
+            "file_sha256": supported_digest,
+        }
+    return identities
+
+
+def immutable_pipeline_setup_projection() -> dict[str, Any]:
+    """Return the code-owned setup projection for the pinned live pipeline source."""
+    return {
+        "api_version": "v1beta",
+        "endpoint": OFFICIAL_ENDPOINTS[0],
+        "model_resource": "models/gemini-2.5-flash-native-audio-latest",
+        "system_instruction_sha256": (
+            "6c24ec573abcb2ff2bebadab8e919517519344f3eacfb0c3af110de2850e31b7"
+        ),
+        "generation_config": {
+            "response_modalities": ["AUDIO"],
+            "temperature": 0.4,
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {"voice_name": "Puck"}
+                }
+            },
+            "thinking_config": {"thinking_budget": 0},
+        },
+        "input_audio_transcription": {},
+        "output_audio_transcription": {},
+        "realtime_input_config": {
+            "automatic_activity_detection": {
+                "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
+                "prefix_padding_ms": 100,
+                "silence_duration_ms": 500,
+            },
+            "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+        },
+        "tool_declarations_sha256": canonical_json_sha256([]),
+        "tool_response_policy": "live_tool_execution",
+        "reconnect_policy": {
+            "max_attempts": 1,
+            "context_restoration": "bounded_transcript_text",
+            "retry_backoff_ms": [0],
+        },
+        "turn_assembly_policy": {"quiescence_ms": None},
+        "websocket_policy": {
+            "max_message_bytes": 10 * 1024 * 1024,
+            "open_timeout_seconds": 10,
+            "setup_timeout_seconds": 10,
+            "ping_interval_seconds": 20,
+            "ping_timeout_seconds": 20,
+            "close_timeout_seconds": 10,
+        },
+    }
+
+
 def canonicalize_qualification_setup(
     document: object,
     *,
     setup_file_sha256: str,
     deviations_sha256: str,
+    source_sha: str,
 ) -> dict[str, Any]:
     """Project a complete provider setup into a non-sensitive canonical document."""
     _require_sha256(setup_file_sha256, "setup_digest_invalid")
@@ -185,8 +343,6 @@ def canonicalize_qualification_setup(
         "websocket_policy",
         "runner_identity",
         "evaluator_identity",
-        "immutable_pipeline_identity",
-        "immutable_pipeline_setup",
     }
     if set(document) != required:
         raise QualificationError("setup_document_invalid")
@@ -249,11 +405,9 @@ def canonicalize_qualification_setup(
     )
     runner_identity = _validate_source_identity(document.get("runner_identity"))
     evaluator_identity = _validate_source_identity(document.get("evaluator_identity"))
-    pipeline_identity = _validate_source_identity(
-        document.get("immutable_pipeline_identity")
-    )
-    immutable_pipeline_setup = document.get("immutable_pipeline_setup")
+    immutable_pipeline_setup = immutable_pipeline_setup_projection()
     _validate_behavior_projection(immutable_pipeline_setup)
+    immutable_source_dependencies = _authoritative_source_dependencies(source_sha)
     tool_response_policy = document["tool_response_policy"]
     if (
         not isinstance(tool_response_policy, str)
@@ -291,8 +445,9 @@ def canonicalize_qualification_setup(
         "websocket_policy": websocket_policy,
         "runner_identity": runner_identity,
         "evaluator_identity": evaluator_identity,
-        "immutable_pipeline_identity": pipeline_identity,
+        "immutable_source_dependencies": immutable_source_dependencies,
         "immutable_pipeline_setup": immutable_pipeline_setup,
+        "immutable_synthetic_profile_sha256": IMMUTABLE_SYNTHETIC_PROFILE_SHA256,
         "provider_setup_file_sha256": setup_file_sha256,
         "deviations_sha256": deviations_sha256,
     }
@@ -327,26 +482,39 @@ def validate_audio_manifest(
 
     speaker_ids = _validate_speakers(speakers)
     language_counts: Counter[str] = Counter()
+    scenario_counts: Counter[str] = Counter()
+    condition_counts: Counter[str] = Counter()
+    split_counts: Counter[str] = Counter()
+    language_splits: dict[str, set[str]] = {}
+    audio_digests: set[str] = set()
     case_ids: set[str] = set()
     fixture_root = manifest_path.resolve().parent
     for case in cases:
-        language = _validate_audio_case(
+        language, scenario, condition, split, audio_digest = _validate_audio_case(
             case,
             fixture_root=fixture_root,
             speaker_ids=speaker_ids,
             case_ids=case_ids,
         )
+        if audio_digest in audio_digests:
+            raise QualificationError("manifest_duplicate_audio")
+        audio_digests.add(audio_digest)
         language_counts[language] += 1
+        scenario_counts[scenario] += 1
+        condition_counts[condition] += 1
+        split_counts[split] += 1
+        language_splits.setdefault(language, set()).add(split)
 
     summary = AudioManifestSummary(
         collection_status=status,
         case_count=len(cases),
         speaker_count=len(speakers),
         language_counts=dict(language_counts),
+        scenario_counts=dict(scenario_counts),
+        condition_counts=dict(condition_counts),
+        split_counts=dict(split_counts),
     )
-    if require_execution_ready:
-        if status != "ready":
-            raise QualificationError("manifest_collection_pending")
+    if status == "ready":
         if len(cases) < MIN_EXECUTION_CASES:
             raise QualificationError("manifest_coverage_incomplete")
         qualifying_languages = sum(
@@ -354,6 +522,19 @@ def validate_audio_manifest(
         )
         if qualifying_languages < MIN_LANGUAGE_GROUPS:
             raise QualificationError("manifest_coverage_incomplete")
+        if (
+            not REQUIRED_SCENARIOS.issubset(scenario_counts)
+            or not REQUIRED_CONDITIONS.issubset(condition_counts)
+            or split_counts["holdout"] < MIN_HOLDOUT_CASES
+            or split_counts["development"] == 0
+            or any(
+                {"development", "holdout"} - splits
+                for splits in language_splits.values()
+            )
+        ):
+            raise QualificationError("manifest_coverage_incomplete")
+    if require_execution_ready and status != "ready":
+        raise QualificationError("manifest_collection_pending")
     return summary
 
 
@@ -373,15 +554,14 @@ def build_preregistration(config: QualificationConfig) -> dict[str, Any]:
 
     manifest = validate_audio_manifest(
         config.manifest_path,
-        require_execution_ready=config.execute,
+        require_execution_ready=False,
     )
-    if config.execute and config.attempt_cap < manifest.case_count:
-        raise QualificationError("attempt_cap_incomplete")
     setup_document = _load_bounded_json(config.setup_path, "setup_document_invalid")
     canonical_setup = canonicalize_qualification_setup(
         setup_document,
         setup_file_sha256=config.setup_file_sha256,
         deviations_sha256=config.deviations_sha256,
+        source_sha=config.source_sha,
     )
     _validate_setup_identity(canonical_setup, config)
     if canonical_json_sha256(canonical_setup) != config.canonical_setup_sha256:
@@ -391,7 +571,6 @@ def build_preregistration(config: QualificationConfig) -> dict[str, Any]:
 
     return {
         "schema_version": 1,
-        "execution_requested": config.execute,
         "source_sha": config.source_sha,
         "model_resource": config.model_resource,
         "api_version": config.api_version,
@@ -422,76 +601,20 @@ async def run_qualification(
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     registration = build_preregistration(config)
-    if not config.execute:
-        ready = registration["manifest"]["execution_ready"]
-        return _qualification_report(
-            status="dry_run_ready" if ready else "dry_run_blocked",
-            registration=registration,
-            failure_counts=(
-                Counter() if ready else Counter({"manifest_collection_pending": 1})
-            ),
-        )
-
-    environment = os.environ if environ is None else environ
-    try:
-        credential = environment[config.credential_ref]
-    except KeyError:
+    ready = registration["manifest"]["execution_ready"]
+    if config.execute:
         return _qualification_report(
             status="execution_blocked",
             registration=registration,
-            failure_counts=Counter({"credential_unavailable": 1}),
+            failure_counts=Counter({"provider_execution_not_implemented": 1}),
         )
-    if not credential:
-        return _qualification_report(
-            status="execution_blocked",
-            registration=registration,
-            failure_counts=Counter({"credential_unavailable": 1}),
-        )
-    connector = connect or _real_connect
-    setup_document = _load_bounded_json(config.setup_path, "setup_document_invalid")
-    provider_setup = setup_document["setup"]
-    manifest_document = _load_bounded_json(config.manifest_path, "manifest_invalid")
-    cases = manifest_document["cases"][: config.attempt_cap]
-    attempts: list[SessionAttemptResult] = []
-    started = time.monotonic()
-    wall_clock_reached = False
-    for case in cases:
-        if time.monotonic() - started >= config.wall_clock_cap_seconds:
-            wall_clock_reached = True
-            break
-        audio = _load_case_audio(config.manifest_path, case)
-        attempts.append(
-            await run_session_attempt(
-                endpoint=config.endpoint,
-                credential=credential,
-                provider_setup=provider_setup,
-                audio_bytes=audio,
-                connect=connector,
-                websocket_policy=registration["canonical_setup"]["websocket_policy"],
-                quiescence_ms=registration["canonical_setup"]["turn_assembly_policy"][
-                    "quiescence_ms"
-                ],
-                session_timeout_seconds=config.session_timeout_seconds,
-                max_reconnect_attempts=registration["canonical_setup"][
-                    "reconnect_policy"
-                ]["max_attempts"],
-                reconnect_backoff_ms=tuple(
-                    registration["canonical_setup"]["reconnect_policy"][
-                        "retry_backoff_ms"
-                    ]
-                ),
-                tool_response_policy=registration["canonical_setup"][
-                    "tool_response_policy"
-                ],
-            )
-        )
-        if not attempts[-1].complete:
-            break
-    return _aggregate_execution_report(
-        registration,
-        attempts,
-        expected_attempts=len(cases),
-        wall_clock_reached=wall_clock_reached,
+    del connect, environ
+    return _qualification_report(
+        status="dry_run_ready" if ready else "dry_run_blocked",
+        registration=registration,
+        failure_counts=(
+            Counter() if ready else Counter({"manifest_collection_pending": 1})
+        ),
     )
 
 
@@ -509,9 +632,20 @@ async def run_session_attempt(
     reconnect_backoff_ms: tuple[int, ...],
     tool_response_policy: str,
 ) -> SessionAttemptResult:
-    """Run one injected-WebSocket attempt and retain aggregate enums only."""
+    """Exercise one mock WebSocket lifecycle and retain aggregate enums only."""
     if (
-        tool_response_policy != "mock_responses_only"
+        endpoint in OFFICIAL_ENDPOINTS
+        or not endpoint.startswith("wss://mock.")
+        or not endpoint.endswith(".invalid")
+        or not credential.startswith("test-only-")
+        or not isinstance(provider_setup, dict)
+        or not isinstance(audio_bytes, bytes)
+        or not _bounded_number(session_timeout_seconds, 0.001, 120)
+        or not _bounded_int(max_reconnect_attempts, 0, 3)
+        or not _bounded_int(quiescence_ms, 1, 5_000)
+        or not isinstance(websocket_policy, dict)
+        or not callable(connect)
+        or tool_response_policy != "mock_responses_only"
         or len(reconnect_backoff_ms) != max_reconnect_attempts
         or any(not _bounded_int(value, 0, 10_000) for value in reconnect_backoff_ms)
     ):
@@ -528,6 +662,8 @@ async def run_session_attempt(
     reconnect_count = 0
     error_code: str | None = None
     emitted_turns = []
+    loop = asyncio.get_running_loop()
+    attempt_deadline = loop.time() + session_timeout_seconds
 
     def emit_lifecycle(
         kind: CallerTurnEventKind,
@@ -548,11 +684,14 @@ async def run_session_attempt(
 
     while True:
         try:
+            remaining_seconds = attempt_deadline - loop.time()
+            if remaining_seconds <= 0:
+                raise TimeoutError
             timeout = min(
-                max(0.001, float(session_timeout_seconds) / 2),
+                max(0.001, remaining_seconds / 2),
                 float(websocket_policy["setup_timeout_seconds"]),
             )
-            async with asyncio.timeout(session_timeout_seconds):
+            async with asyncio.timeout(remaining_seconds):
                 async with connect(
                     endpoint,
                     additional_headers={"x-goog-api-key": credential},
@@ -824,6 +963,8 @@ def _validate_config(config: QualificationConfig) -> None:
         raise QualificationError("credential_ref_not_dedicated")
     if not SOURCE_SHA_PATTERN.fullmatch(config.source_sha):
         raise QualificationError("source_sha_invalid")
+    if config.source_sha != current_git_head_sha():
+        raise QualificationError("source_sha_not_head")
     for digest, code in (
         (config.manifest_sha256, "manifest_digest_invalid"),
         (config.setup_file_sha256, "setup_digest_invalid"),
@@ -869,7 +1010,6 @@ def _validate_setup_identity(
     identities = (
         ("runner_identity", RUNNER_PATH, "runner_identity_mismatch"),
         ("evaluator_identity", EVALUATOR_PATH, "evaluator_identity_mismatch"),
-        ("immutable_pipeline_identity", PIPELINE_PATH, "pipeline_identity_mismatch"),
     )
     for field, path, code in identities:
         identity = canonical_setup[field]
@@ -925,7 +1065,6 @@ def _validate_behavior_projection(value: object) -> None:
         raise QualificationError("setup_document_invalid")
     for field in (
         "system_instruction_sha256",
-        "synthetic_prompt_fixture_sha256",
         "tool_declarations_sha256",
     ):
         _require_sha256(value.get(field), "setup_document_invalid")
@@ -1060,7 +1199,7 @@ def _validate_audio_case(
     fixture_root: Path,
     speaker_ids: set[str],
     case_ids: set[str],
-) -> str:
+) -> tuple[str, str, str, str, str]:
     required = {
         "id",
         "audio_path",
@@ -1093,6 +1232,8 @@ def _validate_audio_case(
         value = case.get(field)
         if not isinstance(value, str) or not SAFE_ID_PATTERN.fullmatch(value):
             raise QualificationError("manifest_case_invalid")
+    if case["codec"] != "pcm_s16le_16000":
+        raise QualificationError("manifest_case_invalid")
     _require_sha256(case.get("audio_sha256"), "manifest_case_invalid")
     _require_sha256(case.get("script_sha256"), "manifest_case_invalid")
     audio_path = case.get("audio_path")
@@ -1106,7 +1247,13 @@ def _validate_audio_case(
     if _file_sha256(resolved, "manifest_case_invalid") != case["audio_sha256"]:
         raise QualificationError("manifest_case_invalid")
     case_ids.add(case_id)
-    return language
+    return (
+        language,
+        case["scenario"],
+        case["condition"],
+        case["split"],
+        case["audio_sha256"],
+    )
 
 
 def _qualification_report(
@@ -1133,56 +1280,6 @@ def _qualification_report(
         "failure_counts": dict(sorted(failure_counts.items())),
         **{field: False for field in EVIDENCE_FIELDS},
     }
-
-
-def _aggregate_execution_report(
-    registration: dict[str, Any],
-    attempts: list[SessionAttemptResult],
-    *,
-    expected_attempts: int,
-    wall_clock_reached: bool,
-) -> dict[str, Any]:
-    failures: Counter[str] = Counter()
-    events: Counter[str] = Counter()
-    turn_statuses: Counter[str] = Counter()
-    decode_rejections: Counter[str] = Counter()
-    for attempt in attempts:
-        if attempt.error_code is not None:
-            failures[attempt.error_code] += 1
-        if not attempt.complete:
-            failures["attempt_incomplete"] += 1
-        events.update(attempt.event_type_counts)
-        turn_statuses.update(attempt.turn_status_counts)
-        decode_rejections.update(attempt.decode_rejection_counts)
-    if wall_clock_reached:
-        failures["wall_clock_cap_reached"] += 1
-    if len(attempts) != expected_attempts:
-        failures["attempts_incomplete"] += 1
-    complete = (
-        bool(attempts)
-        and len(attempts) == expected_attempts
-        and all(attempt.complete for attempt in attempts)
-    )
-    return _qualification_report(
-        status="execution_complete_nonauthorizing" if complete else "partial",
-        registration=registration,
-        failure_counts=failures,
-        attempts=len(attempts),
-        event_counts=events,
-        turn_statuses=turn_statuses,
-        decode_rejections=decode_rejections,
-    )
-
-
-def _load_case_audio(manifest_path: Path, case: dict[str, Any]) -> bytes:
-    root = manifest_path.resolve().parent
-    path = (root / case["audio_path"]).resolve()
-    if not path.is_relative_to(root):
-        raise QualificationError("manifest_case_invalid")
-    data = path.read_bytes()
-    if len(data) > MAX_AUDIO_FILE_BYTES:
-        raise QualificationError("manifest_case_invalid")
-    return data
 
 
 def _load_bounded_json(path: Path, code: str) -> Any:
@@ -1230,12 +1327,6 @@ def _bounded_number(value: object, minimum: float, maximum: float) -> bool:
         and isinstance(value, (int, float))
         and minimum <= float(value) <= maximum
     )
-
-
-def _real_connect(*args: Any, **kwargs: Any):
-    import websockets
-
-    return websockets.connect(*args, **kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:

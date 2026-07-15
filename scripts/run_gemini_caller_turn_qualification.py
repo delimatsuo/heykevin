@@ -23,6 +23,7 @@ from app.services.caller_turn_alignment import ActivityReference
 from app.services.caller_turn_measurement import (
     MeasurementError,
     WireObservation,
+    combined_usage_evidence_sha256,
     derive_audit_capsule_accounting,
     require_reducer_agreement,
     seal_audit_capsule,
@@ -43,13 +44,19 @@ from app.services.voice_turn_replay import (
     build_gemini_audio_message,
 )
 from app.services.qualification_identity import (
+    AttemptClaim,
     canonical_json_bytes,
     capture_environment_identity,
     capture_source_identity,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
-from app.services.qualification_ledger import LedgerCustodyClient, LedgerCustodyIdentity
+from app.services.qualification_ledger import (
+    CustodyLedgerState,
+    LedgerCustodyClient,
+    LedgerCustodyIdentity,
+    validate_custody_ledger_snapshot,
+)
 
 
 OFFICIAL_ENDPOINT = (
@@ -123,6 +130,7 @@ PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
         "evaluator_sha256",
         "ledger_location_sha256",
         "audit_capsule_location_sha256",
+        "holdout_capsule_location_sha256",
         "evidence_location_sha256",
         "consent_attestation_sha256",
         "retention_attestation_sha256",
@@ -1517,6 +1525,8 @@ async def execute_authorized_attempt(
         custodian_public_key=custodian_public_key,
         custodian_key_id=custodian_key_id,
         capsule_path=capsule_path,
+        capsule_location_field="audit_capsule_location_sha256",
+        required_split="development",
     )
     campaign = verify_campaign_approval(
         campaign_envelope,
@@ -1724,6 +1734,279 @@ async def execute_authorized_attempt(
     )
 
 
+async def execute_authorized_holdout(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+    preregistration: Mapping[str, Any],
+    config: AuthorizedAttemptConfig,
+    session_config: SessionExecutionConfig,
+    campaign_envelope: Mapping[str, Any],
+    attempt_envelope: Mapping[str, Any],
+    ledger: LedgerCustodyClient,
+    ledger_custodian_public_key: bytes,
+    now: datetime,
+    credential_loader: Callable[[str], SecretCredential],
+    connector_factory: Callable[[SecretCredential], InjectedConnector],
+    receipt_clock_factory: Callable[[object], Callable[[], int]],
+    sleep_ms: Callable[[int], Awaitable[None]],
+    pricing: PricingSchedule,
+    custodian_public_key: bytes,
+    custodian_key_id: str,
+    capsule_path: Path,
+) -> AttemptExecutionResult:
+    """Resume one active post-lock attempt and execute its released holdout once."""
+    _validate_attempt_inputs(
+        plans,
+        no_speech_plans=no_speech_plans,
+        config=config,
+        session_config=session_config,
+        pricing=pricing,
+    )
+    _validate_exact_holdout_schedule(plans, no_speech_plans=no_speech_plans)
+    approval_public_key = _load_pinned_approval_public_key()
+    _verify_execution_preregistration(
+        preregistration,
+        config=config,
+        session_config=session_config,
+        approval_public_key=approval_public_key,
+        ledger=ledger,
+        plans=plans,
+        no_speech_plans=no_speech_plans,
+        pricing=pricing,
+        custodian_public_key=custodian_public_key,
+        custodian_key_id=custodian_key_id,
+        capsule_path=capsule_path,
+        capsule_location_field="holdout_capsule_location_sha256",
+        required_split="holdout",
+    )
+    campaign = verify_campaign_approval(
+        campaign_envelope,
+        public_key=approval_public_key,
+        expected_key_id=config.approval_key_id,
+        expected_preregistration_sha256=config.preregistration_sha256,
+        expected_source_sha=config.source_sha,
+        now=now,
+    )
+    authorization = verify_attempt_authorization(
+        attempt_envelope,
+        public_key=approval_public_key,
+        expected_key_id=config.approval_key_id,
+        campaign=campaign,
+        now=now,
+    )
+    ledger_identity = ledger.identity()
+    if (
+        not isinstance(ledger_identity, LedgerCustodyIdentity)
+        or not isinstance(ledger_custodian_public_key, bytes)
+        or len(ledger_custodian_public_key) != 32
+        or sha256(ledger_custodian_public_key).hexdigest() != ledger_identity.public_key_sha256
+        or campaign.ledger_instance_id != ledger_identity.ledger_instance_id
+        or campaign.ledger_custodian_key_id != ledger_identity.key_id
+        or campaign.ledger_custodian_public_key_sha256 != ledger_identity.public_key_sha256
+        or campaign.ledger_location_sha256 != ledger_identity.ledger_location_sha256
+    ):
+        raise RunnerError("holdout ledger custody binding mismatch")
+    snapshot = ledger.export_snapshot()
+    state = validate_custody_ledger_snapshot(
+        snapshot,
+        public_key=ledger_custodian_public_key,
+        expected_key_id=ledger_identity.key_id,
+        expected_ledger_instance_id=ledger_identity.ledger_instance_id,
+    )
+    holdout_manifest_sha256 = compute_holdout_schedule_sha256(
+        plans,
+        no_speech_plans=no_speech_plans,
+    )
+    if not isinstance(state, CustodyLedgerState) or (
+        state.phase != "holdout_collection"
+        or state.active_attempt_id != authorization.attempt_id
+        or state.completed_attempt_id is not None
+        or state.campaign_approval_sha256 != campaign.signed_payload_sha256
+        or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
+        or state.selected_policy_ms != config.policy_ms
+        or state.holdout_manifest_sha256 != holdout_manifest_sha256
+        or state.holdout_execution_claimed
+        or state.development_usage_evidence_sha256 is None
+    ):
+        raise RunnerError("holdout release does not match the active signed attempt")
+    required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
+        no_speech_plans
+    )
+    remaining_requests = authorization.provider_request_reservation - (
+        state.development_provider_requests
+    )
+    remaining_cost_microusd = (
+        authorization.cost_reservation_microusd - state.development_cost_microusd
+    )
+    if (
+        remaining_requests < required_requests
+        or remaining_cost_microusd < 0
+        or state.development_provider_requests < 0
+        or state.development_cost_microusd < 0
+    ):
+        raise RunnerError("holdout remaining reservation is insufficient")
+    claim = ledger.resume_holdout(
+        campaign=campaign,
+        authorization=authorization,
+        selected_policy_ms=config.policy_ms,
+        holdout_manifest_sha256=holdout_manifest_sha256,
+        expected_ledger_head_sha256=state.final_ledger_head_sha256,
+        now=now,
+    )
+    if (
+        not isinstance(claim, AttemptClaim)
+        or claim.campaign_id != campaign.campaign_id
+        or claim.attempt_id != authorization.attempt_id
+        or claim.attempt_index != authorization.attempt_index
+        or not isinstance(claim.lease_id, str)
+        or not SHA256.fullmatch(claim.lease_id)
+        or claim.provider_requests_reserved != authorization.provider_request_reservation
+        or claim.cost_reserved_microusd != authorization.cost_reservation_microusd
+    ):
+        raise RunnerError("holdout custodian returned an invalid active claim")
+
+    budget = _RequestBudget(remaining_requests)
+    holdout_cost_microusd = 0
+    error_code: str | None = None
+    capsule_handed_off = False
+    capsule_sha256: str | None = None
+    usage = UsageCounts()
+    session_results: list[tuple[SessionPlan, SessionExecutionResult]] = []
+    no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
+    try:
+        try:
+            environment_identity_sha256 = _capture_current_execution_identity(
+                expected_source_sha=config.source_sha
+            )
+            if (
+                environment_identity_sha256
+                != preregistration["immutable_values"]["environment_identity_sha256"]
+            ):
+                raise RunnerError("execution environment identity mismatch")
+        except Exception:
+            error_code = "source_identity_failed"
+
+        credential: SecretCredential | None = None
+        if error_code is None:
+            try:
+                credential = credential_loader(config.credential_reference)
+                if not isinstance(credential, SecretCredential):
+                    raise TypeError
+            except Exception:
+                error_code = "credential_lookup_failed"
+
+        if error_code is None and credential is not None:
+            connector = _ReservedConnector(
+                budget=budget,
+                credential=credential,
+                factory=connector_factory,
+            )
+            try:
+                session_results, no_speech_results = await asyncio.wait_for(
+                    _execute_attempt_work(
+                        plans,
+                        no_speech_plans=no_speech_plans,
+                        config=session_config,
+                        connector=connector,
+                        credential=credential,
+                        receipt_clock_factory=receipt_clock_factory,
+                        sleep_ms=sleep_ms,
+                        pricing=pricing,
+                        run_cost_limit_microusd=remaining_cost_microusd,
+                    ),
+                    timeout=config.whole_run_timeout_seconds,
+                )
+            except TimeoutError:
+                error_code = "whole_run_timeout"
+
+        if error_code is None:
+            failed = next((result for _, result in session_results if not result.complete), None)
+            if failed is not None:
+                error_code = failed.error_code or "session_failed"
+        if error_code is None:
+            failed_window = next(
+                (result for _, result in no_speech_results if not result.complete),
+                None,
+            )
+            if failed_window is not None:
+                error_code = failed_window.error_code or "no_speech_window_failed"
+
+        for _, result in session_results:
+            usage = _add_usage(usage, result.usage)
+        for _, result in no_speech_results:
+            usage = _add_usage(usage, result.usage)
+        holdout_cost_microusd = _cost_microusd(pricing, usage)
+        if holdout_cost_microusd > remaining_cost_microusd:
+            error_code = "cost_reservation_exhausted"
+
+        if error_code is None:
+            try:
+                capsule = _build_audit_capsule(
+                    campaign_id=campaign.campaign_id,
+                    policy_ms=config.policy_ms,
+                    session_results=session_results,
+                    no_speech_results=no_speech_results,
+                )
+                capsule_usage, capsule_failures = derive_audit_capsule_accounting(capsule)
+                if (
+                    capsule_failures
+                    or not capsule_usage["metadata_complete"]
+                    or capsule_usage["provider_requests"] != budget.consumed
+                    or any(
+                        capsule_usage[field] != value
+                        for field, value in usage.to_dict().items()
+                    )
+                ):
+                    raise RunnerError("holdout capsule accounting mismatch")
+                sealed = seal_audit_capsule(
+                    capsule,
+                    custodian_public_key=custodian_public_key,
+                    custodian_key_id=custodian_key_id,
+                )
+            except (MeasurementError, RunnerError, TypeError, ValueError):
+                error_code = "audit_capsule_failed"
+            else:
+                try:
+                    capsule_sha256 = _write_sealed_capsule(capsule_path, sealed)
+                    capsule_handed_off = True
+                except Exception:
+                    error_code = "capsule_handoff_failed"
+    finally:
+        complete = error_code is None and capsule_handed_off
+        total_requests = state.development_provider_requests + budget.consumed
+        total_cost_microusd = state.development_cost_microusd + holdout_cost_microusd
+        holdout_usage_digest = usage_evidence_sha256(
+            usage.to_dict(),
+            provider_requests=budget.consumed,
+            cost_microusd=holdout_cost_microusd,
+        )
+        final_usage_digest = combined_usage_evidence_sha256(
+            development_usage_evidence_sha256=state.development_usage_evidence_sha256,
+            holdout_usage_evidence_sha256=holdout_usage_digest,
+            provider_requests=total_requests,
+            cost_microusd=total_cost_microusd,
+        )
+        ledger.record_terminal_outcome(
+            claim=claim,
+            outcome="completed" if complete else "failed",
+            outage_enum=None,
+            holdout_capsule_sha256=capsule_sha256 if complete else None,
+            usage_evidence_sha256=final_usage_digest,
+            actual_provider_requests=total_requests,
+            actual_cost_microusd=total_cost_microusd,
+            now=now,
+        )
+
+    return AttemptExecutionResult(
+        complete=complete,
+        error_code=error_code,
+        provider_request_count=total_requests,
+        cost_microusd=total_cost_microusd,
+        capsule_handed_off=capsule_handed_off,
+    )
+
+
 async def _execute_attempt_work(
     plans: tuple[SessionPlan, ...],
     *,
@@ -1863,6 +2146,10 @@ def _validate_exact_development_schedule(
     if (
         len(activities) != 128
         or len(no_speech_plans) != 32
+        or {plan.session_ordinal for plan in plans} != set(range(32))
+        or {activity.activity_ordinal for activity in activities} != set(range(128))
+        or {plan.window_ordinal for plan in no_speech_plans} != set(range(32))
+        or {plan.split for plan in (*plans, *no_speech_plans)} != {"development"}
         or set(language_counts) != VALID_LANGUAGES
         or set(language_counts.values()) != {16}
         or condition_counts
@@ -1878,12 +2165,68 @@ def _validate_exact_development_schedule(
         raise RunnerError("development schedule cardinality is invalid")
 
 
+def _validate_exact_holdout_schedule(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+) -> None:
+    activities = tuple(activity for plan in plans for activity in plan.activities)
+    language_counts = Counter(activity.language for activity in activities)
+    condition_counts = Counter(activity.condition for activity in activities)
+    if (
+        len(activities) != 128
+        or len(no_speech_plans) != 32
+        or {plan.session_ordinal for plan in plans} != set(range(32, 64))
+        or {activity.activity_ordinal for activity in activities} != set(range(128, 256))
+        or {plan.window_ordinal for plan in no_speech_plans} != set(range(32, 64))
+        or {plan.split for plan in (*plans, *no_speech_plans)} != {"holdout"}
+        or set(language_counts) != VALID_LANGUAGES
+        or set(language_counts.values()) != {16}
+        or condition_counts
+        != Counter(
+            {
+                "clean": 32,
+                "twilio_codec_only": 32,
+                "acoustic_impairment": 32,
+                "interaction_stress": 32,
+            }
+        )
+    ):
+        raise RunnerError("holdout schedule cardinality is invalid")
+
+
 def compute_development_schedule_sha256(
     plans: tuple[SessionPlan, ...],
     *,
     no_speech_plans: tuple[NoSpeechWindowPlan, ...],
 ) -> str:
     """Bind replay order, references, timing, and audio bytes without publishing payloads."""
+    return _compute_schedule_sha256(
+        plans,
+        no_speech_plans=no_speech_plans,
+        schema_id="gate_0b_development_schedule_identity_v1",
+    )
+
+
+def compute_holdout_schedule_sha256(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+) -> str:
+    """Bind the post-lock holdout schedule released by the custodian."""
+    return _compute_schedule_sha256(
+        plans,
+        no_speech_plans=no_speech_plans,
+        schema_id="gate_0b_holdout_schedule_identity_v1",
+    )
+
+
+def _compute_schedule_sha256(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+    schema_id: str,
+) -> str:
 
     def replay_identity(replay_input: Gate0BReplayInput) -> dict[str, Any]:
         return {
@@ -1898,7 +2241,7 @@ def compute_development_schedule_sha256(
         }
 
     value = {
-        "schema_id": "gate_0b_development_schedule_identity_v1",
+        "schema_id": schema_id,
         "sessions": [
             {
                 "session_ordinal": plan.session_ordinal,
@@ -1962,6 +2305,8 @@ def _verify_execution_preregistration(
     custodian_public_key: bytes,
     custodian_key_id: str,
     capsule_path: Path,
+    capsule_location_field: str,
+    required_split: str,
 ) -> None:
     """Recompute the approved document and bind every directly observable input."""
     if not isinstance(document, Mapping):
@@ -1987,6 +2332,11 @@ def _verify_execution_preregistration(
         raise RunnerError("preregistration ledger custody identity is invalid")
     if not isinstance(approval_public_key, bytes) or not isinstance(custodian_public_key, bytes):
         raise RunnerError("preregistration trust root is invalid")
+    if capsule_location_field not in {
+        "audit_capsule_location_sha256",
+        "holdout_capsule_location_sha256",
+    } or required_split not in VALID_SPLITS:
+        raise RunnerError("preregistration execution stage is invalid")
     observable = {
         "preregistration_sha256": config.preregistration_sha256,
         "source_sha": config.source_sha,
@@ -2010,7 +2360,7 @@ def _verify_execution_preregistration(
         "ledger_custodian_key_id": ledger_identity.key_id,
         "ledger_custodian_public_key_sha256": ledger_identity.public_key_sha256,
         "ledger_location_sha256": ledger_identity.ledger_location_sha256,
-        "audit_capsule_location_sha256": artifact_location_sha256(capsule_path),
+        capsule_location_field: artifact_location_sha256(capsule_path),
     }
     expected_observable = {
         "preregistration_sha256": expected["preregistration_sha256"],
@@ -2028,8 +2378,8 @@ def _verify_execution_preregistration(
         raise RunnerError("preregistration execution cap mismatch")
 
     all_splits = {plan.split for plan in (*plans, *no_speech_plans)}
-    if all_splits != {"development"}:
-        raise RunnerError("executor accepts only the development split")
+    if all_splits != {required_split}:
+        raise RunnerError("executor split does not match its preregistration stage")
 
 
 def _load_pinned_approval_public_key() -> bytes:
@@ -2902,6 +3252,7 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "evaluator_sha256": None,
             "ledger_location_sha256": None,
             "audit_capsule_location_sha256": None,
+            "holdout_capsule_location_sha256": None,
             "evidence_location_sha256": None,
             "consent_attestation_sha256": None,
             "retention_attestation_sha256": None,

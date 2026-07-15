@@ -28,7 +28,11 @@ from app.services.qualification_identity import (
     canonical_json_bytes,
     ledger_location_sha256,
 )
-from app.services.qualification_ledger import LedgerCustodyIdentity, LedgerReceipt
+from app.services.qualification_ledger import (
+    CustodyLedgerState,
+    LedgerCustodyIdentity,
+    LedgerReceipt,
+)
 from app.services.voice_turn_replay import Gate0BReplayInput
 from scripts.run_gemini_caller_turn_qualification import (
     OFFICIAL_ENDPOINT,
@@ -48,7 +52,9 @@ from scripts.run_gemini_caller_turn_qualification import (
     build_parser,
     build_preregistration,
     compute_development_schedule_sha256,
+    compute_holdout_schedule_sha256,
     execute_authorized_attempt,
+    execute_authorized_holdout,
     execute_injected_session,
     execute_injected_no_speech_window,
     main,
@@ -116,13 +122,19 @@ class ReceiptClock:
 
 
 class FakeCustodyLedger:
-    def __init__(self, path: Path, *, order: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        order: list[str] | None = None,
+        public_key_sha256: str = "8" * 64,
+    ) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self._order = order
         self._identity = LedgerCustodyIdentity(
             ledger_instance_id="ledger_instance_1",
             key_id="ledger_custodian_1",
-            public_key_sha256="8" * 64,
+            public_key_sha256=public_key_sha256,
             ledger_location_sha256=ledger_location_sha256(path),
         )
 
@@ -145,6 +157,19 @@ class FakeCustodyLedger:
     def record_development_checkpoint(self, **values) -> LedgerReceipt:
         self._record("development_checkpoint", values)
         return LedgerReceipt("development_checkpoint", 3, "6" * 64, "development_collection")
+
+    def resume_holdout(self, **values):
+        self._record("resume_holdout", values)
+        campaign = values["campaign"]
+        authorization = values["authorization"]
+        return AttemptClaim(
+            campaign_id=campaign.campaign_id,
+            attempt_id=authorization.attempt_id,
+            attempt_index=authorization.attempt_index,
+            lease_id="7" * 64,
+            provider_requests_reserved=authorization.provider_request_reservation,
+            cost_reserved_microusd=authorization.cost_reservation_microusd,
+        )
 
     def record_policy_lock(self, **values) -> LedgerReceipt:
         self._record("policy_lock", values)
@@ -333,6 +358,78 @@ def _development_schedule() -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWind
     return tuple(plans), windows
 
 
+def _holdout_schedule() -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
+    plans = []
+    for session_index in range(32):
+        activities = []
+        replay_inputs = []
+        for index in range(4):
+            ordinal = 128 + session_index * 4 + index
+            start_ms = index * 150
+            end_ms = start_ms + 100
+            language = LANGUAGES[(ordinal - 128) % len(LANGUAGES)]
+            condition = CONDITIONS[(ordinal - 128) % len(CONDITIONS)]
+            activities.append(
+                SessionActivityPlan(
+                    activity_ordinal=ordinal,
+                    split="holdout",
+                    language=language,
+                    condition=condition,
+                    scenario_tags=("standard",),
+                    reference=ActivityReference(
+                        ordinal,
+                        language,
+                        f"holdout purpose recorded phrase {ordinal}",
+                    ),
+                    expected_lifecycle_status="retrospective_complete",
+                    expected_epoch=1,
+                    start_at_ms=start_ms,
+                    end_at_ms=end_ms,
+                )
+            )
+            replay_inputs.extend(
+                (
+                    Gate0BReplayInput("caller_activity_start", start_ms, 1, ordinal),
+                    Gate0BReplayInput(
+                        "audio",
+                        start_ms + 20,
+                        1,
+                        ordinal,
+                        audio=b"\x00\x00" * 319,
+                        duration_ms=20,
+                    ),
+                    Gate0BReplayInput("caller_activity_end", end_ms, 1, ordinal),
+                )
+            )
+        plans.append(
+            SessionPlan(
+                session_ordinal=32 + session_index,
+                split="holdout",
+                activities=tuple(activities),
+                replay_inputs=tuple(replay_inputs),
+            )
+        )
+    windows = tuple(
+        NoSpeechWindowPlan(
+            window_ordinal=32 + index,
+            split="holdout",
+            condition="background_noise",
+            replay_inputs=(
+                Gate0BReplayInput(
+                    "audio",
+                    0,
+                    1,
+                    None,
+                    audio=b"\x00\x00" * 319,
+                    duration_ms=20,
+                ),
+            ),
+        )
+        for index in range(32)
+    )
+    return tuple(plans), windows
+
+
 def _restart_plan() -> SessionPlan:
     first = _activity(1, start_ms=0, end_ms=100)
     second = SessionActivityPlan(
@@ -454,6 +551,7 @@ def _approval_envelopes(
     preregistration_sha256: str = PREREGISTRATION_SHA,
     provider_request_reservation: int = 128,
     cost_reservation_microusd: int = 10_000_000,
+    ledger_custodian_public_key_sha256: str = "8" * 64,
 ) -> tuple[dict[str, object], dict[str, object]]:
     campaign = {
         "schema_id": "gate_0b_campaign_approval_v1",
@@ -470,7 +568,7 @@ def _approval_envelopes(
         "max_cost_microusd": 30_000_000,
         "ledger_instance_id": "ledger_instance_1",
         "ledger_custodian_key_id": "ledger_custodian_1",
-        "ledger_custodian_public_key_sha256": "8" * 64,
+        "ledger_custodian_public_key_sha256": ledger_custodian_public_key_sha256,
         "ledger_location_sha256": ledger_location_sha256(ledger_path),
         "real_caller_data_authorized": False,
         "runtime_wiring_authorized": False,
@@ -500,6 +598,8 @@ def _preregistration(
     approval_public_key: bytes,
     ledger_path: Path,
     custodian_public_key: bytes,
+    *,
+    ledger_custodian_public_key_sha256: str = "8" * 64,
 ) -> dict[str, object]:
     setup_sha256 = sha256(canonical_json_bytes(build_gate0b_setup_identity(_config()))).hexdigest()
     plans, no_speech_plans = _development_schedule()
@@ -516,7 +616,7 @@ def _preregistration(
             "record_root_public_key_sha256": "9" * 64,
             "ledger_instance_id": "ledger_instance_1",
             "ledger_custodian_key_id": "ledger_custodian_1",
-            "ledger_custodian_public_key_sha256": "8" * 64,
+            "ledger_custodian_public_key_sha256": ledger_custodian_public_key_sha256,
             "source_sha": SOURCE_SHA,
             "environment_identity_sha256": "2" * 64,
             "manifest_sha256": "3" * 64,
@@ -533,6 +633,9 @@ def _preregistration(
             ).hexdigest(),
             "ledger_location_sha256": ledger_location_sha256(ledger_path),
             "audit_capsule_location_sha256": artifact_location_sha256(_capsule_path(ledger_path)),
+            "holdout_capsule_location_sha256": artifact_location_sha256(
+                _holdout_capsule_path(ledger_path)
+            ),
             "evidence_location_sha256": "b" * 64,
             "consent_attestation_sha256": "c" * 64,
             "retention_attestation_sha256": "d" * 64,
@@ -543,6 +646,10 @@ def _preregistration(
 
 def _capsule_path(ledger_path: Path) -> Path:
     return ledger_path.with_name("gate-0b-capsule.json")
+
+
+def _holdout_capsule_path(ledger_path: Path) -> Path:
+    return ledger_path.with_name("gate-0b-holdout-capsule.json")
 
 
 def test_setup_and_connection_policy_are_exact_and_non_debuggable() -> None:
@@ -1376,6 +1483,149 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     )
 
 
+def test_holdout_resumes_same_signed_attempt_and_consumes_only_remaining_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approval_private, approval_public = _key_pair()
+    audit_private, audit_public = _custodian_key_pair()
+    ledger_public = b"l" * 32
+    ledger_public_sha = sha256(ledger_public).hexdigest()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    preregistration = _preregistration(
+        approval_public,
+        ledger_path,
+        audit_public,
+        ledger_custodian_public_key_sha256=ledger_public_sha,
+    )
+    campaign_envelope, attempt_envelope = _approval_envelopes(
+        approval_private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+        ledger_custodian_public_key_sha256=ledger_public_sha,
+    )
+    plans, no_speech_plans = _holdout_schedule()
+    holdout_manifest_sha256 = compute_holdout_schedule_sha256(
+        plans,
+        no_speech_plans=no_speech_plans,
+    )
+    state = CustodyLedgerState(
+        phase="holdout_collection",
+        phase_history=(
+            "preregistered",
+            "development_collection",
+            "policy_selection_locked",
+            "holdout_collection",
+        ),
+        attempt_ids=("attempt_001",),
+        active_attempt_id="attempt_001",
+        completed_attempt_id=None,
+        campaign_approval_sha256=sha256(
+            canonical_json_bytes(campaign_envelope["payload"])
+        ).hexdigest(),
+        attempt_authorization_sha256=sha256(
+            canonical_json_bytes(attempt_envelope["payload"])
+        ).hexdigest(),
+        attempt_claimed_at=NOW,
+        selected_policy_ms=100,
+        policy_lock_sha256="1" * 64,
+        development_capsule_sha256="2" * 64,
+        development_ledger_head_sha256="3" * 64,
+        holdout_manifest_sha256=holdout_manifest_sha256,
+        holdout_execution_claimed=False,
+        holdout_capsule_sha256=None,
+        development_usage_evidence_sha256="4" * 64,
+        final_usage_evidence_sha256=None,
+        development_provider_requests=64,
+        development_cost_microusd=4_992,
+        actual_provider_requests=0,
+        actual_cost_microusd=0,
+        final_ledger_head_sha256="5" * 64,
+    )
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: approval_public)
+    monkeypatch.setattr(
+        runner_module,
+        "validate_custody_ledger_snapshot",
+        lambda *_args, **_kwargs: state,
+    )
+    order: list[str] = []
+    ledger = FakeCustodyLedger(
+        ledger_path,
+        order=order,
+        public_key_sha256=ledger_public_sha,
+    )
+    sessions = [
+        FakeSession(
+            [
+                {"setupComplete": {}},
+                _server_event(text=plan.activities[0].reference.text),
+                _usage_message(),
+                None,
+            ]
+        )
+        for plan in plans
+    ]
+    no_speech_sessions = [
+        FakeSession([{"setupComplete": {}}, _server_event(), _usage_message(), None])
+        for _ in no_speech_plans
+    ]
+    connector = FakeConnector([*sessions, *no_speech_sessions])
+    capsule_path = _holdout_capsule_path(ledger_path)
+
+    def credential_loader(reference: str) -> SecretCredential:
+        order.append("credential:" + reference)
+        return SecretCredential(CANARY_SECRET)
+
+    result = asyncio.run(
+        execute_authorized_holdout(
+            plans,
+            no_speech_plans=no_speech_plans,
+            preregistration=preregistration,
+            config=AuthorizedAttemptConfig(
+                preregistration_sha256=preregistration["preregistration_sha256"],
+                source_sha=SOURCE_SHA,
+                approval_key_id=KEY_ID,
+                credential_reference="qualification_secret_v1",
+                policy_ms=100,
+                whole_run_timeout_seconds=30,
+            ),
+            session_config=_config(),
+            campaign_envelope=campaign_envelope,
+            attempt_envelope=attempt_envelope,
+            ledger=ledger,
+            ledger_custodian_public_key=ledger_public,
+            now=NOW,
+            credential_loader=credential_loader,
+            connector_factory=lambda _credential: connector,
+            receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+            pricing=load_pricing(PRICING_PATH),
+            custodian_public_key=audit_public,
+            custodian_key_id="audit_custodian_1",
+            capsule_path=capsule_path,
+        )
+    )
+
+    assert result.complete is True
+    assert result.provider_request_count == 128
+    assert result.cost_microusd == 9_984
+    assert [name for name, _ in ledger.calls[:2]] == ["export_snapshot", "resume_holdout"]
+    assert "claim" not in [name for name, _ in ledger.calls]
+    assert ledger.calls[-1][0] == "terminal_outcome"
+    terminal = ledger.calls[-1][1]
+    assert terminal["outcome"] == "completed"
+    assert terminal["actual_provider_requests"] == 128
+    assert terminal["actual_cost_microusd"] == 9_984
+    envelope = json.loads(capsule_path.read_bytes())
+    opened = open_audit_capsule(
+        envelope,
+        custodian_private_key=audit_private,
+        expected_key_id="audit_custodian_1",
+    )
+    assert opened["accounting"]["split"] == "holdout"
+    assert opened["policy_ms"] == 100
+
+
 def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2143,6 +2393,7 @@ def test_cli_help_and_dry_run_name_every_immutable_value(
         "attempt_caps",
         "audio_caps",
         "audit_capsule_location_sha256",
+        "holdout_capsule_location_sha256",
         "consent_attestation_sha256",
         "corpus_sha256",
         "cost_caps_microusd",
@@ -2213,6 +2464,7 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
         "evaluator_sha256": "8" * 64,
         "ledger_location_sha256": "9" * 64,
         "audit_capsule_location_sha256": "a" * 64,
+        "holdout_capsule_location_sha256": "f" * 64,
         "evidence_location_sha256": "b" * 64,
         "consent_attestation_sha256": "c" * 64,
         "retention_attestation_sha256": "d" * 64,

@@ -883,6 +883,40 @@ def usage_evidence_sha256(
     ).hexdigest()
 
 
+def combined_usage_evidence_sha256(
+    *,
+    development_usage_evidence_sha256: str,
+    holdout_usage_evidence_sha256: str,
+    provider_requests: int,
+    cost_microusd: int,
+) -> str:
+    """Bind both split digests and cumulative accounting into one final receipt."""
+    for value in (development_usage_evidence_sha256, holdout_usage_evidence_sha256):
+        if not isinstance(value, str) or not SHA256.fullmatch(value):
+            raise MeasurementError("split usage evidence digest is invalid")
+    requests = _bounded_int(
+        provider_requests,
+        label="combined usage provider requests",
+        maximum=1_000,
+    )
+    cost = _bounded_int(
+        cost_microusd,
+        label="combined usage cost",
+        maximum=100_000_000,
+    )
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_id": "gate_0b_combined_usage_evidence_v1",
+                "development_usage_evidence_sha256": development_usage_evidence_sha256,
+                "holdout_usage_evidence_sha256": holdout_usage_evidence_sha256,
+                "provider_requests": requests,
+                "cost_microusd": cost,
+            }
+        )
+    ).hexdigest()
+
+
 def derive_primitive_records_from_capsule(
     capsule: Mapping[str, Any],
     *,

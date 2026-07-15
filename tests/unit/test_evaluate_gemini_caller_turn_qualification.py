@@ -19,6 +19,7 @@ from app.services.caller_turn_measurement import (
     CriticalSpanFact,
     NoSpeechPrimitiveRecord,
     build_signed_record_root,
+    combined_usage_evidence_sha256,
     usage_evidence_sha256,
 )
 from app.services.qualification_identity import canonical_json_bytes
@@ -411,6 +412,7 @@ def _custody_bundle():
             "evaluator_sha256": sha256(Path(evaluator_module.__file__).read_bytes()).hexdigest(),
             "ledger_location_sha256": "7" * 64,
             "audit_capsule_location_sha256": "8" * 64,
+            "holdout_capsule_location_sha256": "7" * 64,
             "evidence_location_sha256": "9" * 64,
             "consent_attestation_sha256": "a" * 64,
             "retention_attestation_sha256": "b" * 64,
@@ -588,6 +590,23 @@ def _custody_bundle():
     _append_ledger_record(
         ledger_key,
         ledger,
+        event="holdout_execution_claim",
+        phase_before="holdout_collection",
+        phase_after="holdout_collection",
+        attempt_id="attempt_1",
+        body={
+            "holdout_release_receipt_sha256": ledger["head_hash"],
+            "selected_policy_ms": 100,
+            "holdout_manifest_sha256": "4" * 64,
+            "provider_requests_remaining": 64,
+            "cost_remaining_microusd": 10_000_000 - development_cost,
+            "execution_nonce": "execution_nonce_1",
+        },
+        at="2026-07-15T15:13:00Z",
+    )
+    _append_ledger_record(
+        ledger_key,
+        ledger,
         event="terminal_outcome",
         phase_before="holdout_collection",
         phase_after="completed",
@@ -596,8 +615,17 @@ def _custody_bundle():
             "outcome": "completed",
             "outage_enum": None,
             "holdout_capsule_sha256": holdout_digest,
-            "usage_evidence_sha256": usage_evidence_sha256(
-                final_usage,
+            "usage_evidence_sha256": combined_usage_evidence_sha256(
+                development_usage_evidence_sha256=usage_evidence_sha256(
+                    development_usage,
+                    provider_requests=64,
+                    cost_microusd=development_cost,
+                ),
+                holdout_usage_evidence_sha256=usage_evidence_sha256(
+                    holdout_usage,
+                    provider_requests=56,
+                    cost_microusd=evaluator_module._cost_microusd_from_usage(holdout_usage),
+                ),
                 provider_requests=120,
                 cost_microusd=final_cost,
             ),

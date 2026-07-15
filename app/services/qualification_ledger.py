@@ -73,9 +73,12 @@ class CustodyLedgerState:
     development_capsule_sha256: str | None
     development_ledger_head_sha256: str | None
     holdout_manifest_sha256: str | None
+    holdout_execution_claimed: bool
     holdout_capsule_sha256: str | None
     development_usage_evidence_sha256: str | None
     final_usage_evidence_sha256: str | None
+    development_provider_requests: int
+    development_cost_microusd: int
     actual_provider_requests: int
     actual_cost_microusd: int
     final_ledger_head_sha256: str
@@ -88,6 +91,10 @@ class LedgerCustodyClient(Protocol):
     def identity(self) -> LedgerCustodyIdentity: ...
 
     def claim_attempt(self, **values: Any) -> Any: ...
+
+    def resume_holdout(self, **values: Any) -> Any:
+        """Atomically append the one-shot signed holdout execution claim."""
+        ...
 
     def record_development_checkpoint(self, **values: Any) -> LedgerReceipt: ...
 
@@ -125,6 +132,7 @@ class _ReplayState:
     policy_lock: str | None = None
     policy_lock_receipt: str | None = None
     holdout_manifest: str | None = None
+    holdout_execution_claimed: bool = False
     holdout_capsule: str | None = None
     campaign_approval: str | None = None
     completed_attempt: str | None = None
@@ -251,9 +259,12 @@ def validate_custody_ledger_snapshot(
         development_capsule_sha256=replay.development_capsule,
         development_ledger_head_sha256=replay.development_head,
         holdout_manifest_sha256=replay.holdout_manifest,
+        holdout_execution_claimed=replay.holdout_execution_claimed,
         holdout_capsule_sha256=replay.holdout_capsule,
         development_usage_evidence_sha256=replay.development_usage,
         final_usage_evidence_sha256=replay.final_usage,
+        development_provider_requests=replay.development_requests,
+        development_cost_microusd=replay.development_cost,
         actual_provider_requests=replay.actual_requests,
         actual_cost_microusd=replay.actual_cost,
         final_ledger_head_sha256=previous,
@@ -357,6 +368,15 @@ def _replay_record(
         )
     elif event == "holdout_release":
         _replay_holdout_release(
+            state,
+            body,
+            before=before,
+            after=after,
+            attempt_id=attempt_id,
+            previous_hash=previous_hash,
+        )
+    elif event == "holdout_execution_claim":
+        _replay_holdout_execution_claim(
             state,
             body,
             before=before,
@@ -668,7 +688,12 @@ def _replay_terminal_outcome(
     outage = body["outage_enum"]
     capsule = body["holdout_capsule_sha256"]
     if outcome == "completed":
-        if before != "holdout_collection" or after != "completed" or outage is not None:
+        if (
+            before != "holdout_collection"
+            or after != "completed"
+            or outage is not None
+            or not state.holdout_execution_claimed
+        ):
             raise CustodyLedgerError("completed outcome phase is invalid")
         state.holdout_capsule = _digest(capsule, label="holdout capsule")
         state.completed_attempt = attempt_id
@@ -688,7 +713,12 @@ def _replay_terminal_outcome(
         state.last_outage_enum = outage
     elif outcome in {"failed", "invalidated"}:
         expected_after = "aborted" if outcome == "failed" else "invalidated"
-        if after != expected_after or outage is not None or capsule is not None:
+        if (
+            after != expected_after
+            or outage is not None
+            or capsule is not None
+            or (before == "holdout_collection" and not state.holdout_execution_claimed)
+        ):
             raise CustodyLedgerError("terminal failure outcome is invalid")
         state.transition(after)
     else:
@@ -702,6 +732,61 @@ def _replay_terminal_outcome(
     state.final_usage = final_usage
     state.actual_requests = requests
     state.actual_cost = cost
+
+
+def _replay_holdout_execution_claim(
+    state: _ReplayState,
+    raw: object,
+    *,
+    before: str,
+    after: str,
+    attempt_id: str | None,
+    previous_hash: str,
+) -> None:
+    body = _strict_mapping(
+        raw,
+        {
+            "holdout_release_receipt_sha256",
+            "selected_policy_ms",
+            "holdout_manifest_sha256",
+            "provider_requests_remaining",
+            "cost_remaining_microusd",
+            "execution_nonce",
+        },
+        label="holdout execution claim body",
+    )
+    if (
+        before != "holdout_collection"
+        or after != before
+        or attempt_id != state.active_attempt
+        or state.holdout_manifest is None
+        or state.holdout_execution_claimed
+        or _digest(
+            body["holdout_release_receipt_sha256"],
+            label="holdout release receipt",
+        )
+        != previous_hash
+        or body["selected_policy_ms"] != state.selected_policy
+        or _digest(body["holdout_manifest_sha256"], label="holdout manifest")
+        != state.holdout_manifest
+        or _bounded_int(
+            body["provider_requests_remaining"],
+            label="holdout requests remaining",
+            maximum=state.active_request_reservation,
+            minimum=0,
+        )
+        != state.active_request_reservation - state.development_requests
+        or _bounded_int(
+            body["cost_remaining_microusd"],
+            label="holdout cost remaining",
+            maximum=state.active_cost_reservation,
+            minimum=0,
+        )
+        != state.active_cost_reservation - state.development_cost
+    ):
+        raise CustodyLedgerError("holdout execution claim is invalid")
+    _safe_id(body["execution_nonce"], label="holdout execution nonce")
+    state.holdout_execution_claimed = True
 
 
 def _strict_mapping(raw: object, fields: set[str], *, label: str) -> dict[str, Any]:

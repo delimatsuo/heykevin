@@ -33,6 +33,7 @@ from app.services.caller_turn_measurement import (  # noqa: E402
     MeasurementError,
     NoSpeechPrimitiveRecord,
     build_signed_record_root,
+    combined_usage_evidence_sha256,
     compute_record_merkle_root,
     derive_audit_capsule_accounting,
     derive_primitive_records_from_capsule,
@@ -453,6 +454,7 @@ def _evaluate_custody_bundle(
     if (
         state.phase != "completed"
         or state.phase_history != EXPECTED_PHASE_HISTORY
+        or not state.holdout_execution_claimed
         or state.selected_policy_ms is None
         or state.policy_lock_sha256 is None
     ):
@@ -569,14 +571,16 @@ def _evaluate_custody_bundle(
         development_capsule
     )
     development_cost_microusd = _cost_microusd_from_usage(development_usage)
+    development_usage_digest = usage_evidence_sha256(
+        development_usage,
+        provider_requests=int(development_usage["provider_requests"]),
+        cost_microusd=development_cost_microusd,
+    )
     if (
         development_failures
-        or state.development_usage_evidence_sha256
-        != usage_evidence_sha256(
-            development_usage,
-            provider_requests=int(development_usage["provider_requests"]),
-            cost_microusd=development_cost_microusd,
-        )
+        or state.development_usage_evidence_sha256 != development_usage_digest
+        or state.development_provider_requests != development_usage["provider_requests"]
+        or state.development_cost_microusd != development_cost_microusd
     ):
         raise EvaluationError("development capsule accounting is invalid")
     candidate_samples = {
@@ -616,13 +620,20 @@ def _evaluate_custody_bundle(
     )
     holdout_usage, holdout_failures = derive_audit_capsule_accounting(holdout_capsule)
     usage = _combine_usage(development_usage, holdout_usage)
-    cost_microusd = _cost_microusd_from_usage(usage)
+    holdout_cost_microusd = _cost_microusd_from_usage(holdout_usage)
+    holdout_usage_digest = usage_evidence_sha256(
+        holdout_usage,
+        provider_requests=int(holdout_usage["provider_requests"]),
+        cost_microusd=holdout_cost_microusd,
+    )
+    cost_microusd = development_cost_microusd + holdout_cost_microusd
     usage_with_cost = {**usage, "cost_microusd": cost_microusd}
     run_failures = (*development_failures, *holdout_failures)
     if (
         state.final_usage_evidence_sha256
-        != usage_evidence_sha256(
-            usage,
+        != combined_usage_evidence_sha256(
+            development_usage_evidence_sha256=development_usage_digest,
+            holdout_usage_evidence_sha256=holdout_usage_digest,
             provider_requests=int(usage["provider_requests"]),
             cost_microusd=cost_microusd,
         )
@@ -1345,7 +1356,7 @@ def _usage_is_complete_and_bounded(usage: Mapping[str, Any]) -> bool:
         and usage["input_audio_seconds"] <= 3_600
         and usage["output_audio_seconds"] <= 1_800
         and usage["cost_microusd"] <= 10_000_000
-        and usage["cost_microusd"] == expected_cost_microusd
+        and expected_cost_microusd <= usage["cost_microusd"] <= expected_cost_microusd + 1
     )
 
 

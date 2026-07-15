@@ -202,6 +202,23 @@ def _append_completed_lifecycle(
     _record(
         private,
         snapshot,
+        event="holdout_execution_claim",
+        phase_before="holdout_collection",
+        phase_after="holdout_collection",
+        attempt_id="attempt_1",
+        body={
+            "holdout_release_receipt_sha256": snapshot["head_hash"],
+            "selected_policy_ms": 100,
+            "holdout_manifest_sha256": "4" * 64,
+            "provider_requests_remaining": 64,
+            "cost_remaining_microusd": 9_000_000,
+            "execution_nonce": "execution_nonce_1",
+        },
+        at=NOW + timedelta(seconds=5),
+    )
+    _record(
+        private,
+        snapshot,
         event="terminal_outcome",
         phase_before="holdout_collection",
         phase_after="completed",
@@ -214,7 +231,7 @@ def _append_completed_lifecycle(
             "actual_provider_requests": 120,
             "actual_cost_microusd": 2_000_000,
         },
-        at=NOW + timedelta(seconds=5),
+        at=NOW + timedelta(seconds=6),
     )
 
 
@@ -249,11 +266,82 @@ def test_signed_custody_ledger_replays_one_attempt_across_both_splits() -> None:
     assert state.development_ledger_head_sha256 is not None
     assert state.development_usage_evidence_sha256 == "2" * 64
     assert state.final_usage_evidence_sha256 == "6" * 64
+    assert state.holdout_execution_claimed is True
     assert state.actual_provider_requests == 120
     assert state.actual_cost_microusd == 2_000_000
     assert state.final_ledger_head_sha256 == snapshot["head_hash"]
 
 
+def test_holdout_cannot_complete_without_one_shot_execution_claim() -> None:
+    private, public = _key_pair()
+    snapshot = _snapshot(private)
+    _append_claim(private, snapshot)
+    _append_completed_lifecycle(private, snapshot)
+    records = snapshot["records"]
+    assert isinstance(records, list)
+    del records[5:]
+    snapshot["head_hash"] = sha256(canonical_json_bytes(records[-1]["payload"])).hexdigest()
+    _record(
+        private,
+        snapshot,
+        event="terminal_outcome",
+        phase_before="holdout_collection",
+        phase_after="completed",
+        attempt_id="attempt_1",
+        body={
+            "outcome": "completed",
+            "outage_enum": None,
+            "holdout_capsule_sha256": "5" * 64,
+            "usage_evidence_sha256": "6" * 64,
+            "actual_provider_requests": 120,
+            "actual_cost_microusd": 2_000_000,
+        },
+        at=NOW + timedelta(seconds=6),
+    )
+
+    with pytest.raises(CustodyLedgerError, match="completed outcome"):
+        validate_custody_ledger_snapshot(
+            snapshot,
+            public_key=public,
+            expected_key_id=KEY_ID,
+            expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+        )
+
+
+def test_holdout_execution_claim_cannot_be_appended_twice() -> None:
+    private, public = _key_pair()
+    snapshot = _snapshot(private)
+    _append_claim(private, snapshot)
+    _append_completed_lifecycle(private, snapshot)
+    records = snapshot["records"]
+    assert isinstance(records, list)
+    del records[6:]
+    snapshot["head_hash"] = sha256(canonical_json_bytes(records[-1]["payload"])).hexdigest()
+    _record(
+        private,
+        snapshot,
+        event="holdout_execution_claim",
+        phase_before="holdout_collection",
+        phase_after="holdout_collection",
+        attempt_id="attempt_1",
+        body={
+            "holdout_release_receipt_sha256": snapshot["head_hash"],
+            "selected_policy_ms": 100,
+            "holdout_manifest_sha256": "4" * 64,
+            "provider_requests_remaining": 64,
+            "cost_remaining_microusd": 9_000_000,
+            "execution_nonce": "execution_nonce_2",
+        },
+        at=NOW + timedelta(seconds=6),
+    )
+
+    with pytest.raises(CustodyLedgerError, match="execution claim"):
+        validate_custody_ledger_snapshot(
+            snapshot,
+            public_key=public,
+            expected_key_id=KEY_ID,
+            expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+        )
 @pytest.mark.parametrize(
     "mutation",
     ("unsigned", "wrong_key", "fork", "truncate", "duplicate_sequence", "recreated"),
@@ -382,6 +470,7 @@ def test_executor_dependency_is_only_a_custodian_client_protocol() -> None:
     assert getattr(LedgerCustodyClient, "_is_protocol", False) is True
     assert {
         "claim_attempt",
+        "resume_holdout",
         "record_development_checkpoint",
         "record_policy_lock",
         "release_holdout",

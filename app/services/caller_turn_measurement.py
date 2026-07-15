@@ -41,14 +41,13 @@ from app.services.caller_turns import (
     CallerTurnAssembler,
     CallerTurnEvent,
     CallerTurnEventKind,
-    RetrospectiveCallerTurn,
 )
 from app.services.qualification_identity import canonical_json_bytes
 
 
 ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v1"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
-AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v4"
+AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v5"
 CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
 SEALED_CAPSULE_SCHEMA_ID = "gate_0b_sealed_capsule_v1"
 SIGNED_ROOT_SCHEMA_ID = "gate_0b_signed_record_root_v1"
@@ -597,6 +596,101 @@ def require_reducer_agreement(
     return primary
 
 
+def _fragment_is_foreign(
+    fragment: str,
+    *,
+    activity_ordinal: int,
+    references: tuple[ActivityReference, ...],
+    policy: AlignmentPolicy,
+) -> bool:
+    alignment = align_fragments((fragment,), references=references, policy=policy)
+    if (
+        alignment.status is AlignmentStatus.MATCHED
+        and alignment.activity_ordinal != activity_ordinal
+    ):
+        return True
+
+    containing_ordinals = {
+        reference.activity_ordinal
+        for reference in references
+        if _reference_contains_fragment(reference, fragment)
+    }
+    if containing_ordinals and activity_ordinal not in containing_ordinals:
+        return True
+
+    expected_reference = next(
+        reference
+        for reference in references
+        if reference.activity_ordinal == activity_ordinal
+    )
+    return any(
+        reference.activity_ordinal != activity_ordinal
+        and _fragment_contains_unique_foreign_sequence(
+            fragment,
+            expected_reference=expected_reference,
+            foreign_reference=reference,
+        )
+        for reference in references
+    )
+
+
+def _reference_contains_fragment(reference: ActivityReference, fragment: str) -> bool:
+    normalized_reference = normalize_text(reference.text, reference.language)
+    normalized_fragment = normalize_text(fragment, reference.language)
+    if not normalized_fragment.characters:
+        return False
+    if normalized_reference.words is not None and normalized_fragment.words is not None:
+        return _contains_tokens(normalized_reference.words, normalized_fragment.words)
+    return _contains_tokens(
+        normalized_reference.characters,
+        normalized_fragment.characters,
+    )
+
+
+def _fragment_contains_unique_foreign_sequence(
+    fragment: str,
+    *,
+    expected_reference: ActivityReference,
+    foreign_reference: ActivityReference,
+) -> bool:
+    normalized_fragment = normalize_text(fragment, foreign_reference.language)
+    normalized_expected = normalize_text(
+        expected_reference.text,
+        foreign_reference.language,
+    )
+    normalized_foreign = normalize_text(
+        foreign_reference.text,
+        foreign_reference.language,
+    )
+    if (
+        normalized_fragment.words is not None
+        and normalized_expected.words is not None
+        and normalized_foreign.words is not None
+    ):
+        fragment_tokens = normalized_fragment.words
+        expected_tokens = normalized_expected.words
+        foreign_tokens = normalized_foreign.words
+    else:
+        fragment_tokens = normalized_fragment.characters
+        expected_tokens = normalized_expected.characters
+        foreign_tokens = normalized_foreign.characters
+    return any(
+        _contains_tokens(fragment_tokens, candidate)
+        and not _contains_tokens(expected_tokens, candidate)
+        for candidate in (
+            foreign_tokens[index : index + 2]
+            for index in range(len(foreign_tokens) - 1)
+        )
+    )
+
+
+def _contains_tokens(container: tuple[str, ...], target: tuple[str, ...]) -> bool:
+    return bool(target) and any(
+        container[index : index + len(target)] == target
+        for index in range(len(container) - len(target) + 1)
+    )
+
+
 def measure_activity(
     measurement: ActivityMeasurementInput,
     *,
@@ -629,16 +723,13 @@ def measure_activity(
         policy=alignment_policy,
     )
     foreign_fragment_count = sum(
-        fragment_alignment.status is AlignmentStatus.MATCHED
-        and fragment_alignment.activity_ordinal != measurement.activity_ordinal
-        for fragment_alignment in (
-            align_fragments(
-                (fragment,),
-                references=measurement.references,
-                policy=alignment_policy,
-            )
-            for fragment in fragments
+        _fragment_is_foreign(
+            fragment,
+            activity_ordinal=measurement.activity_ordinal,
+            references=measurement.references,
+            policy=alignment_policy,
         )
+        for fragment in fragments
     )
     reconstructed = reconstruct_fragments(fragments, policy=alignment_policy)
     normalized_reference = normalize_text(expected_reference.text, measurement.language)
@@ -977,18 +1068,11 @@ def derive_primitive_records_from_capsule(
         session = session_index[session_activities[0]["session_ordinal"]]
         references = tuple(_capsule_reference(activity) for activity in session_activities)
         events = tuple(CallerTurnEvent.from_dict(value) for value in session["events"])
-        attributed_events_by_policy = {
-            policy_ms: _attribute_session_events(
-                events,
-                references=references,
-                wire_facts=session["wire_facts"],
-                policy_ms=policy_ms,
-                advance_to_ms=max(
-                    activity["advance_to_ms"] for activity in session_activities
-                ),
-            )
-            for policy_ms in policies_ms
-        }
+        attributed_events = _attribute_session_events(
+            events,
+            event_activity_ordinals=session["event_activity_ordinals"],
+            references=references,
+        )
         for activity in session_activities:
             wire, activity_end_ms = _capsule_wire_observation(
                 session["wire_facts"],
@@ -1009,10 +1093,7 @@ def derive_primitive_records_from_capsule(
                             condition=activity["condition"],
                             scenario_tags=tuple(activity["scenario_tags"]),
                             references=references,
-                            events=attributed_events_by_policy[policy_ms].get(
-                                activity["activity_ordinal"],
-                                (),
-                            ),
+                            events=attributed_events.get(activity["activity_ordinal"], ()),
                             expected_epoch=activity["expected_epoch"],
                             expected_lifecycle_status=activity["expected_lifecycle_status"],
                             advance_to_ms=activity["advance_to_ms"],
@@ -1046,99 +1127,25 @@ def derive_primitive_records_from_capsule(
     return tuple(activity_records), no_speech_records
 
 
-@dataclass(frozen=True, slots=True)
-class _TurnEvidence:
-    turn: RetrospectiveCallerTurn
-    events: tuple[CallerTurnEvent, ...]
-
-
 def _attribute_session_events(
     events: tuple[CallerTurnEvent, ...],
     *,
+    event_activity_ordinals: list[int],
     references: tuple[ActivityReference, ...],
-    wire_facts: list[Mapping[str, Any]],
-    policy_ms: int,
-    advance_to_ms: int,
 ) -> dict[int, tuple[CallerTurnEvent, ...]]:
-    if not events:
-        return {}
-    assembled = _assemble_session_turn_evidence(
-        events,
-        active_epoch=min(event.epoch for event in events),
-        policy_ms=policy_ms,
-        advance_to_ms=advance_to_ms,
-    )
+    if len(events) != len(event_activity_ordinals):
+        raise MeasurementError("session event ownership cardinality is invalid")
     attributed: dict[int, list[CallerTurnEvent]] = {}
-    causal_responses = tuple(
-        fact
-        for fact in sorted(
-            wire_facts,
-            key=lambda value: (value["at_ms"], value["sequence"]),
-        )
-        if fact["kind"] == "response_open"
-    )
     reference_ordinals = {reference.activity_ordinal for reference in references}
-    if len(assembled) > len(causal_responses) or any(
-        fact["activity_ordinal"] not in reference_ordinals for fact in causal_responses
+    for event, activity_ordinal in zip(
+        events,
+        event_activity_ordinals,
+        strict=True,
     ):
-        raise MeasurementError("session turn lacks causal activity ownership")
-    reconstruction_policy = AlignmentPolicy(fragment_mode=FragmentMode.DELTA)
-    for evidence, response in zip(assembled, causal_responses, strict=False):
-        fragments = tuple(
-            event.text
-            for event in evidence.events
-            if event.kind is CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT
-        )
-        if (
-            reconstruct_fragments(fragments, policy=reconstruction_policy).strip()
-            != evidence.turn.transcript
-        ):
-            raise MeasurementError("session turn transcript attribution disagrees")
-        attributed.setdefault(response["activity_ordinal"], []).extend(evidence.events)
+        if activity_ordinal not in reference_ordinals:
+            raise MeasurementError("session event lacks causal activity ownership")
+        attributed.setdefault(activity_ordinal, []).append(event)
     return {ordinal: tuple(values) for ordinal, values in attributed.items()}
-
-
-def _assemble_session_turn_evidence(
-    events: tuple[CallerTurnEvent, ...],
-    *,
-    active_epoch: int,
-    policy_ms: int,
-    advance_to_ms: int,
-) -> tuple[_TurnEvidence, ...]:
-    assembler = CallerTurnAssembler(
-        active_epoch=active_epoch,
-        quiescence_ms=policy_ms,
-    )
-    pending: list[CallerTurnEvent] = []
-    output: list[_TurnEvidence] = []
-
-    def capture(emitted: tuple[RetrospectiveCallerTurn, ...]) -> None:
-        if not emitted:
-            return
-        if len(emitted) != 1 or not pending:
-            raise MeasurementError("session turn attribution is inconsistent")
-        output.append(_TurnEvidence(turn=emitted[0], events=tuple(pending)))
-        pending.clear()
-
-    for event in events:
-        deadline = assembler.next_deadline_ms
-        if deadline is not None and event.at_ms >= deadline:
-            capture(assembler.advance_time(event.at_ms))
-
-        stale_before = assembler.stale_event_count
-        duplicate_before = assembler.duplicate_event_count
-        emitted = assembler.ingest(event)
-        accepted = (
-            assembler.stale_event_count == stale_before
-            and assembler.duplicate_event_count == duplicate_before
-            and event.kind is not CallerTurnEventKind.RECONNECT_STARTED
-        )
-        if accepted:
-            pending.append(event)
-        capture(emitted)
-
-    capture(assembler.advance_time(advance_to_ms))
-    return tuple(output)
 
 
 def build_signed_record_root(
@@ -1291,7 +1298,13 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
     for raw_session in sessions:
         session = _strict_mapping(
             raw_session,
-            {"session_ordinal", "split", "events", "wire_facts"},
+            {
+                "session_ordinal",
+                "split",
+                "events",
+                "event_activity_ordinals",
+                "wire_facts",
+            },
             label="audit capsule session",
         )
         session_ordinal = _bounded_int(
@@ -1303,10 +1316,14 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         events = session["events"]
         if not isinstance(events, list) or len(events) > 10_000:
             raise MeasurementError("audit capsule events are invalid")
-        for event in events:
-            CallerTurnEvent.from_dict(event)
+        typed_events = tuple(CallerTurnEvent.from_dict(event) for event in events)
         _validate_wire_facts(session["wire_facts"])
         _validate_response_wire_state(session["wire_facts"])
+        _validate_event_activity_ordinals(
+            session["event_activity_ordinals"],
+            events=typed_events,
+            wire_facts=session["wire_facts"],
+        )
         session_index[session_ordinal] = session
     activity_ordinals: set[int] = set()
     for raw_activity in activities:
@@ -1767,6 +1784,35 @@ def _validate_wire_facts(raw: object) -> None:
             "response_terminal",
         } and fact["response_ordinal"] is None:
             raise MeasurementError("response wire fact ordinal is missing")
+
+
+def _validate_event_activity_ordinals(
+    raw: object,
+    *,
+    events: tuple[CallerTurnEvent, ...],
+    wire_facts: list[Mapping[str, Any]],
+) -> None:
+    if not isinstance(raw, list) or len(raw) != len(events):
+        raise MeasurementError("session event ownership cardinality is invalid")
+    sent_audio = tuple(
+        fact for fact in wire_facts if fact["kind"] == "caller_audio_sent"
+    )
+    for event, value in zip(events, raw, strict=True):
+        activity_ordinal = _bounded_int(
+            value,
+            label="event activity ordinal",
+            maximum=255,
+        )
+        eligible = tuple(
+            fact
+            for fact in sent_audio
+            if fact["epoch"] == event.epoch and fact["at_ms"] <= event.at_ms
+        )
+        if not eligible:
+            raise MeasurementError("session event lacks causal activity ownership")
+        latest = max(eligible, key=lambda fact: (fact["at_ms"], fact["sequence"]))
+        if latest["activity_ordinal"] != activity_ordinal:
+            raise MeasurementError("session event ownership is not causal")
 
 
 def _validate_response_wire_state(raw: list[Mapping[str, Any]]) -> None:

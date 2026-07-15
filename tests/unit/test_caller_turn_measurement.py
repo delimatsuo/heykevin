@@ -91,7 +91,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         serialization.PublicFormat.Raw,
     )
     payload = {
-        "schema_id": "gate_0b_audit_capsule_v4",
+        "schema_id": "gate_0b_audit_capsule_v5",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -128,7 +128,18 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
                         "text": "purpose recorded synthetic phrase",
                     }
                 ],
-                "wire_facts": [],
+                "event_activity_ordinals": [3],
+                "wire_facts": [
+                    {
+                        "kind": "caller_audio_sent",
+                        "at_ms": 5,
+                        "response_ordinal": None,
+                        "activity_ordinal": 3,
+                        "sequence": 0,
+                        "epoch": 1,
+                        "audio_bytes": 640,
+                    }
+                ],
             }
         ],
         "activities": [
@@ -210,7 +221,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
 
 def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v4",
+        "schema_id": "gate_0b_audit_capsule_v5",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -256,19 +267,20 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
                 "events": [
                     {
                         "kind": "input_transcript_fragment",
-                        "at_ms": 10,
+                        "at_ms": 30,
                         "sequence": 1,
                         "epoch": 1,
                         "text": "book service today",
                     },
                     {
                         "kind": "turn_complete",
-                        "at_ms": 20,
+                        "at_ms": 40,
                         "sequence": 2,
                         "epoch": 1,
                         "text": "",
                     },
                 ],
+                "event_activity_ordinals": [3, 3],
                 "wire_facts": [
                     {
                         "kind": "caller_activity_start",
@@ -422,7 +434,7 @@ def _literal_wire_capsule() -> dict[str, object]:
         }
 
     return {
-        "schema_id": "gate_0b_audit_capsule_v4",
+        "schema_id": "gate_0b_audit_capsule_v5",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -453,19 +465,20 @@ def _literal_wire_capsule() -> dict[str, object]:
                 "events": [
                     {
                         "kind": "input_transcript_fragment",
-                        "at_ms": 10,
+                        "at_ms": 30,
                         "sequence": 1,
                         "epoch": 1,
                         "text": "book service today",
                     },
                     {
                         "kind": "turn_complete",
-                        "at_ms": 20,
+                        "at_ms": 40,
                         "sequence": 2,
                         "epoch": 1,
                         "text": "",
                     },
                 ],
+                "event_activity_ordinals": [3, 3],
                 "wire_facts": [
                     fact("caller_activity_start", 0, 0),
                     fact("caller_audio_sent", 20, 1, audio_bytes=640),
@@ -512,11 +525,24 @@ def _literal_wire_capsule() -> dict[str, object]:
 def _normalize_wire_sequences(capsule: dict[str, object]) -> None:
     sessions = capsule["sessions"]
     assert isinstance(sessions, list)
-    facts = sessions[0]["wire_facts"]
+    session = sessions[0]
+    facts = session["wire_facts"]
     assert isinstance(facts, list)
     facts.sort(key=lambda value: (value["at_ms"], value["sequence"]))
     for sequence, fact in enumerate(facts):
         fact["sequence"] = sequence
+    sent_audio = [fact for fact in facts if fact["kind"] == "caller_audio_sent"]
+    session["event_activity_ordinals"] = [
+        max(
+            (
+                fact
+                for fact in sent_audio
+                if fact["epoch"] == event["epoch"] and fact["at_ms"] <= event["at_ms"]
+            ),
+            key=lambda fact: (fact["at_ms"], fact["sequence"]),
+        )["activity_ordinal"]
+        for event in session["events"]
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1020,6 +1046,260 @@ def test_measurement_detects_foreign_fragment_even_when_whole_turn_matches() -> 
     assert record.contamination_count == 1
 
 
+def test_measurement_detects_unique_partial_foreign_subphrase() -> None:
+    current = ActivityReference(
+        3,
+        "en",
+        "please schedule the annual heating system inspection for next Tuesday morning",
+    )
+    foreign = ActivityReference(
+        4,
+        "en",
+        "the caller reported a blue leak beneath the kitchen sink yesterday",
+    )
+    measurement = replace(
+        _activity_input(),
+        activity_ordinal=3,
+        references=(current, foreign),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                "please schedule the annual heating system inspection ",
+            ),
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                15,
+                2,
+                1,
+                "blue leak ",
+            ),
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                18,
+                3,
+                1,
+                "for next Tuesday morning",
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 4, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.assignment_status == "matched"
+    assert record.contamination_count == 1
+
+
+def test_measurement_detects_foreign_subphrase_inside_one_large_fragment() -> None:
+    current = ActivityReference(
+        3,
+        "en",
+        "please schedule the annual heating system inspection for next Tuesday morning",
+    )
+    foreign = ActivityReference(
+        4,
+        "en",
+        "the caller reported a blue leak beneath the kitchen sink yesterday",
+    )
+    measurement = replace(
+        _activity_input(),
+        activity_ordinal=3,
+        references=(current, foreign),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                (
+                    "please schedule the annual heating system inspection blue leak "
+                    "for next Tuesday morning"
+                ),
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 2, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.assignment_status == "matched"
+    assert record.contamination_count == 1
+
+
+def test_compensating_missing_and_extra_turns_follow_causal_activity_ownership() -> None:
+    capsule = _literal_wire_capsule()
+    capsule["schema_id"] = "gate_0b_audit_capsule_v5"
+    session = capsule["sessions"][0]  # type: ignore[index]
+    session["events"] = [
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 500,
+            "sequence": 1,
+            "epoch": 1,
+            "text": "book service today",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 510,
+            "sequence": 2,
+            "epoch": 1,
+            "text": "",
+        },
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 800,
+            "sequence": 3,
+            "epoch": 1,
+            "text": "inspect kitchen sink",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 810,
+            "sequence": 4,
+            "epoch": 1,
+            "text": "",
+        },
+    ]
+    session["event_activity_ordinals"] = [4, 4, 4, 4]
+    facts = session["wire_facts"]
+    assert isinstance(facts, list)
+    facts.extend(
+        [
+            {
+                "kind": "caller_activity_start",
+                "at_ms": 400,
+                "response_ordinal": None,
+                "activity_ordinal": 4,
+                "sequence": 20,
+                "epoch": 1,
+                "audio_bytes": 0,
+            },
+            {
+                "kind": "caller_audio_sent",
+                "at_ms": 420,
+                "response_ordinal": None,
+                "activity_ordinal": 4,
+                "sequence": 21,
+                "epoch": 1,
+                "audio_bytes": 640,
+            },
+            {
+                "kind": "caller_speech_end",
+                "at_ms": 460,
+                "response_ordinal": None,
+                "activity_ordinal": 4,
+                "sequence": 22,
+                "epoch": 1,
+                "audio_bytes": 0,
+            },
+            {
+                "kind": "caller_activity_end",
+                "at_ms": 480,
+                "response_ordinal": None,
+                "activity_ordinal": 4,
+                "sequence": 23,
+                "epoch": 1,
+                "audio_bytes": 0,
+            },
+            {
+                "kind": "response_open",
+                "at_ms": 500,
+                "response_ordinal": 2,
+                "activity_ordinal": 4,
+                "sequence": 24,
+                "epoch": 1,
+                "audio_bytes": 0,
+            },
+            {
+                "kind": "audio_received",
+                "at_ms": 500,
+                "response_ordinal": 2,
+                "activity_ordinal": 4,
+                "sequence": 25,
+                "epoch": 1,
+                "audio_bytes": 640,
+            },
+            {
+                "kind": "response_terminal",
+                "at_ms": 850,
+                "response_ordinal": 2,
+                "activity_ordinal": 4,
+                "sequence": 26,
+                "epoch": 1,
+                "audio_bytes": 0,
+            },
+        ]
+    )
+    activities = capsule["activities"]
+    assert isinstance(activities, list)
+    activities.append(
+        {
+            "activity_ordinal": 4,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "clean",
+            "scenario_tags": ["standard"],
+            "reference_text": "inspect kitchen sink",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "speech_end_at_ms": 460,
+            "advance_to_ms": 1_200,
+        }
+    )
+    _normalize_wire_sequences(capsule)
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    by_activity = {record.activity_ordinal: record for record in records}
+    assert by_activity[3].assembled_turn_count == 0
+    assert by_activity[3].observed_lifecycle_status == "missing"
+    assert by_activity[4].assembled_turn_count == 2
+    assert by_activity[4].duplicate_count == 1
+
+
+def test_capsule_rejects_missing_event_ownership_entry() -> None:
+    capsule = _literal_wire_capsule()
+    session = capsule["sessions"][0]  # type: ignore[index]
+    session["event_activity_ordinals"] = [3]
+
+    with pytest.raises(MeasurementError, match="ownership cardinality"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
+def test_capsule_rejects_event_owner_that_disagrees_with_actual_sent_audio() -> None:
+    capsule = _literal_wire_capsule()
+    session = capsule["sessions"][0]  # type: ignore[index]
+    session["event_activity_ordinals"] = [4, 4]
+
+    with pytest.raises(MeasurementError, match="ownership is not causal"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
 def test_duplicate_terminal_cannot_hide_audio_after_the_first_terminal() -> None:
     capsule = _literal_wire_capsule()
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
@@ -1086,7 +1366,7 @@ def test_response_activity_label_must_match_latest_actual_caller_audio() -> None
 
 def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v4",
+        "schema_id": "gate_0b_audit_capsule_v5",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {

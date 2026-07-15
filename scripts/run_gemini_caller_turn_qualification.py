@@ -245,7 +245,7 @@ class _AbortConnection(Exception):
     pass
 
 
-class _ReceiptClockError(Exception):
+class _MeasurementClockError(Exception):
     pass
 
 
@@ -558,6 +558,7 @@ class SessionExecutionResult:
     provider_request_count: int
     epoch_count: int
     wire_facts: tuple[WireFact, ...] = ()
+    event_activity_ordinals: tuple[int, ...] = ()
 
     def redacted_report_dict(self) -> dict[str, Any]:
         event_counts = Counter(value.kind.value for value in self.audit_events)
@@ -802,8 +803,7 @@ async def execute_injected_session(
     config: SessionExecutionConfig,
     connector: InjectedConnector,
     credential: SecretCredential,
-    receipt_clock_ms: Callable[[], int],
-    outbound_clock_factory: Callable[[object], Callable[[], int]],
+    measurement_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult] | None = None,
     request_reserver: Callable[[], None] | None = None,
@@ -815,12 +815,11 @@ async def execute_injected_session(
         raise TypeError("config must be a SessionExecutionConfig")
     if not isinstance(credential, SecretCredential):
         raise TypeError("credential must be a SecretCredential")
-    if not callable(outbound_clock_factory):
-        raise TypeError("outbound clock factory must be callable")
+    if not callable(measurement_clock_factory):
+        raise TypeError("measurement clock factory must be callable")
     reducer = secondary_reducer or independent_reduce_message
-    validated_receipt_clock = _monotonic_receipt_clock(receipt_clock_ms)
-    validated_outbound_clock = _monotonic_receipt_clock(
-        outbound_clock_factory(plan)
+    measurement_clock_ms = _monotonic_measurement_clock(
+        measurement_clock_factory(plan)
     )
     progress = _SessionProgress(
         wires={value.activity_ordinal: _MutableWire() for value in plan.activities}
@@ -832,8 +831,7 @@ async def execute_injected_session(
                 config=config,
                 connector=connector,
                 credential=credential,
-                receipt_clock_ms=validated_receipt_clock,
-                outbound_clock_ms=validated_outbound_clock,
+                measurement_clock_ms=measurement_clock_ms,
                 sleep_ms=sleep_ms,
                 secondary_reducer=reducer,
                 request_reserver=request_reserver,
@@ -876,14 +874,14 @@ async def _execute_session_flow(
     config: SessionExecutionConfig,
     connector: InjectedConnector,
     credential: SecretCredential,
-    receipt_clock_ms: Callable[[], int],
-    outbound_clock_ms: Callable[[], int],
+    measurement_clock_ms: Callable[[], int],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult],
     request_reserver: Callable[[], None] | None,
     progress: _SessionProgress,
 ) -> SessionExecutionResult:
     audit_events: list[CallerTurnEvent] = []
+    event_activity_ordinals: list[int] = []
     wires = progress.wires
     wire_facts = progress.wire_facts
     usage = UsageCounts()
@@ -950,7 +948,7 @@ async def _execute_session_flow(
                     build_gate0b_setup_message(config, include_tool=_plan_uses_tools(plan))
                 )
                 setup_response = await session.receive()
-                setup_at_ms = receipt_clock_ms()
+                setup_at_ms = measurement_clock_ms()
                 last_receipt_ms = setup_at_ms
                 _record_wire_fact(
                     wire_facts,
@@ -958,8 +956,8 @@ async def _execute_session_flow(
                     setup_at_ms,
                     epoch=epoch,
                 )
-            except _ReceiptClockError:
-                error_code = "receipt_clock_invalid"
+            except _MeasurementClockError:
+                error_code = "measurement_clock_invalid"
                 raise _AbortConnection from None
             except ProviderSessionClosed:
                 error_code = "provider_closed"
@@ -995,7 +993,7 @@ async def _execute_session_flow(
                             if delay > 0:
                                 await sleep_ms(delay)
                             cursor_at_ms = activity.speech_end_at_ms
-                            actual_at_ms = outbound_clock_ms()
+                            actual_at_ms = measurement_clock_ms()
                             activity_speech_ended_at[
                                 activity.activity_ordinal
                             ] = actual_at_ms
@@ -1020,12 +1018,12 @@ async def _execute_session_flow(
                             _record_wire_fact(
                                 wire_facts,
                                 replay_input.kind,
-                                outbound_clock_ms(),
+                                measurement_clock_ms(),
                                 epoch=replay_input.epoch,
                                 activity_ordinal=replay_input.activity_ordinal,
                             )
                         elif replay_input.kind == "audio":
-                            actual_at_ms = outbound_clock_ms()
+                            actual_at_ms = measurement_clock_ms()
                             if replay_input.activity_ordinal is None:
                                 raise RunnerError("audio activity identity is missing")
                             activity_started_at.setdefault(
@@ -1043,7 +1041,7 @@ async def _execute_session_flow(
                         elif replay_input.kind == "caller_activity_end":
                             if replay_input.activity_ordinal is None:
                                 raise RunnerError("activity end identity is missing")
-                            actual_at_ms = outbound_clock_ms()
+                            actual_at_ms = measurement_clock_ms()
                             activity_ended_at[replay_input.activity_ordinal] = actual_at_ms
                             _record_wire_fact(
                                 wire_facts,
@@ -1052,8 +1050,8 @@ async def _execute_session_flow(
                                 epoch=replay_input.epoch,
                                 activity_ordinal=replay_input.activity_ordinal,
                             )
-                except _ReceiptClockError:
-                    sender_error = "receipt_clock_invalid"
+                except _MeasurementClockError:
+                    sender_error = "measurement_clock_invalid"
                 except TimeoutError:
                     raise
                 except Exception:
@@ -1111,7 +1109,7 @@ async def _execute_session_flow(
                             break
                         await sender_done.wait()
                     break
-                at_ms = receipt_clock_ms()
+                at_ms = measurement_clock_ms()
                 last_receipt_ms = at_ms
                 if not isinstance(message, Mapping):
                     error_code = "malformed_message"
@@ -1254,7 +1252,6 @@ async def _execute_session_flow(
                     )
                     break
                 sequence += len(primary.events)
-                audit_events.extend(primary.events)
                 latest_activity = _latest_sent_activity(
                     plan.activities,
                     activity_started_at,
@@ -1264,6 +1261,14 @@ async def _execute_session_flow(
                 latest_ordinal = (
                     latest_activity.activity_ordinal if latest_activity is not None else None
                 )
+                if primary.events and latest_ordinal is None:
+                    error_code = "unattributed_response"
+                    break
+                audit_events.extend(primary.events)
+                if latest_ordinal is not None:
+                    event_activity_ordinals.extend(
+                        [latest_ordinal] * len(primary.events)
+                    )
                 for event in primary.events:
                     wire_kind = {
                         CallerTurnEventKind.TOOL_CALL_STARTED: "tool_call_open",
@@ -1518,8 +1523,8 @@ async def _execute_session_flow(
                 at_ms=last_receipt_ms,
                 preferred_ordinal=active_response_activity,
             )
-        except _ReceiptClockError:
-            error_code = "receipt_clock_invalid"
+        except _MeasurementClockError:
+            error_code = "measurement_clock_invalid"
         except TimeoutError:
             raise
         except Exception:
@@ -1595,6 +1600,7 @@ async def _execute_session_flow(
         provider_request_count=provider_request_count,
         epoch_count=epoch_count,
         wire_facts=tuple(wire_facts),
+        event_activity_ordinals=tuple(event_activity_ordinals),
     )
 
 
@@ -1604,8 +1610,7 @@ async def execute_injected_no_speech_window(
     config: SessionExecutionConfig,
     connector: InjectedConnector,
     credential: SecretCredential,
-    receipt_clock_ms: Callable[[], int],
-    outbound_clock_factory: Callable[[object], Callable[[], int]],
+    measurement_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult] | None = None,
     request_reserver: Callable[[], None] | None = None,
@@ -1617,11 +1622,10 @@ async def execute_injected_no_speech_window(
         raise TypeError("config must be a SessionExecutionConfig")
     if not isinstance(credential, SecretCredential):
         raise TypeError("credential must be a SecretCredential")
-    if not callable(outbound_clock_factory):
-        raise TypeError("outbound clock factory must be callable")
-    validated_receipt_clock = _monotonic_receipt_clock(receipt_clock_ms)
-    validated_outbound_clock = _monotonic_receipt_clock(
-        outbound_clock_factory(plan)
+    if not callable(measurement_clock_factory):
+        raise TypeError("measurement clock factory must be callable")
+    measurement_clock_ms = _monotonic_measurement_clock(
+        measurement_clock_factory(plan)
     )
     try:
         return await asyncio.wait_for(
@@ -1630,8 +1634,7 @@ async def execute_injected_no_speech_window(
                 config=config,
                 connector=connector,
                 credential=credential,
-                receipt_clock_ms=validated_receipt_clock,
-                outbound_clock_ms=validated_outbound_clock,
+                measurement_clock_ms=measurement_clock_ms,
                 sleep_ms=sleep_ms,
                 secondary_reducer=secondary_reducer or independent_reduce_message,
                 request_reserver=request_reserver,
@@ -1652,8 +1655,7 @@ async def _execute_no_speech_flow(
     config: SessionExecutionConfig,
     connector: InjectedConnector,
     credential: SecretCredential,
-    receipt_clock_ms: Callable[[], int],
-    outbound_clock_ms: Callable[[], int],
+    measurement_clock_ms: Callable[[], int],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult],
     request_reserver: Callable[[], None] | None,
@@ -1694,7 +1696,7 @@ async def _execute_no_speech_flow(
     try:
         await session.send(build_gate0b_setup_message(config))
         setup = await session.receive()
-        last_receipt_ms = receipt_clock_ms()
+        last_receipt_ms = measurement_clock_ms()
         _record_wire_fact(wire_facts, "connection_open", last_receipt_ms, epoch=1)
         if setup != {"setupComplete": {}}:
             error_code = "setup_rejected"
@@ -1718,12 +1720,12 @@ async def _execute_no_speech_flow(
                         _record_wire_fact(
                             wire_facts,
                             "caller_audio_sent",
-                            outbound_clock_ms(),
+                            measurement_clock_ms(),
                             epoch=1,
                             audio_bytes=len(replay_input.audio),
                         )
-                except _ReceiptClockError:
-                    sender_error = "receipt_clock_invalid"
+                except _MeasurementClockError:
+                    sender_error = "measurement_clock_invalid"
                 except TimeoutError:
                     raise
                 except Exception:
@@ -1757,7 +1759,7 @@ async def _execute_no_speech_flow(
                     if not sender_done.is_set():
                         await sender_done.wait()
                     break
-                at_ms = receipt_clock_ms()
+                at_ms = measurement_clock_ms()
                 last_receipt_ms = at_ms
                 if not isinstance(message, Mapping):
                     error_code = "malformed_message"
@@ -1941,8 +1943,8 @@ async def _execute_no_speech_flow(
             last_receipt_ms,
             epoch=1,
         )
-    except _ReceiptClockError:
-        error_code = "receipt_clock_invalid"
+    except _MeasurementClockError:
+        error_code = "measurement_clock_invalid"
     except TimeoutError:
         raise
     except Exception:
@@ -2234,8 +2236,7 @@ async def execute_authorized_attempt(
     now: datetime,
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
-    receipt_clock_factory: Callable[[object], Callable[[], int]],
-    outbound_clock_factory: Callable[[object], Callable[[], int]],
+    measurement_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     custodian_public_key: bytes,
@@ -2431,8 +2432,7 @@ async def execute_authorized_attempt(
                         config=session_config,
                         connector=connector,
                         credential=credential,
-                        receipt_clock_factory=receipt_clock_factory,
-                        outbound_clock_factory=outbound_clock_factory,
+                        measurement_clock_factory=measurement_clock_factory,
                         sleep_ms=sleep_ms,
                         pricing=pricing,
                         run_cost_limit_microusd=claim.cost_reserved_microusd,
@@ -2617,8 +2617,7 @@ async def execute_authorized_holdout(
     now: datetime,
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
-    receipt_clock_factory: Callable[[object], Callable[[], int]],
-    outbound_clock_factory: Callable[[object], Callable[[], int]],
+    measurement_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     custodian_public_key: bytes,
@@ -2846,8 +2845,7 @@ async def execute_authorized_holdout(
                         config=session_config,
                         connector=connector,
                         credential=credential,
-                        receipt_clock_factory=receipt_clock_factory,
-                        outbound_clock_factory=outbound_clock_factory,
+                        measurement_clock_factory=measurement_clock_factory,
                         sleep_ms=sleep_ms,
                         pricing=pricing,
                         run_cost_limit_microusd=remaining_cost_microusd,
@@ -2988,8 +2986,7 @@ async def _execute_attempt_work(
     config: SessionExecutionConfig,
     connector: InjectedConnector,
     credential: SecretCredential,
-    receipt_clock_factory: Callable[[object], Callable[[], int]],
-    outbound_clock_factory: Callable[[object], Callable[[], int]],
+    measurement_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     run_cost_limit_microusd: int,
@@ -3006,8 +3003,7 @@ async def _execute_attempt_work(
             config=config,
             connector=connector,
             credential=credential,
-            receipt_clock_ms=receipt_clock_factory(plan),
-            outbound_clock_factory=outbound_clock_factory,
+            measurement_clock_factory=measurement_clock_factory,
             sleep_ms=sleep_ms,
         )
         running_usage = _add_usage(running_usage, result.usage)
@@ -3029,8 +3025,7 @@ async def _execute_attempt_work(
             config=config,
             connector=connector,
             credential=credential,
-            receipt_clock_ms=receipt_clock_factory(plan),
-            outbound_clock_factory=outbound_clock_factory,
+            measurement_clock_factory=measurement_clock_factory,
             sleep_ms=sleep_ms,
         )
         running_usage = _add_usage(running_usage, result.usage)
@@ -3511,12 +3506,15 @@ def _build_audit_capsule(
             }
             for event in result.audit_events
         ]
+        if len(result.event_activity_ordinals) != len(result.audit_events):
+            raise RunnerError("successful session lacks causal event ownership")
         latest_event_ms = max((event.at_ms for event in result.audit_events), default=0)
         sessions.append(
             {
                 "session_ordinal": plan.session_ordinal,
                 "split": plan.split,
                 "events": events,
+                "event_activity_ordinals": list(result.event_activity_ordinals),
                 "wire_facts": _ordered_wire_fact_dicts(result.wire_facts),
             }
         )
@@ -3590,7 +3588,7 @@ def _build_audit_capsule(
     if len(splits) != 1:
         raise RunnerError("audit capsule results must contain exactly one split")
     return {
-        "schema_id": "gate_0b_audit_capsule_v4",
+        "schema_id": "gate_0b_audit_capsule_v5",
         "campaign_id": campaign_id,
         "policy_ms": policy_ms,
         "accounting": {
@@ -3687,7 +3685,7 @@ async def _receive_expected_interaction(
     config: SessionExecutionConfig,
     adapter: GeminiTurnEventAdapter,
     secondary_reducer: Callable[..., ReductionResult],
-    receipt_clock_ms: Callable[[], int],
+    measurement_clock_ms: Callable[[], int],
     first_sequence: int,
     epoch: int,
 ) -> tuple[
@@ -3697,7 +3695,7 @@ async def _receive_expected_interaction(
     str | None,
 ]:
     message = await session.receive()
-    at_ms = receipt_clock_ms()
+    at_ms = measurement_clock_ms()
     if not isinstance(message, Mapping):
         return (), set(), None, "interaction_message_missing"
     try:
@@ -4403,9 +4401,9 @@ def _bounded_int(value: object, *, label: str, maximum: int) -> int:
     return value
 
 
-def _monotonic_receipt_clock(source: Callable[[], int]) -> Callable[[], int]:
+def _monotonic_measurement_clock(source: Callable[[], int]) -> Callable[[], int]:
     if not callable(source):
-        raise TypeError("receipt clock must be callable")
+        raise TypeError("measurement clock must be callable")
     previous = -1
 
     def read() -> int:
@@ -4413,14 +4411,14 @@ def _monotonic_receipt_clock(source: Callable[[], int]) -> Callable[[], int]:
         try:
             value = source()
         except Exception:
-            raise _ReceiptClockError from None
+            raise _MeasurementClockError from None
         if (
             isinstance(value, bool)
             or not isinstance(value, int)
             or not 0 <= value <= 7_200_000
             or value < previous
         ):
-            raise _ReceiptClockError
+            raise _MeasurementClockError
         previous = value
         return value
 

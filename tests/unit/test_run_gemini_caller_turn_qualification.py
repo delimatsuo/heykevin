@@ -6,6 +6,7 @@ from copy import copy, deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from inspect import signature
 import json
 from pathlib import Path
 import stat
@@ -199,6 +200,50 @@ class YieldingFakeSession(FakeSession):
         return await super().receive()
 
 
+class CausallySequencedFakeSession(FakeSession):
+    def __init__(self, messages, *, response_audio_counts):
+        super().__init__(messages)
+        self._response_audio_counts = iter(response_audio_counts)
+        self._accepted_audio_count = 0
+        self._delivered_audio_count = 0
+        self._audio_accepted = asyncio.Event()
+        self._response_delivered = asyncio.Event()
+        self._setup_received = False
+
+    async def send(self, message):
+        realtime_input = message.get("realtimeInput")
+        if isinstance(realtime_input, dict) and "audio" in realtime_input:
+            next_audio_count = self._accepted_audio_count + 1
+            while self._delivered_audio_count < next_audio_count - 1:
+                self._response_delivered.clear()
+                await self._response_delivered.wait()
+            self._accepted_audio_count = next_audio_count
+            self._audio_accepted.set()
+        await super().send(message)
+
+    async def receive(self):
+        if not self._setup_received:
+            self._setup_received = True
+            return await super().receive()
+        if not self.messages:
+            return None
+        message = self.messages[0]
+        is_provider_event = isinstance(message, dict) and "usageMetadata" not in message
+        if is_provider_event:
+            required_audio_count = next(self._response_audio_counts)
+            while self._accepted_audio_count < required_audio_count:
+                self._audio_accepted.clear()
+                await self._audio_accepted.wait()
+            delivered = await super().receive()
+            self._delivered_audio_count = max(
+                self._delivered_audio_count,
+                required_audio_count,
+            )
+            self._response_delivered.set()
+            return delivered
+        return await super().receive()
+
+
 class HangingAfterMessagesSession(YieldingFakeSession):
     async def receive(self):
         if self.messages:
@@ -225,11 +270,19 @@ class ReceiptClock:
         return next(self.values)
 
 
-def _outbound_clock_factory(
+def test_injected_executor_accepts_only_one_measurement_clock_factory() -> None:
+    parameters = signature(execute_injected_session).parameters
+
+    assert "measurement_clock_factory" in parameters
+    assert "receipt_clock_ms" not in parameters
+    assert "outbound_clock_factory" not in parameters
+
+
+def _outbound_clock_values(
     plan: SessionPlan | NoSpeechWindowPlan,
-) -> ReceiptClock:
+) -> list[int]:
     if isinstance(plan, NoSpeechWindowPlan):
-        return ReceiptClock(value.at_ms for value in plan.replay_inputs)
+        return [value.at_ms for value in plan.replay_inputs]
 
     values: list[int] = []
     recorded_speech_ends: set[int] = set()
@@ -260,7 +313,24 @@ def _outbound_clock_factory(
         }:
             values.append(replay_input.at_ms)
         previous_at_ms = replay_input.at_ms
-    return ReceiptClock(values)
+    return values
+
+
+def _measurement_clock_factory(
+    receipt_values: list[int],
+):
+    def build(plan: SessionPlan | NoSpeechWindowPlan) -> ReceiptClock:
+        return ReceiptClock(sorted([*receipt_values, *_outbound_clock_values(plan)]))
+
+    return build
+
+
+def _default_measurement_clock_factory(
+    plan: SessionPlan | NoSpeechWindowPlan,
+) -> ReceiptClock:
+    return ReceiptClock(
+        sorted([*_receipt_times_for_plan(plan), *_outbound_clock_values(plan)])
+    )
 
 
 class FakeCustodyLedger:
@@ -765,7 +835,12 @@ def _successful_sessions_for_plans(plans: tuple[SessionPlan, ...]) -> list[FakeS
                     }
                 messages.append(message)
             messages.extend((_usage_message(), None))
-            sessions.append(FakeSession(messages))
+            sessions.append(
+                CausallySequencedFakeSession(
+                    messages,
+                    response_audio_counts=range(1, len(ordinals) + 1),
+                )
+            )
     return sessions
 
 
@@ -1194,13 +1269,14 @@ def test_setup_and_connection_policy_are_exact_and_non_debuggable() -> None:
 
 
 def test_injected_session_paces_audio_reduces_one_combined_event_and_discards_output() -> None:
-    session = FakeSession(
+    session = CausallySequencedFakeSession(
         [
             {"setupComplete": {}},
             _server_event(),
             _usage_message(),
             None,
-        ]
+        ],
+        response_audio_counts=(1,),
     )
     connector = FakeConnector([session])
     sleeps = []
@@ -1214,8 +1290,7 @@ def test_injected_session_paces_audio_reduces_one_combined_event_and_discards_ou
             config=_config(),
             connector=connector,
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 150, 160, 170]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 150, 160, 170]),
             sleep_ms=sleep_ms,
         )
     )
@@ -1277,8 +1352,7 @@ def test_response_while_activity_end_is_still_pacing_fails_closed() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1327,8 +1401,7 @@ def test_response_while_audio_send_is_blocked_is_not_credited_to_future_activity
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1348,8 +1421,9 @@ def test_outbound_wire_facts_use_injected_actual_times_not_replay_schedule() -> 
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 200, 210, 220]),
-            outbound_clock_factory=lambda _plan: ReceiptClock([10, 45, 110, 140]),
+            measurement_clock_factory=lambda _plan: ReceiptClock(
+                [0, 10, 45, 110, 140, 200, 210, 220]
+            ),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1373,6 +1447,39 @@ def test_outbound_wire_facts_use_injected_actual_times_not_replay_schedule() -> 
         "caller_activity_end": 140,
     }
     assert result.wire_observations[1].first_audio_ms == 90
+
+
+def test_one_measurement_clock_preserves_latency_under_uniform_offset() -> None:
+    def run(offset: int):
+        values = [offset + value for value in (0, 10, 45, 110, 140, 200, 210, 220)]
+        return asyncio.run(
+            execute_injected_session(
+                _plan(),
+                config=_config(),
+                connector=FakeConnector(
+                    [
+                        FakeSession(
+                            [
+                                {"setupComplete": {}},
+                                _server_event(),
+                                _usage_message(),
+                                None,
+                            ]
+                        )
+                    ]
+                ),
+                credential=SecretCredential(CANARY_SECRET),
+                measurement_clock_factory=lambda _plan: ReceiptClock(values),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+            )
+        )
+
+    baseline = run(0)
+    shifted = run(1_900)
+
+    assert baseline.complete is shifted.complete is True
+    assert baseline.wire_observations[1].first_audio_ms == 90
+    assert shifted.wire_observations[1].first_audio_ms == 90
 
 
 def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> None:
@@ -1445,8 +1552,9 @@ def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> 
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=lambda _plan: ReceiptClock([0, 125]),
+            measurement_clock_factory=lambda _plan: ReceiptClock(
+                [0, 0, 120, 125, 130]
+            ),
             sleep_ms=sleep_ms,
         )
     )
@@ -1458,7 +1566,7 @@ def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> 
 def test_multiple_official_usage_frames_use_latest_cumulative_snapshot() -> None:
     first = _server_event(text="book service today 1")
     second = _server_event(text="book service today 2")
-    session = FakeSession(
+    session = CausallySequencedFakeSession(
         [
             {"setupComplete": {}},
             first,
@@ -1471,7 +1579,8 @@ def test_multiple_official_usage_frames_use_latest_cumulative_snapshot() -> None
                 output_text_tokens=2,
             ),
             None,
-        ]
+        ],
+        response_audio_counts=(1, 2),
     )
 
     result = asyncio.run(
@@ -1480,8 +1589,7 @@ def test_multiple_official_usage_frames_use_latest_cumulative_snapshot() -> None
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 300, 310]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 300, 310]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1494,7 +1602,7 @@ def test_multiple_official_usage_frames_use_latest_cumulative_snapshot() -> None
 def test_decreasing_cumulative_usage_snapshot_fails_closed() -> None:
     first = _server_event(text="book service today 1")
     second = _server_event(text="book service today 2")
-    session = FakeSession(
+    session = CausallySequencedFakeSession(
         [
             {"setupComplete": {}},
             first,
@@ -1502,7 +1610,8 @@ def test_decreasing_cumulative_usage_snapshot_fails_closed() -> None:
             second,
             _usage_message(input_audio_tokens=8, output_audio_tokens=4),
             None,
-        ]
+        ],
+        response_audio_counts=(1, 2),
     )
 
     result = asyncio.run(
@@ -1511,8 +1620,7 @@ def test_decreasing_cumulative_usage_snapshot_fails_closed() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 300, 310]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 300, 310]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1530,8 +1638,7 @@ def test_automatic_vad_schedule_keeps_activity_markers_local_and_sends_only_pcm(
             config=_config(),
             connector=connector,
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1568,8 +1675,7 @@ def test_synthetic_tool_calls_receive_synchronous_payload_free_responses() -> No
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 140]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1610,8 +1716,7 @@ def test_synchronous_tool_response_precedes_the_next_caller_activity() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 300]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 300]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1652,8 +1757,7 @@ def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() ->
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 260, 300]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 260, 300]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1693,8 +1797,7 @@ def test_malformed_oversized_and_goaway_messages_fail_with_bounded_codes(
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1716,8 +1819,7 @@ def test_missing_or_inconsistent_usage_metadata_fails_closed() -> None:
             config=_config(),
             connector=FakeConnector([missing]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1727,8 +1829,7 @@ def test_missing_or_inconsistent_usage_metadata_fails_closed() -> None:
             config=_config(),
             connector=FakeConnector([inconsistent]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 140]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1749,8 +1850,7 @@ def test_session_timeout_after_connect_is_bounded_counted_and_closes() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0]),
             sleep_ms=expire,
         )
     )
@@ -1774,8 +1874,7 @@ def test_dual_reducer_disagreement_stops_before_audit_handoff() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 140]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             secondary_reducer=disagree,
         )
@@ -1786,7 +1885,7 @@ def test_dual_reducer_disagreement_stops_before_audit_handoff() -> None:
     assert result.audit_events == ()
 
 
-def test_current_response_before_activity_end_is_rejected() -> None:
+def test_response_received_after_actual_activity_end_is_not_backdated() -> None:
     session = FakeSession([{"setupComplete": {}}, _server_event(), _usage_message(), None])
 
     result = asyncio.run(
@@ -1795,15 +1894,14 @@ def test_current_response_before_activity_end_is_rejected() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 50, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 50, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
 
-    assert result.complete is False
-    assert result.error_code == "premature_current_response"
-    assert result.wire_observations[1].premature_current_audio_count == 1
+    assert result.complete is True
+    assert result.error_code is None
+    assert result.wire_observations[1].premature_current_audio_count == 0
 
 
 def test_first_audio_latency_uses_speech_end_before_trailing_silence() -> None:
@@ -1822,8 +1920,7 @@ def test_first_audio_latency_uses_speech_end_before_trailing_silence() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1840,7 +1937,7 @@ def test_open_prior_response_remains_prior_during_next_activity() -> None:
     second_audio["serverContent"].pop("inputTranscription")
     interrupted = {"serverContent": {"interrupted": True}}
     current = _server_event(text="second", terminal=True)
-    session = FakeSession(
+    session = CausallySequencedFakeSession(
         [
             {"setupComplete": {}},
             first_audio,
@@ -1849,7 +1946,8 @@ def test_open_prior_response_remains_prior_during_next_activity() -> None:
             current,
             _usage_message(),
             None,
-        ]
+        ],
+        response_audio_counts=(1, 2, 2, 2),
     )
 
     result = asyncio.run(
@@ -1858,14 +1956,25 @@ def test_open_prior_response_remains_prior_during_next_activity() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 200, 220, 300, 310, 320]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 200, 220, 300, 310, 320]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
 
     assert result.complete is True
-    assert result.wire_observations[2].interruption_tail_ms == 30
+    activity_start = next(
+        fact.at_ms
+        for fact in result.wire_facts
+        if fact.kind == "caller_audio_sent" and fact.activity_ordinal == 2
+    )
+    prior_response_tail = max(
+        fact.at_ms
+        for fact in result.wire_facts
+        if fact.kind == "audio_received" and fact.response_ordinal == 1
+    )
+    assert result.wire_observations[2].interruption_tail_ms == (
+        prior_response_tail - activity_start
+    )
     assert result.wire_observations[2].premature_current_audio_count == 0
 
 
@@ -1882,8 +1991,7 @@ def test_fresh_restart_uses_new_connection_and_epoch_without_context_restoration
             config=_config(),
             connector=connector,
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 150, 300, 310]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 150, 300, 310]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1918,8 +2026,7 @@ def test_generation_complete_does_not_close_the_response_before_turn_complete() 
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 140, 150, 160]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 140, 150, 160]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1948,8 +2055,7 @@ def test_abnormal_close_is_reduced_to_bounded_code_without_exception_text() -> N
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1971,8 +2077,7 @@ def test_audio_after_turn_terminal_is_rejected_and_counted() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -1998,8 +2103,7 @@ def test_duplicate_response_terminal_is_recorded_as_malformed_and_rejected() -> 
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 140]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -2010,7 +2114,7 @@ def test_duplicate_response_terminal_is_recorded_as_malformed_and_rejected() -> 
     assert [fact.kind for fact in result.wire_facts].count("malformed") == 1
 
 
-def test_decreasing_receipt_clock_fails_closed() -> None:
+def test_decreasing_measurement_clock_fails_closed() -> None:
     session = FakeSession(
         [{"setupComplete": {}}, _server_event(), _usage_message(), None]
     )
@@ -2021,14 +2125,15 @@ def test_decreasing_receipt_clock_fails_closed() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 110]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=lambda _plan: ReceiptClock(
+                [0, 0, 20, 80, 100, 120, 110]
+            ),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
 
     assert result.complete is False
-    assert result.error_code == "receipt_clock_invalid"
+    assert result.error_code == "measurement_clock_invalid"
 
 
 def test_usage_metadata_does_not_hide_delayed_audio_after_terminal() -> None:
@@ -2050,8 +2155,7 @@ def test_usage_metadata_does_not_hide_delayed_audio_after_terminal() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130, 140]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 140]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -2077,8 +2181,7 @@ def test_no_speech_usage_metadata_does_not_hide_delayed_activation() -> None:
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -2102,8 +2205,7 @@ def test_usage_completion_uses_bounded_quiet_drain_when_stream_stays_open() -> N
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -2122,8 +2224,7 @@ def test_no_speech_window_records_false_activation_without_computing_verdict() -
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -2222,8 +2323,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             now=NOW,
             credential_loader=credential_loader,
             connector_factory=connector_factory,
-            receipt_clock_factory=lambda plan: ReceiptClock(_receipt_times_for_plan(plan)),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_default_measurement_clock_factory,
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,
@@ -2462,8 +2562,7 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         now=NOW,
         credential_loader=credential_loader,
         connector_factory=lambda _credential: connector,
-        receipt_clock_factory=lambda plan: ReceiptClock(_receipt_times_for_plan(plan)),
-        outbound_clock_factory=_outbound_clock_factory,
+        measurement_clock_factory=_default_measurement_clock_factory,
         sleep_ms=lambda _value: asyncio.sleep(0),
         pricing=load_pricing(PRICING_PATH),
         custodian_public_key=audit_public,
@@ -2617,8 +2716,7 @@ def test_development_claim_boundary_fails_closed_before_secret_lookup(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -2681,8 +2779,7 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
             now=NOW,
             credential_loader=lambda _reference: touched.append("credential"),
             connector_factory=lambda _credential: touched.append("connector"),
-            receipt_clock_factory=lambda _plan: ReceiptClock([]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=lambda _plan: ReceiptClock([]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(PRICING_PATH),
             custodian_public_key=custodian_public,
@@ -2749,8 +2846,7 @@ def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -2816,8 +2912,7 @@ def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
                 now=NOW,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -2875,8 +2970,7 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
                 custodian_public_key=custodian_public,
@@ -2948,8 +3042,7 @@ def test_stale_privacy_receipt_blocks_asset_ledger_secret_and_connector(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3051,8 +3144,7 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3152,8 +3244,7 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=pricing,
                 custodian_public_key=supplied_custodian,
@@ -3222,8 +3313,7 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3289,8 +3379,7 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
                 now=NOW,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3357,8 +3446,7 @@ def test_insufficient_signed_liability_blocks_before_ledger_and_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3440,8 +3528,7 @@ def test_nonexact_campaign_ceiling_blocks_before_assets_ledger_and_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3516,8 +3603,7 @@ def test_ledger_genesis_ceiling_mismatch_blocks_before_claim_and_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3575,8 +3661,7 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
-                receipt_clock_factory=lambda _plan: ReceiptClock([]),
-                outbound_clock_factory=_outbound_clock_factory,
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
                 sleep_ms=lambda _value: asyncio.sleep(0),
                 pricing=load_pricing(PRICING_PATH),
                 custodian_public_key=custodian_public,
@@ -3696,8 +3781,7 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
                 now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: connector,
-            receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(PRICING_PATH),
             custodian_public_key=custodian_public,
@@ -3763,8 +3847,7 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=connector_factory,
-            receipt_clock_factory=lambda _plan: ReceiptClock([]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=lambda _plan: ReceiptClock([]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,
@@ -3837,8 +3920,7 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: pytest.fail("connector must not be built"),
-            receipt_clock_factory=lambda _plan: ReceiptClock([]),
-            outbound_clock_factory=_outbound_clock_factory,
+            measurement_clock_factory=lambda _plan: ReceiptClock([]),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,

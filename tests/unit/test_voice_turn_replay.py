@@ -140,13 +140,21 @@ def test_gate0b_session_schedule_preserves_consecutive_boundaries_and_restart(tm
     first = _gate0b_activity(
         tmp_path,
         ordinal=1,
-        scenario_tags=("synchronous_tool_use", "tool_cancellation_interruption"),
         fresh_restart_after=True,
     )
-    second = _gate0b_activity(tmp_path, ordinal=2)
+    second = _gate0b_activity(
+        tmp_path,
+        ordinal=2,
+        scenario_tags=("synchronous_tool_use",),
+    )
+    third = _gate0b_activity(
+        tmp_path,
+        ordinal=3,
+        scenario_tags=("tool_cancellation_interruption",),
+    )
     session = Gate0BReplaySession(
         session_ordinal=3,
-        activities=(first, second),
+        activities=(first, second, third),
         inter_activity_gap_ms=50,
     )
 
@@ -165,7 +173,24 @@ def test_gate0b_session_schedule_preserves_consecutive_boundaries_and_restart(tm
     assert [(event.activity_ordinal, event.at_ms, event.epoch) for event in starts] == [
         (1, 0, 1),
         (2, 150, 2),
+        (3, 300, 2),
     ]
+
+
+def test_gate0b_session_rejects_noncausal_combined_tool_cancellation(tmp_path):
+    activity = _gate0b_activity(
+        tmp_path,
+        ordinal=1,
+        scenario_tags=("synchronous_tool_use", "tool_cancellation_interruption"),
+    )
+    session = Gate0BReplaySession(
+        session_ordinal=3,
+        activities=(activity,),
+        inter_activity_gap_ms=50,
+    )
+
+    with pytest.raises(ValueError, match="distinct tool activity"):
+        build_gate0b_session_inputs(session, frame_pattern_ms=(20, 30, 40))
 
 
 def test_gate0b_no_speech_window_uses_audio_without_activity_boundaries(tmp_path):

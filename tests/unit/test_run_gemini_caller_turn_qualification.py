@@ -2,8 +2,9 @@
 
 import asyncio
 import base64
+from copy import copy, deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -15,7 +16,11 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 import pytest
 import scripts.run_gemini_caller_turn_qualification as runner_module
 
-from app.services.caller_turn_alignment import ActivityReference
+from app.services.caller_turn_alignment import (
+    ActivityReference,
+    CriticalSpan,
+    CriticalSpanKind,
+)
 from app.services.caller_turn_measurement import (
     derive_audit_capsule_accounting,
     open_audit_capsule,
@@ -33,9 +38,11 @@ from app.services.qualification_ledger import (
     LedgerCustodyIdentity,
     LedgerReceipt,
 )
+from app.services.qualification_privacy import QualificationAssets
 from app.services.voice_turn_replay import Gate0BReplayInput
 from scripts.run_gemini_caller_turn_qualification import (
     OFFICIAL_ENDPOINT,
+    AuthorizedAssetRelease,
     AuthorizedAttemptConfig,
     ConnectionPolicy,
     NoSpeechWindowPlan,
@@ -70,6 +77,12 @@ LEDGER_PUBLIC_KEY = b"l" * 32
 LEDGER_PUBLIC_KEY_SHA256 = sha256(LEDGER_PUBLIC_KEY).hexdigest()
 LEASE_ID = "7" * 64
 LEASE_ID_SHA256 = sha256(LEASE_ID.encode("ascii")).hexdigest()
+PRIVACY_KEY_ID = "privacy_custodian_1"
+PRIVACY_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"p" * 32)
+PRIVACY_PUBLIC_KEY = PRIVACY_PRIVATE_KEY.public_key().public_bytes(
+    serialization.Encoding.Raw,
+    serialization.PublicFormat.Raw,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +102,51 @@ def _fixed_execution_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 PRICING_PATH = Path("tests/fixtures/caller_turn_qualification/pricing.json")
 LANGUAGES = ("ar", "en", "es", "fr", "hi", "ht", "pt", "zh")
 CONDITIONS = ("clean", "twilio_codec_only", "acoustic_impairment", "interaction_stress")
+STRESS_TAGS = (
+    "jitter_packet_loss",
+    "fresh_connection_restart",
+    "synchronous_tool_use",
+    "tool_cancellation_interruption",
+    "background_noise",
+    "long_pause",
+    "fast_speech",
+    "correction",
+    "number_dictation",
+    "clipping",
+    "echo_crosstalk",
+    "far_field_low_volume",
+)
+CRITICAL_KINDS = tuple(CriticalSpanKind)
+
+
+def _allocation_tags_and_spans(
+    language: str,
+    within_language: int,
+) -> tuple[tuple[str, ...], tuple[CriticalSpan, ...]]:
+    tags = ["standard"]
+    if within_language >= 12:
+        tags = [
+            tag
+            for tag_index, tag in enumerate(STRESS_TAGS)
+            if tag_index % 4 == within_language - 12
+        ]
+    if language != "en" and within_language == 10:
+        tags.append("code_switch_english_to_language")
+    if language != "en" and within_language == 11:
+        tags.append("code_switch_language_to_english")
+    applicable = {
+        "number_dictation": CriticalSpanKind.DIGITS,
+        "correction": CriticalSpanKind.CORRECTION,
+        "code_switch_english_to_language": CriticalSpanKind.ENGLISH_TO_LANGUAGE,
+        "code_switch_language_to_english": CriticalSpanKind.LANGUAGE_TO_ENGLISH,
+    }
+    kinds = {CRITICAL_KINDS[within_language % len(CRITICAL_KINDS)]}
+    kinds.update(applicable[tag] for tag in tags if tag in applicable)
+    spans = tuple(
+        CriticalSpan(kind, "purpose", language)
+        for kind in sorted(kinds, key=lambda value: value.value)
+    )
+    return tuple(tags), spans
 
 
 class FakeSession:
@@ -416,132 +474,104 @@ def _plan(*, two_activities: bool = False) -> SessionPlan:
 
 
 def _development_schedule() -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
-    plans = []
-    for session_ordinal in range(32):
-        activities = []
-        replay_inputs = []
-        for index in range(4):
-            ordinal = session_ordinal * 4 + index
-            start_ms = index * 150
-            end_ms = start_ms + 100
-            language = LANGUAGES[ordinal % len(LANGUAGES)]
-            condition = CONDITIONS[ordinal % len(CONDITIONS)]
-            activity = SessionActivityPlan(
-                activity_ordinal=ordinal,
-                split="development",
-                language=language,
-                condition=condition,
-                scenario_tags=("standard",),
-                reference=ActivityReference(
-                    ordinal,
-                    language,
-                    f"purpose recorded phrase {ordinal}",
-                ),
-                expected_lifecycle_status="retrospective_complete",
-                expected_epoch=1,
-                start_at_ms=start_ms,
-                end_at_ms=end_ms,
-            )
-            activities.append(activity)
-            replay_inputs.extend(
-                (
-                    Gate0BReplayInput("caller_activity_start", start_ms, 1, ordinal),
-                    Gate0BReplayInput(
-                        "audio",
-                        start_ms + 20,
-                        1,
-                        ordinal,
-                        audio=b"\x00\x00" * 319,
-                        duration_ms=20,
-                    ),
-                    Gate0BReplayInput("caller_activity_end", end_ms, 1, ordinal),
-                )
-            )
-        plans.append(
-            SessionPlan(
-                session_ordinal=session_ordinal,
-                split="development",
-                activities=tuple(activities),
-                replay_inputs=tuple(replay_inputs),
-            )
-        )
-    windows = tuple(
-        NoSpeechWindowPlan(
-            window_ordinal=ordinal,
-            split="development",
-            condition="background_noise",
-            replay_inputs=(
-                Gate0BReplayInput(
-                    "audio",
-                    0,
-                    1,
-                    None,
-                    audio=b"\x00\x00" * 319,
-                    duration_ms=20,
-                ),
-            ),
-        )
-        for ordinal in range(32)
-    )
-    return tuple(plans), windows
+    return _split_schedule("development")
 
 
 def _holdout_schedule() -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
-    plans = []
-    for session_index in range(32):
-        activities = []
-        replay_inputs = []
-        for index in range(4):
-            ordinal = 128 + session_index * 4 + index
-            start_ms = index * 150
-            end_ms = start_ms + 100
-            language = LANGUAGES[(ordinal - 128) % len(LANGUAGES)]
-            condition = CONDITIONS[(ordinal - 128) % len(CONDITIONS)]
-            activities.append(
-                SessionActivityPlan(
-                    activity_ordinal=ordinal,
-                    split="holdout",
-                    language=language,
-                    condition=condition,
-                    scenario_tags=("standard",),
-                    reference=ActivityReference(
-                        ordinal,
-                        language,
-                        f"holdout purpose recorded phrase {ordinal}",
-                    ),
-                    expected_lifecycle_status="retrospective_complete",
-                    expected_epoch=1,
-                    start_at_ms=start_ms,
-                    end_at_ms=end_ms,
+    return _split_schedule("holdout")
+
+
+def _split_schedule(
+    split: str,
+) -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
+    activity_base = 0 if split == "development" else 128
+    session_base = 0 if split == "development" else 24
+    window_base = 0 if split == "development" else 32
+    session_ranges = ((0, 6), (6, 12), (12, 16))
+    plans: list[SessionPlan] = []
+    for language_index, language in enumerate(LANGUAGES):
+        for language_session, (first_position, final_position) in enumerate(session_ranges):
+            activities: list[SessionActivityPlan] = []
+            replay_inputs: list[Gate0BReplayInput] = []
+            for local_index, within_language in enumerate(range(first_position, final_position)):
+                ordinal = activity_base + language_index * 16 + within_language
+                start_ms = local_index * 150
+                end_ms = start_ms + 100
+                condition = CONDITIONS[within_language // 4]
+                scenario_tags, critical_spans = _allocation_tags_and_spans(
+                    language,
+                    within_language,
+                )
+                epoch = 2 if within_language >= 13 else 1
+                if "fresh_connection_restart" in scenario_tags:
+                    prior = activities[-1]
+                    replay_inputs.append(
+                        Gate0BReplayInput(
+                            "fresh_connection_restart",
+                            prior.end_at_ms,
+                            epoch,
+                            prior.activity_ordinal,
+                        )
+                    )
+                activities.append(
+                    SessionActivityPlan(
+                        activity_ordinal=ordinal,
+                        split=split,
+                        language=language,
+                        condition=condition,
+                        scenario_tags=scenario_tags,
+                        reference=ActivityReference(
+                            ordinal,
+                            language,
+                            f"purpose recorded phrase {ordinal}",
+                            critical_spans,
+                        ),
+                        expected_lifecycle_status="retrospective_complete",
+                        expected_epoch=epoch,
+                        start_at_ms=start_ms,
+                        end_at_ms=end_ms,
+                    )
+                )
+                replay_inputs.extend(
+                    (
+                        Gate0BReplayInput("caller_activity_start", start_ms, epoch, ordinal),
+                        Gate0BReplayInput(
+                            "audio",
+                            start_ms + 20,
+                            epoch,
+                            ordinal,
+                            audio=b"\x00\x00" * 319,
+                            duration_ms=20,
+                        ),
+                        Gate0BReplayInput("caller_activity_end", end_ms, epoch, ordinal),
+                    )
+                )
+                if "synchronous_tool_use" in scenario_tags:
+                    replay_inputs.append(
+                        Gate0BReplayInput("expect_synchronous_tool", end_ms, epoch, ordinal)
+                    )
+                if "tool_cancellation_interruption" in scenario_tags:
+                    replay_inputs.extend(
+                        (
+                            Gate0BReplayInput(
+                                "expect_tool_cancellation", end_ms, epoch, ordinal
+                            ),
+                            Gate0BReplayInput("expect_interruption", end_ms, epoch, ordinal),
+                        )
+                    )
+            plans.append(
+                SessionPlan(
+                    session_ordinal=session_base + language_index * 3 + language_session,
+                    split=split,
+                    activities=tuple(activities),
+                    replay_inputs=tuple(replay_inputs),
                 )
             )
-            replay_inputs.extend(
-                (
-                    Gate0BReplayInput("caller_activity_start", start_ms, 1, ordinal),
-                    Gate0BReplayInput(
-                        "audio",
-                        start_ms + 20,
-                        1,
-                        ordinal,
-                        audio=b"\x00\x00" * 319,
-                        duration_ms=20,
-                    ),
-                    Gate0BReplayInput("caller_activity_end", end_ms, 1, ordinal),
-                )
-            )
-        plans.append(
-            SessionPlan(
-                session_ordinal=32 + session_index,
-                split="holdout",
-                activities=tuple(activities),
-                replay_inputs=tuple(replay_inputs),
-            )
-        )
     windows = tuple(
         NoSpeechWindowPlan(
-            window_ordinal=32 + index,
-            split="holdout",
-            condition="background_noise",
+            window_ordinal=window_base + index,
+            split=split,
+            condition="silence" if index < 16 else "background_noise",
             replay_inputs=(
                 Gate0BReplayInput(
                     "audio",
@@ -606,12 +636,71 @@ def _no_speech_plan() -> NoSpeechWindowPlan:
     )
 
 
+def _successful_sessions_for_plans(plans: tuple[SessionPlan, ...]) -> list[FakeSession]:
+    sessions: list[FakeSession] = []
+    for plan in plans:
+        activities = {value.activity_ordinal: value for value in plan.activities}
+        for epoch, _base_at_ms, replay_inputs in runner_module._connection_segments(plan):
+            ordinals = tuple(
+                dict.fromkeys(
+                    value.activity_ordinal
+                    for value in replay_inputs
+                    if value.activity_ordinal is not None and value.kind == "caller_activity_start"
+                )
+            )
+            messages: list[object] = [{"setupComplete": {}}]
+            for ordinal in ordinals:
+                activity = activities[ordinal]
+                message = _server_event(text=activity.reference.text)
+                if "synchronous_tool_use" in activity.scenario_tags:
+                    message["toolCall"] = {
+                        "functionCalls": [
+                            {"id": f"tool_{epoch}", "name": "synthetic_lookup", "args": {}}
+                        ]
+                    }
+                if "tool_cancellation_interruption" in activity.scenario_tags:
+                    message = {
+                        "serverContent": {
+                            "inputTranscription": {"text": activity.reference.text},
+                            "interrupted": True,
+                        },
+                        "toolCallCancellation": {"ids": [f"tool_{epoch}"]},
+                    }
+                messages.append(message)
+            messages.extend((_usage_message(), None))
+            sessions.append(FakeSession(messages))
+    return sessions
+
+
+def _receipt_times_for_plan(plan: SessionPlan | NoSpeechWindowPlan) -> list[int]:
+    if isinstance(plan, NoSpeechWindowPlan):
+        return [0, 30]
+    values: list[int] = []
+    for _epoch, base_at_ms, replay_inputs in runner_module._connection_segments(plan):
+        values.append(base_at_ms)
+        ordinals = tuple(
+            dict.fromkeys(
+                value.activity_ordinal
+                for value in replay_inputs
+                if value.activity_ordinal is not None and value.kind == "caller_activity_start"
+            )
+        )
+        activities = {value.activity_ordinal: value for value in plan.activities}
+        values.extend(activities[ordinal].end_at_ms + 20 for ordinal in ordinals)
+        values.append(max((activities[ordinal].end_at_ms for ordinal in ordinals), default=0) + 30)
+    return values
+
+
 def _tool_interaction_plan() -> SessionPlan:
     base = _plan(two_activities=True)
+    activities = (
+        replace(base.activities[0], scenario_tags=("synchronous_tool_use",)),
+        base.activities[1],
+    )
     return SessionPlan(
         session_ordinal=base.session_ordinal,
         split=base.split,
-        activities=base.activities,
+        activities=activities,
         replay_inputs=(
             *base.replay_inputs[:3],
             Gate0BReplayInput("expect_synchronous_tool", 100, 1, 1),
@@ -622,15 +711,23 @@ def _tool_interaction_plan() -> SessionPlan:
 
 def _cancellation_interaction_plan() -> SessionPlan:
     base = _plan(two_activities=True)
+    activities = (
+        replace(base.activities[0], scenario_tags=("synchronous_tool_use",)),
+        replace(
+            base.activities[1],
+            scenario_tags=("tool_cancellation_interruption",),
+        ),
+    )
     return SessionPlan(
         session_ordinal=base.session_ordinal,
         split=base.split,
-        activities=base.activities,
+        activities=activities,
         replay_inputs=(
             *base.replay_inputs[:3],
-            Gate0BReplayInput("expect_tool_cancellation", 100, 1, 1),
-            Gate0BReplayInput("expect_interruption", 100, 1, 1),
+            Gate0BReplayInput("expect_synchronous_tool", 100, 1, 1),
             *base.replay_inputs[3:],
+            Gate0BReplayInput("expect_tool_cancellation", 250, 1, 2),
+            Gate0BReplayInput("expect_interruption", 250, 1, 2),
         ),
     )
 
@@ -644,6 +741,43 @@ def _config() -> SessionExecutionConfig:
         session_timeout_seconds=30,
         response_gap_limit_ms=500,
     )
+
+
+def test_session_plan_rejects_duplicate_activity_boundary() -> None:
+    base = _plan()
+
+    with pytest.raises(ValueError, match="one boundary pair"):
+        replace(
+            base,
+            replay_inputs=(base.replay_inputs[0], *base.replay_inputs),
+        )
+
+
+def test_session_plan_rejects_audio_outside_activity_boundary() -> None:
+    base = _plan()
+    audio = replace(base.replay_inputs[1], at_ms=90, duration_ms=20)
+
+    with pytest.raises(ValueError, match="PCM topology"):
+        replace(base, replay_inputs=(base.replay_inputs[0], audio, base.replay_inputs[2]))
+
+
+def test_session_plan_rejects_noncausal_cancellation_markers() -> None:
+    base = _plan(two_activities=True)
+    activities = (
+        base.activities[0],
+        replace(
+            base.activities[1],
+            scenario_tags=("tool_cancellation_interruption",),
+        ),
+    )
+    replay_inputs = (
+        *base.replay_inputs,
+        Gate0BReplayInput("expect_tool_cancellation", 250, 1, 2),
+        Gate0BReplayInput("expect_interruption", 250, 1, 2),
+    )
+
+    with pytest.raises(ValueError, match="causally paired"):
+        replace(base, activities=activities, replay_inputs=replay_inputs)
 
 
 def _key_pair() -> tuple[Ed25519PrivateKey, bytes]:
@@ -740,6 +874,10 @@ def _preregistration(
             "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
             "custodian_key_id": "audit_custodian_1",
             "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
+            "privacy_custodian_key_id": PRIVACY_KEY_ID,
+            "privacy_custodian_public_key_sha256": sha256(
+                PRIVACY_PUBLIC_KEY
+            ).hexdigest(),
             "record_root_key_id": "evidence_custodian_1",
             "record_root_public_key_sha256": "9" * 64,
             "ledger_instance_id": "ledger_instance_1",
@@ -769,6 +907,97 @@ def _preregistration(
             "retention_attestation_sha256": "d" * 64,
             "zdr_or_residual_retention_acceptance_sha256": "e" * 64,
         }
+    )
+
+
+class FakeAssetLoader:
+    def __init__(
+        self,
+        plans: tuple[SessionPlan, ...],
+        no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+        *,
+        order: list[str] | None = None,
+    ) -> None:
+        self.plans = plans
+        self.no_speech_plans = no_speech_plans
+        self.order = order
+        self.authorizations = []
+
+    def load(self, authorization):
+        if self.order is not None:
+            self.order.append("asset")
+        self.authorizations.append(authorization)
+        return QualificationAssets(self.plans, self.no_speech_plans)
+
+
+def _asset_release(
+    plans: tuple[SessionPlan, ...],
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+    preregistration: dict[str, object],
+    campaign_envelope: dict[str, object],
+    attempt_envelope: dict[str, object],
+    *,
+    split: str,
+    order: list[str] | None = None,
+) -> AuthorizedAssetRelease:
+    immutable = preregistration["immutable_values"]
+    campaign = campaign_envelope["payload"]
+    attempt = attempt_envelope["payload"]
+    assert isinstance(immutable, dict)
+    assert isinstance(campaign, dict)
+    assert isinstance(attempt, dict)
+    schedule_sha256 = (
+        immutable["development_schedule_sha256"]
+        if split == "development"
+        else compute_holdout_schedule_sha256(
+            plans,
+            no_speech_plans=no_speech_plans,
+        )
+    )
+    payload = {
+        "schema_id": "gate_0b_privacy_custody_authorization_v1",
+        "campaign_id": campaign["campaign_id"],
+        "authorization_id": campaign["authorization_id"],
+        "attempt_id": attempt["attempt_id"],
+        "split": split,
+        "preregistration_sha256": preregistration["preregistration_sha256"],
+        "source_sha": SOURCE_SHA,
+        "schedule_sha256": schedule_sha256,
+        "corpus_sha256": immutable["corpus_sha256"],
+        "project": immutable["project"],
+        "model": immutable["model"],
+        "consent_registry_sha256": immutable["consent_attestation_sha256"],
+        "withdrawal_registry_sha256": "5" * 64,
+        "purpose_attestation_sha256": "6" * 64,
+        "rights_attestation_sha256": "7" * 64,
+        "provider_disclosure_sha256": "8" * 64,
+        "subject_set_sha256": "a" * 64,
+        "retention_policy_sha256": immutable["retention_attestation_sha256"],
+        "provider_retention_decision": "zdr_verified",
+        "residual_retention_acceptance_sha256": immutable[
+            "zdr_or_residual_retention_acceptance_sha256"
+        ],
+        "consent_active": True,
+        "withdrawal_clear": True,
+        "purpose_limited": True,
+        "usage_rights_active": True,
+        "provider_disclosures_current": True,
+        "issued_at": (NOW - timedelta(minutes=1)).isoformat(),
+        "expires_at": (NOW + timedelta(minutes=4)).isoformat(),
+        "deletion_deadline": (NOW + timedelta(days=29)).isoformat(),
+        "nonce": "privacy_nonce_1",
+    }
+    envelope = {
+        "key_id": PRIVACY_KEY_ID,
+        "payload": payload,
+        "signature": base64.b64encode(
+            PRIVACY_PRIVATE_KEY.sign(canonical_json_bytes(payload))
+        ).decode("ascii"),
+    }
+    return AuthorizedAssetRelease(
+        loader=FakeAssetLoader(plans, no_speech_plans, order=order),
+        privacy_envelope=envelope,
+        privacy_public_key=PRIVACY_PUBLIC_KEY,
     )
 
 
@@ -1166,6 +1395,13 @@ def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() ->
         [
             {"setupComplete": {}},
             {
+                "toolCall": {
+                    "functionCalls": [
+                        {"id": "tool_1", "name": "synthetic_lookup", "args": {}}
+                    ]
+                }
+            },
+            {
                 "serverContent": {"interrupted": True},
                 "toolCallCancellation": {"ids": ["tool_1"]},
             },
@@ -1180,16 +1416,24 @@ def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() ->
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            receipt_clock_ms=ReceiptClock([0, 120, 300]),
+            receipt_clock_ms=ReceiptClock([0, 120, 260, 300]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
 
     assert result.complete is True
     assert [event.kind for event in result.audit_events] == [
+        CallerTurnEventKind.TOOL_CALL_STARTED,
         CallerTurnEventKind.INTERRUPTED,
         CallerTurnEventKind.TOOL_CALL_CANCELLED,
     ]
+    assert not any("toolResponse" in value for value in session.sent)
+    audio_inputs = [
+        value
+        for value in session.sent
+        if isinstance(value.get("realtimeInput"), dict) and "audio" in value["realtimeInput"]
+    ]
+    assert len(audio_inputs) == 2
 
 
 @pytest.mark.parametrize(
@@ -1481,8 +1725,12 @@ def test_no_speech_window_records_false_activation_without_computing_verdict() -
     assert result.model_audio_chunk_count == 1
     assert result.output_audio_bytes == 4
     assert [fact.kind for fact in result.wire_facts] == [
+        "connection_open",
         "false_activity",
+        "response_open",
         "audio_received",
+        "response_terminal",
+        "teardown_complete",
     ]
     assert "passed" not in result.redacted_report_dict()
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
@@ -1504,19 +1752,9 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     )
     order: list[str] = []
     plans, no_speech_plans = _development_schedule()
-    sessions = [
-        FakeSession(
-            [
-                {"setupComplete": {}},
-                _server_event(text=plan.activities[0].reference.text),
-                _usage_message(),
-                None,
-            ]
-        )
-        for plan in plans
-    ]
+    sessions = _successful_sessions_for_plans(plans)
     no_speech_sessions = [
-        FakeSession([{"setupComplete": {}}, _server_event(), _usage_message(), None])
+        FakeSession([{"setupComplete": {}}, _usage_message(), None])
         for _ in no_speech_plans
     ]
     connector = FakeConnector([*sessions, *no_speech_sessions])
@@ -1549,8 +1787,15 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
 
     result = asyncio.run(
         execute_authorized_attempt(
-            plans,
-            no_speech_plans=no_speech_plans,
+            _asset_release(
+                plans,
+                no_speech_plans,
+                preregistration,
+                campaign,
+                attempt,
+                split="development",
+                order=order,
+            ),
             preregistration=preregistration,
             config=AuthorizedAttemptConfig(
                 preregistration_sha256=preregistration["preregistration_sha256"],
@@ -1568,7 +1813,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             now=NOW,
             credential_loader=credential_loader,
             connector_factory=connector_factory,
-            receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
+            receipt_clock_factory=lambda plan: ReceiptClock(_receipt_times_for_plan(plan)),
             sleep_ms=lambda _value: asyncio.sleep(0),
             pricing=load_pricing(Path("tests/fixtures/caller_turn_qualification/pricing.json")),
             custodian_public_key=custodian_public,
@@ -1582,14 +1827,15 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert result.provider_request_count == 64
     assert result.cost_microusd == 4_992
     assert stat.S_IMODE(capsule_path.stat().st_mode) == 0o600
-    assert order[:5] == [
+    assert order[:6] == [
+        "asset",
         "export_snapshot",
         "claim",
         "export_snapshot",
         "source",
         "credential:qualification_secret_v1",
     ]
-    assert order[5:-2] == ["connector"] * 64
+    assert order[6:-2] == ["connector"] * 64
     assert order[-2:] == ["development_checkpoint", "export_snapshot"]
     envelope = json.loads(capsule_path.read_bytes())
     opened = open_audit_capsule(
@@ -1598,12 +1844,14 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         expected_key_id="audit_custodian_1",
     )
     assert opened["activities"][0]["reference_text"] == "purpose recorded phrase 0"
-    assert opened["no_speech_windows"][0]["wire_facts"][0]["kind"] == "false_activity"
+    assert [
+        fact["kind"] for fact in opened["no_speech_windows"][0]["wire_facts"]
+    ] == ["connection_open", "teardown_complete"]
     usage, failures = derive_audit_capsule_accounting(opened)
     assert usage["provider_requests"] == 64
     assert usage["input_audio_seconds"] == 4
     assert usage["output_audio_seconds"] == 1
-    assert len(opened["accounting"]["units"]) == 64
+    assert len(opened["accounting"]["units"]) == 56
     assert failures == ()
     assert CANARY_SECRET not in json.dumps(envelope)
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
@@ -1630,7 +1878,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
 
 @pytest.mark.parametrize(
     "resume_mode",
-    ("durable", "stale_snapshot", "substituted_lease"),
+    ("durable", "stale_snapshot", "substituted_lease", "stale_privacy"),
 )
 def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
     tmp_path: Path,
@@ -1729,19 +1977,9 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
             return replace(original_resume(**values), lease_id="8" * 64)
 
         monkeypatch.setattr(ledger, "resume_holdout", resume_with_substituted_lease)
-    sessions = [
-        FakeSession(
-            [
-                {"setupComplete": {}},
-                _server_event(text=plan.activities[0].reference.text),
-                _usage_message(),
-                None,
-            ]
-        )
-        for plan in plans
-    ]
+    sessions = _successful_sessions_for_plans(plans)
     no_speech_sessions = [
-        FakeSession([{"setupComplete": {}}, _server_event(), _usage_message(), None])
+        FakeSession([{"setupComplete": {}}, _usage_message(), None])
         for _ in no_speech_plans
     ]
     connector = FakeConnector([*sessions, *no_speech_sessions])
@@ -1751,9 +1989,28 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         order.append("credential:" + reference)
         return SecretCredential(CANARY_SECRET)
 
-    execution = execute_authorized_holdout(
+    release = _asset_release(
         plans,
-        no_speech_plans=no_speech_plans,
+        no_speech_plans,
+        preregistration,
+        campaign_envelope,
+        attempt_envelope,
+        split="holdout",
+        order=order,
+    )
+    if resume_mode == "stale_privacy":
+        stale_envelope = deepcopy(release.privacy_envelope)
+        stale_payload = stale_envelope["payload"]
+        assert isinstance(stale_payload, dict)
+        stale_payload["issued_at"] = (NOW - timedelta(minutes=6)).isoformat()
+        stale_payload["expires_at"] = (NOW + timedelta(minutes=1)).isoformat()
+        stale_envelope["signature"] = base64.b64encode(
+            PRIVACY_PRIVATE_KEY.sign(canonical_json_bytes(stale_payload))
+        ).decode("ascii")
+        release = replace(release, privacy_envelope=stale_envelope)
+
+    execution = execute_authorized_holdout(
+        release,
         preregistration=preregistration,
         config=AuthorizedAttemptConfig(
             preregistration_sha256=preregistration["preregistration_sha256"],
@@ -1771,7 +2028,7 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         now=NOW,
         credential_loader=credential_loader,
         connector_factory=lambda _credential: connector,
-        receipt_clock_factory=lambda _plan: ReceiptClock([0, 120, 130]),
+        receipt_clock_factory=lambda plan: ReceiptClock(_receipt_times_for_plan(plan)),
         sleep_ms=lambda _value: asyncio.sleep(0),
         pricing=load_pricing(PRICING_PATH),
         custodian_public_key=audit_public,
@@ -1783,10 +2040,16 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
             "durably consume the holdout claim"
             if resume_mode == "stale_snapshot"
             else "substituted lease"
+            if resume_mode == "substituted_lease"
+            else "fresh"
         )
         with pytest.raises(ValueError, match=error):
             asyncio.run(execution)
-        expected_order = ["export_snapshot", "resume_holdout"]
+        expected_order = (
+            ["export_snapshot"]
+            if resume_mode == "stale_privacy"
+            else ["export_snapshot", "asset", "resume_holdout"]
+        )
         if resume_mode == "stale_snapshot":
             expected_order.append("export_snapshot")
         assert order == expected_order
@@ -1891,8 +2154,14 @@ def test_development_claim_boundary_fails_closed_before_secret_lookup(
     with pytest.raises((ValueError, RuntimeError), match=error):
         asyncio.run(
             execute_authorized_attempt(
-                plans,
-                no_speech_plans=no_speech_plans,
+                _asset_release(
+                    plans,
+                    no_speech_plans,
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -1947,8 +2216,14 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
 
     result = asyncio.run(
         execute_authorized_attempt(
-            plans,
-            no_speech_plans=no_speech_plans,
+            _asset_release(
+                plans,
+                no_speech_plans,
+                preregistration,
+                campaign,
+                attempt,
+                split="development",
+            ),
             preregistration=preregistration,
             config=AuthorizedAttemptConfig(
                 preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2007,7 +2282,14 @@ def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
     with pytest.raises(ValueError, match="binding"):
         asyncio.run(
             execute_authorized_attempt(
-                (_plan(),),
+                _asset_release(
+                    (_plan(),),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2065,7 +2347,14 @@ def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
     with pytest.raises(ValueError, match="artifact destination"):
         asyncio.run(
             execute_authorized_attempt(
-                (_plan(),),
+                _asset_release(
+                    (_plan(),),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2115,7 +2404,14 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
     with pytest.raises(ValueError, match="signature"):
         asyncio.run(
             execute_authorized_attempt(
-                (_plan(),),
+                _asset_release(
+                    (_plan(),),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2146,6 +2442,79 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
     assert not ledger_path.exists()
 
 
+def test_stale_privacy_receipt_blocks_asset_ledger_secret_and_connector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    plans, no_speech_plans = _development_schedule()
+    release = _asset_release(
+        plans,
+        no_speech_plans,
+        preregistration,
+        campaign,
+        attempt,
+        split="development",
+    )
+    stale_envelope = deepcopy(release.privacy_envelope)
+    stale_payload = stale_envelope["payload"]
+    assert isinstance(stale_payload, dict)
+    stale_payload["issued_at"] = (NOW - timedelta(minutes=6)).isoformat()
+    stale_payload["expires_at"] = (NOW + timedelta(minutes=1)).isoformat()
+    stale_envelope["signature"] = base64.b64encode(
+        PRIVACY_PRIVATE_KEY.sign(canonical_json_bytes(stale_payload))
+    ).decode("ascii")
+    release = replace(release, privacy_envelope=stale_envelope)
+    loader = release.loader
+    assert isinstance(loader, FakeAssetLoader)
+    ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
+    touched: list[str] = []
+    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+
+    with pytest.raises(ValueError, match="fresh"):
+        asyncio.run(
+            execute_authorized_attempt(
+                release,
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=ledger,
+                ledger_custodian_public_key=LEDGER_PUBLIC_KEY,
+                now=NOW,
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                receipt_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_path=_capsule_path(ledger_path),
+            )
+        )
+
+    assert loader.authorizations == []
+    assert ledger.calls == []
+    assert touched == []
+    assert not ledger_path.exists()
+
+
 def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
     tmp_path: Path,
 ) -> None:
@@ -2163,7 +2532,14 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
     with pytest.raises(ValueError, match="trust root.*unprovisioned"):
         asyncio.run(
             execute_authorized_attempt(
-                (_plan(),),
+                _asset_release(
+                    (_plan(),),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2262,7 +2638,14 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
     with pytest.raises(ValueError, match="preregistration"):
         asyncio.run(
             execute_authorized_attempt(
-                (_plan(),),
+                _asset_release(
+                    (_plan(),),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=supplied_preregistration,
                 config=config,
                 session_config=session_config,
@@ -2313,11 +2696,17 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
     holdout_window = replace(_no_speech_plan(), split="holdout")
     touched: list[str] = []
 
-    with pytest.raises(ValueError, match="holdout|split|phase"):
+    with pytest.raises(ValueError, match="schedule|holdout|split|phase"):
         asyncio.run(
             execute_authorized_attempt(
-                (holdout_plan,),
-                no_speech_plans=(holdout_window,),
+                _asset_release(
+                    (holdout_plan,),
+                    (holdout_window,),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2369,12 +2758,20 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
         else value
         for value in base.replay_inputs
     )
-    bad_plan = replace(base, replay_inputs=bad_inputs)
+    bad_plan = copy(base)
+    object.__setattr__(bad_plan, "replay_inputs", bad_inputs)
 
     with pytest.raises(ValueError, match="audio.*duration|duration.*audio"):
         asyncio.run(
             execute_authorized_attempt(
-                (bad_plan,),
+                _asset_release(
+                    (bad_plan,),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2433,8 +2830,14 @@ def test_insufficient_signed_liability_blocks_before_ledger_and_secret(
     with pytest.raises(ValueError, match="reservation"):
         asyncio.run(
             execute_authorized_attempt(
-                plans,
-                no_speech_plans=no_speech_plans,
+                _asset_release(
+                    plans,
+                    no_speech_plans,
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2484,8 +2887,14 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
     with pytest.raises(ValueError, match="development schedule"):
         asyncio.run(
             execute_authorized_attempt(
-                (_plan(),),
-                no_speech_plans=(_no_speech_plan(),),
+                _asset_release(
+                    (_plan(),),
+                    (_no_speech_plan(),),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2514,6 +2923,52 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
 
     assert touched == []
     assert not ledger_path.exists()
+
+
+def test_all_standard_development_schedule_fails_shared_preclaim_validation() -> None:
+    plans, no_speech_plans = _development_schedule()
+    mutable_plans = []
+    for plan in plans:
+        mutated_plan = copy(plan)
+        object.__setattr__(
+            mutated_plan,
+            "activities",
+            tuple(
+                replace(activity, scenario_tags=("standard",))
+                for activity in plan.activities
+            ),
+        )
+        mutable_plans.append(mutated_plan)
+    mutated = tuple(mutable_plans)
+
+    with pytest.raises(ValueError, match="schedule allocation"):
+        runner_module._validate_exact_development_schedule(
+            mutated,
+            no_speech_plans=no_speech_plans,
+        )
+
+
+def test_correlated_language_condition_schedule_fails_shared_preclaim_validation() -> None:
+    plans, no_speech_plans = _development_schedule()
+    mutated = tuple(
+        replace(
+            plan,
+            activities=tuple(
+                replace(
+                    activity,
+                    condition=CONDITIONS[LANGUAGES.index(activity.language) % 4],
+                )
+                for activity in plan.activities
+            ),
+        )
+        for plan in plans
+    )
+
+    with pytest.raises(ValueError, match="schedule allocation"):
+        runner_module._validate_exact_development_schedule(
+            mutated,
+            no_speech_plans=no_speech_plans,
+        )
 
 
 def test_per_session_cost_cap_stops_before_the_next_provider_request(
@@ -2551,8 +3006,14 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
 
     result = asyncio.run(
         execute_authorized_attempt(
-            plans,
-            no_speech_plans=no_speech_plans,
+            _asset_release(
+                plans,
+                no_speech_plans,
+                preregistration,
+                campaign,
+                attempt,
+                split="development",
+            ),
             preregistration=preregistration,
             config=AuthorizedAttemptConfig(
                 preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2610,8 +3071,14 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
 
     result = asyncio.run(
         execute_authorized_attempt(
-            plans,
-            no_speech_plans=no_speech_plans,
+            _asset_release(
+                plans,
+                no_speech_plans,
+                preregistration,
+                campaign,
+                attempt,
+                split="development",
+            ),
             preregistration=preregistration,
             config=AuthorizedAttemptConfig(
                 preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2676,8 +3143,14 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
     monkeypatch.setattr(runner_module, "_execute_attempt_work", expire)
     result = asyncio.run(
         execute_authorized_attempt(
-            plans,
-            no_speech_plans=no_speech_plans,
+            _asset_release(
+                plans,
+                no_speech_plans,
+                preregistration,
+                campaign,
+                attempt,
+                split="development",
+            ),
             preregistration=preregistration,
             config=AuthorizedAttemptConfig(
                 preregistration_sha256=preregistration["preregistration_sha256"],
@@ -2735,6 +3208,8 @@ def test_cli_help_and_dry_run_name_every_immutable_value(
         "credential_reference",
         "custodian_key_id",
         "custodian_public_key_sha256",
+        "privacy_custodian_key_id",
+        "privacy_custodian_public_key_sha256",
         "record_root_key_id",
         "record_root_public_key_sha256",
         "ledger_instance_id",
@@ -2783,11 +3258,13 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
         "approval_public_key_sha256": "1" * 64,
         "custodian_key_id": "audit_custodian_1",
         "custodian_public_key_sha256": "f" * 64,
+        "privacy_custodian_key_id": "privacy_custodian_1",
+        "privacy_custodian_public_key_sha256": "3" * 64,
         "record_root_key_id": "evidence_custodian_1",
         "record_root_public_key_sha256": "0" * 64,
         "ledger_instance_id": "ledger_instance_1",
         "ledger_custodian_key_id": "ledger_custodian_1",
-        "ledger_custodian_public_key_sha256": "f" * 64,
+        "ledger_custodian_public_key_sha256": "2" * 64,
         "source_sha": SOURCE_SHA,
         "environment_identity_sha256": "2" * 64,
         "manifest_sha256": "3" * 64,
@@ -2819,6 +3296,7 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
     values_path = tmp_path / "values.json"
     output_path = tmp_path / "preregistration.json"
     values_path.write_text(json.dumps(values))
+    values_path.chmod(0o600)
     assert (
         main(
             [
@@ -2835,6 +3313,23 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
 
     with pytest.raises(ValueError, match="fields"):
         build_preregistration({**values, "unexpected": True})
+
+    with pytest.raises(ValueError, match="distinct identities"):
+        build_preregistration(
+            {
+                **values,
+                "privacy_custodian_key_id": values["custodian_key_id"],
+            }
+        )
+    with pytest.raises(ValueError, match="distinct identities"):
+        build_preregistration(
+            {
+                **values,
+                "privacy_custodian_public_key_sha256": values[
+                    "custodian_public_key_sha256"
+                ],
+            }
+        )
 
 
 def test_dry_run_output_must_be_outside_repository(tmp_path: Path) -> None:

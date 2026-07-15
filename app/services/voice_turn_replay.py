@@ -532,6 +532,17 @@ def build_gate0b_session_inputs(
     if not isinstance(session, Gate0BReplaySession):
         raise TypeError("session must be a Gate0BReplaySession")
     _validate_gate0b_frame_pattern(frame_pattern_ms)
+    for index, activity in enumerate(session.activities):
+        if "tool_cancellation_interruption" not in activity.scenario_tags:
+            continue
+        if "synchronous_tool_use" in activity.scenario_tags or index == 0:
+            raise ValueError("Gate 0B tool cancellation must follow a distinct tool activity")
+        prior = session.activities[index - 1]
+        if (
+            "synchronous_tool_use" not in prior.scenario_tags
+            or prior.fresh_restart_after
+        ):
+            raise ValueError("Gate 0B tool cancellation is not causally paired")
     events: list[Gate0BReplayInput] = []
     epoch = 1
     start_at_ms = 0

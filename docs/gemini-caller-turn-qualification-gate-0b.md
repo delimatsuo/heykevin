@@ -31,6 +31,11 @@ The implementation pins:
 - Python `3.12.13`, uv `0.11.7`, and the checked-in `uv.lock`;
 - exactly 256 eligible activities, 128 sealed holdout activities, and 64
   separately scheduled no-speech windows;
+- exactly 24 logical sessions, eight fresh-connection restarts, and 32 no-speech
+  requests per split, for 64 provider requests per split and 128 per attempt;
+- an exact shared allocation validator covering every language, condition, stress,
+  code-switch direction, applicable critical span, and the 16 silence plus 16
+  background-noise windows in each split;
 - the request, duration, timeout, attempt, and cost ceilings in the approved plan.
 
 `app/services/gemini_pipeline.py` and `app/services/voice_pipeline.py` must not
@@ -46,9 +51,13 @@ uv run --locked --no-sync --extra dev --python 3.12.13 \
   python -m pytest \
   tests/unit/test_qualification_identity.py \
   tests/unit/test_qualification_ledger.py \
+  tests/unit/test_qualification_allocation.py \
+  tests/unit/test_qualification_privacy.py \
+  tests/unit/test_qualification_private_paths.py \
   tests/unit/test_caller_turn_measurement.py \
   tests/unit/test_run_gemini_caller_turn_qualification.py \
-  tests/unit/test_evaluate_gemini_caller_turn_qualification.py -q
+  tests/unit/test_evaluate_gemini_caller_turn_qualification.py \
+  tests/unit/test_gate0b_offline_boundaries.py -q
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   ruff check app/services/qualification_identity.py \
   app/services/qualification_ledger.py \
@@ -112,6 +121,8 @@ approval_key_id
 approval_public_key_sha256
 custodian_key_id
 custodian_public_key_sha256
+privacy_custodian_key_id
+privacy_custodian_public_key_sha256
 record_root_key_id
 record_root_public_key_sha256
 ledger_instance_id
@@ -151,7 +162,8 @@ uv run --locked --no-sync --extra dev --python 3.12.13 \
 ```
 
 The builder rejects missing or unknown fields, a production project, the live Hey
-Kevin project, malformed identities, and noncanonical digests. It adds
+Kevin project, malformed identities, noncanonical digests, reused key IDs, and
+reused public-key digests. It adds
 `preregistration_sha256`, computed over the complete artifact before that digest
 field is attached.
 
@@ -207,10 +219,29 @@ resume or replace the holdout. Each provider request consumes reserved allowance
 immediately before connector construction. There are no case, session, setup,
 provider, malformed-message, timeout, or gate retries.
 
+Corpus and schedule bytes are not executor arguments. A separate opaque loader may
+release one split only after a fresh Ed25519-signed privacy-custody receipt verifies
+the campaign, attempt, split, source, preregistration, schedule, corpus, project,
+model, consent and withdrawal status, purpose, rights, provider disclosure,
+retention decision, deletion deadline, and residual-retention acceptance. A stale,
+withdrawn, mismatched, or alternate-fork receipt cannot invoke the loader. Holdout
+verification additionally requires the signed post-lock ledger state and exact
+holdout schedule commitment before the one-shot holdout claim.
+
 Raw provider messages are reduced independently twice and then discarded. Output
 audio is counted and discarded. Canonical references and transcript fragments may
-exist only inside the allowlisted encrypted audit capsule. The storage sink must
-return a digest-matched handoff receipt before an attempt can be marked complete.
+exist only inside the allowlisted encrypted audit capsule. Capsule schema v3 stores
+adapted transcript events and ordered raw wire facts once per logical session;
+activity entries contain metadata and references only. The evaluator independently
+derives timing, premature output, response gaps, terminal ordering, causal tool
+cancellation/interruption, close, malformed-message, runaway-output, and teardown
+facts from that session evidence. The storage sink must return a digest-matched
+handoff receipt before an attempt can be marked complete.
+
+Every external values file, capsule, custody bundle, key, and report uses an
+absolute path outside the repository. Input files must be current-user-owned,
+single-link regular files with mode `0600`; output parents must be
+current-user-owned directories with mode `0700`; symlink ancestry is rejected.
 
 Request counts, modality token totals, input duration, output bytes, observed
 elapsed time, completion state, and bounded failure enums are also stored only in

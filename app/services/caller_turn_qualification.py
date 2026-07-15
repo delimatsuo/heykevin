@@ -787,6 +787,7 @@ def _validate_no_speech_windows(windows: list[dict[str, Any]], *, corpus_root: P
         "duration_ms",
     }
     split_counts: Counter[str] = Counter()
+    condition_counts: Counter[tuple[str, str]] = Counter()
     seen_ids: set[str] = set()
     for raw in windows:
         data = _strict_object(raw, allowed=allowed, label="no-speech window")
@@ -804,10 +805,20 @@ def _validate_no_speech_windows(windows: list[dict[str, Any]], *, corpus_root: P
             corpus_root=corpus_root,
             id_label=window_id,
             expect_speech=False,
+            no_speech_condition=data["condition"],
         )
         split_counts[split] += 1
+        condition_counts[(split, data["condition"])] += 1
     if split_counts != Counter({"development": 32, "holdout": 32}):
         raise QualificationContractError("no-speech windows must split 32/32")
+    if any(
+        condition_counts[(split, condition)] != 16
+        for split in VALID_SPLITS
+        for condition in ("silence", "background_noise")
+    ):
+        raise QualificationContractError(
+            "each split must contain 16 silence and 16 background-noise windows"
+        )
 
 
 def _validate_pcm_asset(
@@ -816,6 +827,7 @@ def _validate_pcm_asset(
     corpus_root: Path,
     id_label: str,
     expect_speech: bool,
+    no_speech_condition: str | None = None,
 ) -> None:
     relative = data.get("audio_path")
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
@@ -864,8 +876,23 @@ def _validate_pcm_asset(
             raise QualificationContractError(f"{id_label} speech boundaries are invalid")
         if silence_ratio >= 0.98 or peak < 100 or clipping_ratio > 0.01:
             raise QualificationContractError(f"{id_label} speech signal bounds are invalid")
-    elif silence_ratio < 0.95 or clipping_ratio > 0.01:
-        raise QualificationContractError(f"{id_label} no-speech signal bounds are invalid")
+    elif no_speech_condition == "silence":
+        if silence_ratio < 0.95 or peak > 64 or clipping_ratio > 0.01:
+            raise QualificationContractError(f"{id_label} silence signal bounds are invalid")
+    elif no_speech_condition == "background_noise":
+        nontrivial_ratio = sum(abs(value) >= 64 for value in samples) / len(samples)
+        mean_square = sum(value * value for value in samples) // len(samples)
+        if (
+            nontrivial_ratio < 0.80
+            or not 4_096 <= mean_square <= 64_000_000
+            or not 64 <= peak <= 8_000
+            or clipping_ratio > 0.01
+        ):
+            raise QualificationContractError(
+                f"{id_label} background-noise signal bounds are invalid"
+            )
+    else:
+        raise QualificationContractError(f"{id_label} no-speech condition is invalid")
 
 
 def _resolve_corpus_root(value: object, manifest_dir: Path | None) -> Path:

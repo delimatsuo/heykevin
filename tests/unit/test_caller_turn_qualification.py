@@ -54,11 +54,19 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
 
-def _write_pcm(path: Path, *, ordinal: int, silent: bool = False) -> tuple[str, str]:
+def _write_pcm(
+    path: Path,
+    *,
+    ordinal: int,
+    silent: bool = False,
+    background_noise: bool = False,
+) -> tuple[str, str]:
     sample = 0 if silent else 500 + ordinal
     samples = [sample] * 320
     if silent:
         samples[-1] = ordinal % 5
+    if background_noise:
+        samples = [200 if index % 2 else -200 for index in range(320)]
     payload = struct.pack(f"<{len(samples)}h", *samples)
     path.write_bytes(payload)
     return sha256(payload).hexdigest(), compute_twilio_roundtrip_sha256(payload)
@@ -143,12 +151,18 @@ def _ready_manifest(tmp_path: Path) -> dict[str, object]:
     for ordinal in range(64):
         window_id = f"window_{ordinal:03d}"
         audio_path = corpus_root / f"{window_id}.pcm"
-        audio_sha, roundtrip_sha = _write_pcm(audio_path, ordinal=ordinal, silent=True)
+        condition = "silence" if ordinal % 4 < 2 else "background_noise"
+        audio_sha, roundtrip_sha = _write_pcm(
+            audio_path,
+            ordinal=ordinal,
+            silent=condition == "silence",
+            background_noise=condition == "background_noise",
+        )
         no_speech_windows.append(
             {
                 "window_id": window_id,
                 "split": SPLITS[ordinal % 2],
-                "condition": "silence" if ordinal % 2 == 0 else "background_noise",
+                "condition": condition,
                 "audio_path": str(audio_path.relative_to(corpus_root)),
                 "audio_sha256": audio_sha,
                 "twilio_roundtrip_sha256": roundtrip_sha,
@@ -202,6 +216,25 @@ def test_ready_manifest_enforces_exact_matrix_and_audio(tmp_path: Path) -> None:
     assert summary.holdout_activity_count == 128
     assert summary.no_speech_window_count == 64
     assert summary.language_counts == {language: 32 for language in LANGUAGES}
+
+
+def test_ready_manifest_rejects_silence_labeled_as_background_noise(tmp_path: Path) -> None:
+    manifest = _ready_manifest(tmp_path)
+    window = next(
+        value
+        for value in manifest["no_speech_windows"]  # type: ignore[union-attr]
+        if value["condition"] == "background_noise"
+    )
+    corpus_root = Path(manifest["corpus_root"])  # type: ignore[arg-type]
+    audio_path = corpus_root / window["audio_path"]
+    audio_sha, roundtrip_sha = _write_pcm(audio_path, ordinal=0, silent=True)
+    window["audio_sha256"] = audio_sha
+    window["twilio_roundtrip_sha256"] = roundtrip_sha
+    manifest_path = tmp_path / "manifest.json"
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(QualificationContractError, match="background-noise signal"):
+        load_corpus_manifest(manifest_path, require_ready=True)
 
 
 def test_unknown_manifest_field_fails_closed(tmp_path: Path) -> None:

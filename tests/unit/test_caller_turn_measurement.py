@@ -91,7 +91,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         serialization.PublicFormat.Raw,
     )
     payload = {
-        "schema_id": "gate_0b_audit_capsule_v2",
+        "schema_id": "gate_0b_audit_capsule_v3",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -115,6 +115,22 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
                 }
             ],
         },
+        "sessions": [
+            {
+                "session_ordinal": 1,
+                "split": "development",
+                "events": [
+                    {
+                        "kind": "input_transcript_fragment",
+                        "at_ms": 10,
+                        "sequence": 1,
+                        "epoch": 1,
+                        "text": "purpose recorded synthetic phrase",
+                    }
+                ],
+                "wire_facts": [],
+            }
+        ],
         "activities": [
             {
                 "activity_ordinal": 3,
@@ -127,19 +143,9 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
                 "critical_spans": [
                     {"kind": "correction", "text": "synthetic phrase", "language": "en"}
                 ],
-                "events": [
-                    {
-                        "kind": "input_transcript_fragment",
-                        "at_ms": 10,
-                        "sequence": 1,
-                        "epoch": 1,
-                        "text": "purpose recorded synthetic phrase",
-                    }
-                ],
                 "expected_lifecycle_status": "retrospective_complete",
                 "expected_epoch": 1,
                 "advance_to_ms": 300,
-                "wire_facts": [],
             }
         ],
         "no_speech_windows": [],
@@ -185,6 +191,9 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
                     "at_ms": 10,
                     "response_ordinal": None,
                     "activity_ordinal": None,
+                    "sequence": 0,
+                    "epoch": 1,
+                    "audio_bytes": 0,
                     "secret_value": "forbidden",
                 }
             ],
@@ -200,7 +209,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
 
 def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v2",
+        "schema_id": "gate_0b_audit_capsule_v3",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -239,18 +248,10 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
                 },
             ],
         },
-        "activities": [
+        "sessions": [
             {
-                "activity_ordinal": 3,
                 "session_ordinal": 1,
                 "split": "development",
-                "language": "en",
-                "condition": "clean",
-                "scenario_tags": ["standard"],
-                "reference_text": "book service today",
-                "critical_spans": [
-                    {"kind": "correction", "text": "service today", "language": "en"}
-                ],
                 "events": [
                     {
                         "kind": "input_transcript_fragment",
@@ -267,35 +268,88 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
                         "text": "",
                     },
                 ],
-                "expected_lifecycle_status": "retrospective_complete",
-                "expected_epoch": 1,
-                "advance_to_ms": 900,
                 "wire_facts": [
                     {
                         "kind": "caller_activity_start",
                         "at_ms": 0,
                         "response_ordinal": None,
                         "activity_ordinal": 3,
+                        "sequence": 0,
+                        "epoch": 1,
+                        "audio_bytes": 0,
+                    },
+                    {
+                        "kind": "caller_audio_sent",
+                        "at_ms": 20,
+                        "response_ordinal": None,
+                        "activity_ordinal": 3,
+                        "sequence": 1,
+                        "epoch": 1,
+                        "audio_bytes": 640,
                     },
                     {
                         "kind": "caller_activity_end",
                         "at_ms": 100,
                         "response_ordinal": None,
                         "activity_ordinal": 3,
+                        "sequence": 2,
+                        "epoch": 1,
+                        "audio_bytes": 0,
                     },
                     {
                         "kind": "response_open",
                         "at_ms": 220,
                         "response_ordinal": 1,
                         "activity_ordinal": 3,
+                        "sequence": 3,
+                        "epoch": 1,
+                        "audio_bytes": 0,
                     },
                     {
                         "kind": "audio_received",
                         "at_ms": 220,
                         "response_ordinal": 1,
                         "activity_ordinal": 3,
+                        "sequence": 4,
+                        "epoch": 1,
+                        "audio_bytes": 48_000,
+                    },
+                    {
+                        "kind": "response_terminal",
+                        "at_ms": 230,
+                        "response_ordinal": 1,
+                        "activity_ordinal": 3,
+                        "sequence": 5,
+                        "epoch": 1,
+                        "audio_bytes": 0,
+                    },
+                    {
+                        "kind": "teardown_complete",
+                        "at_ms": 240,
+                        "response_ordinal": None,
+                        "activity_ordinal": None,
+                        "sequence": 6,
+                        "epoch": 1,
+                        "audio_bytes": 0,
                     },
                 ],
+            }
+        ],
+        "activities": [
+            {
+                "activity_ordinal": 3,
+                "session_ordinal": 1,
+                "split": "development",
+                "language": "en",
+                "condition": "clean",
+                "scenario_tags": ["standard"],
+                "reference_text": "book service today",
+                "critical_spans": [
+                    {"kind": "correction", "text": "service today", "language": "en"}
+                ],
+                "expected_lifecycle_status": "retrospective_complete",
+                "expected_epoch": 1,
+                "advance_to_ms": 900,
             }
         ],
         "no_speech_windows": [
@@ -335,9 +389,307 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
     assert failures == ()
 
 
+def _literal_wire_capsule() -> dict[str, object]:
+    def fact(
+        kind: str,
+        at_ms: int,
+        sequence: int,
+        *,
+        response_ordinal: int | None = None,
+        activity_ordinal: int | None = 3,
+        audio_bytes: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "kind": kind,
+            "at_ms": at_ms,
+            "response_ordinal": response_ordinal,
+            "activity_ordinal": activity_ordinal,
+            "sequence": sequence,
+            "epoch": 1,
+            "audio_bytes": audio_bytes,
+        }
+
+    return {
+        "schema_id": "gate_0b_audit_capsule_v3",
+        "campaign_id": "campaign_1",
+        "policy_ms": 250,
+        "accounting": {
+            "schema_id": "gate_0b_capsule_accounting_v1",
+            "split": "development",
+            "units": [
+                {
+                    "kind": "session",
+                    "ordinal": 1,
+                    "metadata_complete": True,
+                    "complete": True,
+                    "error_code": None,
+                    "provider_request_count": 1,
+                    "observed_elapsed_ms": 900,
+                    "input_audio_duration_ms": 100,
+                    "output_audio_bytes": 640,
+                    "input_audio_tokens": 1,
+                    "output_audio_tokens": 1,
+                    "input_text_tokens": 0,
+                    "output_text_tokens": 0,
+                }
+            ],
+        },
+        "sessions": [
+            {
+                "session_ordinal": 1,
+                "split": "development",
+                "events": [
+                    {
+                        "kind": "input_transcript_fragment",
+                        "at_ms": 10,
+                        "sequence": 1,
+                        "epoch": 1,
+                        "text": "book service today",
+                    },
+                    {
+                        "kind": "turn_complete",
+                        "at_ms": 20,
+                        "sequence": 2,
+                        "epoch": 1,
+                        "text": "",
+                    },
+                ],
+                "wire_facts": [
+                    fact("caller_activity_start", 0, 0),
+                    fact("caller_audio_sent", 20, 1, audio_bytes=640),
+                    fact("caller_activity_end", 100, 2),
+                    fact("response_open", 220, 3, response_ordinal=1),
+                    fact(
+                        "audio_received",
+                        220,
+                        4,
+                        response_ordinal=1,
+                        audio_bytes=640,
+                    ),
+                    fact("response_terminal", 230, 5, response_ordinal=1),
+                    fact(
+                        "teardown_complete",
+                        240,
+                        6,
+                        activity_ordinal=None,
+                    ),
+                ],
+            }
+        ],
+        "activities": [
+            {
+                "activity_ordinal": 3,
+                "session_ordinal": 1,
+                "split": "development",
+                "language": "en",
+                "condition": "clean",
+                "scenario_tags": ["standard"],
+                "reference_text": "book service today",
+                "critical_spans": [],
+                "expected_lifecycle_status": "retrospective_complete",
+                "expected_epoch": 1,
+                "advance_to_ms": 900,
+            }
+        ],
+        "no_speech_windows": [],
+    }
+
+
+def _normalize_wire_sequences(capsule: dict[str, object]) -> None:
+    sessions = capsule["sessions"]
+    assert isinstance(sessions, list)
+    facts = sessions[0]["wire_facts"]
+    assert isinstance(facts, list)
+    facts.sort(key=lambda value: (value["at_ms"], value["sequence"]))
+    for sequence, fact in enumerate(facts):
+        fact["sequence"] = sequence
+
+
+@pytest.mark.parametrize(
+    ("mutation", "field"),
+    (
+        ("premature", "premature_current_audio_count"),
+        ("gap", "response_gap_violation_count"),
+        ("after_terminal", "audio_after_terminal_count"),
+        ("missing_terminal", "response_timeout_count"),
+    ),
+)
+def test_literal_capsule_wire_mutations_derive_failing_primitives(
+    mutation: str,
+    field: str,
+) -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    if mutation == "premature":
+        facts[3]["at_ms"] = 90
+        facts[4]["at_ms"] = 90
+    elif mutation == "gap":
+        facts.insert(
+            5,
+            {
+                **facts[4],
+                "at_ms": 721,
+            },
+        )
+        facts[6]["at_ms"] = 730
+        facts[7]["at_ms"] = 740
+    elif mutation == "after_terminal":
+        facts.insert(
+            6,
+            {
+                **facts[4],
+                "at_ms": 235,
+            },
+        )
+        facts[7]["at_ms"] = 240
+    else:
+        facts.pop(5)
+    _normalize_wire_sequences(capsule)
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert getattr(records[0], field) == 1
+    if mutation == "premature":
+        assert records[0].first_audio_ms == 0
+
+
+def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> None:
+    capsule = _literal_wire_capsule()
+    sessions = capsule["sessions"]
+    activities = capsule["activities"]
+    assert isinstance(sessions, list)
+    assert isinstance(activities, list)
+    session = sessions[0]
+    session["events"] = [
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 50,
+            "sequence": 1,
+            "epoch": 1,
+            "text": "first phrase",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 120,
+            "sequence": 2,
+            "epoch": 1,
+            "text": "",
+        },
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 250,
+            "sequence": 3,
+            "epoch": 1,
+            "text": "second phrase",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 320,
+            "sequence": 4,
+            "epoch": 1,
+            "text": "",
+        },
+    ]
+
+    def fact(
+        kind: str,
+        at_ms: int,
+        sequence: int,
+        *,
+        activity: int | None,
+        response: int | None = None,
+        audio_bytes: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "kind": kind,
+            "at_ms": at_ms,
+            "response_ordinal": response,
+            "activity_ordinal": activity,
+            "sequence": sequence,
+            "epoch": 1,
+            "audio_bytes": audio_bytes,
+        }
+
+    session["wire_facts"] = [
+        fact("caller_activity_start", 0, 0, activity=2),
+        fact("caller_audio_sent", 20, 1, activity=2, audio_bytes=640),
+        fact("caller_activity_end", 100, 2, activity=2),
+        fact("response_open", 150, 3, activity=2, response=1),
+        fact("audio_received", 150, 4, activity=2, response=1, audio_bytes=320),
+        fact("tool_call_open", 160, 5, activity=2),
+        fact("caller_activity_start", 200, 6, activity=3),
+        fact("caller_audio_sent", 200, 7, activity=3, audio_bytes=640),
+        fact("audio_received", 200, 8, activity=2, response=1, audio_bytes=320),
+        fact("tool_call_cancelled", 200, 9, activity=3),
+        fact("interrupted", 200, 10, activity=3),
+        fact("response_terminal", 200, 11, activity=2, response=1),
+        fact("caller_activity_end", 300, 12, activity=3),
+        fact("response_open", 400, 13, activity=3, response=2),
+        fact("audio_received", 400, 14, activity=3, response=2, audio_bytes=320),
+        fact("response_terminal", 410, 15, activity=3, response=2),
+        fact("teardown_complete", 420, 16, activity=None),
+    ]
+    activities[:] = [
+        {
+            "activity_ordinal": 2,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "interaction_stress",
+            "scenario_tags": ["synchronous_tool_use"],
+            "reference_text": "first phrase",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "advance_to_ms": 800,
+        },
+        {
+            "activity_ordinal": 3,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "interaction_stress",
+            "scenario_tags": ["tool_cancellation_interruption"],
+            "reference_text": "second phrase",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "advance_to_ms": 800,
+        },
+    ]
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+    cancellation = next(record for record in records if record.activity_ordinal == 3)
+    assert cancellation.interruption_tail_ms == 0
+
+    no_open = deepcopy(capsule)
+    no_open["sessions"][0]["wire_facts"] = [  # type: ignore[index]
+        fact
+        for fact in no_open["sessions"][0]["wire_facts"]  # type: ignore[index]
+        if fact["kind"] != "tool_call_open"
+    ]
+    _normalize_wire_sequences(no_open)
+    records, _ = derive_primitive_records_from_capsule(
+        no_open,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+    cancellation = next(record for record in records if record.activity_ordinal == 3)
+    assert cancellation.interruption_tail_ms is None
+
+
 def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v2",
+        "schema_id": "gate_0b_audit_capsule_v3",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "accounting": {
@@ -361,6 +713,7 @@ def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failure
                 }
             ],
         },
+        "sessions": [],
         "activities": [],
         "no_speech_windows": [],
     }

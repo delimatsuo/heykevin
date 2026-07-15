@@ -7,15 +7,13 @@ import argparse
 import asyncio
 import base64
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import ROUND_CEILING
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
 import re
-import stat
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
@@ -44,6 +42,12 @@ from app.services.voice_turn_replay import (
     build_gemini_audio_message,
 )
 from app.services.qualification_environment import execution_identity_sha256
+from app.services.qualification_allocation import (
+    AllocationActivity,
+    AllocationError,
+    NoSpeechAllocation,
+    validate_gate0b_allocation,
+)
 from app.services.qualification_identity import (
     AttemptAuthorization,
     AttemptClaim,
@@ -57,6 +61,18 @@ from app.services.qualification_ledger import (
     LedgerCustodyClient,
     LedgerCustodyIdentity,
     validate_custody_ledger_snapshot,
+)
+from app.services.qualification_privacy import (
+    OpaqueQualificationAssetLoader,
+    PrivacyCustodyAuthorization,
+    QualificationAssets,
+    verify_privacy_custody,
+)
+from app.services.qualification_private_paths import (
+    PrivatePathError,
+    read_private_file,
+    validate_private_output_path,
+    write_private_file,
 )
 
 
@@ -86,6 +102,8 @@ PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
         "approval_public_key_sha256",
         "custodian_key_id",
         "custodian_public_key_sha256",
+        "privacy_custodian_key_id",
+        "privacy_custodian_public_key_sha256",
         "record_root_key_id",
         "record_root_public_key_sha256",
         "ledger_instance_id",
@@ -120,6 +138,13 @@ class ProviderSessionClosed(Exception):
 
     def __init__(self, _provider_reason: object = None) -> None:
         super().__init__("provider session closed")
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizedAssetRelease:
+    loader: OpaqueQualificationAssetLoader
+    privacy_envelope: Mapping[str, Any]
+    privacy_public_key: bytes
 
 
 class RequestReservationError(RunnerError):
@@ -360,6 +385,7 @@ class SessionPlan:
             for value in self.replay_inputs
         ):
             raise RunnerError("session replay input references an unknown activity")
+        _validate_replay_topology(self.activities, self.replay_inputs)
         _validate_restart_schedule(self.activities, self.replay_inputs)
 
 
@@ -435,6 +461,7 @@ class SessionExecutionResult:
     output_audio_bytes: int
     provider_request_count: int
     epoch_count: int
+    wire_facts: tuple[WireFact, ...] = ()
 
     def redacted_report_dict(self) -> dict[str, Any]:
         event_counts = Counter(value.kind.value for value in self.audit_events)
@@ -457,11 +484,29 @@ class WireFact:
     at_ms: int
     response_ordinal: int | None = None
     activity_ordinal: int | None = None
+    sequence: int = 0
+    epoch: int = 1
+    audio_bytes: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in {
+            "abnormal_close",
+            "audio_after_terminal",
             "audio_received",
+            "caller_activity_end",
+            "caller_activity_start",
+            "caller_audio_sent",
+            "connection_open",
             "false_activity",
+            "goaway",
+            "interrupted",
+            "malformed",
+            "response_open",
+            "response_terminal",
+            "teardown_complete",
+            "teardown_failed",
+            "tool_call_cancelled",
+            "tool_call_open",
         }:
             raise RunnerError("wire fact kind is invalid")
         _bounded_int(self.at_ms, label="wire fact time", maximum=7_200_000)
@@ -477,6 +522,14 @@ class WireFact:
                 label="wire activity ordinal",
                 maximum=255,
             )
+        _bounded_int(self.sequence, label="wire sequence", maximum=100_000)
+        _bounded_int(self.epoch, label="wire epoch", maximum=1_000)
+        _bounded_int(self.audio_bytes, label="wire audio bytes", maximum=1024 * 1024)
+        if self.kind in {"audio_received", "caller_audio_sent"}:
+            if self.audio_bytes <= 0:
+                raise RunnerError("audio wire facts require a positive byte count")
+        elif self.audio_bytes:
+            raise RunnerError("non-audio wire facts cannot carry an audio byte count")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -484,6 +537,9 @@ class WireFact:
             "at_ms": self.at_ms,
             "response_ordinal": self.response_ordinal,
             "activity_ordinal": self.activity_ordinal,
+            "sequence": self.sequence,
+            "epoch": self.epoch,
+            "audio_bytes": self.audio_bytes,
         }
 
 
@@ -571,6 +627,7 @@ class _SessionProgress:
     wires: dict[int, _MutableWire]
     provider_request_count: int = 0
     epoch_count: int = 0
+    wire_facts: list[WireFact] = field(default_factory=list)
 
 
 def build_gate0b_setup_message(
@@ -686,11 +743,26 @@ async def execute_injected_session(
             wires=progress.wires,
             provider_request_count=progress.provider_request_count,
             epoch_count=progress.epoch_count,
+            wire_facts=tuple(progress.wire_facts),
         )
     except RequestReservationError:
-        return _failed_result(plan, "provider_request_reservation_exhausted")
+        return _failed_result(
+            plan,
+            "provider_request_reservation_exhausted",
+            wires=progress.wires,
+            provider_request_count=progress.provider_request_count,
+            epoch_count=progress.epoch_count,
+            wire_facts=tuple(progress.wire_facts),
+        )
     except Exception:  # A connector failure is reported only as a bounded enum.
-        return _failed_result(plan, "connector_failure")
+        return _failed_result(
+            plan,
+            "connector_failure",
+            wires=progress.wires,
+            provider_request_count=progress.provider_request_count,
+            epoch_count=progress.epoch_count,
+            wire_facts=tuple(progress.wire_facts),
+        )
 
 
 async def _execute_session_flow(
@@ -707,6 +779,7 @@ async def _execute_session_flow(
 ) -> SessionExecutionResult:
     audit_events: list[CallerTurnEvent] = []
     wires = progress.wires
+    wire_facts = progress.wire_facts
     usage = UsageCounts()
     output_audio_bytes = 0
     error_code: str | None = None
@@ -717,6 +790,7 @@ async def _execute_session_flow(
     adapter = GeminiTurnEventAdapter()
     provider_request_count = 0
     epoch_count = 0
+    response_ordinal = 0
 
     for epoch, base_at_ms, replay_inputs in _connection_segments(plan):
         if active_response_activity is not None:
@@ -742,6 +816,7 @@ async def _execute_session_flow(
         except Exception:
             error_code = "connector_failure"
             break
+        _record_wire_fact(wire_facts, "connection_open", base_at_ms, epoch=epoch)
 
         connection_usage = UsageCounts()
         usage_frame_count = 0
@@ -758,6 +833,10 @@ async def _execute_session_flow(
         }
         sender_error: str | None = None
         sender_task: asyncio.Task[None] | None = None
+        outstanding_tool_call_id: str | None = None
+        cancellation_scenario = any(
+            replay_input.kind == "expect_tool_cancellation" for replay_input in replay_inputs
+        )
         try:
             try:
                 await session.send(
@@ -784,6 +863,26 @@ async def _execute_session_flow(
                         if delay > 0:
                             await sleep_ms(delay)
                         previous_at_ms = replay_input.at_ms
+                        if replay_input.kind in {
+                            "caller_activity_start",
+                            "caller_activity_end",
+                        }:
+                            _record_wire_fact(
+                                wire_facts,
+                                replay_input.kind,
+                                replay_input.at_ms,
+                                epoch=replay_input.epoch,
+                                activity_ordinal=replay_input.activity_ordinal,
+                            )
+                        elif replay_input.kind == "audio":
+                            _record_wire_fact(
+                                wire_facts,
+                                "caller_audio_sent",
+                                replay_input.at_ms,
+                                epoch=replay_input.epoch,
+                                activity_ordinal=replay_input.activity_ordinal,
+                                audio_bytes=len(replay_input.audio),
+                            )
                         if replay_input.kind in interaction_events:
                             await interaction_events[replay_input.kind].wait()
                             continue
@@ -804,6 +903,13 @@ async def _execute_session_flow(
                     message = await session.receive()
                 except ProviderSessionClosed:
                     error_code = "provider_closed"
+                    _record_wire_fact(
+                        wire_facts,
+                        "abnormal_close",
+                        last_receipt_ms,
+                        epoch=epoch,
+                        activity_ordinal=active_response_activity,
+                    )
                     _increment_wire_counter(
                         wires,
                         plan.activities,
@@ -833,6 +939,13 @@ async def _execute_session_flow(
                 last_receipt_ms = at_ms
                 if not isinstance(message, Mapping):
                     error_code = "malformed_message"
+                    _record_wire_fact(
+                        wire_facts,
+                        "malformed",
+                        at_ms,
+                        epoch=epoch,
+                        activity_ordinal=active_response_activity,
+                    )
                     _increment_wire_counter(
                         wires,
                         plan.activities,
@@ -851,6 +964,13 @@ async def _execute_session_flow(
                     ).encode("utf-8")
                 except (TypeError, ValueError, UnicodeEncodeError):
                     error_code = "malformed_message"
+                    _record_wire_fact(
+                        wire_facts,
+                        "malformed",
+                        at_ms,
+                        epoch=epoch,
+                        activity_ordinal=active_response_activity,
+                    )
                     _increment_wire_counter(
                         wires,
                         plan.activities,
@@ -862,6 +982,13 @@ async def _execute_session_flow(
                     break
                 if len(encoded) > config.max_message_bytes:
                     error_code = "message_too_large"
+                    _record_wire_fact(
+                        wire_facts,
+                        "malformed",
+                        at_ms,
+                        epoch=epoch,
+                        activity_ordinal=active_response_activity,
+                    )
                     _increment_wire_counter(
                         wires,
                         plan.activities,
@@ -873,6 +1000,13 @@ async def _execute_session_flow(
                     break
                 if "goAway" in message:
                     error_code = "provider_goaway"
+                    _record_wire_fact(
+                        wire_facts,
+                        "goaway",
+                        at_ms,
+                        epoch=epoch,
+                        activity_ordinal=active_response_activity,
+                    )
                     _increment_wire_counter(
                         wires,
                         plan.activities,
@@ -951,6 +1085,24 @@ async def _execute_session_flow(
                     break
                 sequence += len(primary.events)
                 audit_events.extend(primary.events)
+                latest_activity = _latest_activity(plan.activities, at_ms, epoch=epoch)
+                latest_ordinal = (
+                    latest_activity.activity_ordinal if latest_activity is not None else None
+                )
+                for event in primary.events:
+                    wire_kind = {
+                        CallerTurnEventKind.TOOL_CALL_STARTED: "tool_call_open",
+                        CallerTurnEventKind.TOOL_CALL_CANCELLED: "tool_call_cancelled",
+                        CallerTurnEventKind.INTERRUPTED: "interrupted",
+                    }.get(event.kind)
+                    if wire_kind is not None:
+                        _record_wire_fact(
+                            wire_facts,
+                            wire_kind,
+                            at_ms,
+                            epoch=epoch,
+                            activity_ordinal=latest_ordinal,
+                        )
 
                 try:
                     tool_response = _synthetic_tool_response(message)
@@ -966,7 +1118,29 @@ async def _execute_session_flow(
                     )
                     break
                 if tool_response is not None:
-                    await session.send(tool_response)
+                    call = tool_response["toolResponse"]["functionResponses"][0]
+                    call_id = call["id"]
+                    if outstanding_tool_call_id is not None:
+                        error_code = "overlapping_tool_call"
+                        break
+                    outstanding_tool_call_id = call_id
+                    if not cancellation_scenario:
+                        await session.send(tool_response)
+                        outstanding_tool_call_id = None
+
+                try:
+                    cancellation_ids = _tool_cancellation_ids(message)
+                except RunnerError as exc:
+                    error_code = str(exc)
+                    break
+                if cancellation_ids:
+                    if (
+                        outstanding_tool_call_id is None
+                        or cancellation_ids != (outstanding_tool_call_id,)
+                    ):
+                        error_code = "tool_cancellation_mismatch"
+                        break
+                    outstanding_tool_call_id = None
 
                 newly_observed = _observed_interaction_kinds(primary.events)
                 observed_interactions.update(newly_observed)
@@ -974,7 +1148,8 @@ async def _execute_session_flow(
                     interaction_events[kind].set()
 
                 try:
-                    audio_bytes = _extract_output_audio(message)
+                    audio_chunk_sizes = _extract_output_audio_chunks(message)
+                    audio_bytes = sum(audio_chunk_sizes)
                 except RunnerError as exc:
                     error_code = str(exc)
                     _increment_wire_counter(
@@ -1010,9 +1185,25 @@ async def _execute_session_flow(
                             break
                         if activity.activity_ordinal in terminal_activities:
                             wires[activity.activity_ordinal].audio_after_terminal_count += 1
+                            _record_wire_fact(
+                                wire_facts,
+                                "audio_after_terminal",
+                                at_ms,
+                                epoch=epoch,
+                                activity_ordinal=activity.activity_ordinal,
+                            )
                             error_code = "audio_after_terminal"
                             break
                         active_response_activity = activity.activity_ordinal
+                        response_ordinal += 1
+                        _record_wire_fact(
+                            wire_facts,
+                            "response_open",
+                            at_ms,
+                            epoch=epoch,
+                            response_ordinal=response_ordinal,
+                            activity_ordinal=active_response_activity,
+                        )
                         if at_ms < activity.end_at_ms:
                             wires[activity.activity_ordinal].premature_current_audio_count += 1
                             error_code = "premature_current_response"
@@ -1036,8 +1227,26 @@ async def _execute_session_flow(
                         wires[active_response_activity].response_gap_violation_count += 1
                         error_code = "response_gap_exceeded"
                     last_response_audio_ms = at_ms
+                    for chunk_size in audio_chunk_sizes:
+                        _record_wire_fact(
+                            wire_facts,
+                            "audio_received",
+                            at_ms,
+                            epoch=epoch,
+                            response_ordinal=response_ordinal,
+                            activity_ordinal=active_response_activity,
+                            audio_bytes=chunk_size,
+                        )
 
                 if _has_response_terminal(message) and active_response_activity is not None:
+                    _record_wire_fact(
+                        wire_facts,
+                        "response_terminal",
+                        at_ms,
+                        epoch=epoch,
+                        response_ordinal=response_ordinal,
+                        activity_ordinal=active_response_activity,
+                    )
                     terminal_activities.add(active_response_activity)
                     active_response_activity = None
                     last_response_audio_ms = None
@@ -1086,7 +1295,21 @@ async def _execute_session_flow(
         finally:
             try:
                 await session.close()
+                _record_wire_fact(
+                    wire_facts,
+                    "teardown_complete",
+                    last_receipt_ms,
+                    epoch=epoch,
+                    activity_ordinal=active_response_activity,
+                )
             except Exception:
+                _record_wire_fact(
+                    wire_facts,
+                    "teardown_failed",
+                    last_receipt_ms,
+                    epoch=epoch,
+                    activity_ordinal=active_response_activity,
+                )
                 if error_code is None:
                     error_code = "teardown_failure"
                     _increment_wire_counter(
@@ -1111,6 +1334,7 @@ async def _execute_session_flow(
             output_audio_bytes=output_audio_bytes,
             provider_request_count=provider_request_count,
             epoch_count=epoch_count,
+            wire_facts=tuple(wire_facts),
         )
     return SessionExecutionResult(
         complete=True,
@@ -1121,6 +1345,7 @@ async def _execute_session_flow(
         output_audio_bytes=output_audio_bytes,
         provider_request_count=provider_request_count,
         epoch_count=epoch_count,
+        wire_facts=tuple(wire_facts),
     )
 
 
@@ -1207,10 +1432,12 @@ async def _execute_no_speech_flow(
     sender_done = asyncio.Event()
     sender_error: str | None = None
     sender_task: asyncio.Task[None] | None = None
+    last_receipt_ms = 0
     try:
         await session.send(build_gate0b_setup_message(config))
         setup = await session.receive()
-        receipt_clock_ms()
+        last_receipt_ms = receipt_clock_ms()
+        _record_wire_fact(wire_facts, "connection_open", last_receipt_ms, epoch=1)
         if setup != {"setupComplete": {}}:
             error_code = "setup_rejected"
         else:
@@ -1245,14 +1472,22 @@ async def _execute_no_speech_flow(
                 except ProviderSessionClosed:
                     abnormal_close_count += 1
                     error_code = "provider_closed"
+                    _record_wire_fact(
+                        wire_facts,
+                        "abnormal_close",
+                        last_receipt_ms,
+                        epoch=1,
+                    )
                     break
                 if message is None:
                     if not sender_done.is_set():
                         await sender_done.wait()
                     break
                 at_ms = receipt_clock_ms()
+                last_receipt_ms = at_ms
                 if not isinstance(message, Mapping):
                     error_code = "malformed_message"
+                    _record_wire_fact(wire_facts, "malformed", at_ms, epoch=1)
                     break
                 try:
                     encoded = json.dumps(
@@ -1263,13 +1498,16 @@ async def _execute_no_speech_flow(
                     ).encode("utf-8")
                 except (TypeError, ValueError, UnicodeEncodeError):
                     error_code = "malformed_message"
+                    _record_wire_fact(wire_facts, "malformed", at_ms, epoch=1)
                     break
                 if len(encoded) > config.max_message_bytes:
                     error_code = "message_too_large"
+                    _record_wire_fact(wire_facts, "malformed", at_ms, epoch=1)
                     break
                 if "goAway" in message:
                     abnormal_close_count += 1
                     error_code = "provider_goaway"
+                    _record_wire_fact(wire_facts, "goaway", at_ms, epoch=1)
                     break
 
                 if "usageMetadata" in message:
@@ -1339,7 +1577,7 @@ async def _execute_no_speech_flow(
                 )
                 if activated:
                     false_activity_count += 1
-                    wire_facts.append(WireFact("false_activity", at_ms))
+                    _record_wire_fact(wire_facts, "false_activity", at_ms, epoch=1)
 
                 try:
                     tool_response = _synthetic_tool_response(message)
@@ -1359,13 +1597,36 @@ async def _execute_no_speech_flow(
                     if response_terminal:
                         audio_after_teardown_count += audio_chunks
                         error_code = "audio_after_terminal"
+                        for _ in range(audio_chunks):
+                            _record_wire_fact(
+                                wire_facts,
+                                "audio_after_terminal",
+                                at_ms,
+                                epoch=1,
+                                response_ordinal=1,
+                            )
                         break
+                    if not response_open:
+                        _record_wire_fact(
+                            wire_facts,
+                            "response_open",
+                            at_ms,
+                            epoch=1,
+                            response_ordinal=1,
+                        )
                     response_open = True
                     model_audio_chunk_count += audio_chunks
                     output_audio_bytes += audio_bytes
+                    chunk_sizes = _extract_output_audio_chunks(message)
                     wire_facts.extend(
-                        WireFact("audio_received", at_ms, response_ordinal=1)
-                        for _ in range(audio_chunks)
+                        WireFact(
+                            "audio_received",
+                            at_ms,
+                            response_ordinal=1,
+                            sequence=len(wire_facts) + index,
+                            audio_bytes=chunk_size,
+                        )
+                        for index, chunk_size in enumerate(chunk_sizes)
                     )
                     if output_audio_bytes > MAX_OUTPUT_AUDIO_BYTES:
                         error_code = "runaway_output"
@@ -1374,6 +1635,13 @@ async def _execute_no_speech_flow(
                 if _has_response_terminal(message) and response_open:
                     response_open = False
                     response_terminal = True
+                    _record_wire_fact(
+                        wire_facts,
+                        "response_terminal",
+                        at_ms,
+                        epoch=1,
+                        response_ordinal=1,
+                    )
                 if usage_frame_count and sender_done.is_set() and not response_open:
                     break
 
@@ -1393,6 +1661,12 @@ async def _execute_no_speech_flow(
     except ProviderSessionClosed:
         abnormal_close_count += 1
         error_code = "provider_closed"
+        _record_wire_fact(
+            wire_facts,
+            "abnormal_close",
+            last_receipt_ms,
+            epoch=1,
+        )
     except TimeoutError:
         raise
     except Exception:
@@ -1408,8 +1682,21 @@ async def _execute_no_speech_flow(
         try:
             await session.close()
         except Exception:
+            _record_wire_fact(
+                wire_facts,
+                "teardown_failed",
+                last_receipt_ms,
+                epoch=1,
+            )
             if error_code is None:
                 error_code = "teardown_failure"
+        else:
+            _record_wire_fact(
+                wire_facts,
+                "teardown_complete",
+                last_receipt_ms,
+                epoch=1,
+            )
 
     return NoSpeechExecutionResult(
         complete=error_code is None,
@@ -1616,9 +1903,8 @@ def _require_postclaim_state(
 
 
 async def execute_authorized_attempt(
-    plans: tuple[SessionPlan, ...],
+    asset_release: AuthorizedAssetRelease,
     *,
-    no_speech_plans: tuple[NoSpeechWindowPlan, ...] = (),
     preregistration: Mapping[str, Any],
     config: AuthorizedAttemptConfig,
     session_config: SessionExecutionConfig,
@@ -1637,9 +1923,8 @@ async def execute_authorized_attempt(
     capsule_path: Path,
 ) -> AttemptExecutionResult:
     """Execute one consumed attempt using only injected secret, transport, and sinks."""
-    _validate_attempt_inputs(
-        plans,
-        no_speech_plans=no_speech_plans,
+    _validate_asset_release(asset_release)
+    _validate_attempt_configuration(
         config=config,
         session_config=session_config,
         pricing=pricing,
@@ -1651,8 +1936,7 @@ async def execute_authorized_attempt(
         session_config=session_config,
         approval_public_key=approval_public_key,
         ledger=ledger,
-        plans=plans,
-        no_speech_plans=no_speech_plans,
+        privacy_public_key=asset_release.privacy_public_key,
         pricing=pricing,
         custodian_public_key=custodian_public_key,
         custodian_key_id=custodian_key_id,
@@ -1668,18 +1952,50 @@ async def execute_authorized_attempt(
         expected_source_sha=config.source_sha,
         now=now,
     )
-    ledger_identity = _validate_ledger_custody_binding(
-        campaign=campaign,
-        ledger=ledger,
-        public_key=ledger_custodian_public_key,
-        label="campaign",
-    )
     authorization = verify_attempt_authorization(
         attempt_envelope,
         public_key=approval_public_key,
         expected_key_id=config.approval_key_id,
         campaign=campaign,
         now=now,
+    )
+    privacy_authorization = verify_privacy_custody(
+        asset_release.privacy_envelope,
+        public_key=asset_release.privacy_public_key,
+        expected_key_id=preregistration["immutable_values"]["privacy_custodian_key_id"],
+        expected_campaign_id=campaign.campaign_id,
+        expected_authorization_id=campaign.authorization_id,
+        expected_attempt_id=authorization.attempt_id,
+        expected_split="development",
+        expected_preregistration_sha256=config.preregistration_sha256,
+        expected_source_sha=config.source_sha,
+        expected_schedule_sha256=preregistration["immutable_values"][
+            "development_schedule_sha256"
+        ],
+        expected_corpus_sha256=preregistration["immutable_values"]["corpus_sha256"],
+        expected_project=session_config.project,
+        expected_model=session_config.model,
+        expected_consent_registry_sha256=preregistration["immutable_values"][
+            "consent_attestation_sha256"
+        ],
+        expected_retention_policy_sha256=preregistration["immutable_values"][
+            "retention_attestation_sha256"
+        ],
+        expected_residual_retention_acceptance_sha256=preregistration[
+            "immutable_values"
+        ]["zdr_or_residual_retention_acceptance_sha256"],
+        now=now,
+    )
+    plans, no_speech_plans = _materialize_qualification_assets(
+        asset_release,
+        privacy_authorization,
+    )
+    _validate_attempt_inputs(
+        plans,
+        no_speech_plans=no_speech_plans,
+        config=config,
+        session_config=session_config,
+        pricing=pricing,
     )
     if (
         compute_development_schedule_sha256(
@@ -1696,6 +2012,12 @@ async def execute_authorized_attempt(
     if required_requests > authorization.provider_request_reservation:
         raise RunnerError("signed request reservation is insufficient")
     _require_preregistered_attempt_liability(authorization, preregistration)
+    ledger_identity = _validate_ledger_custody_binding(
+        campaign=campaign,
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        label="campaign",
+    )
     preclaim_state = _replay_bound_ledger_snapshot(
         ledger=ledger,
         public_key=ledger_custodian_public_key,
@@ -1945,9 +2267,8 @@ async def execute_authorized_attempt(
 
 
 async def execute_authorized_holdout(
-    plans: tuple[SessionPlan, ...],
+    asset_release: AuthorizedAssetRelease,
     *,
-    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
     preregistration: Mapping[str, Any],
     config: AuthorizedAttemptConfig,
     session_config: SessionExecutionConfig,
@@ -1966,14 +2287,12 @@ async def execute_authorized_holdout(
     capsule_path: Path,
 ) -> AttemptExecutionResult:
     """Resume one active post-lock attempt and execute its released holdout once."""
-    _validate_attempt_inputs(
-        plans,
-        no_speech_plans=no_speech_plans,
+    _validate_asset_release(asset_release)
+    _validate_attempt_configuration(
         config=config,
         session_config=session_config,
         pricing=pricing,
     )
-    _validate_exact_holdout_schedule(plans, no_speech_plans=no_speech_plans)
     approval_public_key = _load_pinned_approval_public_key()
     _verify_execution_preregistration(
         preregistration,
@@ -1981,8 +2300,7 @@ async def execute_authorized_holdout(
         session_config=session_config,
         approval_public_key=approval_public_key,
         ledger=ledger,
-        plans=plans,
-        no_speech_plans=no_speech_plans,
+        privacy_public_key=asset_release.privacy_public_key,
         pricing=pricing,
         custodian_public_key=custodian_public_key,
         custodian_key_id=custodian_key_id,
@@ -2018,10 +2336,6 @@ async def execute_authorized_holdout(
         campaign=campaign,
         authorization=authorization,
     )
-    holdout_manifest_sha256 = compute_holdout_schedule_sha256(
-        plans,
-        no_speech_plans=no_speech_plans,
-    )
     if not isinstance(state, CustodyLedgerState) or (
         state.phase != "holdout_collection"
         or state.active_attempt_id != authorization.attempt_id
@@ -2029,11 +2343,55 @@ async def execute_authorized_holdout(
         or state.campaign_approval_sha256 != campaign.signed_payload_sha256
         or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
         or state.selected_policy_ms != config.policy_ms
-        or state.holdout_manifest_sha256 != holdout_manifest_sha256
+        or not isinstance(state.holdout_manifest_sha256, str)
+        or not SHA256.fullmatch(state.holdout_manifest_sha256)
         or state.holdout_execution_claimed
         or state.development_usage_evidence_sha256 is None
         or state.lease_id_sha256 is None
     ):
+        raise RunnerError("holdout release does not match the active signed attempt")
+    privacy_authorization = verify_privacy_custody(
+        asset_release.privacy_envelope,
+        public_key=asset_release.privacy_public_key,
+        expected_key_id=preregistration["immutable_values"]["privacy_custodian_key_id"],
+        expected_campaign_id=campaign.campaign_id,
+        expected_authorization_id=campaign.authorization_id,
+        expected_attempt_id=authorization.attempt_id,
+        expected_split="holdout",
+        expected_preregistration_sha256=config.preregistration_sha256,
+        expected_source_sha=config.source_sha,
+        expected_schedule_sha256=state.holdout_manifest_sha256,
+        expected_corpus_sha256=preregistration["immutable_values"]["corpus_sha256"],
+        expected_project=session_config.project,
+        expected_model=session_config.model,
+        expected_consent_registry_sha256=preregistration["immutable_values"][
+            "consent_attestation_sha256"
+        ],
+        expected_retention_policy_sha256=preregistration["immutable_values"][
+            "retention_attestation_sha256"
+        ],
+        expected_residual_retention_acceptance_sha256=preregistration[
+            "immutable_values"
+        ]["zdr_or_residual_retention_acceptance_sha256"],
+        now=now,
+    )
+    plans, no_speech_plans = _materialize_qualification_assets(
+        asset_release,
+        privacy_authorization,
+    )
+    _validate_attempt_inputs(
+        plans,
+        no_speech_plans=no_speech_plans,
+        config=config,
+        session_config=session_config,
+        pricing=pricing,
+    )
+    _validate_exact_holdout_schedule(plans, no_speech_plans=no_speech_plans)
+    holdout_manifest_sha256 = compute_holdout_schedule_sha256(
+        plans,
+        no_speech_plans=no_speech_plans,
+    )
+    if state.holdout_manifest_sha256 != holdout_manifest_sha256:
         raise RunnerError("holdout release does not match the active signed attempt")
     required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
         no_speech_plans
@@ -2392,34 +2750,62 @@ def _validate_attempt_inputs(
         raise RunnerError("pricing and model identity mismatch")
 
 
+def _validate_attempt_configuration(
+    *,
+    config: AuthorizedAttemptConfig,
+    session_config: SessionExecutionConfig,
+    pricing: PricingSchedule,
+) -> None:
+    if not isinstance(config, AuthorizedAttemptConfig):
+        raise TypeError("config must be an AuthorizedAttemptConfig")
+    if not isinstance(session_config, SessionExecutionConfig):
+        raise TypeError("session_config must be a SessionExecutionConfig")
+    if not isinstance(pricing, PricingSchedule):
+        raise TypeError("pricing must be a PricingSchedule")
+    if pricing.model != session_config.model.removeprefix("models/"):
+        raise RunnerError("pricing and model identity mismatch")
+
+
+def _validate_asset_release(release: AuthorizedAssetRelease) -> None:
+    if (
+        not isinstance(release, AuthorizedAssetRelease)
+        or not isinstance(release.privacy_envelope, Mapping)
+        or not isinstance(release.privacy_public_key, bytes)
+        or len(release.privacy_public_key) != 32
+        or not callable(getattr(release.loader, "load", None))
+    ):
+        raise RunnerError("qualification asset release is invalid")
+
+
+def _materialize_qualification_assets(
+    release: AuthorizedAssetRelease,
+    authorization: PrivacyCustodyAuthorization,
+) -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
+    try:
+        assets = release.loader.load(authorization)
+    except Exception as exc:
+        raise RunnerError("qualification assets could not be released") from exc
+    if not isinstance(assets, QualificationAssets):
+        raise RunnerError("qualification asset release is invalid")
+    if not isinstance(assets.plans, tuple) or not isinstance(
+        assets.no_speech_plans, tuple
+    ):
+        raise RunnerError("qualification asset release is invalid")
+    return assets.plans, assets.no_speech_plans
+
+
 def _validate_exact_development_schedule(
     plans: tuple[SessionPlan, ...],
     *,
     no_speech_plans: tuple[NoSpeechWindowPlan, ...],
 ) -> None:
-    activities = tuple(activity for plan in plans for activity in plan.activities)
-    language_counts = Counter(activity.language for activity in activities)
-    condition_counts = Counter(activity.condition for activity in activities)
-    if (
-        len(activities) != 128
-        or len(no_speech_plans) != 32
-        or {plan.session_ordinal for plan in plans} != set(range(32))
-        or {activity.activity_ordinal for activity in activities} != set(range(128))
-        or {plan.window_ordinal for plan in no_speech_plans} != set(range(32))
-        or {plan.split for plan in (*plans, *no_speech_plans)} != {"development"}
-        or set(language_counts) != VALID_LANGUAGES
-        or set(language_counts.values()) != {16}
-        or condition_counts
-        != Counter(
-            {
-                "clean": 32,
-                "twilio_codec_only": 32,
-                "acoustic_impairment": 32,
-                "interaction_stress": 32,
-            }
-        )
-    ):
+    if {plan.session_ordinal for plan in plans} != set(range(24)):
         raise RunnerError("development schedule cardinality is invalid")
+    _validate_shared_allocation(
+        plans,
+        no_speech_plans=no_speech_plans,
+        split="development",
+    )
 
 
 def _validate_exact_holdout_schedule(
@@ -2427,29 +2813,45 @@ def _validate_exact_holdout_schedule(
     *,
     no_speech_plans: tuple[NoSpeechWindowPlan, ...],
 ) -> None:
-    activities = tuple(activity for plan in plans for activity in plan.activities)
-    language_counts = Counter(activity.language for activity in activities)
-    condition_counts = Counter(activity.condition for activity in activities)
-    if (
-        len(activities) != 128
-        or len(no_speech_plans) != 32
-        or {plan.session_ordinal for plan in plans} != set(range(32, 64))
-        or {activity.activity_ordinal for activity in activities} != set(range(128, 256))
-        or {plan.window_ordinal for plan in no_speech_plans} != set(range(32, 64))
-        or {plan.split for plan in (*plans, *no_speech_plans)} != {"holdout"}
-        or set(language_counts) != VALID_LANGUAGES
-        or set(language_counts.values()) != {16}
-        or condition_counts
-        != Counter(
-            {
-                "clean": 32,
-                "twilio_codec_only": 32,
-                "acoustic_impairment": 32,
-                "interaction_stress": 32,
-            }
-        )
-    ):
+    if {plan.session_ordinal for plan in plans} != set(range(24, 48)):
         raise RunnerError("holdout schedule cardinality is invalid")
+    _validate_shared_allocation(plans, no_speech_plans=no_speech_plans, split="holdout")
+
+
+def _validate_shared_allocation(
+    plans: tuple[SessionPlan, ...],
+    *,
+    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+    split: str,
+) -> None:
+    try:
+        validate_gate0b_allocation(
+            (
+                AllocationActivity(
+                    ordinal=activity.activity_ordinal,
+                    split=activity.split,
+                    language=activity.language,
+                    condition=activity.condition,
+                    scenario_tags=activity.scenario_tags,
+                    critical_span_kinds=tuple(
+                        span.kind.value for span in activity.reference.critical_spans
+                    ),
+                )
+                for plan in plans
+                for activity in plan.activities
+            ),
+            (
+                NoSpeechAllocation(
+                    ordinal=plan.window_ordinal,
+                    split=plan.split,
+                    condition=plan.condition,
+                )
+                for plan in no_speech_plans
+            ),
+            split=split,
+        )
+    except AllocationError as exc:
+        raise RunnerError(f"{split} schedule allocation is invalid") from exc
 
 
 def compute_development_schedule_sha256(
@@ -2556,8 +2958,7 @@ def _verify_execution_preregistration(
     session_config: SessionExecutionConfig,
     approval_public_key: bytes,
     ledger: LedgerCustodyClient,
-    plans: tuple[SessionPlan, ...],
-    no_speech_plans: tuple[NoSpeechWindowPlan, ...],
+    privacy_public_key: bytes,
     pricing: PricingSchedule,
     custodian_public_key: bytes,
     custodian_key_id: str,
@@ -2587,7 +2988,11 @@ def _verify_execution_preregistration(
     ledger_identity = ledger.identity()
     if not isinstance(ledger_identity, LedgerCustodyIdentity):
         raise RunnerError("preregistration ledger custody identity is invalid")
-    if not isinstance(approval_public_key, bytes) or not isinstance(custodian_public_key, bytes):
+    if (
+        not isinstance(approval_public_key, bytes)
+        or not isinstance(privacy_public_key, bytes)
+        or not isinstance(custodian_public_key, bytes)
+    ):
         raise RunnerError("preregistration trust root is invalid")
     if capsule_location_field not in {
         "audit_capsule_location_sha256",
@@ -2600,6 +3005,9 @@ def _verify_execution_preregistration(
         "approval_key_id": config.approval_key_id,
         "credential_reference": config.credential_reference,
         "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
+        "privacy_custodian_public_key_sha256": sha256(
+            privacy_public_key
+        ).hexdigest(),
         "custodian_key_id": custodian_key_id,
         "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
         "model": session_config.model,
@@ -2634,9 +3042,6 @@ def _verify_execution_preregistration(
     ):
         raise RunnerError("preregistration execution cap mismatch")
 
-    all_splits = {plan.split for plan in (*plans, *no_speech_plans)}
-    if all_splits != {required_split}:
-        raise RunnerError("executor split does not match its preregistration stage")
 
 
 def _load_pinned_approval_public_key() -> bytes:
@@ -2666,52 +3071,18 @@ def artifact_location_sha256(path: Path) -> str:
 
 
 def _canonical_artifact_path(path: Path) -> Path:
-    if not isinstance(path, Path) or not path.is_absolute() or path.name in {"", ".", ".."}:
-        raise RunnerError("artifact destination is invalid")
-    if path.exists() or path.is_symlink():
-        raise RunnerError("artifact destination must be absent")
-    for ancestor in path.parents:
-        if ancestor.is_symlink():
-            raise RunnerError("artifact destination ancestors must not be symlinks")
-    parent = path.parent.resolve()
-    if not parent.is_dir():
-        raise RunnerError("artifact destination parent is unavailable")
-    canonical = parent / path.name
     try:
-        canonical.relative_to(REPO_ROOT.resolve())
-    except ValueError:
-        return canonical
-    raise RunnerError("artifact destination must be outside the repository")
+        return validate_private_output_path(path, repo_root=REPO_ROOT)
+    except PrivatePathError as exc:
+        raise RunnerError("artifact destination is invalid") from exc
 
 
 def _write_sealed_capsule(path: Path, envelope: Mapping[str, Any]) -> str:
-    canonical = _canonical_artifact_path(path)
     payload = canonical_json_bytes(envelope) + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(canonical, flags, 0o600)
-    except OSError as exc:
+        write_private_file(path, payload, repo_root=REPO_ROOT)
+    except PrivatePathError as exc:
         raise RunnerError("capsule destination is unavailable") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise RunnerError("capsule destination is not a private regular file")
-        remaining = memoryview(payload)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise RunnerError("capsule write did not make progress")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    directory = os.open(canonical.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
     return sha256(payload[:-1]).hexdigest()
 
 
@@ -2723,6 +3094,7 @@ def _build_audit_capsule(
     no_speech_results: Sequence[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]],
 ) -> dict[str, Any]:
     activities: list[dict[str, Any]] = []
+    sessions: list[dict[str, Any]] = []
     accounting_units: list[dict[str, Any]] = []
     for plan, result in session_results:
         events = [
@@ -2736,6 +3108,14 @@ def _build_audit_capsule(
             for event in result.audit_events
         ]
         latest_event_ms = max((event.at_ms for event in result.audit_events), default=0)
+        sessions.append(
+            {
+                "session_ordinal": plan.session_ordinal,
+                "split": plan.split,
+                "events": events,
+                "wire_facts": [fact.to_dict() for fact in result.wire_facts],
+            }
+        )
         accounting_units.append(
             _accounting_unit(
                 kind="session",
@@ -2749,7 +3129,6 @@ def _build_audit_capsule(
             )
         )
         for activity in plan.activities:
-            wire = result.wire_observations[activity.activity_ordinal]
             activities.append(
                 {
                     "activity_ordinal": activity.activity_ordinal,
@@ -2767,14 +3146,12 @@ def _build_audit_capsule(
                         }
                         for span in activity.reference.critical_spans
                     ],
-                    "events": events,
                     "expected_lifecycle_status": activity.expected_lifecycle_status,
                     "expected_epoch": activity.expected_epoch,
                     "advance_to_ms": max(
                         activity.end_at_ms + max(VALID_POLICIES_MS),
                         latest_event_ms,
                     ),
-                    "wire_facts": _wire_facts(activity, wire),
                 }
             )
     accounting_units.extend(
@@ -2794,7 +3171,7 @@ def _build_audit_capsule(
     if len(splits) != 1:
         raise RunnerError("audit capsule results must contain exactly one split")
     return {
-        "schema_id": "gate_0b_audit_capsule_v2",
+        "schema_id": "gate_0b_audit_capsule_v3",
         "campaign_id": campaign_id,
         "policy_ms": policy_ms,
         "accounting": {
@@ -2802,6 +3179,7 @@ def _build_audit_capsule(
             "split": next(iter(splits)),
             "units": accounting_units,
         },
+        "sessions": sessions,
         "activities": activities,
         "no_speech_windows": [
             {
@@ -2847,49 +3225,6 @@ def _replay_observation_end_ms(replay_inputs: Sequence[Gate0BReplayInput]) -> in
         ),
         default=0,
     )
-
-
-def _wire_facts(
-    activity: SessionActivityPlan,
-    wire: WireObservation,
-) -> list[dict[str, Any]]:
-    facts = [
-        _wire_fact("caller_activity_start", activity.start_at_ms, activity.activity_ordinal),
-        _wire_fact("caller_activity_end", activity.end_at_ms, activity.activity_ordinal),
-    ]
-    if wire.first_audio_ms is not None:
-        at_ms = activity.end_at_ms + wire.first_audio_ms
-        facts.extend(
-            (
-                _wire_fact("response_open", at_ms, activity.activity_ordinal, response_ordinal=1),
-                _wire_fact("audio_received", at_ms, activity.activity_ordinal, response_ordinal=1),
-            )
-        )
-    if wire.interruption_tail_ms is not None:
-        facts.append(
-            _wire_fact(
-                "audio_received",
-                activity.start_at_ms + wire.interruption_tail_ms,
-                activity.activity_ordinal,
-                response_ordinal=1,
-            )
-        )
-    return facts
-
-
-def _wire_fact(
-    kind: str,
-    at_ms: int,
-    activity_ordinal: int,
-    *,
-    response_ordinal: int | None = None,
-) -> dict[str, Any]:
-    return {
-        "kind": kind,
-        "at_ms": at_ms,
-        "response_ordinal": response_ordinal,
-        "activity_ordinal": activity_ordinal,
-    }
 
 
 def _cost_microusd(pricing: PricingSchedule, usage: UsageCounts) -> int:
@@ -3171,6 +3506,110 @@ def _validate_restart_schedule(
             raise RunnerError("activity crosses the fresh restart boundary")
 
 
+def _validate_replay_topology(
+    activities: tuple[SessionActivityPlan, ...],
+    replay_inputs: tuple[Gate0BReplayInput, ...],
+) -> None:
+    if len(replay_inputs) > 10_000:
+        raise RunnerError("session replay event count exceeds the fixed bound")
+    supported = {
+        "caller_activity_start",
+        "audio",
+        "caller_activity_end",
+        "expect_synchronous_tool",
+        "expect_tool_cancellation",
+        "expect_interruption",
+        "fresh_connection_restart",
+    }
+    if any(value.kind not in supported for value in replay_inputs):
+        raise RunnerError("session replay input kind is invalid")
+    ordered_activities = tuple(sorted(activities, key=lambda value: value.start_at_ms))
+    for index, activity in enumerate(ordered_activities):
+        related = tuple(
+            value
+            for value in replay_inputs
+            if value.activity_ordinal == activity.activity_ordinal
+            and value.kind != "fresh_connection_restart"
+        )
+        starts = [value for value in related if value.kind == "caller_activity_start"]
+        ends = [value for value in related if value.kind == "caller_activity_end"]
+        audio = [value for value in related if value.kind == "audio"]
+        if len(starts) != 1 or len(ends) != 1 or not audio:
+            raise RunnerError("activity replay requires one boundary pair and PCM audio")
+        if (
+            starts[0].at_ms != activity.start_at_ms
+            or ends[0].at_ms != activity.end_at_ms
+            or starts[0].epoch != activity.expected_epoch
+            or ends[0].epoch != activity.expected_epoch
+        ):
+            raise RunnerError("activity replay boundaries do not match the activity")
+        start_index = replay_inputs.index(starts[0])
+        end_index = replay_inputs.index(ends[0])
+        if start_index >= end_index:
+            raise RunnerError("activity replay boundary order is invalid")
+        for frame in audio:
+            expected_bytes = frame.duration_ms * 16_000 * 2 // 1_000
+            frame_index = replay_inputs.index(frame)
+            if (
+                frame.epoch != activity.expected_epoch
+                or frame.duration_ms not in {10, 20, 30, 40}
+                or not isinstance(frame.audio, bytes)
+                or not expected_bytes - 2 <= len(frame.audio) <= expected_bytes
+                or not activity.start_at_ms <= frame.at_ms
+                or frame.at_ms + frame.duration_ms > activity.end_at_ms
+                or not start_index < frame_index < end_index
+            ):
+                raise RunnerError("activity replay PCM topology is invalid")
+        marker_requirements = {
+            "expect_synchronous_tool": "synchronous_tool_use",
+            "expect_tool_cancellation": "tool_cancellation_interruption",
+            "expect_interruption": "tool_cancellation_interruption",
+        }
+        for marker_kind, scenario_tag in marker_requirements.items():
+            markers = [value for value in related if value.kind == marker_kind]
+            expected_count = 1 if scenario_tag in activity.scenario_tags else 0
+            if len(markers) != expected_count:
+                raise RunnerError("activity interaction markers do not match its scenario")
+            if markers and (
+                markers[0].at_ms != activity.end_at_ms
+                or replay_inputs.index(markers[0]) <= end_index
+                or markers[0].audio
+                or markers[0].duration_ms
+            ):
+                raise RunnerError("activity interaction marker ordering is invalid")
+        if "tool_cancellation_interruption" in activity.scenario_tags:
+            if index == 0:
+                raise RunnerError("tool cancellation requires a preceding tool activity")
+            prior = ordered_activities[index - 1]
+            if (
+                "synchronous_tool_use" not in prior.scenario_tags
+                or prior.expected_epoch != activity.expected_epoch
+                or prior.end_at_ms > activity.start_at_ms
+            ):
+                raise RunnerError("tool cancellation is not causally paired")
+
+    restart_markers = [
+        value for value in replay_inputs if value.kind == "fresh_connection_restart"
+    ]
+    restart_activities = [
+        value for value in ordered_activities if "fresh_connection_restart" in value.scenario_tags
+    ]
+    if len(restart_markers) != len(restart_activities):
+        raise RunnerError("fresh restart markers do not match the allocation")
+    for activity, marker in zip(restart_activities, restart_markers, strict=True):
+        index = ordered_activities.index(activity)
+        prior = ordered_activities[index - 1] if index else None
+        if (
+            prior is None
+            or marker.activity_ordinal != prior.activity_ordinal
+            or marker.at_ms != prior.end_at_ms
+            or marker.epoch != activity.expected_epoch
+            or marker.audio
+            or marker.duration_ms
+        ):
+            raise RunnerError("fresh restart marker ordering is invalid")
+
+
 def _connection_segments(
     plan: SessionPlan,
 ) -> tuple[tuple[int, int, tuple[Gate0BReplayInput, ...]], ...]:
@@ -3286,18 +3725,22 @@ def _token_details(raw: object) -> dict[str, int]:
 
 
 def _extract_output_audio(message: Mapping[str, Any]) -> int:
+    return sum(_extract_output_audio_chunks(message))
+
+
+def _extract_output_audio_chunks(message: Mapping[str, Any]) -> tuple[int, ...]:
     content = message.get("serverContent")
     if not isinstance(content, Mapping):
-        return 0
+        return ()
     model_turn = content.get("modelTurn")
     if model_turn is None:
-        return 0
+        return ()
     if not isinstance(model_turn, Mapping):
         raise RunnerError("malformed_output_audio")
     parts = model_turn.get("parts", [])
     if not isinstance(parts, list):
         raise RunnerError("malformed_output_audio")
-    total = 0
+    sizes: list[int] = []
     for part in parts:
         if not isinstance(part, Mapping):
             raise RunnerError("malformed_output_audio")
@@ -3312,10 +3755,10 @@ def _extract_output_audio(message: Mapping[str, Any]) -> int:
             decoded = base64.b64decode(inline["data"], validate=True)
         except (TypeError, ValueError) as exc:
             raise RunnerError("malformed_output_audio") from exc
-        if len(decoded) > 1024 * 1024:
+        if not decoded or len(decoded) > 1024 * 1024:
             raise RunnerError("oversized_output_audio")
-        total += len(decoded)
-    return total
+        sizes.append(len(decoded))
+    return tuple(sizes)
 
 
 def _count_output_audio_chunks(message: Mapping[str, Any]) -> int:
@@ -3362,6 +3805,23 @@ def _synthetic_tool_response(message: Mapping[str, Any]) -> dict[str, Any] | Non
             ]
         }
     }
+
+
+def _tool_cancellation_ids(message: Mapping[str, Any]) -> tuple[str, ...]:
+    cancellation = message.get("toolCallCancellation")
+    if cancellation is None:
+        return ()
+    if not isinstance(cancellation, Mapping) or set(cancellation) != {"ids"}:
+        raise RunnerError("malformed_tool_cancellation")
+    ids = cancellation["ids"]
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or len(ids) != len(set(ids))
+        or any(not isinstance(value, str) or not SAFE_ID.fullmatch(value) for value in ids)
+    ):
+        raise RunnerError("malformed_tool_cancellation")
+    return tuple(ids)
 
 
 def _increment_wire_counter(
@@ -3414,6 +3874,7 @@ def _failed_result(
     wires: Mapping[int, _MutableWire] | None = None,
     provider_request_count: int = 0,
     epoch_count: int = 0,
+    wire_facts: tuple[WireFact, ...] = (),
 ) -> SessionExecutionResult:
     observations = (
         {ordinal: value.freeze() for ordinal, value in wires.items()}
@@ -3429,6 +3890,30 @@ def _failed_result(
         output_audio_bytes=0,
         provider_request_count=provider_request_count,
         epoch_count=epoch_count,
+        wire_facts=wire_facts,
+    )
+
+
+def _record_wire_fact(
+    facts: list[WireFact],
+    kind: str,
+    at_ms: int,
+    *,
+    epoch: int,
+    response_ordinal: int | None = None,
+    activity_ordinal: int | None = None,
+    audio_bytes: int = 0,
+) -> None:
+    facts.append(
+        WireFact(
+            kind=kind,
+            at_ms=at_ms,
+            response_ordinal=response_ordinal,
+            activity_ordinal=activity_ordinal,
+            sequence=len(facts),
+            epoch=epoch,
+            audio_bytes=audio_bytes,
+        )
     )
 
 
@@ -3480,6 +3965,8 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "approval_public_key_sha256": None,
             "custodian_key_id": None,
             "custodian_public_key_sha256": None,
+            "privacy_custodian_key_id": None,
+            "privacy_custodian_public_key_sha256": None,
             "record_root_key_id": None,
             "record_root_public_key_sha256": None,
             "ledger_instance_id": None,
@@ -3555,33 +4042,57 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         raise RunnerError("preregistration project is invalid")
 
     validated: dict[str, str] = {"project": project}
-    for field in (
+    for field_name in (
         "credential_reference",
         "approval_key_id",
         "custodian_key_id",
+        "privacy_custodian_key_id",
         "record_root_key_id",
         "ledger_instance_id",
         "ledger_custodian_key_id",
     ):
-        validated[field] = _safe_id(values[field], label=field.replace("_", " "))
+        validated[field_name] = _safe_id(
+            values[field_name],
+            label=field_name.replace("_", " "),
+        )
     source_sha = values["source_sha"]
     if not isinstance(source_sha, str) or not SOURCE_SHA.fullmatch(source_sha):
         raise RunnerError("preregistration source SHA is invalid")
     validated["source_sha"] = source_sha
-    for field in PREREGISTRATION_EXTERNAL_FIELDS - {
+    for field_name in PREREGISTRATION_EXTERNAL_FIELDS - {
         "project",
         "credential_reference",
         "approval_key_id",
         "custodian_key_id",
+        "privacy_custodian_key_id",
         "record_root_key_id",
         "ledger_instance_id",
         "ledger_custodian_key_id",
         "source_sha",
     }:
-        value = values[field]
+        value = values[field_name]
         if not isinstance(value, str) or not SHA256.fullmatch(value):
             raise RunnerError("preregistration digest is invalid")
-        validated[field] = value
+        validated[field_name] = value
+
+    key_id_fields = (
+        "approval_key_id",
+        "custodian_key_id",
+        "privacy_custodian_key_id",
+        "record_root_key_id",
+        "ledger_custodian_key_id",
+    )
+    public_key_digest_fields = (
+        "approval_public_key_sha256",
+        "custodian_public_key_sha256",
+        "privacy_custodian_public_key_sha256",
+        "record_root_public_key_sha256",
+        "ledger_custodian_public_key_sha256",
+    )
+    if len({validated[field] for field in key_id_fields}) != len(key_id_fields) or len(
+        {validated[field] for field in public_key_digest_fields}
+    ) != len(public_key_digest_fields):
+        raise RunnerError("preregistration key roles must use distinct identities")
 
     document = build_dry_run_preregistration()
     document["status"] = "preregistered_pending_separate_approval"
@@ -3591,15 +4102,14 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _load_external_values(path_value: str) -> Mapping[str, Any]:
-    path = Path(path_value)
-    if not path.is_absolute() or path.is_symlink() or not path.is_file():
-        raise RunnerError("preregistration values file is invalid")
-    resolved = path.resolve()
-    if resolved.is_relative_to(REPO_ROOT) or resolved.stat().st_size > 64 * 1024:
-        raise RunnerError("preregistration values file is invalid")
     try:
-        decoded = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = read_private_file(
+            Path(path_value),
+            repo_root=REPO_ROOT,
+            maximum_bytes=64 * 1024,
+        )
+        decoded = json.loads(raw)
+    except (OSError, PrivatePathError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RunnerError("preregistration values file is invalid") from exc
     if not isinstance(decoded, Mapping):
         raise RunnerError("preregistration values file is invalid")
@@ -3607,23 +4117,14 @@ def _load_external_values(path_value: str) -> Mapping[str, Any]:
 
 
 def _write_dry_run_output(path_value: str, document: Mapping[str, Any]) -> None:
-    path = Path(path_value)
-    if not path.is_absolute():
-        raise RunnerError("dry-run output path must be absolute")
-    if path.exists() and path.is_symlink():
-        raise RunnerError("dry-run output path must not be a symlink")
-    parent = path.parent.resolve()
-    if not parent.is_dir():
-        raise RunnerError("dry-run output parent is unavailable")
-    resolved = parent / path.name
-    if resolved.is_relative_to(REPO_ROOT):
-        raise RunnerError("dry-run output must be outside the repository")
-    descriptor = os.open(resolved, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(descriptor, canonical_json_bytes(document) + b"\n")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        write_private_file(
+            Path(path_value),
+            canonical_json_bytes(document) + b"\n",
+            repo_root=REPO_ROOT,
+        )
+    except PrivatePathError as exc:
+        raise RunnerError("dry-run output path is invalid") from exc
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -11,10 +11,8 @@ import hashlib
 import hmac
 import json
 import math
-import os
 from pathlib import Path
 import re
-import stat
 import sys
 from typing import Any, Mapping, Sequence
 
@@ -47,6 +45,12 @@ from app.services.caller_turn_qualification import (  # noqa: E402
     empty_evidence_flags,
     load_pricing,
 )
+from app.services.qualification_allocation import (  # noqa: E402
+    AllocationActivity,
+    AllocationError,
+    NoSpeechAllocation,
+    validate_gate0b_allocation,
+)
 from app.services.qualification_identity import (  # noqa: E402
     canonical_json_bytes,
     verify_attempt_authorization,
@@ -54,6 +58,11 @@ from app.services.qualification_identity import (  # noqa: E402
 )
 from app.services.qualification_ledger import (  # noqa: E402
     validate_custody_ledger_snapshot,
+)
+from app.services.qualification_private_paths import (  # noqa: E402
+    PrivatePathError,
+    read_private_file,
+    write_private_file,
 )
 from scripts.run_gemini_caller_turn_qualification import (  # noqa: E402
     PREREGISTRATION_EXTERNAL_FIELDS,
@@ -820,7 +829,13 @@ def _validate_cardinality(
     selected_development = tuple(
         record for record in development if record.policy_ms == selected_policy
     )
-    if not _strata_are_exact(selected_development) or not _strata_are_exact(holdout):
+    development_windows = tuple(window for window in windows if window.split == "development")
+    holdout_windows = tuple(window for window in windows if window.split == "holdout")
+    if not _strata_are_exact(
+        selected_development,
+        development_windows,
+        split="development",
+    ) or not _strata_are_exact(holdout, holdout_windows, split="holdout"):
         failures["activity_strata_invalid"] = 1
     if expected_development_set is None or expected_development_set & set(holdout_ordinals):
         failures["split_population_overlap"] = 1
@@ -1137,22 +1152,38 @@ def _policy_invariant_projection(record: ActivityPrimitiveRecord) -> tuple[Any, 
     )
 
 
-def _strata_are_exact(records: tuple[ActivityPrimitiveRecord, ...]) -> bool:
-    language_groups = _groups(records, key="language")
-    if set(language_groups) != {"ar", "en", "es", "fr", "hi", "ht", "pt", "zh"}:
-        return False
-    if any(len(group) != 16 for group in language_groups.values()):
-        return False
-    return all(
-        len([record for record in group if record.condition == condition]) == 4
-        for group in language_groups.values()
-        for condition in (
-            "clean",
-            "twilio_codec_only",
-            "acoustic_impairment",
-            "interaction_stress",
+def _strata_are_exact(
+    records: tuple[ActivityPrimitiveRecord, ...],
+    windows: tuple[NoSpeechPrimitiveRecord, ...],
+    *,
+    split: str,
+) -> bool:
+    try:
+        validate_gate0b_allocation(
+            (
+                AllocationActivity(
+                    ordinal=record.activity_ordinal,
+                    split=record.split,
+                    language=record.language,
+                    condition=record.condition,
+                    scenario_tags=record.scenario_tags,
+                    critical_span_kinds=tuple(fact.kind for fact in record.critical_spans),
+                )
+                for record in records
+            ),
+            (
+                NoSpeechAllocation(
+                    ordinal=window.window_ordinal,
+                    split=window.split,
+                    condition=window.condition,
+                )
+                for window in windows
+            ),
+            split=split,
         )
-    )
+    except AllocationError:
+        return False
+    return True
 
 
 def _groups(
@@ -1433,10 +1464,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    raw = args.bundle.read_bytes()
-    if len(raw) > MAX_ARTIFACT_BYTES:
-        report = _failure_report({"custody_bundle_invalid": 1})
-    else:
+    try:
+        raw = read_private_file(
+            args.bundle,
+            repo_root=REPO_ROOT,
+            maximum_bytes=MAX_ARTIFACT_BYTES,
+        )
         try:
             bundle = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1460,26 +1493,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             record_root_key_id=args.record_root_key_id,
         )
-    _write_private_report(args.output, report)
+        _write_private_report(args.output, report)
+    except (EvaluationError, PrivatePathError, OSError, TypeError, ValueError):
+        print('{"error_code":"private_custody_rejected","status":"blocked"}')
+        return 2
     return 0 if report["status"] == "pass" else 1
 
 
 def _read_private_key_file(path: Path, *, label: str) -> bytes:
-    if path.is_symlink() or not path.is_file():
-        raise EvaluationError(f"{label} key file is invalid")
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode & 0o077:
-        raise EvaluationError(f"{label} key file permissions are too broad")
-    value = path.read_bytes()
+    try:
+        value = read_private_file(path, repo_root=REPO_ROOT, maximum_bytes=32)
+    except PrivatePathError as exc:
+        raise EvaluationError(f"{label} key file is invalid") from exc
     if len(value) != 32:
         raise EvaluationError(f"{label} key must be exactly 32 bytes")
     return value
 
 
 def _read_public_key_file(path: Path, *, label: str) -> bytes:
-    if path.is_symlink() or not path.is_file():
-        raise EvaluationError(f"{label} public key file is invalid")
-    value = path.read_bytes()
+    try:
+        value = read_private_file(path, repo_root=REPO_ROOT, maximum_bytes=32)
+    except PrivatePathError as exc:
+        raise EvaluationError(f"{label} public key file is invalid") from exc
     if len(value) != 32:
         raise EvaluationError(f"{label} public key must be exactly 32 bytes")
     return value
@@ -1506,31 +1541,11 @@ def _parse_utc_time(value: object) -> datetime:
 
 
 def _write_private_report(path: Path, report: Mapping[str, Any]) -> None:
-    if path.exists() or path.is_symlink() or not path.parent.is_dir():
-        raise EvaluationError("output path must be an absent file in an existing directory")
     payload = json.dumps(report, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as exc:
+        write_private_file(path, payload, repo_root=REPO_ROOT)
+    except PrivatePathError as exc:
         raise EvaluationError("output path is unavailable") from exc
-    try:
-        remaining = memoryview(payload)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise EvaluationError("output write did not make progress")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    directory = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
 
 
 if __name__ == "__main__":

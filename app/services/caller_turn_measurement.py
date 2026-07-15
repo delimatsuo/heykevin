@@ -45,7 +45,7 @@ from app.services.qualification_identity import canonical_json_bytes
 
 ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v1"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
-AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v2"
+AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v3"
 CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
 SEALED_CAPSULE_SCHEMA_ID = "gate_0b_sealed_capsule_v1"
 SIGNED_ROOT_SCHEMA_ID = "gate_0b_signed_record_root_v1"
@@ -98,17 +98,18 @@ WIRE_FACT_KINDS = frozenset(
         "audio_received",
         "caller_activity_end",
         "caller_activity_start",
-        "cancelled",
+        "caller_audio_sent",
+        "connection_open",
         "false_activity",
+        "goaway",
         "interrupted",
         "malformed",
-        "premature_current_audio",
-        "response_gap",
         "response_open",
         "response_terminal",
-        "response_timeout",
-        "runaway_output",
-        "teardown",
+        "teardown_complete",
+        "teardown_failed",
+        "tool_call_cancelled",
+        "tool_call_open",
     }
 )
 CAPSULE_FAILURE_CODES = frozenset(
@@ -119,6 +120,7 @@ CAPSULE_FAILURE_CODES = frozenset(
         "expected_interaction_missing",
         "expected_tool_call_missing",
         "interaction_message_missing",
+        "malformed_tool_cancellation",
         "malformed_message",
         "message_too_large",
         "premature_current_response",
@@ -136,6 +138,8 @@ CAPSULE_FAILURE_CODES = frozenset(
         "session_timeout",
         "setup_rejected",
         "teardown_failure",
+        "tool_cancellation_mismatch",
+        "overlapping_tool_call",
         "unattributed_response",
         "unexpected_interaction_audio",
         "usage_metadata_inconsistent",
@@ -934,6 +938,7 @@ def derive_primitive_records_from_capsule(
     for policy_ms in policies_ms:
         _validate_policy(policy_ms)
 
+    sessions = data["sessions"]
     activities = data["activities"]
     windows = data["no_speech_windows"]
     splits = {value["split"] for value in (*activities, *windows)}
@@ -943,24 +948,22 @@ def derive_primitive_records_from_capsule(
     if split == "holdout" and policies_ms != (data["policy_ms"],):
         raise MeasurementError("holdout capsule must use only its selected policy")
 
+    session_index = {value["session_ordinal"]: value for value in sessions}
     by_session: dict[int, list[Mapping[str, Any]]] = {}
     for activity in activities:
         by_session.setdefault(activity["session_ordinal"], []).append(activity)
 
     activity_records: list[ActivityPrimitiveRecord] = []
     for session_activities in by_session.values():
-        canonical_events = canonical_json_bytes(session_activities[0]["events"])
-        if any(
-            canonical_json_bytes(activity["events"]) != canonical_events
-            for activity in session_activities[1:]
-        ):
-            raise MeasurementError("session activities must share one event stream")
+        session = session_index[session_activities[0]["session_ordinal"]]
         references = tuple(_capsule_reference(activity) for activity in session_activities)
-        events = tuple(
-            CallerTurnEvent.from_dict(value) for value in session_activities[0]["events"]
-        )
+        events = tuple(CallerTurnEvent.from_dict(value) for value in session["events"])
         for activity in session_activities:
-            wire, activity_end_ms = _capsule_wire_observation(activity["wire_facts"])
+            wire, activity_end_ms = _capsule_wire_observation(
+                session["wire_facts"],
+                activity_ordinal=activity["activity_ordinal"],
+                scenario_tags=tuple(activity["scenario_tags"]),
+            )
             if activity["advance_to_ms"] < activity_end_ms + max(policies_ms):
                 raise MeasurementError("capsule observation window is shorter than policy set")
             for policy_ms in policies_ms:
@@ -1134,6 +1137,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             "campaign_id",
             "policy_ms",
             "accounting",
+            "sessions",
             "activities",
             "no_speech_windows",
         },
@@ -1143,13 +1147,37 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise MeasurementError("audit capsule schema is invalid")
     _safe_id(data["campaign_id"], label="campaign ID")
     _validate_policy(data["policy_ms"])
+    sessions = data["sessions"]
     activities = data["activities"]
     windows = data["no_speech_windows"]
+    if not isinstance(sessions, list) or len(sessions) > 64:
+        raise MeasurementError("audit capsule sessions are invalid")
     if not isinstance(activities, list) or len(activities) > 256:
         raise MeasurementError("audit capsule activities are invalid")
     if not isinstance(windows, list) or len(windows) > 64:
         raise MeasurementError("audit capsule no-speech windows are invalid")
     accounting = _validate_capsule_accounting(data["accounting"])
+    session_index: dict[int, Mapping[str, Any]] = {}
+    for raw_session in sessions:
+        session = _strict_mapping(
+            raw_session,
+            {"session_ordinal", "split", "events", "wire_facts"},
+            label="audit capsule session",
+        )
+        session_ordinal = _bounded_int(
+            session["session_ordinal"], label="session ordinal", maximum=63
+        )
+        if session_ordinal in session_index:
+            raise MeasurementError("audit capsule session identity is duplicated")
+        _validate_split(session["split"])
+        events = session["events"]
+        if not isinstance(events, list) or len(events) > 10_000:
+            raise MeasurementError("audit capsule events are invalid")
+        for event in events:
+            CallerTurnEvent.from_dict(event)
+        _validate_wire_facts(session["wire_facts"])
+        session_index[session_ordinal] = session
+    activity_ordinals: set[int] = set()
     for raw_activity in activities:
         activity = _strict_mapping(
             raw_activity,
@@ -1162,11 +1190,9 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
                 "scenario_tags",
                 "reference_text",
                 "critical_spans",
-                "events",
                 "expected_lifecycle_status",
                 "expected_epoch",
                 "advance_to_ms",
-                "wire_facts",
             },
             label="audit capsule activity",
         )
@@ -1175,7 +1201,12 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             label="activity ordinal",
             maximum=255,
         )
-        _bounded_int(activity["session_ordinal"], label="session ordinal", maximum=63)
+        if ordinal in activity_ordinals:
+            raise MeasurementError("audit capsule activity identity is duplicated")
+        activity_ordinals.add(ordinal)
+        session_ordinal = _bounded_int(
+            activity["session_ordinal"], label="session ordinal", maximum=63
+        )
         language = _validate_language(activity["language"])
         _validate_split(activity["split"])
         _safe_id(activity["condition"], label="condition")
@@ -1203,16 +1234,13 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             text=activity["reference_text"],
             critical_spans=tuple(typed_spans),
         )
-        events = activity["events"]
-        if not isinstance(events, list) or len(events) > 10_000:
-            raise MeasurementError("audit capsule events are invalid")
-        for event in events:
-            CallerTurnEvent.from_dict(event)
+        session = session_index.get(session_ordinal)
+        if session is None or session["split"] != activity["split"]:
+            raise MeasurementError("audit capsule activity session is invalid")
         if activity["expected_lifecycle_status"] not in VALID_LIFECYCLE_STATUSES:
             raise MeasurementError("audit capsule lifecycle status is invalid")
         _bounded_int(activity["expected_epoch"], label="expected epoch", maximum=1_000)
         _bounded_int(activity["advance_to_ms"], label="advance time", maximum=7_200_000)
-        _validate_wire_facts(activity["wire_facts"])
     for raw_window in windows:
         window = _strict_mapping(
             raw_window,
@@ -1223,13 +1251,16 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         _validate_split(window["split"])
         _safe_id(window["condition"], label="condition")
         _validate_wire_facts(window["wire_facts"])
+    activity_session_ordinals = {activity["session_ordinal"] for activity in activities}
+    if activity_session_ordinals != set(session_index):
+        raise MeasurementError("audit capsule session population is invalid")
     expected_units = {
-        *(('session', activity["session_ordinal"]) for activity in activities),
-        *(('no_speech_window', window["window_ordinal"]) for window in windows),
+        *(("session", session["session_ordinal"]) for session in sessions),
+        *(("no_speech_window", window["window_ordinal"]) for window in windows),
     }
     actual_units = {(unit["kind"], unit["ordinal"]) for unit in accounting["units"]}
     evidence_splits = {
-        *(activity["split"] for activity in activities),
+        *(session["split"] for session in sessions),
         *(window["split"] for window in windows),
     }
     if (
@@ -1342,40 +1373,145 @@ def _capsule_reference(activity: Mapping[str, Any]) -> ActivityReference:
 
 def _capsule_wire_observation(
     facts: list[Mapping[str, Any]],
+    *,
+    activity_ordinal: int,
+    scenario_tags: tuple[str, ...],
 ) -> tuple[WireObservation, int]:
-    starts = [value["at_ms"] for value in facts if value["kind"] == "caller_activity_start"]
-    ends = [value["at_ms"] for value in facts if value["kind"] == "caller_activity_end"]
+    ordered = sorted(facts, key=lambda value: (value["at_ms"], value["sequence"]))
+    starts = [
+        value["at_ms"]
+        for value in ordered
+        if value["kind"] == "caller_activity_start"
+        and value["activity_ordinal"] == activity_ordinal
+    ]
+    ends = [
+        value["at_ms"]
+        for value in ordered
+        if value["kind"] == "caller_activity_end"
+        and value["activity_ordinal"] == activity_ordinal
+    ]
     if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
         raise MeasurementError("capsule activity boundaries are invalid")
-    response_opens = [value["at_ms"] for value in facts if value["kind"] == "response_open"]
-    if len(response_opens) > 1 or any(value < ends[0] for value in response_opens):
-        raise MeasurementError("capsule response-open facts are invalid")
-    first_audio_ms = response_opens[0] - ends[0] if response_opens else None
-    open_times = set(response_opens)
-    interruption_audio = [
-        value["at_ms"]
-        for value in facts
-        if value["kind"] == "audio_received" and value["at_ms"] not in open_times
+    response_opens = [
+        value
+        for value in ordered
+        if value["kind"] == "response_open"
+        and value["activity_ordinal"] == activity_ordinal
     ]
-    interruption_tail_ms = (
-        min(interruption_audio) - starts[0] if interruption_audio else None
+    if len(response_opens) > 1:
+        raise MeasurementError("capsule response-open facts are invalid")
+    target_audio = [
+        value
+        for value in ordered
+        if value["kind"] == "audio_received"
+        and value["activity_ordinal"] == activity_ordinal
+    ]
+    if target_audio and not response_opens:
+        raise MeasurementError("capsule audio is missing a response-open fact")
+    if response_opens and target_audio and any(
+        value["response_ordinal"] != response_opens[0]["response_ordinal"]
+        for value in target_audio
+    ):
+        raise MeasurementError("capsule response attribution is inconsistent")
+    first_audio_ms = min((value["at_ms"] for value in target_audio), default=None)
+    if first_audio_ms is not None:
+        first_audio_ms = max(0, first_audio_ms - ends[0])
+    premature_count = sum(value["at_ms"] < ends[0] for value in target_audio)
+    terminals = {
+        value["response_ordinal"]: value["at_ms"]
+        for value in ordered
+        if value["kind"] == "response_terminal"
+    }
+    audio_after_terminal_count = sum(
+        value["response_ordinal"] in terminals
+        and value["at_ms"] > terminals[value["response_ordinal"]]
+        for value in target_audio
     )
-    if interruption_tail_ms is not None and interruption_tail_ms < 0:
-        raise MeasurementError("capsule interruption timing is invalid")
+    response_gap_count = 0
+    by_response: dict[int, list[int]] = {}
+    for value in target_audio:
+        by_response.setdefault(value["response_ordinal"], []).append(value["at_ms"])
+    for times in by_response.values():
+        response_gap_count += sum(
+            later - earlier > 500 for earlier, later in zip(times, times[1:], strict=False)
+        )
+    response_timeout_count = sum(
+        value["response_ordinal"] not in terminals for value in response_opens
+    )
+    interruption_tail_ms: int | None = None
+    if "tool_cancellation_interruption" in scenario_tags:
+        caller_audio = [
+            value
+            for value in ordered
+            if value["kind"] == "caller_audio_sent"
+            and value["activity_ordinal"] == activity_ordinal
+        ]
+        if caller_audio:
+            trigger = caller_audio[0]
+            open_tools = [
+                value
+                for value in ordered
+                if value["kind"] == "tool_call_open"
+                and value["activity_ordinal"] != activity_ordinal
+                and (value["at_ms"], value["sequence"])
+                < (trigger["at_ms"], trigger["sequence"])
+            ]
+            cancellations = [
+                value
+                for value in ordered
+                if value["kind"] == "tool_call_cancelled"
+                and value["activity_ordinal"] == activity_ordinal
+                and (value["at_ms"], value["sequence"])
+                >= (trigger["at_ms"], trigger["sequence"])
+            ]
+            interruptions = [
+                value
+                for value in ordered
+                if value["kind"] == "interrupted"
+                and value["activity_ordinal"] == activity_ordinal
+                and (value["at_ms"], value["sequence"])
+                >= (trigger["at_ms"], trigger["sequence"])
+            ]
+            if open_tools and cancellations and interruptions:
+                prior_ordinal = open_tools[-1]["activity_ordinal"]
+                tail_audio = [
+                    value["at_ms"]
+                    for value in ordered
+                    if value["kind"] == "audio_received"
+                    and value["activity_ordinal"] == prior_ordinal
+                    and value["at_ms"] >= trigger["at_ms"]
+                    and value["at_ms"] <= cancellations[0]["at_ms"]
+                ]
+                interruption_tail_ms = (
+                    max(value - starts[0] for value in tail_audio) if tail_audio else 0
+                )
+    applicable = [
+        value
+        for value in ordered
+        if value["activity_ordinal"] in {None, activity_ordinal}
+    ]
+    abnormal_close_count = _fact_count(applicable, "abnormal_close") + _fact_count(
+        applicable, "goaway"
+    )
+    malformed_count = _fact_count(applicable, "malformed")
+    teardown_violation_count = _fact_count(applicable, "teardown_failed")
+    runaway_output_count = int(
+        sum(value["audio_bytes"] for value in target_audio) > MAX_ACCOUNTING_OUTPUT_BYTES
+    )
     return (
         WireObservation(
             timing_covered=first_audio_ms is not None,
             first_audio_ms=first_audio_ms,
             interruption_tail_ms=interruption_tail_ms,
-            premature_current_audio_count=_fact_count(facts, "premature_current_audio"),
-            audio_after_terminal_count=_fact_count(facts, "audio_after_terminal"),
-            response_gap_violation_count=_fact_count(facts, "response_gap"),
-            abnormal_close_count=_fact_count(facts, "abnormal_close"),
-            runaway_output_count=_fact_count(facts, "runaway_output"),
-            response_timeout_count=_fact_count(facts, "response_timeout"),
-            malformed_count=_fact_count(facts, "malformed"),
-            teardown_violation_count=_fact_count(facts, "teardown"),
-            error_code=_wire_error_code(facts),
+            premature_current_audio_count=premature_count,
+            audio_after_terminal_count=audio_after_terminal_count,
+            response_gap_violation_count=response_gap_count,
+            abnormal_close_count=abnormal_close_count,
+            runaway_output_count=runaway_output_count,
+            response_timeout_count=response_timeout_count,
+            malformed_count=malformed_count,
+            teardown_violation_count=teardown_violation_count,
+            error_code=_wire_error_code(applicable),
         ),
         ends[0],
     )
@@ -1386,7 +1522,11 @@ def _fact_count(facts: list[Mapping[str, Any]], kind: str) -> int:
 
 
 def _audio_after_teardown_count(facts: list[Mapping[str, Any]]) -> int:
-    teardown_times = [value["at_ms"] for value in facts if value["kind"] == "teardown"]
+    teardown_times = [
+        value["at_ms"]
+        for value in facts
+        if value["kind"] in {"teardown_complete", "teardown_failed"}
+    ]
     if not teardown_times:
         return 0
     return sum(
@@ -1397,14 +1537,11 @@ def _audio_after_teardown_count(facts: list[Mapping[str, Any]]) -> int:
 
 def _wire_error_code(facts: list[Mapping[str, Any]]) -> str | None:
     codes = (
-        ("premature_current_audio", "premature_current_response"),
         ("audio_after_terminal", "audio_after_terminal"),
-        ("response_gap", "response_gap_exceeded"),
         ("abnormal_close", "provider_closed"),
-        ("runaway_output", "runaway_output"),
-        ("response_timeout", "response_terminal_missing"),
+        ("goaway", "provider_goaway"),
         ("malformed", "malformed_message"),
-        ("teardown", "teardown_failure"),
+        ("teardown_failed", "teardown_failure"),
     )
     return next((code for kind, code in codes if _fact_count(facts, kind)), None)
 
@@ -1423,10 +1560,18 @@ def _reject_forbidden_capsule_keys(value: object) -> None:
 def _validate_wire_facts(raw: object) -> None:
     if not isinstance(raw, list) or len(raw) > 10_000:
         raise MeasurementError("audit capsule wire facts are invalid")
-    for raw_fact in raw:
+    for index, raw_fact in enumerate(raw):
         fact = _strict_mapping(
             raw_fact,
-            {"kind", "at_ms", "response_ordinal", "activity_ordinal"},
+            {
+                "kind",
+                "at_ms",
+                "response_ordinal",
+                "activity_ordinal",
+                "sequence",
+                "epoch",
+                "audio_bytes",
+            },
             label="audit capsule wire fact",
         )
         if fact["kind"] not in WIRE_FACT_KINDS:
@@ -1442,6 +1587,28 @@ def _validate_wire_facts(raw: object) -> None:
             label="activity ordinal",
             maximum=255,
         )
+        sequence = _bounded_int(fact["sequence"], label="wire sequence", maximum=100_000)
+        if sequence != index:
+            raise MeasurementError("audit capsule wire fact sequence is invalid")
+        epoch = _bounded_int(fact["epoch"], label="wire epoch", maximum=1_000)
+        if epoch < 1:
+            raise MeasurementError("audit capsule wire epoch is invalid")
+        audio_bytes = _bounded_int(
+            fact["audio_bytes"], label="wire audio bytes", maximum=1024 * 1024
+        )
+        if fact["kind"] in {"audio_received", "caller_audio_sent"}:
+            if audio_bytes <= 0:
+                raise MeasurementError("audio wire fact byte count is invalid")
+        elif audio_bytes:
+            raise MeasurementError("non-audio wire fact byte count is invalid")
+        if fact["kind"] in {
+            "audio_received",
+            "response_open",
+            "response_terminal",
+        } and fact["response_ordinal"] is None:
+            raise MeasurementError("response wire fact ordinal is missing")
+
+
 def _event_dict(event: CallerTurnEvent) -> dict[str, Any]:
     return {
         "kind": event.kind.value,

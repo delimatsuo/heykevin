@@ -1,6 +1,7 @@
 """Independent evaluator tests for complete Gate 0B evidence."""
 
 import base64
+from dataclasses import replace
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -36,6 +37,20 @@ from scripts.run_gemini_caller_turn_qualification import build_preregistration
 CAMPAIGN_KEY = b"k" * 32
 LANGUAGES = ("en", "es", "pt", "fr", "zh", "hi", "ar", "ht")
 CONDITIONS = ("clean", "twilio_codec_only", "acoustic_impairment", "interaction_stress")
+STRESS_TAGS = (
+    "jitter_packet_loss",
+    "clipping",
+    "echo_crosstalk",
+    "far_field_low_volume",
+    "background_noise",
+    "long_pause",
+    "fast_speech",
+    "correction",
+    "number_dictation",
+    "synchronous_tool_use",
+    "tool_cancellation_interruption",
+    "fresh_connection_restart",
+)
 POLICIES = (100, 250, 500, 750)
 ROOT_KEY_ID = "evidence_custodian_1"
 IDENTITIES = {
@@ -66,8 +81,9 @@ def _activity_record(
     rare_failure: bool = False,
     wire_drift: bool = False,
 ) -> ActivityPrimitiveRecord:
-    language = LANGUAGES[ordinal % len(LANGUAGES)]
-    interruption = ordinal % 16 == 0
+    relative_ordinal = ordinal if split == "development" else ordinal - 128
+    language = LANGUAGES[relative_ordinal // 16]
+    within_language = relative_ordinal % 16
     kinds = (
         "digits",
         "negation",
@@ -76,14 +92,27 @@ def _activity_record(
         "english_to_language",
         "language_to_english",
     )
-    scenario_tags = (
-        ("tool_cancellation_interruption",)
-        if interruption
-        else ("code_switch_english_to_language",)
-        if ordinal % 16 == 1
-        else ("code_switch_language_to_english",)
-        if ordinal % 16 == 2
-        else ("standard",)
+    scenario_tags = ["standard"]
+    if within_language >= 12:
+        scenario_tags = [
+            tag
+            for tag_index, tag in enumerate(STRESS_TAGS)
+            if tag_index % 4 == within_language - 12
+        ]
+    if language != "en" and within_language == 10:
+        scenario_tags.append("code_switch_english_to_language")
+    if language != "en" and within_language == 11:
+        scenario_tags.append("code_switch_language_to_english")
+    interruption = "tool_cancellation_interruption" in scenario_tags
+    applicable_kinds = {
+        "number_dictation": "digits",
+        "correction": "correction",
+        "code_switch_english_to_language": "english_to_language",
+        "code_switch_language_to_english": "language_to_english",
+    }
+    critical_kinds = {kinds[within_language % len(kinds)]}
+    critical_kinds.update(
+        applicable_kinds[tag] for tag in scenario_tags if tag in applicable_kinds
     )
     word_values = (None, None, None, None, None) if language == "zh" else (3, 3, 0, 0, 0)
     record = ActivityPrimitiveRecord(
@@ -92,8 +121,8 @@ def _activity_record(
         activity_ordinal=ordinal,
         split=split,
         language=language,
-        condition="rare" if rare_failure else CONDITIONS[(ordinal // 8) % len(CONDITIONS)],
-        scenario_tags=scenario_tags,
+        condition="rare" if rare_failure else CONDITIONS[within_language // 4],
+        scenario_tags=tuple(scenario_tags),
         assignment_status="matched",
         expected_lifecycle_status="retrospective_complete",
         observed_lifecycle_status="missing" if assembly_failure else "retrospective_complete",
@@ -111,8 +140,9 @@ def _activity_record(
         word_insertions=word_values[3],
         word_deletions=word_values[4],
         ambiguity_margin_micros=500_000,
-        critical_spans=(
-            CriticalSpanFact(kind=kinds[ordinal % len(kinds)], exact=not rare_failure),
+        critical_spans=tuple(
+            CriticalSpanFact(kind=kind, exact=not rare_failure)
+            for kind in sorted(critical_kinds)
         ),
         contamination_count=0,
         duplicate_count=0,
@@ -140,8 +170,8 @@ def _no_speech_record(ordinal: int) -> NoSpeechPrimitiveRecord:
     record = NoSpeechPrimitiveRecord(
         schema_id=NO_SPEECH_PRIMITIVE_SCHEMA_ID,
         window_ordinal=ordinal,
-        split="development" if ordinal % 2 == 0 else "holdout",
-        condition="silence" if ordinal % 2 == 0 else "background_noise",
+        split="development" if ordinal < 32 else "holdout",
+        condition="silence" if ordinal % 32 < 16 else "background_noise",
         false_activity_count=0,
         model_audio_chunk_count=0,
         abnormal_close_count=0,
@@ -258,6 +288,34 @@ def _evaluate(artifact: dict[str, object], public_key: bytes) -> dict[str, objec
         root_public_key=public_key,
         expected_root_key_id=ROOT_KEY_ID,
     )
+
+
+def test_evaluator_cardinality_rejects_all_standard_false_green_probe() -> None:
+    artifact, _ = _artifact()
+    records = tuple(
+        ActivityPrimitiveRecord.from_dict(value)
+        for value in artifact["activity_records"]  # type: ignore[union-attr]
+    )
+    mutated = tuple(
+        ActivityPrimitiveRecord.with_commitment(
+            replace(record, scenario_tags=("standard",), commitment=""),
+            commitment_key=CAMPAIGN_KEY,
+        )
+        for record in records
+    )
+    windows = tuple(
+        NoSpeechPrimitiveRecord.from_dict(value)
+        for value in artifact["no_speech_records"]  # type: ignore[union-attr]
+    )
+
+    failures = evaluator_module._validate_cardinality(
+        mutated,
+        windows,
+        candidate_policies=POLICIES,
+        selected_policy=100,
+    )
+
+    assert failures["activity_strata_invalid"] == 1
 
 
 def _append_ledger_record(
@@ -396,6 +454,8 @@ def _custody_bundle(
             "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
             "custodian_key_id": "audit_custodian_1",
             "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
+            "privacy_custodian_key_id": "privacy_custodian_1",
+            "privacy_custodian_public_key_sha256": "1" * 64,
             "record_root_key_id": ROOT_KEY_ID,
             "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
             "ledger_instance_id": "ledger_instance_1",
@@ -1178,6 +1238,7 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     ledger_public_path = tmp_path / "ledger-custodian.pub"
     output = tmp_path / "report.json"
     bundle_path.write_text(json.dumps(bundle))
+    bundle_path.chmod(0o600)
     commitment_path.write_bytes(CAMPAIGN_KEY)
     commitment_path.chmod(0o600)
     custodian_path.write_bytes(
@@ -1197,6 +1258,7 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     )
     root_path.chmod(0o600)
     ledger_public_path.write_bytes(ledger_public_key)
+    ledger_public_path.chmod(0o600)
     monkeypatch.setattr(
         evaluator_module,
         "open_audit_capsule",
@@ -1249,6 +1311,44 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     assert CAMPAIGN_KEY.hex() not in output.read_text()
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert "--artifact" not in evaluator_module.build_parser().format_help()
+
+
+@pytest.mark.parametrize(
+    ("successes", "trials", "expected"),
+    (
+        (0, 1, (0, 975_000)),
+        (0, 10, (0, 308_497)),
+        (1, 1, (25_000, 1_000_000)),
+        (5, 10, (187_086, 812_914)),
+        (99, 100, (945_541, 999_747)),
+        (128, 128, (971_592, 1_000_000)),
+    ),
+)
+def test_clopper_pearson_95_matches_pinned_golden_vectors(
+    successes: int,
+    trials: int,
+    expected: tuple[int, int],
+) -> None:
+    assert evaluator_module._clopper_pearson_95(successes, trials) == expected
+
+
+@pytest.mark.parametrize(
+    ("values", "percentile", "expected"),
+    (
+        ([1], 95, 1),
+        ([1, 2], 50, 1),
+        ([1, 2], 95, 2),
+        (list(range(1, 21)), 50, 10),
+        (list(range(1, 21)), 95, 19),
+        (list(range(1, 101)), 95, 95),
+    ),
+)
+def test_nearest_rank_percentile_matches_pinned_golden_vectors(
+    values: list[int],
+    percentile: int,
+    expected: int,
+) -> None:
+    assert evaluator_module._percentile(values, percentile) == expected
 
 
 @pytest.mark.parametrize("field", ("future_execution_authorized", "production_authorized"))

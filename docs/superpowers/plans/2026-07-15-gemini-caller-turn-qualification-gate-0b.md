@@ -134,6 +134,8 @@ protocol requiring a different plan and approval.
 ```text
 External consented corpus directory (never committed)
   -> consent, manifest, PCM, and provenance validators
+  -> fresh signed privacy-custody authorization
+  -> opaque split loader releases only the authorized schedule
   -> DEVELOPMENT_COLLECTION
   -> independent in-memory adapter/measurement agreement
   -> immutable policy-selection digest
@@ -153,13 +155,15 @@ Ownership boundaries:
 - raw provider messages remain in memory only and are reduced independently by two
   allowlisted implementations before disposal;
 - a short-lived encrypted audit capsule stores only canonical references and the
-  allowlisted adapted transcript-event fields needed for post-run recomputation;
+  allowlisted adapted transcript-event fields and ordered raw wire facts needed for
+  post-run recomputation, with transcript events stored once per logical session;
 - fixed-schema primitive records contain no text and are independently derived from
   the audit capsule rather than trusted from the executor;
 - the evaluator recomputes metric algebra, aggregates, and every gate from the audit
   capsule and primitive records; it never trusts runner verdicts;
 - no component imports the live pipelines;
-- the approval verifier runs before credentials are read or a connector is created.
+- the approval and fresh privacy-custody verifiers run before corpus materialization,
+  credentials are read, or a connector is created.
 
 ## 5. Exact Candidate And Setup Policy
 
@@ -217,6 +221,17 @@ extend beyond 30 days after the evidence panel. Provider-retained data is govern
 a separate ZDR attestation or an explicit residual-retention acceptance naming the
 privacy owner and exact execution approval; local deletion never claims to delete
 provider records.
+
+The executor receives no plan, transcript, or audio tuple directly. A distinct
+privacy custodian signs a receipt with a maximum five-minute age and fifteen-minute
+lifetime, binding the exact campaign, attempt, split, preregistration, source,
+schedule, corpus, project, model, consent and withdrawal registries, purpose,
+rights, provider disclosures, subject set, retention policy, provider-retention
+decision, residual-retention acceptance, and deletion deadline. Only the verified
+typed receipt may be passed to an opaque asset loader. Development schedule
+validation still completes before the first ledger claim. Holdout requires the
+post-lock signed ledger state, a fresh holdout receipt, and exact released schedule
+validation before the one-shot resume claim.
 
 The signed, versioned consent registry is separately controlled from the corpus. It
 binds a corpus-scoped subject ID to consent version, adult attestation, recording
@@ -314,7 +329,10 @@ The network executor computes no verdict. Two independently implemented in-memor
 reducers must agree on raw-message-to-adapted-event reduction before raw messages are
 discarded. An allowlisted encrypted audit capsule then records campaign-local
 ordinals, relative receipt times, event kinds, epoch/terminal facts, canonical script
-references, and adapted transcript fragments. It excludes provider IDs, paths,
+references, adapted transcript fragments once per logical session, and ordered raw
+wire facts for every caller boundary, audio chunk, response, tool interaction,
+close, malformed message, and teardown. Activity rows do not duplicate session
+transcripts. It excludes provider IDs, paths,
 credentials, request/session IDs, tool payloads, and every unapproved raw field. A
 separate custodian holds the capsule key. The evidence panel deletes the capsule and
 key after recomputation and records a deletion attestation.
@@ -370,6 +388,15 @@ campaign.
 If the reducers, aligner, fidelity metrics, encrypted audit path, or independent
 recomputation cannot be validated on multilingual synthetic fixtures, Gate 0B stops
 before any provider call.
+
+The exact sealed schedule has 24 logical sessions per split. Eight sessions per
+split contain one fresh-connection restart. Together with 32 independently
+scheduled no-speech windows per split, this creates exactly 64 requests per split
+and 128 per attempt. The shared runner/evaluator allocation validator requires all
+128 activity ordinals per split; eight languages by four conditions by four
+activities; every stress tag in at least eight activities and four languages;
+both code-switch directions for every non-English language; all applicable critical
+span kinds; and exactly 16 silence plus 16 background-noise windows per split.
 
 ## 8. Evidence Artifact And Independent Evaluation
 
@@ -672,6 +699,13 @@ session resumption disabled, no restart is called provider-context continuity. A
 activity crossing the boundary is classified fail-closed and every late prior-epoch
 event is stale.
 
+All external values, corpus assets, capsules, custody bundles, keys, and reports use
+absolute paths outside the repository with no symlink ancestry. Custody directories
+are current-user-owned mode `0700`; input files are current-user-owned, single-link
+regular files mode `0600`; outputs are atomically created mode `0600`. Approval,
+privacy, audit-capsule, record-root, and ledger-custodian roles must have distinct
+key IDs and distinct public-key digests.
+
 ## 12. Task-Level TDD Plan
 
 Each task records RED, implements the minimum change, records GREEN, runs Ruff on
@@ -762,6 +796,9 @@ policy-lock binding, one selected-policy holdout, per-language sample thresholds
 wire-interaction thresholds, exact Gate 0 assembly thresholds, contradictory records,
 partial-run no-go, signed under-reservation rejection before capsule opening,
 small-cell publication suppression, and all nonauthorization fields.
+Add literal capsule-to-record mutation vectors for premature audio, response gaps,
+audio after terminal, missing terminal, and causal cancellation with a distinct
+zero-millisecond tail; pin Clopper-Pearson and nearest-rank percentile golden vectors.
 
 ### Task 6: Add the injected Gate 0B session executor
 
@@ -782,6 +819,12 @@ deadlines, output disposal, capsule handoff, typed claim validation, signed
 post-claim and post-resume proof, reservation inflation, failed append, crash replay,
 minimum safe cost liability, accepted-chain prefix continuity, signed lease-digest
 binding, and durable terminal-outcome replay.
+
+The executor accepts only an opaque asset release handle. Fresh signed privacy
+custody must verify before loader access, and exact topology/allocation validation
+must finish before a development claim or holdout resume. Tests deny stale and
+withdrawn receipts before loader, ledger mutation, credential, connector, or capsule
+access.
 
 The executor computes no verdict. The selected authentication transport has failure-
 path tests proving credentials and authenticated URLs cannot enter output, logs,

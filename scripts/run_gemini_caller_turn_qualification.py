@@ -27,7 +27,6 @@ from app.services.caller_turn_measurement import (
     seal_audit_capsule,
 )
 from app.services.caller_turn_qualification import (
-    CampaignPhase,
     PricingSchedule,
     empty_evidence_flags,
 )
@@ -1467,8 +1466,6 @@ async def execute_authorized_attempt(
     campaign_envelope: Mapping[str, Any],
     attempt_envelope: Mapping[str, Any],
     ledger: AttemptLedger,
-    phase: CampaignPhase,
-    holdout_materialized: bool,
     now: datetime,
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
@@ -1494,8 +1491,6 @@ async def execute_authorized_attempt(
         session_config=session_config,
         approval_public_key=approval_public_key,
         ledger=ledger,
-        phase=phase,
-        holdout_materialized=holdout_materialized,
         plans=plans,
         no_speech_plans=no_speech_plans,
         pricing=pricing,
@@ -1532,8 +1527,6 @@ async def execute_authorized_attempt(
     claim = ledger.claim_attempt(
         campaign=campaign,
         authorization=authorization,
-        phase=phase,
-        holdout_materialized=holdout_materialized,
         now=now,
     )
 
@@ -1541,6 +1534,7 @@ async def execute_authorized_attempt(
     cost_microusd = 0
     error_code: str | None = None
     capsule_handed_off = False
+    capsule_sha256: str | None = None
     session_results: list[tuple[SessionPlan, SessionExecutionResult]] = []
     no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
 
@@ -1631,7 +1625,7 @@ async def execute_authorized_attempt(
                 error_code = "audit_capsule_failed"
             else:
                 try:
-                    _write_sealed_capsule(capsule_path, sealed)
+                    capsule_sha256 = _write_sealed_capsule(capsule_path, sealed)
                     capsule_handed_off = True
                 except Exception:
                     error_code = "capsule_handoff_failed"
@@ -1643,6 +1637,7 @@ async def execute_authorized_attempt(
             outage_enum=None,
             actual_provider_requests=budget.consumed,
             actual_cost_microusd=cost_microusd,
+            capsule_sha256=capsule_sha256 if complete else None,
             now=now,
         )
 
@@ -1886,8 +1881,6 @@ def _verify_execution_preregistration(
     session_config: SessionExecutionConfig,
     approval_public_key: bytes,
     ledger: AttemptLedger,
-    phase: CampaignPhase,
-    holdout_materialized: bool,
     plans: tuple[SessionPlan, ...],
     no_speech_plans: tuple[NoSpeechWindowPlan, ...],
     pricing: PricingSchedule,
@@ -1956,12 +1949,8 @@ def _verify_execution_preregistration(
         raise RunnerError("preregistration execution cap mismatch")
 
     all_splits = {plan.split for plan in (*plans, *no_speech_plans)}
-    if (
-        phase is not CampaignPhase.DEVELOPMENT_COLLECTION
-        or holdout_materialized
-        or all_splits != {"development"}
-    ):
-        raise RunnerError("holdout split is forbidden during development phase")
+    if all_splits != {"development"}:
+        raise RunnerError("executor accepts only the development split")
 
 
 def _load_pinned_approval_public_key() -> bytes:

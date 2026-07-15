@@ -3,10 +3,13 @@
 import json
 from hashlib import sha256
 from pathlib import Path
+import stat
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 import pytest
+import scripts.evaluate_gemini_caller_turn_qualification as evaluator_module
 
 from app.services.caller_turn_measurement import (
     ACTIVITY_PRIMITIVE_SCHEMA_ID,
@@ -16,9 +19,11 @@ from app.services.caller_turn_measurement import (
     NoSpeechPrimitiveRecord,
     build_signed_record_root,
 )
+from app.services.qualification_identity import canonical_json_bytes
 from scripts.evaluate_gemini_caller_turn_qualification import (
     compute_evidence_context_commitment,
     compute_policy_lock_sha256,
+    evaluate_custody_bundle,
     evaluate_evidence_artifact,
     main,
 )
@@ -37,6 +42,14 @@ IDENTITIES = {
     "pricing_sha256": sha256(
         Path("tests/fixtures/caller_turn_qualification/pricing.json").read_bytes()
     ).hexdigest(),
+    "preregistration_sha256": "e" * 64,
+    "campaign_approval_sha256": "f" * 64,
+    "attempt_authorization_sha256": "1" * 64,
+    "development_capsule_sha256": "2" * 64,
+    "holdout_capsule_sha256": "3" * 64,
+    "ledger_head_sha256": "4" * 64,
+    "custodian_public_key_sha256": "5" * 64,
+    "record_root_public_key_sha256": "6" * 64,
 }
 
 
@@ -247,6 +260,259 @@ def _evaluate(artifact: dict[str, object], public_key: bytes) -> dict[str, objec
     )
 
 
+def _append_ledger_record(ledger: dict[str, object], record: dict[str, object]) -> None:
+    records = ledger["records"]
+    assert isinstance(records, list)
+    entry = {
+        "sequence": len(records) + 1,
+        "previous_hash": ledger["head_hash"],
+        **record,
+    }
+    entry["record_hash"] = sha256(canonical_json_bytes(entry)).hexdigest()
+    records.append(entry)
+    ledger["head_hash"] = entry["record_hash"]
+
+
+def _custody_bundle():
+    artifact, _ = _artifact()
+    activity_records = tuple(
+        ActivityPrimitiveRecord.from_dict(value) for value in artifact["activity_records"]
+    )
+    no_speech_records = tuple(
+        NoSpeechPrimitiveRecord.from_dict(value) for value in artifact["no_speech_records"]
+    )
+    development_records = tuple(
+        record for record in activity_records if record.split == "development"
+    )
+    holdout_records = tuple(record for record in activity_records if record.split == "holdout")
+    development_windows = tuple(
+        record for record in no_speech_records if record.split == "development"
+    )
+    holdout_windows = tuple(record for record in no_speech_records if record.split == "holdout")
+    custodian_key = X25519PrivateKey.generate()
+    root_key = Ed25519PrivateKey.generate()
+    development_envelope = {"kind": "development"}
+    holdout_envelope = {"kind": "holdout"}
+    development_digest = sha256(canonical_json_bytes(development_envelope)).hexdigest()
+    holdout_digest = sha256(canonical_json_bytes(holdout_envelope)).hexdigest()
+    source_sha = "b" * 40
+    authorization_sha = "1" * 64
+    identities = {
+        "source_sha256": sha256(source_sha.encode("ascii")).hexdigest(),
+        "environment_sha256": "b" * 64,
+        "evaluator_sha256": sha256(Path(evaluator_module.__file__).read_bytes()).hexdigest(),
+        "corpus_sha256": "d" * 64,
+        "pricing_sha256": sha256(
+            Path("tests/fixtures/caller_turn_qualification/pricing.json").read_bytes()
+        ).hexdigest(),
+        "preregistration_sha256": "e" * 64,
+        "campaign_approval_sha256": "f" * 64,
+        "attempt_authorization_sha256": authorization_sha,
+        "development_capsule_sha256": development_digest,
+        "holdout_capsule_sha256": holdout_digest,
+        "ledger_head_sha256": "0" * 64,
+        "custodian_public_key_sha256": sha256(
+            custodian_key.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        ).hexdigest(),
+        "record_root_public_key_sha256": sha256(
+            root_key.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        ).hexdigest(),
+    }
+    policy_lock = compute_policy_lock_sha256(
+        activity_records=development_records,
+        no_speech_records=development_windows,
+        candidate_policies_ms=POLICIES,
+        selected_policy_ms=100,
+        identities=identities,
+    )
+    ledger = {
+        "schema_id": "gate_0b_attempt_ledger_v1",
+        "campaign_id": "campaign_1",
+        "authorization_id": "authorization_1",
+        "preregistration_sha256": identities["preregistration_sha256"],
+        "source_sha": source_sha,
+        "campaign_approval_sha256": identities["campaign_approval_sha256"],
+        "ledger_location_sha256": "7" * 64,
+        "max_attempts": 3,
+        "max_provider_requests": 384,
+        "max_cost_microusd": 30_000_000,
+        "records": [],
+        "head_hash": "0" * 64,
+    }
+    _append_ledger_record(
+        ledger,
+        {
+            "event": "phase_transition",
+            "from_phase": "preregistered",
+            "to_phase": "development_collection",
+            "selected_policy_ms": None,
+            "policy_lock_sha256": None,
+            "capsule_sha256": None,
+            "holdout_materialized": False,
+            "at": "2026-07-15T15:00:00Z",
+        },
+    )
+    _append_ledger_record(
+        ledger,
+        {
+            "event": "claim",
+            "attempt_id": "attempt_1",
+            "attempt_index": 1,
+            "lease_id": "8" * 64,
+            "phase": "development_collection",
+            "holdout_materialized": False,
+            "provider_requests_reserved": 128,
+            "cost_reserved_microusd": 10_000_000,
+            "authorization_sha256": authorization_sha,
+            "prior_attempt_id": None,
+            "outage_enum": None,
+            "at": "2026-07-15T15:00:01Z",
+        },
+    )
+    _append_ledger_record(
+        ledger,
+        {
+            "event": "outcome",
+            "attempt_id": "attempt_1",
+            "attempt_index": 1,
+            "lease_id": "8" * 64,
+            "outcome": "completed",
+            "outage_enum": None,
+            "actual_provider_requests": 64,
+            "actual_cost_microusd": artifact["usage"]["cost_microusd"],
+            "capsule_sha256": development_digest,
+            "at": "2026-07-15T15:10:00Z",
+        },
+    )
+    for current, target, capsule, materialized in (
+        ("development_collection", "policy_selection_locked", development_digest, False),
+        ("policy_selection_locked", "holdout_collection", None, True),
+        ("holdout_collection", "completed", holdout_digest, True),
+    ):
+        _append_ledger_record(
+            ledger,
+            {
+                "event": "phase_transition",
+                "from_phase": current,
+                "to_phase": target,
+                "selected_policy_ms": 100,
+                "policy_lock_sha256": policy_lock,
+                "capsule_sha256": capsule,
+                "holdout_materialized": materialized,
+                "at": "2026-07-15T15:11:00Z",
+            },
+        )
+    identities["ledger_head_sha256"] = ledger["head_hash"]
+    bundle = {
+        "schema_id": "gate_0b_custody_bundle_v1",
+        "campaign_id": "campaign_1",
+        "development_capsule": development_envelope,
+        "holdout_capsule": holdout_envelope,
+        "ledger": ledger,
+        "identities": identities,
+        "usage": artifact["usage"],
+        "run_failures": [],
+    }
+    derived = {
+        "development": (development_records, development_windows),
+        "holdout": (holdout_records, holdout_windows),
+    }
+    return bundle, custodian_key, root_key, derived
+
+
+def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, custodian_key, root_key, derived = _custody_bundle()
+    opened: list[str] = []
+
+    def open_capsule(envelope, **_kwargs):
+        opened.append(envelope["kind"])
+        return {"campaign_id": "campaign_1", "kind": envelope["kind"]}
+
+    def derive(capsule, **_kwargs):
+        return derived[capsule["kind"]]
+
+    monkeypatch.setattr(evaluator_module, "open_audit_capsule", open_capsule)
+    monkeypatch.setattr(evaluator_module, "derive_primitive_records_from_capsule", derive)
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "pass"
+    assert opened == ["development", "holdout"]
+    assert "activity_records" not in bundle
+    assert "phase_history" not in bundle
+    assert "attempt_completed" not in bundle
+
+
+def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, custodian_key, root_key, derived = _custody_bundle()
+    injected = dict(bundle)
+    injected["activity_records"] = []
+    injected_report = evaluate_custody_bundle(
+        injected,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+    assert injected_report["status"] == "no_go"
+    assert injected_report["failures"] == {"custody_bundle_invalid": 1}
+
+    failing_development = tuple(
+        _activity_record(
+            policy_ms=policy,
+            ordinal=ordinal,
+            split="development",
+            assembly_failure=True,
+        )
+        for policy in POLICIES
+        for ordinal in range(128)
+    )
+    opened: list[str] = []
+
+    def open_capsule(envelope, **_kwargs):
+        opened.append(envelope["kind"])
+        if envelope["kind"] == "holdout":
+            pytest.fail("holdout must remain encrypted when development has no passing policy")
+        return {"campaign_id": "campaign_1", "kind": "development"}
+
+    monkeypatch.setattr(evaluator_module, "open_audit_capsule", open_capsule)
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda _capsule, **_kwargs: (failing_development, derived["development"][1]),
+    )
+
+    blocked = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert blocked["status"] == "no_go"
+    assert opened == ["development"]
+
+
 def test_evaluator_recomputes_complete_gate_and_publishes_only_aggregates() -> None:
     artifact, public_key = _artifact()
 
@@ -343,26 +609,62 @@ def test_contradictory_or_tampered_records_never_reach_metric_algebra() -> None:
     assert report["gate_0b_sample_passed"] is False
 
 
-def test_cli_writes_payload_safe_report_and_uses_external_key_material(tmp_path: Path) -> None:
-    artifact, public_key = _artifact()
-    artifact_path = tmp_path / "evidence.json"
+def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, custodian_key, root_key, derived = _custody_bundle()
+    bundle_path = tmp_path / "custody-bundle.json"
     commitment_path = tmp_path / "commitment.key"
-    public_path = tmp_path / "root.pub"
+    custodian_path = tmp_path / "custodian.key"
+    root_path = tmp_path / "record-root.key"
     output = tmp_path / "report.json"
-    artifact_path.write_text(json.dumps(artifact))
+    bundle_path.write_text(json.dumps(bundle))
     commitment_path.write_bytes(CAMPAIGN_KEY)
     commitment_path.chmod(0o600)
-    public_path.write_bytes(public_key)
+    custodian_path.write_bytes(
+        custodian_key.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+    )
+    custodian_path.chmod(0o600)
+    root_path.write_bytes(
+        root_key.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+    )
+    root_path.chmod(0o600)
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: {
+            "campaign_id": "campaign_1",
+            "kind": envelope["kind"],
+        },
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
 
     exit_code = main(
         [
-            "--artifact",
-            str(artifact_path),
+            "--bundle",
+            str(bundle_path),
             "--commitment-key",
             str(commitment_path),
-            "--root-public-key",
-            str(public_path),
-            "--root-key-id",
+            "--custodian-private-key",
+            str(custodian_path),
+            "--custodian-key-id",
+            "audit_custodian_1",
+            "--record-root-signing-key",
+            str(root_path),
+            "--record-root-key-id",
             ROOT_KEY_ID,
             "--output",
             str(output),
@@ -374,6 +676,8 @@ def test_cli_writes_payload_safe_report_and_uses_external_key_material(tmp_path:
     assert persisted["status"] == "pass"
     assert persisted["release_authorized"] is False
     assert CAMPAIGN_KEY.hex() not in output.read_text()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert "--artifact" not in evaluator_module.build_parser().format_help()
 
 
 @pytest.mark.parametrize("field", ("future_execution_authorized", "production_authorized"))

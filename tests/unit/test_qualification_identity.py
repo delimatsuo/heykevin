@@ -10,13 +10,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
-from app.services.caller_turn_qualification import CampaignPhase
 from app.services.qualification_identity import (
     AttemptLedger,
     IdentityError,
     canonical_json_bytes,
     capture_environment_identity,
     capture_source_identity,
+    derive_ledger_campaign_state,
     ledger_location_sha256,
     verify_attempt_authorization,
     verify_campaign_approval,
@@ -278,8 +278,6 @@ def test_ledger_consumes_attempt_before_work_and_blocks_concurrency(tmp_path: Pa
     claim = ledger.claim_attempt(
         campaign=campaign,
         authorization=attempt,
-        phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-        holdout_materialized=False,
         now=NOW,
     )
 
@@ -289,8 +287,6 @@ def test_ledger_consumes_attempt_before_work_and_blocks_concurrency(tmp_path: Pa
         ledger.claim_attempt(
             campaign=campaign,
             authorization=attempt,
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW + timedelta(seconds=1),
         )
 
@@ -334,8 +330,6 @@ def test_replacement_requires_prelock_outage_and_new_signed_attempt(tmp_path: Pa
     first_claim = ledger.claim_attempt(
         campaign=campaign,
         authorization=first,
-        phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-        holdout_materialized=False,
         now=NOW,
     )
     ledger.record_outcome(
@@ -350,8 +344,6 @@ def test_replacement_requires_prelock_outage_and_new_signed_attempt(tmp_path: Pa
     replacement = ledger.claim_attempt(
         campaign=campaign,
         authorization=second,
-        phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-        holdout_materialized=False,
         now=NOW + timedelta(seconds=2),
     )
     assert replacement.attempt_id == "attempt_002"
@@ -369,29 +361,101 @@ def test_replacement_requires_prelock_outage_and_new_signed_attempt(tmp_path: Pa
         now=NOW,
     )
     other_ledger = AttemptLedger(other_path)
-    other_ledger.claim_attempt(
+    other_claim = other_ledger.claim_attempt(
         campaign=other_campaign,
         authorization=first,
-        phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-        holdout_materialized=False,
         now=NOW,
     )
     other_ledger.record_outcome(
-        first_claim,
-        outcome="infrastructure_outage",
-        outage_enum="provider_dns_outage",
+        other_claim,
+        outcome="completed",
+        outage_enum=None,
         actual_provider_requests=0,
         actual_cost_microusd=0,
+        capsule_sha256="d" * 64,
         now=NOW + timedelta(seconds=1),
+    )
+    other_ledger.record_policy_lock(
+        campaign_id=other_campaign.campaign_id,
+        selected_policy_ms=250,
+        policy_lock_sha256="e" * 64,
+        development_capsule_sha256="d" * 64,
+        now=NOW + timedelta(seconds=2),
     )
     with pytest.raises(IdentityError, match="before policy lock|holdout"):
         other_ledger.claim_attempt(
             campaign=other_campaign,
             authorization=second,
-            phase=CampaignPhase.POLICY_SELECTION_LOCKED,
-            holdout_materialized=True,
-            now=NOW + timedelta(seconds=2),
+            now=NOW + timedelta(seconds=3),
         )
+
+
+def test_ledger_replays_policy_lock_holdout_release_and_completion_state(tmp_path: Path) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "ledger.json"
+    campaign = verify_campaign_approval(
+        _signed(
+            private,
+            _campaign_payload(ledger_location_sha256=ledger_location_sha256(ledger_path)),
+        ),
+        public_key=public,
+        expected_key_id=KEY_ID,
+        expected_preregistration_sha256=PREREGISTRATION_SHA,
+        expected_source_sha=SOURCE_SHA,
+        now=NOW,
+    )
+    attempt = verify_attempt_authorization(
+        _signed(private, _attempt_payload()),
+        public_key=public,
+        expected_key_id=KEY_ID,
+        campaign=campaign,
+        now=NOW,
+    )
+    ledger = AttemptLedger(ledger_path)
+    claim = ledger.claim_attempt(campaign=campaign, authorization=attempt, now=NOW)
+    ledger.record_outcome(
+        claim,
+        outcome="completed",
+        outage_enum=None,
+        actual_provider_requests=64,
+        actual_cost_microusd=1_000,
+        capsule_sha256="d" * 64,
+        now=NOW + timedelta(seconds=1),
+    )
+    ledger.record_policy_lock(
+        campaign_id=campaign.campaign_id,
+        selected_policy_ms=250,
+        policy_lock_sha256="e" * 64,
+        development_capsule_sha256="d" * 64,
+        now=NOW + timedelta(seconds=2),
+    )
+    locked = derive_ledger_campaign_state(ledger.snapshot())
+    assert locked.phase.value == "policy_selection_locked"
+    assert locked.holdout_materialized is False
+    assert locked.selected_policy_ms == 250
+
+    ledger.record_holdout_materialized(
+        campaign_id=campaign.campaign_id,
+        policy_lock_sha256="e" * 64,
+        now=NOW + timedelta(seconds=3),
+    )
+    ledger.record_completed(
+        campaign_id=campaign.campaign_id,
+        holdout_capsule_sha256="f" * 64,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    completed = derive_ledger_campaign_state(ledger.snapshot())
+    assert [phase.value for phase in completed.phase_history] == [
+        "preregistered",
+        "development_collection",
+        "policy_selection_locked",
+        "holdout_collection",
+        "completed",
+    ]
+    assert completed.phase.value == "completed"
+    assert completed.holdout_materialized is True
+    assert completed.policy_lock_sha256 == "e" * 64
 
 
 def test_ledger_hash_chain_detects_tampering(tmp_path: Path) -> None:
@@ -419,12 +483,10 @@ def test_ledger_hash_chain_detects_tampering(tmp_path: Path) -> None:
     ledger.claim_attempt(
         campaign=campaign,
         authorization=attempt,
-        phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-        holdout_materialized=False,
         now=NOW,
     )
     raw = json.loads(path.read_text())
-    raw["records"][0]["provider_requests_reserved"] = 1
+    raw["records"][1]["provider_requests_reserved"] = 1
     path.write_text(json.dumps(raw))
 
     with pytest.raises(IdentityError, match="ledger hash chain"):
@@ -457,7 +519,5 @@ def test_campaign_approval_binds_exact_ledger_location(tmp_path: Path) -> None:
         AttemptLedger(tmp_path / "different.json").claim_attempt(
             campaign=campaign,
             authorization=attempt,
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW,
         )

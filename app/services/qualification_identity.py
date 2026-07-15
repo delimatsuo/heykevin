@@ -22,7 +22,7 @@ import unicodedata
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from app.services.caller_turn_qualification import CampaignPhase
+from app.services.caller_turn_qualification import CampaignPhase, validate_phase_transition
 
 
 CAMPAIGN_APPROVAL_SCHEMA_ID = "gate_0b_campaign_approval_v1"
@@ -150,6 +150,15 @@ class AttemptClaim:
     lease_id: str
     provider_requests_reserved: int
     cost_reserved_microusd: int
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerCampaignState:
+    phase: CampaignPhase
+    phase_history: tuple[CampaignPhase, ...]
+    holdout_materialized: bool
+    selected_policy_ms: int | None
+    policy_lock_sha256: str | None
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -453,12 +462,8 @@ class AttemptLedger:
         *,
         campaign: CampaignApproval,
         authorization: AttemptAuthorization,
-        phase: CampaignPhase,
-        holdout_materialized: bool,
         now: datetime,
     ) -> AttemptClaim:
-        if not isinstance(phase, CampaignPhase):
-            raise IdentityError("claim phase is invalid")
         if authorization.campaign_id != campaign.campaign_id:
             raise IdentityError("attempt campaign mismatch")
         if ledger_location_sha256(self.path) != campaign.ledger_location_sha256:
@@ -469,6 +474,15 @@ class AttemptLedger:
             ledger = self._read_or_initialize(campaign)
             self._validate_ledger(ledger)
             records = ledger["records"]
+            state = _derive_ledger_campaign_state(records)
+            if state.phase is CampaignPhase.PREREGISTERED:
+                self._append_phase_transition(
+                    ledger,
+                    current=CampaignPhase.PREREGISTERED,
+                    target=CampaignPhase.DEVELOPMENT_COLLECTION,
+                    now=now,
+                )
+                state = _derive_ledger_campaign_state(ledger["records"])
             claims = [record for record in records if record["event"] == "claim"]
             outcomes = {record["attempt_id"]: record for record in records if record["event"] == "outcome"}
             if any(record["attempt_id"] == authorization.attempt_id for record in claims):
@@ -487,7 +501,10 @@ class AttemptLedger:
                 raise IdentityError("campaign cost reservation exceeded")
 
             if authorization.attempt_index > 1:
-                if phase is not CampaignPhase.DEVELOPMENT_COLLECTION or holdout_materialized:
+                if (
+                    state.phase is not CampaignPhase.DEVELOPMENT_COLLECTION
+                    or state.holdout_materialized
+                ):
                     raise IdentityError("replacement is allowed only before policy lock and holdout")
                 prior = authorization.prior_attempt_id
                 if prior is None or not claims or claims[-1]["attempt_id"] != prior:
@@ -499,7 +516,10 @@ class AttemptLedger:
                     or prior_outcome["outage_enum"] != authorization.outage_enum
                 ):
                     raise IdentityError("replacement lacks matching infrastructure outage")
-            elif phase is not CampaignPhase.DEVELOPMENT_COLLECTION or holdout_materialized:
+            elif (
+                state.phase is not CampaignPhase.DEVELOPMENT_COLLECTION
+                or state.holdout_materialized
+            ):
                 raise IdentityError("first attempt must begin before policy lock and holdout")
 
             lease_id = sha256(
@@ -518,8 +538,8 @@ class AttemptLedger:
                     "attempt_id": authorization.attempt_id,
                     "attempt_index": authorization.attempt_index,
                     "lease_id": lease_id,
-                    "phase": phase.value,
-                    "holdout_materialized": holdout_materialized,
+                    "phase": state.phase.value,
+                    "holdout_materialized": state.holdout_materialized,
                     "provider_requests_reserved": authorization.provider_request_reservation,
                     "cost_reserved_microusd": authorization.cost_reservation_microusd,
                     "authorization_sha256": authorization.signed_payload_sha256,
@@ -546,6 +566,7 @@ class AttemptLedger:
         outage_enum: str | None,
         actual_provider_requests: int,
         actual_cost_microusd: int,
+        capsule_sha256: str | None = None,
         now: datetime,
     ) -> None:
         if outcome not in {"completed", "failed", "infrastructure_outage", "invalidated"}:
@@ -555,6 +576,10 @@ class AttemptLedger:
                 raise IdentityError("infrastructure outage enum is invalid")
         elif outage_enum is not None:
             raise IdentityError("outage enum is allowed only for infrastructure outage")
+        if outcome == "completed":
+            _sha(capsule_sha256, "completed attempt capsule")
+        elif capsule_sha256 is not None:
+            raise IdentityError("capsule digest is allowed only for a completed attempt")
         with self._exclusive_lock():
             ledger = self._read()
             self._validate_ledger(ledger)
@@ -596,8 +621,106 @@ class AttemptLedger:
                     "outage_enum": outage_enum,
                     "actual_provider_requests": requests,
                     "actual_cost_microusd": cost,
+                    "capsule_sha256": capsule_sha256,
                     "at": _format_time(now),
                 },
+            )
+            self._write(ledger)
+
+    def record_policy_lock(
+        self,
+        *,
+        campaign_id: str,
+        selected_policy_ms: int,
+        policy_lock_sha256: str,
+        development_capsule_sha256: str,
+        now: datetime,
+    ) -> None:
+        campaign = _safe_id(campaign_id, "campaign_id")
+        policy_lock = _sha(policy_lock_sha256, "policy lock")
+        capsule = _sha(development_capsule_sha256, "development capsule")
+        if isinstance(selected_policy_ms, bool) or selected_policy_ms not in {100, 250, 500, 750}:
+            raise IdentityError("selected policy is invalid")
+        with self._exclusive_lock():
+            ledger = self._read()
+            self._validate_ledger(ledger)
+            if ledger["campaign_id"] != campaign:
+                raise IdentityError("policy lock campaign mismatch")
+            state = _derive_ledger_campaign_state(ledger["records"])
+            if state.phase is not CampaignPhase.DEVELOPMENT_COLLECTION:
+                raise IdentityError("policy lock requires development phase")
+            outcomes = [
+                record
+                for record in ledger["records"]
+                if record["event"] == "outcome" and record["outcome"] == "completed"
+            ]
+            if not outcomes or outcomes[-1].get("capsule_sha256") != capsule:
+                raise IdentityError("policy lock lacks its completed development capsule")
+            self._append_phase_transition(
+                ledger,
+                current=state.phase,
+                target=CampaignPhase.POLICY_SELECTION_LOCKED,
+                now=now,
+                selected_policy_ms=selected_policy_ms,
+                policy_lock_sha256=policy_lock,
+                capsule_sha256=capsule,
+            )
+            self._write(ledger)
+
+    def record_holdout_materialized(
+        self,
+        *,
+        campaign_id: str,
+        policy_lock_sha256: str,
+        now: datetime,
+    ) -> None:
+        campaign = _safe_id(campaign_id, "campaign_id")
+        policy_lock = _sha(policy_lock_sha256, "policy lock")
+        with self._exclusive_lock():
+            ledger = self._read()
+            self._validate_ledger(ledger)
+            state = _derive_ledger_campaign_state(ledger["records"])
+            if (
+                ledger["campaign_id"] != campaign
+                or state.phase is not CampaignPhase.POLICY_SELECTION_LOCKED
+                or state.policy_lock_sha256 != policy_lock
+            ):
+                raise IdentityError("holdout release lacks its durable policy lock")
+            self._append_phase_transition(
+                ledger,
+                current=state.phase,
+                target=CampaignPhase.HOLDOUT_COLLECTION,
+                now=now,
+                selected_policy_ms=state.selected_policy_ms,
+                policy_lock_sha256=policy_lock,
+                holdout_materialized=True,
+            )
+            self._write(ledger)
+
+    def record_completed(
+        self,
+        *,
+        campaign_id: str,
+        holdout_capsule_sha256: str,
+        now: datetime,
+    ) -> None:
+        campaign = _safe_id(campaign_id, "campaign_id")
+        capsule = _sha(holdout_capsule_sha256, "holdout capsule")
+        with self._exclusive_lock():
+            ledger = self._read()
+            self._validate_ledger(ledger)
+            state = _derive_ledger_campaign_state(ledger["records"])
+            if ledger["campaign_id"] != campaign or state.phase is not CampaignPhase.HOLDOUT_COLLECTION:
+                raise IdentityError("completion requires holdout collection phase")
+            self._append_phase_transition(
+                ledger,
+                current=state.phase,
+                target=CampaignPhase.COMPLETED,
+                now=now,
+                selected_policy_ms=state.selected_policy_ms,
+                policy_lock_sha256=state.policy_lock_sha256,
+                capsule_sha256=capsule,
+                holdout_materialized=True,
             )
             self._write(ledger)
 
@@ -615,6 +738,8 @@ class AttemptLedger:
             if (
                 ledger.get("campaign_id") != campaign.campaign_id
                 or ledger.get("authorization_id") != campaign.authorization_id
+                or ledger.get("preregistration_sha256") != campaign.preregistration_sha256
+                or ledger.get("source_sha") != campaign.source_sha
                 or ledger.get("campaign_approval_sha256") != campaign.signed_payload_sha256
                 or ledger.get("max_attempts") != campaign.max_attempts
                 or ledger.get("max_provider_requests") != campaign.max_provider_requests
@@ -627,6 +752,8 @@ class AttemptLedger:
             "schema_id": LEDGER_SCHEMA_ID,
             "campaign_id": campaign.campaign_id,
             "authorization_id": campaign.authorization_id,
+            "preregistration_sha256": campaign.preregistration_sha256,
+            "source_sha": campaign.source_sha,
             "campaign_approval_sha256": campaign.signed_payload_sha256,
             "ledger_location_sha256": campaign.ledger_location_sha256,
             "max_attempts": campaign.max_attempts,
@@ -648,55 +775,7 @@ class AttemptLedger:
         return value
 
     def _validate_ledger(self, ledger: Mapping[str, Any]) -> None:
-        allowed = {
-            "schema_id",
-            "campaign_id",
-            "authorization_id",
-            "campaign_approval_sha256",
-            "ledger_location_sha256",
-            "max_attempts",
-            "max_provider_requests",
-            "max_cost_microusd",
-            "records",
-            "head_hash",
-        }
-        data = _strict_object(ledger, allowed=allowed, label="attempt ledger")
-        if data.get("schema_id") != LEDGER_SCHEMA_ID:
-            raise IdentityError("attempt ledger schema is invalid")
-        _safe_id(data.get("campaign_id"), "ledger campaign_id")
-        _safe_id(data.get("authorization_id"), "ledger authorization_id")
-        _sha(data.get("campaign_approval_sha256"), "campaign approval")
-        _sha(data.get("ledger_location_sha256"), "ledger location")
-        _bounded_int(data.get("max_attempts"), "ledger max_attempts", 1, MAX_ATTEMPTS)
-        _bounded_int(
-            data.get("max_provider_requests"),
-            "ledger max_provider_requests",
-            1,
-            MAX_REQUESTS_PER_CAMPAIGN,
-        )
-        _bounded_int(
-            data.get("max_cost_microusd"),
-            "ledger max_cost_microusd",
-            1,
-            MAX_COST_PER_CAMPAIGN_MICROUSD,
-        )
-        records = data.get("records")
-        if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
-            raise IdentityError("attempt ledger records are invalid")
-        previous = "0" * 64
-        for sequence, record in enumerate(records, start=1):
-            if record.get("sequence") != sequence or record.get("previous_hash") != previous:
-                raise IdentityError("ledger hash chain is invalid")
-            record_hash = record.get("record_hash")
-            if not isinstance(record_hash, str):
-                raise IdentityError("ledger hash chain is invalid")
-            unsigned = {key: value for key, value in record.items() if key != "record_hash"}
-            expected = sha256(canonical_json_bytes(unsigned)).hexdigest()
-            if record_hash != expected:
-                raise IdentityError("ledger hash chain is invalid")
-            previous = record_hash
-        if data.get("head_hash") != previous:
-            raise IdentityError("ledger hash chain is invalid")
+        validate_ledger_snapshot(ledger)
 
     def _append_record(self, ledger: dict[str, Any], record: dict[str, Any]) -> None:
         previous = ledger["head_hash"]
@@ -708,6 +787,33 @@ class AttemptLedger:
         entry["record_hash"] = sha256(canonical_json_bytes(entry)).hexdigest()
         ledger["records"].append(entry)
         ledger["head_hash"] = entry["record_hash"]
+
+    def _append_phase_transition(
+        self,
+        ledger: dict[str, Any],
+        *,
+        current: CampaignPhase,
+        target: CampaignPhase,
+        now: datetime,
+        selected_policy_ms: int | None = None,
+        policy_lock_sha256: str | None = None,
+        capsule_sha256: str | None = None,
+        holdout_materialized: bool = False,
+    ) -> None:
+        validate_phase_transition(current, target)
+        self._append_record(
+            ledger,
+            {
+                "event": "phase_transition",
+                "from_phase": current.value,
+                "to_phase": target.value,
+                "selected_policy_ms": selected_policy_ms,
+                "policy_lock_sha256": policy_lock_sha256,
+                "capsule_sha256": capsule_sha256,
+                "holdout_materialized": holdout_materialized,
+                "at": _format_time(now),
+            },
+        )
 
     def _write(self, ledger: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -777,6 +883,159 @@ class _FileLock:
             fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
             self._file.close()
         return False
+
+
+def derive_ledger_campaign_state(ledger: Mapping[str, Any]) -> LedgerCampaignState:
+    """Derive campaign phase only from a validated ledger record sequence."""
+    if not isinstance(ledger, Mapping) or not isinstance(ledger.get("records"), list):
+        raise IdentityError("attempt ledger records are invalid")
+    return _derive_ledger_campaign_state(ledger["records"])
+
+
+def validate_ledger_snapshot(ledger: Mapping[str, Any]) -> LedgerCampaignState:
+    """Validate a complete exported ledger and return only replay-derived campaign state."""
+    allowed = {
+        "schema_id",
+        "campaign_id",
+        "authorization_id",
+        "preregistration_sha256",
+        "source_sha",
+        "campaign_approval_sha256",
+        "ledger_location_sha256",
+        "max_attempts",
+        "max_provider_requests",
+        "max_cost_microusd",
+        "records",
+        "head_hash",
+    }
+    data = _strict_object(ledger, allowed=allowed, label="attempt ledger")
+    if data.get("schema_id") != LEDGER_SCHEMA_ID:
+        raise IdentityError("attempt ledger schema is invalid")
+    _safe_id(data.get("campaign_id"), "ledger campaign_id")
+    _safe_id(data.get("authorization_id"), "ledger authorization_id")
+    _sha(data.get("preregistration_sha256"), "ledger preregistration")
+    _source_sha(data.get("source_sha"))
+    _sha(data.get("campaign_approval_sha256"), "campaign approval")
+    _sha(data.get("ledger_location_sha256"), "ledger location")
+    _bounded_int(data.get("max_attempts"), "ledger max_attempts", 1, MAX_ATTEMPTS)
+    _bounded_int(
+        data.get("max_provider_requests"),
+        "ledger max_provider_requests",
+        1,
+        MAX_REQUESTS_PER_CAMPAIGN,
+    )
+    _bounded_int(
+        data.get("max_cost_microusd"),
+        "ledger max_cost_microusd",
+        1,
+        MAX_COST_PER_CAMPAIGN_MICROUSD,
+    )
+    records = data.get("records")
+    if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
+        raise IdentityError("attempt ledger records are invalid")
+    previous = "0" * 64
+    for sequence, record in enumerate(records, start=1):
+        if record.get("sequence") != sequence or record.get("previous_hash") != previous:
+            raise IdentityError("ledger hash chain is invalid")
+        record_hash = record.get("record_hash")
+        if not isinstance(record_hash, str):
+            raise IdentityError("ledger hash chain is invalid")
+        unsigned = {key: value for key, value in record.items() if key != "record_hash"}
+        expected = sha256(canonical_json_bytes(unsigned)).hexdigest()
+        if record_hash != expected:
+            raise IdentityError("ledger hash chain is invalid")
+        previous = record_hash
+    if data.get("head_hash") != previous:
+        raise IdentityError("ledger hash chain is invalid")
+    return _derive_ledger_campaign_state(records)
+
+
+def _derive_ledger_campaign_state(records: Sequence[Mapping[str, Any]]) -> LedgerCampaignState:
+    phase = CampaignPhase.PREREGISTERED
+    history = [phase]
+    holdout_materialized = False
+    selected_policy_ms: int | None = None
+    policy_lock_sha256: str | None = None
+    for record in records:
+        event = record.get("event")
+        if event == "phase_transition":
+            try:
+                current = CampaignPhase(record.get("from_phase"))
+                target = CampaignPhase(record.get("to_phase"))
+            except (TypeError, ValueError) as exc:
+                raise IdentityError("ledger phase transition is invalid") from exc
+            if current is not phase:
+                raise IdentityError("ledger phase transition is not forward-only")
+            try:
+                validate_phase_transition(current, target)
+            except ValueError as exc:
+                raise IdentityError("ledger phase transition is not forward-only") from exc
+            record_policy = record.get("selected_policy_ms")
+            record_lock = record.get("policy_lock_sha256")
+            record_capsule = record.get("capsule_sha256")
+            record_holdout = record.get("holdout_materialized")
+            if not isinstance(record_holdout, bool):
+                raise IdentityError("ledger holdout state is invalid")
+            if target is CampaignPhase.DEVELOPMENT_COLLECTION:
+                if any(value is not None for value in (record_policy, record_lock, record_capsule)):
+                    raise IdentityError("development transition contains future evidence")
+            elif target is CampaignPhase.POLICY_SELECTION_LOCKED:
+                if (
+                    isinstance(record_policy, bool)
+                    or record_policy not in {100, 250, 500, 750}
+                    or record_holdout
+                ):
+                    raise IdentityError("ledger policy lock is invalid")
+                selected_policy_ms = record_policy
+                policy_lock_sha256 = _sha(record_lock, "ledger policy lock")
+                _sha(record_capsule, "ledger development capsule")
+            elif target is CampaignPhase.HOLDOUT_COLLECTION:
+                if (
+                    record_policy != selected_policy_ms
+                    or _sha(record_lock, "ledger policy lock") != policy_lock_sha256
+                    or not record_holdout
+                    or record_capsule is not None
+                ):
+                    raise IdentityError("ledger holdout transition is invalid")
+                holdout_materialized = True
+            elif target is CampaignPhase.COMPLETED:
+                if (
+                    record_policy != selected_policy_ms
+                    or _sha(record_lock, "ledger policy lock") != policy_lock_sha256
+                    or not record_holdout
+                ):
+                    raise IdentityError("ledger completion transition is invalid")
+                _sha(record_capsule, "ledger holdout capsule")
+            phase = target
+            history.append(phase)
+            continue
+        if event == "claim":
+            if phase is not CampaignPhase.DEVELOPMENT_COLLECTION:
+                raise IdentityError("ledger claim occurred outside development")
+            if (
+                record.get("phase") != phase.value
+                or record.get("holdout_materialized") is not False
+            ):
+                raise IdentityError("ledger claim phase state is inconsistent")
+            continue
+        if event == "outcome":
+            if phase is not CampaignPhase.DEVELOPMENT_COLLECTION:
+                raise IdentityError("ledger outcome occurred outside development")
+            outcome = record.get("outcome")
+            capsule = record.get("capsule_sha256")
+            if outcome == "completed":
+                _sha(capsule, "ledger completed capsule")
+            elif capsule is not None:
+                raise IdentityError("failed ledger outcome contains a capsule")
+            continue
+        raise IdentityError("ledger record event is invalid")
+    return LedgerCampaignState(
+        phase=phase,
+        phase_history=tuple(history),
+        holdout_materialized=holdout_materialized,
+        selected_policy_ms=selected_policy_ms,
+        policy_lock_sha256=policy_lock_sha256,
+    )
 
 
 def _verify_envelope(

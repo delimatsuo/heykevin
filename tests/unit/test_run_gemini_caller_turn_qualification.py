@@ -17,7 +17,7 @@ import scripts.run_gemini_caller_turn_qualification as runner_module
 
 from app.services.caller_turn_alignment import ActivityReference
 from app.services.caller_turn_measurement import open_audit_capsule
-from app.services.caller_turn_qualification import CampaignPhase, load_pricing
+from app.services.caller_turn_qualification import load_pricing
 from app.services.caller_turns import CallerTurnEventKind
 from app.services.qualification_identity import (
     AttemptLedger,
@@ -1230,8 +1230,6 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
             campaign_envelope=campaign,
             attempt_envelope=attempt,
             ledger=RecordingLedger(),
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW,
             credential_loader=credential_loader,
             connector_factory=connector_factory,
@@ -1264,8 +1262,15 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert not hasattr(result, "audit_events")
     snapshot = AttemptLedger(ledger_path).snapshot()
-    assert [record["event"] for record in snapshot["records"]] == ["claim", "outcome"]
+    assert [record["event"] for record in snapshot["records"]] == [
+        "phase_transition",
+        "claim",
+        "outcome",
+    ]
     assert snapshot["records"][-1]["actual_cost_microusd"] == 4_992
+    assert snapshot["records"][-1]["capsule_sha256"] == sha256(
+        capsule_path.read_bytes().rstrip(b"\n")
+    ).hexdigest()
 
 
 def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
@@ -1307,8 +1312,6 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
             campaign_envelope=campaign,
             attempt_envelope=attempt,
             ledger=AttemptLedger(ledger_path),
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW,
             credential_loader=lambda _reference: touched.append("credential"),
             connector_factory=lambda _credential: touched.append("connector"),
@@ -1325,7 +1328,11 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
     assert result.error_code == "source_identity_failed"
     assert touched == []
     snapshot = AttemptLedger(ledger_path).snapshot()
-    assert [record["event"] for record in snapshot["records"]] == ["claim", "outcome"]
+    assert [record["event"] for record in snapshot["records"]] == [
+        "phase_transition",
+        "claim",
+        "outcome",
+    ]
     assert snapshot["records"][-1]["outcome"] == "failed"
 
 
@@ -1362,8 +1369,6 @@ def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1421,8 +1426,6 @@ def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
@@ -1472,8 +1475,6 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1521,8 +1522,6 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1610,8 +1609,6 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1666,8 +1663,6 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1724,8 +1719,6 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: pytest.fail("secret must not be read"),
                 connector_factory=lambda _credential: pytest.fail("connector must not be built"),
@@ -1777,8 +1770,6 @@ def test_insufficient_signed_request_reservation_blocks_before_ledger_and_secret
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1829,8 +1820,6 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
                 ledger=AttemptLedger(ledger_path),
-                phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-                holdout_materialized=False,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
                 connector_factory=lambda _credential: touched.append("connector"),
@@ -1897,8 +1886,6 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
             campaign_envelope=campaign,
             attempt_envelope=attempt,
             ledger=AttemptLedger(ledger_path),
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: connector,
@@ -1956,8 +1943,6 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
             campaign_envelope=campaign,
             attempt_envelope=attempt,
             ledger=AttemptLedger(ledger_path),
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=connector_factory,
@@ -2017,8 +2002,6 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
             campaign_envelope=campaign,
             attempt_envelope=attempt,
             ledger=AttemptLedger(ledger_path),
-            phase=CampaignPhase.DEVELOPMENT_COLLECTION,
-            holdout_materialized=False,
             now=NOW,
             credential_loader=lambda _reference: SecretCredential(CANARY_SECRET),
             connector_factory=lambda _credential: pytest.fail("connector must not be built"),

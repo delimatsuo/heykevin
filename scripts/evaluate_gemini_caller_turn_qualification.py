@@ -10,11 +10,16 @@ import hashlib
 import hmac
 import json
 import math
+import os
 from pathlib import Path
 import re
 import stat
 import sys
 from typing import Any, Mapping, Sequence
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +31,10 @@ from app.services.caller_turn_measurement import (  # noqa: E402
     ActivityPrimitiveRecord,
     MeasurementError,
     NoSpeechPrimitiveRecord,
+    build_signed_record_root,
     compute_record_merkle_root,
+    derive_primitive_records_from_capsule,
+    open_audit_capsule,
     verify_record_commitment,
     verify_signed_record_root,
 )
@@ -35,10 +43,14 @@ from app.services.caller_turn_qualification import (  # noqa: E402
     empty_evidence_flags,
     load_pricing,
 )
-from app.services.qualification_identity import canonical_json_bytes  # noqa: E402
+from app.services.qualification_identity import (  # noqa: E402
+    canonical_json_bytes,
+    validate_ledger_snapshot,
+)
 
 
 EVIDENCE_SCHEMA_ID = "gate_0b_evidence_v1"
+CUSTODY_BUNDLE_SCHEMA_ID = "gate_0b_custody_bundle_v1"
 REPORT_SCHEMA_ID = "gate_0b_evaluation_report_v1"
 EXPECTED_POLICIES = (100, 250, 500, 750)
 EXPECTED_PHASE_HISTORY = (
@@ -68,6 +80,27 @@ THRESHOLDS = {
     "interruption_tail_max_ms": 500,
 }
 EVIDENCE_CONTEXT_HMAC_DOMAIN = b"gate-0b-evidence-context-v1\x00"
+FINAL_IDENTITY_FIELDS = frozenset(
+    {
+        "source_sha256",
+        "environment_sha256",
+        "evaluator_sha256",
+        "corpus_sha256",
+        "pricing_sha256",
+        "preregistration_sha256",
+        "campaign_approval_sha256",
+        "attempt_authorization_sha256",
+        "development_capsule_sha256",
+        "holdout_capsule_sha256",
+        "ledger_head_sha256",
+        "custodian_public_key_sha256",
+        "record_root_public_key_sha256",
+    }
+)
+POLICY_LOCK_IDENTITY_FIELDS = FINAL_IDENTITY_FIELDS - {
+    "holdout_capsule_sha256",
+    "ledger_head_sha256",
+}
 REQUIRED_CRITICAL_KINDS = frozenset(
     {
         "digits",
@@ -109,7 +142,9 @@ def compute_policy_lock_sha256(
         "selected_policy_ms": selected_policy_ms,
         "selection_rule": "lowest_passing_quiescence_ms",
         "thresholds": THRESHOLDS,
-        "identities": identity,
+        "identities": {
+            field: identity[field] for field in sorted(POLICY_LOCK_IDENTITY_FIELDS)
+        },
     }
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
@@ -326,6 +361,227 @@ def evaluate_evidence_artifact(
     }
     assert_payload_safe(report)
     return report
+
+
+def evaluate_custody_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    commitment_key: bytes,
+    custodian_private_key: X25519PrivateKey,
+    expected_custodian_key_id: str,
+    record_root_signing_key: Ed25519PrivateKey,
+    record_root_key_id: str,
+) -> dict[str, Any]:
+    """Open custody evidence, independently derive primitives, and evaluate it."""
+    try:
+        return _evaluate_custody_bundle(
+            bundle,
+            commitment_key=commitment_key,
+            custodian_private_key=custodian_private_key,
+            expected_custodian_key_id=expected_custodian_key_id,
+            record_root_signing_key=record_root_signing_key,
+            record_root_key_id=record_root_key_id,
+        )
+    except (EvaluationError, MeasurementError, KeyError, TypeError, ValueError):
+        return _failure_report({"custody_bundle_invalid": 1})
+
+
+def _evaluate_custody_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    commitment_key: bytes,
+    custodian_private_key: X25519PrivateKey,
+    expected_custodian_key_id: str,
+    record_root_signing_key: Ed25519PrivateKey,
+    record_root_key_id: str,
+) -> dict[str, Any]:
+    fields = {
+        "schema_id",
+        "campaign_id",
+        "development_capsule",
+        "holdout_capsule",
+        "ledger",
+        "identities",
+        "usage",
+        "run_failures",
+    }
+    if not isinstance(bundle, Mapping) or set(bundle) != fields:
+        raise EvaluationError("custody bundle fields are invalid")
+    if bundle["schema_id"] != CUSTODY_BUNDLE_SCHEMA_ID:
+        raise EvaluationError("custody bundle schema is invalid")
+    campaign_id = _safe_id(bundle["campaign_id"], label="campaign ID")
+    ledger = bundle["ledger"]
+    if not isinstance(ledger, Mapping) or ledger.get("campaign_id") != campaign_id:
+        raise EvaluationError("custody ledger campaign is invalid")
+    state = validate_ledger_snapshot(ledger)
+    if (
+        state.phase.value != "completed"
+        or tuple(value.value for value in state.phase_history) != EXPECTED_PHASE_HISTORY
+        or not state.holdout_materialized
+        or state.selected_policy_ms is None
+        or state.policy_lock_sha256 is None
+    ):
+        raise EvaluationError("custody ledger phase history is incomplete")
+
+    development_envelope = bundle["development_capsule"]
+    holdout_envelope = bundle["holdout_capsule"]
+    if not isinstance(development_envelope, Mapping) or not isinstance(
+        holdout_envelope, Mapping
+    ):
+        raise EvaluationError("custody capsule envelope is invalid")
+    development_capsule_sha256 = hashlib.sha256(
+        canonical_json_bytes(development_envelope)
+    ).hexdigest()
+    holdout_capsule_sha256 = hashlib.sha256(
+        canonical_json_bytes(holdout_envelope)
+    ).hexdigest()
+
+    completed_outcomes = [
+        record
+        for record in ledger["records"]
+        if record.get("event") == "outcome" and record.get("outcome") == "completed"
+    ]
+    lock_transitions = [
+        record
+        for record in ledger["records"]
+        if record.get("event") == "phase_transition"
+        and record.get("to_phase") == "policy_selection_locked"
+    ]
+    completion_transitions = [
+        record
+        for record in ledger["records"]
+        if record.get("event") == "phase_transition"
+        and record.get("to_phase") == "completed"
+    ]
+    if (
+        len(completed_outcomes) != 1
+        or len(lock_transitions) != 1
+        or len(completion_transitions) != 1
+        or completed_outcomes[0].get("capsule_sha256") != development_capsule_sha256
+        or lock_transitions[0].get("capsule_sha256") != development_capsule_sha256
+        or completion_transitions[0].get("capsule_sha256") != holdout_capsule_sha256
+    ):
+        raise EvaluationError("custody capsule and ledger identities disagree")
+
+    claims = [record for record in ledger["records"] if record.get("event") == "claim"]
+    completed_attempt_id = completed_outcomes[0].get("attempt_id")
+    completed_claims = [
+        record for record in claims if record.get("attempt_id") == completed_attempt_id
+    ]
+    if len(completed_claims) != 1:
+        raise EvaluationError("completed attempt authorization is missing")
+
+    if not isinstance(custodian_private_key, X25519PrivateKey) or not isinstance(
+        record_root_signing_key, Ed25519PrivateKey
+    ):
+        raise EvaluationError("custody key type is invalid")
+    custodian_public_key = custodian_private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    record_root_public_key = record_root_signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    identities = _validate_identities(bundle["identities"])
+    observable_identities = {
+        "source_sha256": hashlib.sha256(ledger["source_sha"].encode("ascii")).hexdigest(),
+        "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "pricing_sha256": hashlib.sha256(PRICING_PATH.read_bytes()).hexdigest(),
+        "preregistration_sha256": ledger["preregistration_sha256"],
+        "campaign_approval_sha256": ledger["campaign_approval_sha256"],
+        "attempt_authorization_sha256": completed_claims[0]["authorization_sha256"],
+        "development_capsule_sha256": development_capsule_sha256,
+        "holdout_capsule_sha256": holdout_capsule_sha256,
+        "ledger_head_sha256": ledger["head_hash"],
+        "custodian_public_key_sha256": hashlib.sha256(custodian_public_key).hexdigest(),
+        "record_root_public_key_sha256": hashlib.sha256(record_root_public_key).hexdigest(),
+    }
+    if any(identities[field] != value for field, value in observable_identities.items()):
+        raise EvaluationError("custody evidence identity is not observable")
+
+    development_capsule = open_audit_capsule(
+        development_envelope,
+        custodian_private_key=custodian_private_key,
+        expected_key_id=expected_custodian_key_id,
+    )
+    if development_capsule["campaign_id"] != campaign_id:
+        raise EvaluationError("development capsule campaign mismatch")
+    development_records, development_windows = derive_primitive_records_from_capsule(
+        development_capsule,
+        policies_ms=EXPECTED_POLICIES,
+        commitment_key=commitment_key,
+    )
+    candidate_samples = {
+        policy: _evaluate_sample(
+            tuple(record for record in development_records if record.policy_ms == policy),
+            no_speech_records=development_windows,
+        )
+        for policy in EXPECTED_POLICIES
+    }
+    passing_policies = [
+        policy for policy in EXPECTED_POLICIES if candidate_samples[policy]["passed"]
+    ]
+    selected_policy_ms = min(passing_policies) if passing_policies else None
+    if selected_policy_ms is None or selected_policy_ms != state.selected_policy_ms:
+        raise EvaluationError("custody policy selection disagrees with development evidence")
+    expected_policy_lock = compute_policy_lock_sha256(
+        activity_records=development_records,
+        no_speech_records=development_windows,
+        candidate_policies_ms=EXPECTED_POLICIES,
+        selected_policy_ms=selected_policy_ms,
+        identities=identities,
+    )
+    if expected_policy_lock != state.policy_lock_sha256:
+        raise EvaluationError("custody policy lock is invalid")
+
+    holdout_capsule = open_audit_capsule(
+        holdout_envelope,
+        custodian_private_key=custodian_private_key,
+        expected_key_id=expected_custodian_key_id,
+    )
+    if holdout_capsule["campaign_id"] != campaign_id:
+        raise EvaluationError("holdout capsule campaign mismatch")
+    holdout_records, holdout_windows = derive_primitive_records_from_capsule(
+        holdout_capsule,
+        policies_ms=(selected_policy_ms,),
+        commitment_key=commitment_key,
+    )
+    activity_records = (*development_records, *holdout_records)
+    no_speech_records = (*development_windows, *holdout_windows)
+    signed_root = build_signed_record_root(
+        activity_records=activity_records,
+        no_speech_records=no_speech_records,
+        campaign_id=campaign_id,
+        signing_key=record_root_signing_key,
+        key_id=record_root_key_id,
+    )
+    artifact = {
+        "schema_id": EVIDENCE_SCHEMA_ID,
+        "campaign_id": campaign_id,
+        "attempt_completed": True,
+        "phase_history": [value.value for value in state.phase_history],
+        "candidate_policies_ms": list(EXPECTED_POLICIES),
+        "selected_policy_ms": selected_policy_ms,
+        "holdout_materialized_after_lock": state.holdout_materialized,
+        "identities": identities,
+        "policy_lock_sha256": state.policy_lock_sha256,
+        "activity_records": [record.to_dict() for record in activity_records],
+        "no_speech_records": [record.to_dict() for record in no_speech_records],
+        "signed_record_root": signed_root,
+        "usage": bundle["usage"],
+        "run_failures": bundle["run_failures"],
+    }
+    artifact["context_commitment"] = compute_evidence_context_commitment(
+        artifact,
+        commitment_key=commitment_key,
+    )
+    return evaluate_evidence_artifact(
+        artifact,
+        commitment_key=commitment_key,
+        root_public_key=record_root_public_key,
+        expected_root_key_id=record_root_key_id,
+    )
 
 
 def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -922,17 +1178,10 @@ def _validate_policy_configuration(policies: tuple[int, ...], selected: object) 
 
 
 def _validate_identities(raw: Mapping[str, str]) -> dict[str, str]:
-    fields = {
-        "source_sha256",
-        "environment_sha256",
-        "evaluator_sha256",
-        "corpus_sha256",
-        "pricing_sha256",
-    }
-    if not isinstance(raw, Mapping) or set(raw) != fields:
+    if not isinstance(raw, Mapping) or set(raw) != FINAL_IDENTITY_FIELDS:
         raise EvaluationError("evidence identities are invalid")
     result = {}
-    for key in sorted(fields):
+    for key in sorted(FINAL_IDENTITY_FIELDS):
         value = raw[key]
         if not isinstance(value, str) or not SHA256.fullmatch(value):
             raise EvaluationError("evidence identity digest is invalid")
@@ -1026,46 +1275,83 @@ def _failure_report(failures: Mapping[str, int]) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate one sealed Gate 0B evidence set.")
-    parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--commitment-key", type=Path, required=True)
-    parser.add_argument("--root-public-key", type=Path, required=True)
-    parser.add_argument("--root-key-id", required=True)
+    parser.add_argument("--custodian-private-key", type=Path, required=True)
+    parser.add_argument("--custodian-key-id", required=True)
+    parser.add_argument("--record-root-signing-key", type=Path, required=True)
+    parser.add_argument("--record-root-key-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    raw = args.artifact.read_bytes()
+    raw = args.bundle.read_bytes()
     if len(raw) > MAX_ARTIFACT_BYTES:
-        report = _failure_report({"artifact_invalid": 1})
+        report = _failure_report({"custody_bundle_invalid": 1})
     else:
         try:
-            artifact = json.loads(raw)
+            bundle = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
-            artifact = {}
-        report = evaluate_evidence_artifact(
-            artifact,
-            commitment_key=_read_private_key_file(args.commitment_key),
-            root_public_key=args.root_public_key.read_bytes(),
-            expected_root_key_id=args.root_key_id,
+            bundle = {}
+        report = evaluate_custody_bundle(
+            bundle,
+            commitment_key=_read_private_key_file(args.commitment_key, label="commitment"),
+            custodian_private_key=X25519PrivateKey.from_private_bytes(
+                _read_private_key_file(args.custodian_private_key, label="custodian")
+            ),
+            expected_custodian_key_id=args.custodian_key_id,
+            record_root_signing_key=Ed25519PrivateKey.from_private_bytes(
+                _read_private_key_file(
+                    args.record_root_signing_key,
+                    label="record root signing",
+                )
+            ),
+            record_root_key_id=args.record_root_key_id,
         )
-    if args.output.is_symlink():
-        raise EvaluationError("output path cannot be a symlink")
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    _write_private_report(args.output, report)
     return 0 if report["status"] == "pass" else 1
 
 
-def _read_private_key_file(path: Path) -> bytes:
+def _read_private_key_file(path: Path, *, label: str) -> bytes:
     if path.is_symlink() or not path.is_file():
-        raise EvaluationError("commitment key file is invalid")
+        raise EvaluationError(f"{label} key file is invalid")
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
-        raise EvaluationError("commitment key file permissions are too broad")
+        raise EvaluationError(f"{label} key file permissions are too broad")
     value = path.read_bytes()
     if len(value) != 32:
-        raise EvaluationError("commitment key must be exactly 32 bytes")
+        raise EvaluationError(f"{label} key must be exactly 32 bytes")
     return value
+
+
+def _write_private_report(path: Path, report: Mapping[str, Any]) -> None:
+    if path.exists() or path.is_symlink() or not path.parent.is_dir():
+        raise EvaluationError("output path must be an absent file in an existing directory")
+    payload = json.dumps(report, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise EvaluationError("output path is unavailable") from exc
+    try:
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise EvaluationError("output write did not make progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 if __name__ == "__main__":

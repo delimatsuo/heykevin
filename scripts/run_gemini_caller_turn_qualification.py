@@ -43,11 +43,12 @@ from app.services.voice_turn_replay import (
     Gate0BReplayInput,
     build_gemini_audio_message,
 )
+from app.services.qualification_environment import execution_identity_sha256
 from app.services.qualification_identity import (
+    AttemptAuthorization,
     AttemptClaim,
+    CampaignApproval,
     canonical_json_bytes,
-    capture_environment_identity,
-    capture_source_identity,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -77,35 +78,6 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
-EXPECTED_PYTHON = "3.12.13"
-EXPECTED_UV = "0.11.7"
-EXECUTION_DEPENDENCY_PATHS = (
-    "config/qualification/gate_0b_approval_root.ed25519.pub",
-    "app/services/caller_turn_qualification.py",
-    "app/services/qualification_identity.py",
-    "app/services/qualification_ledger.py",
-    "app/services/caller_turn_alignment.py",
-    "app/services/caller_turn_measurement.py",
-    "app/services/caller_turns.py",
-    "app/services/gemini_turn_events.py",
-    "app/services/voice_turn_replay.py",
-    "app/utils/audio.py",
-    "scripts/run_gemini_caller_turn_qualification.py",
-    "scripts/evaluate_gemini_caller_turn_qualification.py",
-    "scripts/verify_qualification_environment.py",
-    "app/services/gemini_pipeline.py",
-    "app/services/voice_pipeline.py",
-    "app/config.py",
-    "uv.lock",
-)
-EXECUTION_IMPORT_NAMES = (
-    "websockets",
-    "cryptography",
-    "app.services.caller_turn_qualification",
-    "app.services.qualification_identity",
-    "app.services.qualification_ledger",
-    "app.utils.audio",
-)
 PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
     {
         "project",
@@ -1484,6 +1456,98 @@ class _ReservedConnector:
         return await connector.connect(request)
 
 
+def _validate_ledger_custody_binding(
+    *,
+    campaign: CampaignApproval,
+    ledger: LedgerCustodyClient,
+    public_key: bytes,
+    label: str,
+) -> LedgerCustodyIdentity:
+    identity = ledger.identity()
+    if (
+        not isinstance(identity, LedgerCustodyIdentity)
+        or not isinstance(public_key, bytes)
+        or len(public_key) != 32
+        or sha256(public_key).hexdigest() != identity.public_key_sha256
+        or campaign.ledger_instance_id != identity.ledger_instance_id
+        or campaign.ledger_custodian_key_id != identity.key_id
+        or campaign.ledger_custodian_public_key_sha256 != identity.public_key_sha256
+        or campaign.ledger_location_sha256 != identity.ledger_location_sha256
+    ):
+        raise RunnerError(f"{label} ledger custody binding mismatch")
+    return identity
+
+
+def _replay_bound_ledger_snapshot(
+    *,
+    ledger: LedgerCustodyClient,
+    public_key: bytes,
+    identity: LedgerCustodyIdentity,
+    campaign: CampaignApproval,
+    authorization: AttemptAuthorization,
+) -> CustodyLedgerState:
+    state = validate_custody_ledger_snapshot(
+        ledger.export_snapshot(),
+        public_key=public_key,
+        expected_key_id=identity.key_id,
+        expected_ledger_instance_id=identity.ledger_instance_id,
+        expected_campaign_id=campaign.campaign_id,
+        expected_authorization_id=campaign.authorization_id,
+        expected_preregistration_sha256=campaign.preregistration_sha256,
+        expected_source_sha=campaign.source_sha,
+        expected_ledger_location_sha256=campaign.ledger_location_sha256,
+    )
+    if not isinstance(state, CustodyLedgerState):
+        raise RunnerError("custodian ledger snapshot is invalid")
+    return state
+
+
+def _require_exact_claim(
+    claim: object,
+    *,
+    campaign: CampaignApproval,
+    authorization: AttemptAuthorization,
+    label: str,
+) -> AttemptClaim:
+    if (
+        not isinstance(claim, AttemptClaim)
+        or claim.campaign_id != campaign.campaign_id
+        or claim.attempt_id != authorization.attempt_id
+        or claim.attempt_index != authorization.attempt_index
+        or not isinstance(claim.lease_id, str)
+        or not SHA256.fullmatch(claim.lease_id)
+        or claim.provider_requests_reserved != authorization.provider_request_reservation
+        or claim.cost_reserved_microusd != authorization.cost_reservation_microusd
+    ):
+        raise RunnerError(f"{label} custodian returned an invalid active claim")
+    return claim
+
+
+def _require_postclaim_state(
+    state: CustodyLedgerState,
+    *,
+    campaign: CampaignApproval,
+    authorization: AttemptAuthorization,
+    expected_claimed_at: datetime,
+) -> None:
+    if (
+        state.phase != "development_collection"
+        or state.active_attempt_id != authorization.attempt_id
+        or state.completed_attempt_id is not None
+        or len(state.attempt_ids) != authorization.attempt_index
+        or state.attempt_ids[-1] != authorization.attempt_id
+        or state.campaign_approval_sha256 != campaign.signed_payload_sha256
+        or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
+        or state.attempt_claimed_at != expected_claimed_at
+        or state.provider_requests_reserved
+        != authorization.provider_request_reservation
+        or state.cost_reserved_microusd != authorization.cost_reservation_microusd
+        or state.development_capsule_sha256 is not None
+        or state.holdout_execution_claimed
+    ):
+        raise RunnerError("signed ledger did not durably consume the attempt claim")
+
+
 async def execute_authorized_attempt(
     plans: tuple[SessionPlan, ...],
     *,
@@ -1494,6 +1558,7 @@ async def execute_authorized_attempt(
     campaign_envelope: Mapping[str, Any],
     attempt_envelope: Mapping[str, Any],
     ledger: LedgerCustodyClient,
+    ledger_custodian_public_key: bytes,
     now: datetime,
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
@@ -1536,16 +1601,12 @@ async def execute_authorized_attempt(
         expected_source_sha=config.source_sha,
         now=now,
     )
-    ledger_identity = ledger.identity()
-    if not isinstance(ledger_identity, LedgerCustodyIdentity):
-        raise RunnerError("preregistration ledger custody identity is invalid")
-    if (
-        campaign.ledger_instance_id != ledger_identity.ledger_instance_id
-        or campaign.ledger_custodian_key_id != ledger_identity.key_id
-        or campaign.ledger_custodian_public_key_sha256 != ledger_identity.public_key_sha256
-        or campaign.ledger_location_sha256 != ledger_identity.ledger_location_sha256
-    ):
-        raise RunnerError("campaign ledger custody binding mismatch")
+    ledger_identity = _validate_ledger_custody_binding(
+        campaign=campaign,
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        label="campaign",
+    )
     authorization = verify_attempt_authorization(
         attempt_envelope,
         public_key=approval_public_key,
@@ -1567,10 +1628,28 @@ async def execute_authorized_attempt(
     )
     if required_requests > authorization.provider_request_reservation:
         raise RunnerError("signed request reservation is insufficient")
-    claim = ledger.claim_attempt(
+    claim = _require_exact_claim(
+        ledger.claim_attempt(
+            campaign=campaign,
+            authorization=authorization,
+            now=now,
+        ),
         campaign=campaign,
         authorization=authorization,
-        now=now,
+        label="development",
+    )
+    claimed_state = _replay_bound_ledger_snapshot(
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        identity=ledger_identity,
+        campaign=campaign,
+        authorization=authorization,
+    )
+    _require_postclaim_state(
+        claimed_state,
+        campaign=campaign,
+        authorization=authorization,
+        expected_claimed_at=now,
     )
 
     budget = _RequestBudget(claim.provider_requests_reserved)
@@ -1704,7 +1783,8 @@ async def execute_authorized_attempt(
             cost_microusd=cost_microusd,
         )
         if complete:
-            assert capsule_sha256 is not None
+            if capsule_sha256 is None:
+                raise RunnerError("completed attempt is missing its capsule digest")
             ledger.record_development_checkpoint(
                 claim=claim,
                 development_capsule_sha256=capsule_sha256,
@@ -1713,6 +1793,25 @@ async def execute_authorized_attempt(
                 actual_cost_microusd=cost_microusd,
                 now=now,
             )
+            final_state = _replay_bound_ledger_snapshot(
+                ledger=ledger,
+                public_key=ledger_custodian_public_key,
+                identity=ledger_identity,
+                campaign=campaign,
+                authorization=authorization,
+            )
+            if (
+                final_state.phase != "development_collection"
+                or final_state.active_attempt_id != authorization.attempt_id
+                or final_state.development_capsule_sha256 != capsule_sha256
+                or final_state.development_usage_evidence_sha256
+                != usage_evidence_digest
+                or final_state.development_provider_requests != budget.consumed
+                or final_state.development_cost_microusd != cost_microusd
+                or final_state.final_ledger_head_sha256
+                == claimed_state.final_ledger_head_sha256
+            ):
+                raise RunnerError("signed development checkpoint is not durable")
         else:
             ledger.record_terminal_outcome(
                 claim=claim,
@@ -1724,6 +1823,25 @@ async def execute_authorized_attempt(
                 actual_cost_microusd=cost_microusd,
                 now=now,
             )
+            final_state = _replay_bound_ledger_snapshot(
+                ledger=ledger,
+                public_key=ledger_custodian_public_key,
+                identity=ledger_identity,
+                campaign=campaign,
+                authorization=authorization,
+            )
+            if (
+                final_state.phase != "aborted"
+                or final_state.active_attempt_id is not None
+                or final_state.attempt_authorization_sha256
+                != authorization.signed_payload_sha256
+                or final_state.final_usage_evidence_sha256 != usage_evidence_digest
+                or final_state.actual_provider_requests != budget.consumed
+                or final_state.actual_cost_microusd != cost_microusd
+                or final_state.final_ledger_head_sha256
+                == claimed_state.final_ledger_head_sha256
+            ):
+                raise RunnerError("signed terminal outcome is not durable")
 
     return AttemptExecutionResult(
         complete=complete,
@@ -1795,24 +1913,18 @@ async def execute_authorized_holdout(
         campaign=campaign,
         now=now,
     )
-    ledger_identity = ledger.identity()
-    if (
-        not isinstance(ledger_identity, LedgerCustodyIdentity)
-        or not isinstance(ledger_custodian_public_key, bytes)
-        or len(ledger_custodian_public_key) != 32
-        or sha256(ledger_custodian_public_key).hexdigest() != ledger_identity.public_key_sha256
-        or campaign.ledger_instance_id != ledger_identity.ledger_instance_id
-        or campaign.ledger_custodian_key_id != ledger_identity.key_id
-        or campaign.ledger_custodian_public_key_sha256 != ledger_identity.public_key_sha256
-        or campaign.ledger_location_sha256 != ledger_identity.ledger_location_sha256
-    ):
-        raise RunnerError("holdout ledger custody binding mismatch")
-    snapshot = ledger.export_snapshot()
-    state = validate_custody_ledger_snapshot(
-        snapshot,
+    ledger_identity = _validate_ledger_custody_binding(
+        campaign=campaign,
+        ledger=ledger,
         public_key=ledger_custodian_public_key,
-        expected_key_id=ledger_identity.key_id,
-        expected_ledger_instance_id=ledger_identity.ledger_instance_id,
+        label="holdout",
+    )
+    state = _replay_bound_ledger_snapshot(
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        identity=ledger_identity,
+        campaign=campaign,
+        authorization=authorization,
     )
     holdout_manifest_sha256 = compute_holdout_schedule_sha256(
         plans,
@@ -1846,25 +1958,44 @@ async def execute_authorized_holdout(
         or state.development_cost_microusd < 0
     ):
         raise RunnerError("holdout remaining reservation is insufficient")
-    claim = ledger.resume_holdout(
+    claim = _require_exact_claim(
+        ledger.resume_holdout(
+            campaign=campaign,
+            authorization=authorization,
+            selected_policy_ms=config.policy_ms,
+            holdout_manifest_sha256=holdout_manifest_sha256,
+            expected_ledger_head_sha256=state.final_ledger_head_sha256,
+            now=now,
+        ),
         campaign=campaign,
         authorization=authorization,
-        selected_policy_ms=config.policy_ms,
-        holdout_manifest_sha256=holdout_manifest_sha256,
-        expected_ledger_head_sha256=state.final_ledger_head_sha256,
-        now=now,
+        label="holdout",
+    )
+    resumed_state = _replay_bound_ledger_snapshot(
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        identity=ledger_identity,
+        campaign=campaign,
+        authorization=authorization,
     )
     if (
-        not isinstance(claim, AttemptClaim)
-        or claim.campaign_id != campaign.campaign_id
-        or claim.attempt_id != authorization.attempt_id
-        or claim.attempt_index != authorization.attempt_index
-        or not isinstance(claim.lease_id, str)
-        or not SHA256.fullmatch(claim.lease_id)
-        or claim.provider_requests_reserved != authorization.provider_request_reservation
-        or claim.cost_reserved_microusd != authorization.cost_reservation_microusd
+        resumed_state.phase != "holdout_collection"
+        or resumed_state.active_attempt_id != authorization.attempt_id
+        or resumed_state.campaign_approval_sha256 != campaign.signed_payload_sha256
+        or resumed_state.attempt_authorization_sha256
+        != authorization.signed_payload_sha256
+        or resumed_state.selected_policy_ms != config.policy_ms
+        or resumed_state.holdout_manifest_sha256 != holdout_manifest_sha256
+        or not resumed_state.holdout_execution_claimed
+        or resumed_state.provider_requests_reserved
+        != authorization.provider_request_reservation
+        or resumed_state.cost_reserved_microusd
+        != authorization.cost_reservation_microusd
+        or resumed_state.development_usage_evidence_sha256
+        != state.development_usage_evidence_sha256
+        or resumed_state.final_ledger_head_sha256 == state.final_ledger_head_sha256
     ):
-        raise RunnerError("holdout custodian returned an invalid active claim")
+        raise RunnerError("signed ledger did not durably consume the holdout claim")
 
     budget = _RequestBudget(remaining_requests)
     holdout_cost_microusd = 0
@@ -1997,6 +2128,29 @@ async def execute_authorized_holdout(
             actual_cost_microusd=total_cost_microusd,
             now=now,
         )
+        final_state = _replay_bound_ledger_snapshot(
+            ledger=ledger,
+            public_key=ledger_custodian_public_key,
+            identity=ledger_identity,
+            campaign=campaign,
+            authorization=authorization,
+        )
+        if (
+            final_state.phase != ("completed" if complete else "aborted")
+            or final_state.active_attempt_id is not None
+            or final_state.completed_attempt_id
+            != (authorization.attempt_id if complete else None)
+            or final_state.attempt_authorization_sha256
+            != authorization.signed_payload_sha256
+            or final_state.final_usage_evidence_sha256 != final_usage_digest
+            or final_state.actual_provider_requests != total_requests
+            or final_state.actual_cost_microusd != total_cost_microusd
+            or final_state.holdout_capsule_sha256
+            != (capsule_sha256 if complete else None)
+            or final_state.final_ledger_head_sha256
+            == resumed_state.final_ledger_head_sha256
+        ):
+            raise RunnerError("signed holdout terminal outcome is not durable")
 
     return AttemptExecutionResult(
         complete=complete,
@@ -2396,23 +2550,10 @@ def _load_pinned_approval_public_key() -> bytes:
 
 
 def _capture_current_execution_identity(*, expected_source_sha: str) -> str:
-    source = capture_source_identity(
+    return execution_identity_sha256(
         REPO_ROOT,
         expected_source_sha=expected_source_sha,
-        dependency_paths=EXECUTION_DEPENDENCY_PATHS,
     )
-    environment = capture_environment_identity(
-        repo_root=REPO_ROOT,
-        expected_python=EXPECTED_PYTHON,
-        expected_uv=EXPECTED_UV,
-        import_names=EXECUTION_IMPORT_NAMES,
-    )
-    report = {
-        "schema_id": "gate_0b_environment_identity_v1",
-        "source": source.redacted_report_dict(),
-        "environment": environment.redacted_report_dict(),
-    }
-    return sha256(canonical_json_bytes(report)).hexdigest()
 
 
 def artifact_location_sha256(path: Path) -> str:

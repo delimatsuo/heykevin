@@ -12,7 +12,7 @@ from app.services.qualification_identity import canonical_json_bytes
 from app.services.qualification_ledger import (
     CustodyLedgerError,
     LedgerCustodyClient,
-    validate_custody_ledger_snapshot,
+    validate_custody_ledger_snapshot as _validate_custody_ledger_snapshot,
 )
 
 
@@ -26,6 +26,31 @@ SOURCE_SHA = "b" * 40
 LEDGER_LOCATION_SHA = "c" * 64
 CAMPAIGN_APPROVAL_SHA = "d" * 64
 ATTEMPT_AUTHORIZATION_SHA = "e" * 64
+
+
+def validate_custody_ledger_snapshot(
+    raw: dict[str, object],
+    *,
+    public_key: bytes,
+    expected_key_id: str,
+    expected_ledger_instance_id: str,
+    **identity_overrides: str,
+):
+    expected = {
+        "expected_campaign_id": CAMPAIGN_ID,
+        "expected_authorization_id": AUTHORIZATION_ID,
+        "expected_preregistration_sha256": PREREGISTRATION_SHA,
+        "expected_source_sha": SOURCE_SHA,
+        "expected_ledger_location_sha256": LEDGER_LOCATION_SHA,
+        **identity_overrides,
+    }
+    return _validate_custody_ledger_snapshot(
+        raw,
+        public_key=public_key,
+        expected_key_id=expected_key_id,
+        expected_ledger_instance_id=expected_ledger_instance_id,
+        **expected,
+    )
 
 
 def _key_pair() -> tuple[Ed25519PrivateKey, bytes]:
@@ -258,10 +283,17 @@ def test_signed_custody_ledger_replays_one_attempt_across_both_splits() -> None:
     )
     assert state.attempt_ids == ("attempt_1",)
     assert state.active_attempt_id is None
+    assert state.campaign_id == CAMPAIGN_ID
+    assert state.authorization_id == AUTHORIZATION_ID
+    assert state.preregistration_sha256 == PREREGISTRATION_SHA
+    assert state.source_sha == SOURCE_SHA
+    assert state.ledger_location_sha256 == LEDGER_LOCATION_SHA
     assert state.completed_attempt_id == "attempt_1"
     assert state.campaign_approval_sha256 == CAMPAIGN_APPROVAL_SHA
     assert state.attempt_authorization_sha256 == ATTEMPT_AUTHORIZATION_SHA
     assert state.attempt_claimed_at == NOW + timedelta(seconds=1)
+    assert state.provider_requests_reserved == 128
+    assert state.cost_reserved_microusd == 10_000_000
     assert state.selected_policy_ms == 100
     assert state.development_ledger_head_sha256 is not None
     assert state.development_usage_evidence_sha256 == "2" * 64
@@ -270,6 +302,33 @@ def test_signed_custody_ledger_replays_one_attempt_across_both_splits() -> None:
     assert state.actual_provider_requests == 120
     assert state.actual_cost_microusd == 2_000_000
     assert state.final_ledger_head_sha256 == snapshot["head_hash"]
+
+
+@pytest.mark.parametrize(
+    ("expected_field", "wrong_value"),
+    (
+        ("expected_campaign_id", "campaign_wrong"),
+        ("expected_authorization_id", "authorization_wrong"),
+        ("expected_preregistration_sha256", "0" * 64),
+        ("expected_source_sha", "0" * 40),
+        ("expected_ledger_location_sha256", "0" * 64),
+    ),
+)
+def test_signed_export_must_match_every_approved_external_identity(
+    expected_field: str,
+    wrong_value: str,
+) -> None:
+    private, public = _key_pair()
+    snapshot = _snapshot(private)
+
+    with pytest.raises(CustodyLedgerError, match="approval identity"):
+        validate_custody_ledger_snapshot(
+            snapshot,
+            public_key=public,
+            expected_key_id=KEY_ID,
+            expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+            **{expected_field: wrong_value},
+        )
 
 
 def test_holdout_cannot_complete_without_one_shot_execution_claim() -> None:

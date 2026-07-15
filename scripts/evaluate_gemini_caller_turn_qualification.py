@@ -445,11 +445,25 @@ def _evaluate_custody_bundle(
         != immutable["ledger_custodian_public_key_sha256"]
     ):
         raise EvaluationError("ledger custodian root is not preregistered")
+    campaign_payload = bundle["campaign_envelope"]
+    if not isinstance(campaign_payload, Mapping) or not isinstance(
+        campaign_payload.get("payload"),
+        Mapping,
+    ):
+        raise EvaluationError("campaign approval envelope is invalid")
+    authorization_id = campaign_payload["payload"].get("authorization_id")
+    if not isinstance(authorization_id, str):
+        raise EvaluationError("campaign approval envelope is invalid")
     state = validate_custody_ledger_snapshot(
         ledger,
         public_key=ledger_custodian_public_key,
         expected_key_id=immutable["ledger_custodian_key_id"],
         expected_ledger_instance_id=immutable["ledger_instance_id"],
+        expected_campaign_id=campaign_id,
+        expected_authorization_id=authorization_id,
+        expected_preregistration_sha256=preregistration["preregistration_sha256"],
+        expected_source_sha=immutable["source_sha"],
+        expected_ledger_location_sha256=immutable["ledger_location_sha256"],
     )
     if (
         state.phase != "completed"
@@ -516,13 +530,19 @@ def _evaluate_custody_bundle(
     if (
         ledger["preregistration_sha256"] != preregistration["preregistration_sha256"]
         or ledger["source_sha"] != immutable["source_sha"]
+        or state.campaign_id != campaign.campaign_id
+        or state.authorization_id != campaign.authorization_id
         or state.campaign_approval_sha256 != campaign.signed_payload_sha256
         or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
         or authorization.attempt_id != state.completed_attempt_id
+        or state.provider_requests_reserved
+        != authorization.provider_request_reservation
+        or state.cost_reserved_microusd != authorization.cost_reservation_microusd
         or campaign.ledger_instance_id != immutable["ledger_instance_id"]
         or campaign.ledger_custodian_key_id != immutable["ledger_custodian_key_id"]
         or campaign.ledger_custodian_public_key_sha256
         != immutable["ledger_custodian_public_key_sha256"]
+        or campaign.ledger_location_sha256 != immutable["ledger_location_sha256"]
     ):
         raise EvaluationError("custody authorization and ledger identities disagree")
     if (

@@ -22,38 +22,12 @@ if str(REPO_ROOT) not in sys.path:
 from app.services.qualification_identity import (  # noqa: E402
     IdentityError,
     canonical_json_bytes,
-    capture_environment_identity,
-    capture_source_identity,
+)
+from app.services.qualification_environment import (  # noqa: E402
+    build_execution_identity_report,
 )
 
 
-EXPECTED_PYTHON = "3.12.13"
-EXPECTED_UV = "0.11.7"
-DEPENDENCY_PATHS = (
-    "config/qualification/gate_0b_approval_root.ed25519.pub",
-    "app/services/caller_turn_qualification.py",
-    "app/services/qualification_identity.py",
-    "app/services/caller_turn_alignment.py",
-    "app/services/caller_turn_measurement.py",
-    "app/services/caller_turns.py",
-    "app/services/gemini_turn_events.py",
-    "app/services/voice_turn_replay.py",
-    "app/utils/audio.py",
-    "scripts/run_gemini_caller_turn_qualification.py",
-    "scripts/evaluate_gemini_caller_turn_qualification.py",
-    "scripts/verify_qualification_environment.py",
-    "app/services/gemini_pipeline.py",
-    "app/services/voice_pipeline.py",
-    "app/config.py",
-    "uv.lock",
-)
-IMPORT_NAMES = (
-    "websockets",
-    "cryptography",
-    "app.services.caller_turn_qualification",
-    "app.services.qualification_identity",
-    "app.utils.audio",
-)
 GIT_BINARY = "/usr/bin/git"
 
 
@@ -80,22 +54,10 @@ def _snapshot_path(source_sha: str) -> Path:
 
 
 def _identity_report(source_sha: str) -> dict[str, object]:
-    source = capture_source_identity(
+    return build_execution_identity_report(
         REPO_ROOT,
         expected_source_sha=source_sha,
-        dependency_paths=DEPENDENCY_PATHS,
     )
-    environment = capture_environment_identity(
-        repo_root=REPO_ROOT,
-        expected_python=EXPECTED_PYTHON,
-        expected_uv=EXPECTED_UV,
-        import_names=IMPORT_NAMES,
-    )
-    return {
-        "schema_id": "gate_0b_environment_identity_v1",
-        "source": source.redacted_report_dict(),
-        "environment": environment.redacted_report_dict(),
-    }
 
 
 def _write_private(path: Path, report: dict[str, object]) -> None:

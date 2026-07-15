@@ -1,10 +1,10 @@
 # Gemini Caller-Turn Qualification Gate 0B Plan
 
-> **Status:** Revised after panel review; pending final panel confirmation. This
-> revision authorizes documentation only.
-> Offline implementation starts only after panel approval. It does not authorize a
-> Gemini request, credential creation, corpus collection, staging, production,
-> deployment, runtime wiring, or release.
+> **Status:** Approved for offline implementation and currently under exact-commit
+> remediation review. The external signed-custody amendment in Section 10 supersedes
+> the earlier local-ledger design. The approval trust root remains `UNPROVISIONED`.
+> This plan does not authorize a Gemini request, credential creation, corpus access,
+> staging, production, deployment, runtime wiring, merge, or release.
 
 **Date:** 2026-07-15
 
@@ -574,17 +574,37 @@ attempt identity, and atomically consumes the attempt before credential lookup o
 provider DNS. The attempt is consumed even if the process crashes, setup fails, or no
 provider request succeeds.
 
-The campaign uses a single-host, access-restricted, durable ledger outside the repo
-with an OS-exclusive lease, atomic transaction, fsync, hash chain, custodian
-signature, and append-only attempt records. It reserves worst-case request and cost
-allowance before execution, prevents concurrent campaign use, reconciles actual
-usage, and never automatically recovers an expired lease. A replacement requires a
-new signed attempt authorization that names the previous attempt and one exact
-preregistered infrastructure-outage enum. Replacement is permitted only while the
-campaign remains in `DEVELOPMENT_COLLECTION` and the ledger proves that no holdout
-asset was materialized/accessed and no holdout provider request was claimed. Ledger
-access is local and performs no network operation; “before DNS” means before any
-provider/control-plane DNS.
+The campaign ledger is owned by a separate, durable custodian reached through a
+local IPC client boundary. The application repository contains only the typed
+custodian protocol, signed-receipt replay validator, and injected test doubles; it
+does not contain an app-owned mutable ledger or treat a local JSON file as
+authoritative. This paragraph supersedes every earlier reference to a locally owned
+single-host ledger implementation.
+
+The external custodian atomically appends Ed25519-signed, hash-chained records and
+exports a signed snapshot bound to the exact ledger instance, custodian key,
+campaign, authorization, preregistration, source SHA, and hashed custody location.
+The executor treats `claim_attempt` and `resume_holdout` return values as
+untrusted hints. Before credential lookup, DNS, or connector construction, it must
+replay a fresh post-mutation signed snapshot and prove the exact attempt identity,
+claim time, request/cost reservation, phase, and changed one-shot holdout-claim
+state. A stale, unsigned, truncated, wrong-identity, inflated-reservation, or
+unreplayable export blocks execution. Development checkpoint and terminal outcome
+mutations are likewise replayed from a fresh signed snapshot before success is
+reported.
+
+One attempt remains active across development, policy lock, release, and holdout.
+Holdout execution requires one irreversible signed `holdout_execution_claim`; it
+does not create or reserve a second attempt. The custodian reserves worst-case
+request and cost allowance before development, prevents concurrent campaign use,
+reconciles capsule-derived usage, and never automatically recovers a consumed
+attempt. A replacement requires a new signed attempt authorization that names the
+previous attempt and one exact preregistered infrastructure-outage enum. Replacement
+is permitted only while the campaign remains in `DEVELOPMENT_COLLECTION` and the
+signed ledger proves that no development checkpoint, policy lock, holdout release,
+or holdout execution claim exists for that attempt. Custodian access is local and
+performs no provider network operation; “before DNS” means before any provider or
+control-plane DNS.
 
 A digest/signature mismatch, expiry, consumed attempt, lease conflict, missing field,
 insufficient reserved allowance, or ledger inconsistency blocks before credential
@@ -667,9 +687,13 @@ schemas, unknown-field rejection, and payload-free published serialization.
 
 **Create:**
 
+- `app/services/qualification_environment.py`
 - `app/services/qualification_identity.py`
+- `app/services/qualification_ledger.py`
 - `scripts/verify_qualification_environment.py`
+- `tests/unit/test_qualification_environment.py`
 - `tests/unit/test_qualification_identity.py`
+- `tests/unit/test_qualification_ledger.py`
 
 **Tests first:** staged/unstaged/untracked rejection, detached and linked worktrees,
 source SHA mismatch, Git blob mismatch, executable dependency mutation, untracked
@@ -678,8 +702,9 @@ CA/codec identity, asymmetric approval signature and trust root, expiry, nonce,
 one-use attempt consumption, exclusive lease, atomic request/cost reservation,
 crash-consumed attempt, tamper-evident ledger, replacement linkage, changed
 digest/value, pre-lock-only replacement, post-lock/holdout replacement rejection,
-exact Python/uv environment identity, and proof that failure occurs before
-credential, DNS, or connector access.
+exact shared Python/uv environment identity, fully bound signed custody exports,
+post-mutation replay, stale/unsigned/wrong-identity export rejection, and proof that
+failure occurs before credential, DNS, or connector access.
 
 ### Task 3: Reuse and extend deterministic audio replay
 
@@ -742,7 +767,9 @@ tools, interruption, cancellation, consecutive turns, fresh-connection restart e
 GoAway/close, malformed/oversized messages, usage metadata, provider-request and
 cost reservation, current-versus-prior output-turn attribution, premature current
 response rejection, bounded prior-turn interruption tail, total session/run
-deadlines, output disposal, and capsule handoff.
+deadlines, output disposal, capsule handoff, typed claim validation, signed
+post-claim and post-resume proof, reservation inflation, failed append, crash replay,
+and durable terminal-outcome replay.
 
 The executor computes no verdict. The selected authentication transport has failure-
 path tests proving credentials and authenticated URLs cannot enter output, logs,
@@ -755,6 +782,9 @@ exception chains, snapshots, crash handlers, or reports.
 - `docs/gemini-caller-turn-qualification-gate-0b.md`
 
 **Modify:**
+
+- `docs/superpowers/plans/2026-07-15-gemini-caller-turn-qualification-gate-0b.md`
+  to keep the approved architecture and implementation boundary consistent.
 
 - `docs/adr/0001-gemini-retrospective-caller-turns.md` only to describe the pending
   Gate 0B process; do not record a go decision.
@@ -780,7 +810,9 @@ Require:
 - staff, security/privacy, product/caller-experience, and QA review of the exact
   commit.
 
-Merge the implementation PR before generating an executable preregistration.
+An exact-commit approval is a review verdict only. Merge remains a separate user
+decision. Merge the implementation PR before generating an executable
+preregistration.
 
 ### Task 9: Separate preregistration approval
 
@@ -910,8 +942,8 @@ around the current transcription surface.
 
 ## 15. Required Review Boundary
 
-This plan must receive panel approval before implementation. The implementation must
-then receive exact-commit staff, security/privacy, product/caller-experience, and QA
+This plan has received approval for offline implementation. The implementation must
+receive exact-commit staff, security/privacy, product/caller-experience, and QA
 approval before merge.
 Provider execution requires a later user message approving the exact canonical
 preregistration digest and values. Approval at any earlier layer does not flow into a

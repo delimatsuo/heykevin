@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 import re
@@ -12,7 +12,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from app.services.qualification_identity import canonical_json_bytes
+from app.services.qualification_identity import AttemptClaim, canonical_json_bytes
 
 
 LEDGER_EXPORT_SCHEMA_ID = "gate_0b_custodian_ledger_export_v1"
@@ -60,6 +60,11 @@ class LedgerCustodyIdentity:
 
 @dataclass(frozen=True, slots=True)
 class CustodyLedgerState:
+    campaign_id: str
+    authorization_id: str
+    preregistration_sha256: str
+    source_sha: str
+    ledger_location_sha256: str
     phase: str
     phase_history: tuple[str, ...]
     attempt_ids: tuple[str, ...]
@@ -68,6 +73,8 @@ class CustodyLedgerState:
     campaign_approval_sha256: str
     attempt_authorization_sha256: str | None
     attempt_claimed_at: datetime | None
+    provider_requests_reserved: int
+    cost_reserved_microusd: int
     selected_policy_ms: int | None
     policy_lock_sha256: str | None
     development_capsule_sha256: str | None
@@ -90,9 +97,9 @@ class LedgerCustodyClient(Protocol):
 
     def identity(self) -> LedgerCustodyIdentity: ...
 
-    def claim_attempt(self, **values: Any) -> Any: ...
+    def claim_attempt(self, **values: Any) -> AttemptClaim: ...
 
-    def resume_holdout(self, **values: Any) -> Any:
+    def resume_holdout(self, **values: Any) -> AttemptClaim:
         """Atomically append the one-shot signed holdout execution claim."""
         ...
 
@@ -110,8 +117,8 @@ class LedgerCustodyClient(Protocol):
 @dataclass(slots=True)
 class _ReplayState:
     phase: str = "preregistered"
-    history: list[str] | None = None
-    attempts: list[str] | None = None
+    history: list[str] = field(default_factory=lambda: ["preregistered"])
+    attempts: list[str] = field(default_factory=list)
     active_attempt: str | None = None
     active_attempt_index: int | None = None
     active_request_reservation: int = 0
@@ -138,6 +145,8 @@ class _ReplayState:
     completed_attempt: str | None = None
     completed_authorization: str | None = None
     completed_claimed_at: datetime | None = None
+    completed_request_reservation: int = 0
+    completed_cost_reservation: int = 0
     final_usage: str | None = None
     actual_requests: int = 0
     actual_cost: int = 0
@@ -146,14 +155,9 @@ class _ReplayState:
     max_cost: int = 0
     genesis_seen: bool = False
 
-    def __post_init__(self) -> None:
-        self.history = ["preregistered"]
-        self.attempts = []
-
     def transition(self, target: str) -> None:
         if target != self.phase:
             self.phase = target
-            assert self.history is not None
             self.history.append(target)
 
 
@@ -163,6 +167,11 @@ def validate_custody_ledger_snapshot(
     public_key: bytes,
     expected_key_id: str,
     expected_ledger_instance_id: str,
+    expected_campaign_id: str,
+    expected_authorization_id: str,
+    expected_preregistration_sha256: str,
+    expected_source_sha: str,
+    expected_ledger_location_sha256: str,
 ) -> CustodyLedgerState:
     """Verify every custodian receipt and derive campaign state by strict replay."""
     fields = {
@@ -203,6 +212,24 @@ def validate_custody_ledger_snapshot(
             label="ledger location",
         ),
     }
+    expected_identities = {
+        "campaign_id": _safe_id(expected_campaign_id, label="expected campaign"),
+        "authorization_id": _safe_id(
+            expected_authorization_id,
+            label="expected authorization",
+        ),
+        "preregistration_sha256": _digest(
+            expected_preregistration_sha256,
+            label="expected preregistration",
+        ),
+        "source_sha": _source_digest(expected_source_sha),
+        "ledger_location_sha256": _digest(
+            expected_ledger_location_sha256,
+            label="expected ledger location",
+        ),
+    }
+    if any(identities[field] != value for field, value in expected_identities.items()):
+        raise CustodyLedgerError("ledger export approval identity mismatch")
     records = data["records"]
     if not isinstance(records, list) or not 1 <= len(records) <= 32:
         raise CustodyLedgerError("custodian ledger records are invalid")
@@ -240,10 +267,14 @@ def validate_custody_ledger_snapshot(
     if not replay.genesis_seen:
         raise CustodyLedgerError("ledger genesis receipt is missing")
 
-    assert replay.history is not None
-    assert replay.attempts is not None
-    assert replay.campaign_approval is not None
+    if replay.campaign_approval is None:
+        raise CustodyLedgerError("ledger campaign approval is missing")
     return CustodyLedgerState(
+        campaign_id=identities["campaign_id"],
+        authorization_id=identities["authorization_id"],
+        preregistration_sha256=identities["preregistration_sha256"],
+        source_sha=identities["source_sha"],
+        ledger_location_sha256=identities["ledger_location_sha256"],
         phase=replay.phase,
         phase_history=tuple(replay.history),
         attempt_ids=tuple(replay.attempts),
@@ -254,6 +285,12 @@ def validate_custody_ledger_snapshot(
             replay.completed_authorization or replay.active_authorization
         ),
         attempt_claimed_at=replay.completed_claimed_at or replay.active_claimed_at,
+        provider_requests_reserved=(
+            replay.completed_request_reservation or replay.active_request_reservation
+        ),
+        cost_reserved_microusd=(
+            replay.completed_cost_reservation or replay.active_cost_reservation
+        ),
         selected_policy_ms=replay.selected_policy,
         policy_lock_sha256=replay.policy_lock,
         development_capsule_sha256=replay.development_capsule,
@@ -459,7 +496,6 @@ def _replay_claim(
         raise CustodyLedgerError("ledger claim state is invalid")
     if before not in {"preregistered", "development_collection"}:
         raise CustodyLedgerError("ledger claim phase is invalid")
-    assert state.attempts is not None
     index = _bounded_int(body["attempt_index"], label="attempt index", maximum=3)
     if index != len(state.attempts) + 1 or index > state.max_attempts:
         raise CustodyLedgerError("ledger attempt index is invalid")
@@ -699,6 +735,8 @@ def _replay_terminal_outcome(
         state.completed_attempt = attempt_id
         state.completed_authorization = state.active_authorization
         state.completed_claimed_at = state.active_claimed_at
+        state.completed_request_reservation = state.active_request_reservation
+        state.completed_cost_reservation = state.active_cost_reservation
         state.transition(after)
     elif outcome == "infrastructure_outage":
         if (
@@ -720,6 +758,10 @@ def _replay_terminal_outcome(
             or (before == "holdout_collection" and not state.holdout_execution_claimed)
         ):
             raise CustodyLedgerError("terminal failure outcome is invalid")
+        state.completed_authorization = state.active_authorization
+        state.completed_claimed_at = state.active_claimed_at
+        state.completed_request_reservation = state.active_request_reservation
+        state.completed_cost_reservation = state.active_cost_reservation
         state.transition(after)
     else:
         raise CustodyLedgerError("terminal outcome is invalid")
@@ -814,9 +856,8 @@ def _source_digest(value: object) -> str:
 
 
 def _phase(value: object) -> str:
-    if value not in PHASES:
+    if not isinstance(value, str) or value not in PHASES:
         raise CustodyLedgerError("ledger phase is invalid")
-    assert isinstance(value, str)
     return value
 
 

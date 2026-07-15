@@ -1,6 +1,7 @@
 {
   "version": 1,
   "provenance": "fixture_authored_synthetic",
+  "quiescence_ms": 100,
   "cases": [
     {
       "name": "fragments_before_model_output",

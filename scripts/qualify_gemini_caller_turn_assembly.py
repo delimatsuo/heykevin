@@ -229,6 +229,8 @@ def canonicalize_qualification_setup(
         raise QualificationError("setup_document_invalid")
     if not isinstance(reconnect_policy.get("context_restoration"), str):
         raise QualificationError("setup_document_invalid")
+    if reconnect_policy["context_restoration"] != "none":
+        raise QualificationError("setup_document_invalid")
     retry_backoff = reconnect_policy.get("retry_backoff_ms")
     if (
         not isinstance(retry_backoff, list)
@@ -256,6 +258,7 @@ def canonicalize_qualification_setup(
     if (
         not isinstance(tool_response_policy, str)
         or not SAFE_ID_PATTERN.fullmatch(tool_response_policy)
+        or tool_response_policy != "mock_responses_only"
     ):
         raise QualificationError("setup_document_invalid")
     for configuration in (
@@ -472,6 +475,14 @@ async def run_qualification(
                 max_reconnect_attempts=registration["canonical_setup"][
                     "reconnect_policy"
                 ]["max_attempts"],
+                reconnect_backoff_ms=tuple(
+                    registration["canonical_setup"]["reconnect_policy"][
+                        "retry_backoff_ms"
+                    ]
+                ),
+                tool_response_policy=registration["canonical_setup"][
+                    "tool_response_policy"
+                ],
             )
         )
         if not attempts[-1].complete:
@@ -495,8 +506,16 @@ async def run_session_attempt(
     quiescence_ms: int,
     session_timeout_seconds: float,
     max_reconnect_attempts: int,
+    reconnect_backoff_ms: tuple[int, ...],
+    tool_response_policy: str,
 ) -> SessionAttemptResult:
     """Run one injected-WebSocket attempt and retain aggregate enums only."""
+    if (
+        tool_response_policy != "mock_responses_only"
+        or len(reconnect_backoff_ms) != max_reconnect_attempts
+        or any(not _bounded_int(value, 0, 10_000) for value in reconnect_backoff_ms)
+    ):
+        raise ValueError("unsupported session attempt policy")
     adapter = GeminiTurnEventAdapter()
     assembler = CallerTurnAssembler(active_epoch=1, quiescence_ms=quiescence_ms)
     event_counts: Counter[str] = Counter()
@@ -591,6 +610,14 @@ async def run_session_attempt(
                         except (UnicodeDecodeError, json.JSONDecodeError):
                             error_code = "malformed_message"
                             break
+                        if tool_response_policy == "mock_responses_only":
+                            try:
+                                tool_response = _build_mock_tool_response(message)
+                            except (TypeError, ValueError):
+                                error_code = "malformed_message"
+                                break
+                            if tool_response is not None:
+                                await websocket.send(json.dumps(tool_response))
                         batch = adapter.adapt_message(
                             message,
                             at_ms=at_ms,
@@ -629,6 +656,9 @@ async def run_session_attempt(
                 emit_lifecycle(
                     CallerTurnEventKind.RECONNECT_STARTED,
                     event_epoch=epoch,
+                )
+                await asyncio.sleep(
+                    reconnect_backoff_ms[reconnect_count - 1] / 1_000
                 )
                 continue
             emit_lifecycle(CallerTurnEventKind.CONNECTION_CLOSED)
@@ -697,6 +727,41 @@ def _validate_provider_setup(setup: dict[str, Any]) -> None:
         setup.get("tools"), list
     ):
         raise QualificationError("setup_document_invalid")
+
+
+def _build_mock_tool_response(message: object) -> dict[str, Any] | None:
+    if not isinstance(message, dict) or "toolCall" not in message:
+        return None
+    tool_call = message["toolCall"]
+    if not isinstance(tool_call, dict):
+        raise TypeError("toolCall must be an object")
+    function_calls = tool_call.get("functionCalls", [])
+    if not isinstance(function_calls, list):
+        raise TypeError("functionCalls must be an array")
+    responses = []
+    for call in function_calls:
+        if not isinstance(call, dict):
+            raise TypeError("function call must be an object")
+        call_id = call.get("id")
+        name = call.get("name")
+        if (
+            not isinstance(call_id, str)
+            or not isinstance(name, str)
+            or not 1 <= len(call_id) <= 128
+            or not 1 <= len(name) <= 128
+            or any(ord(character) < 32 for character in call_id + name)
+        ):
+            raise ValueError("function call identity is invalid")
+        responses.append(
+            {
+                "id": call_id,
+                "name": name,
+                "response": {"result": "synthetic_unavailable"},
+            }
+        )
+    if not responses:
+        return None
+    return {"tool_response": {"function_responses": responses}}
 
 
 def _validate_websocket_policy(policy: dict[str, Any]) -> dict[str, Any]:
@@ -1052,6 +1117,7 @@ def _qualification_report(
     attempts: int = 0,
     event_counts: Counter[str] | None = None,
     turn_statuses: Counter[str] | None = None,
+    decode_rejections: Counter[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1061,6 +1127,9 @@ def _qualification_report(
         "sample": {"attempts": attempts},
         "event_type_counts": dict(sorted((event_counts or Counter()).items())),
         "turn_status_counts": dict(sorted((turn_statuses or Counter()).items())),
+        "decode_rejection_counts": dict(
+            sorted((decode_rejections or Counter()).items())
+        ),
         "failure_counts": dict(sorted(failure_counts.items())),
         **{field: False for field in EVIDENCE_FIELDS},
     }
@@ -1076,11 +1145,15 @@ def _aggregate_execution_report(
     failures: Counter[str] = Counter()
     events: Counter[str] = Counter()
     turn_statuses: Counter[str] = Counter()
+    decode_rejections: Counter[str] = Counter()
     for attempt in attempts:
         if attempt.error_code is not None:
             failures[attempt.error_code] += 1
+        if not attempt.complete:
+            failures["attempt_incomplete"] += 1
         events.update(attempt.event_type_counts)
         turn_statuses.update(attempt.turn_status_counts)
+        decode_rejections.update(attempt.decode_rejection_counts)
     if wall_clock_reached:
         failures["wall_clock_cap_reached"] += 1
     if len(attempts) != expected_attempts:
@@ -1097,6 +1170,7 @@ def _aggregate_execution_report(
         attempts=len(attempts),
         event_counts=events,
         turn_statuses=turn_statuses,
+        decode_rejections=decode_rejections,
     )
 
 

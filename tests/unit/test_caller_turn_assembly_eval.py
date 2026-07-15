@@ -39,6 +39,7 @@ def test_evaluator_reports_exact_identity_and_aggregate_fixture_result():
     assert report["sample"]["scenarios"] == 10
     assert report["sample"]["failed_scenarios"] == 0
     assert report["sample"]["observed_turns"] == 9
+    assert report["policy"] == {"quiescence_ms": 100}
     assert report["failures"] == {}
     assert set(report["metrics"]["completion_status_counts"]) <= {
         "retrospective_complete",

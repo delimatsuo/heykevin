@@ -156,15 +156,19 @@ class GeminiTurnEventAdapter:
         message: dict[str, Any],
     ) -> tuple[tuple[CallerTurnEventKind, str], ...]:
         decoded: list[tuple[CallerTurnEventKind, str]] = []
+        content: dict[str, Any] | None = None
         if "serverContent" in message:
             content = message["serverContent"]
             if not isinstance(content, dict):
                 raise TypeError("serverContent must be an object")
-            transcript = _decode_input_transcript(content)
-            if transcript:
-                decoded.append(
-                    (CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT, transcript)
-                )
+
+        transcript = _decode_input_transcript(content or {})
+        if not transcript:
+            transcript = _decode_input_transcript(message)
+        if transcript:
+            decoded.append((CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT, transcript))
+
+        if content is not None:
             if "modelTurn" in content:
                 model_turn = content["modelTurn"]
                 if not isinstance(model_turn, dict):

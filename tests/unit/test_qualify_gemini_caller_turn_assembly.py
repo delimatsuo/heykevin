@@ -73,7 +73,7 @@ def _provider_setup() -> dict[str, object]:
         "tool_response_policy": "mock_responses_only",
         "reconnect_policy": {
             "max_attempts": 1,
-            "context_restoration": "synthetic_transcript_digest_only",
+            "context_restoration": "none",
             "retry_backoff_ms": [0],
         },
         "turn_assembly_policy": {"quiescence_ms": 250},
@@ -520,6 +520,8 @@ def _attempt(connect, *, timeout=1, reconnects=0):
             quiescence_ms=250,
             session_timeout_seconds=timeout,
             max_reconnect_attempts=reconnects,
+            reconnect_backoff_ms=tuple(0 for _ in range(reconnects)),
+            tool_response_policy="mock_responses_only",
         )
     )
 
@@ -529,7 +531,7 @@ def test_mocked_websocket_reduces_events_without_raw_payloads():
         messages=[
             {"serverContent": {"inputTranscription": {"text": "Private synthetic text"}}},
             {"serverContent": {"interrupted": True}},
-            {"toolCall": {"functionCalls": [{"name": "lookup"}]}},
+            {"toolCall": {"functionCalls": [{"id": "tool-id", "name": "lookup"}]}},
             {"toolCallCancellation": {"ids": ["tool-id"]}},
         ]
     )
@@ -548,6 +550,19 @@ def test_mocked_websocket_reduces_events_without_raw_payloads():
     assert "Private synthetic text" not in serialized
     assert "synthetic-audio" not in serialized
     assert "test-only-credential" not in serialized
+    sent = [json.loads(message) for message in socket.sent]
+    assert any("tool_response" in message for message in sent)
+
+
+def test_mocked_shape_rejection_is_counted_and_attempt_is_incomplete():
+    socket = _FakeSocket(
+        messages=[{"serverContent": {"turnComplete": "not-a-boolean"}}]
+    )
+
+    result = _attempt(_FakeConnect(socket)).redacted_report_dict()
+
+    assert result["decode_rejection_counts"] == {"malformed_message": 1}
+    assert result["complete"] is False
 
 
 @pytest.mark.parametrize(

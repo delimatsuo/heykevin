@@ -318,6 +318,8 @@ def test_time_and_configuration_must_be_positive_and_monotonic():
         CallerTurnAssembler(active_epoch=1, quiescence_ms=0)
     with pytest.raises(ValueError, match="resource limits must be positive"):
         CallerTurnAssembler(active_epoch=1, max_events_per_turn=0)
+    with pytest.raises(ValueError, match="retained sequence limit must be positive"):
+        CallerTurnAssembler(active_epoch=1, max_retained_sequences=0)
 
     assembler = CallerTurnAssembler(active_epoch=1, quiescence_ms=100)
     assembler.ingest(
@@ -338,6 +340,26 @@ def test_time_and_configuration_must_be_positive_and_monotonic():
         )
     with pytest.raises(ValueError, match="time must be monotonic"):
         assembler.advance_time(9)
+
+
+def test_receipt_deduplication_memory_is_bounded_across_a_long_epoch():
+    assembler = CallerTurnAssembler(
+        active_epoch=1,
+        quiescence_ms=100,
+        max_retained_sequences=3,
+    )
+
+    for sequence in range(1, 6):
+        assembler.ingest(
+            _event(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                at_ms=sequence,
+                sequence=sequence,
+                text="x",
+            )
+        )
+
+    assert assembler.retained_sequence_count == 3
 
 
 def test_redacted_report_excludes_transcript_and_event_payloads():

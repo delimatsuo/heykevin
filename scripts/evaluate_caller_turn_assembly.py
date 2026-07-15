@@ -65,6 +65,7 @@ def evaluate_caller_turn_fixture(
             close_reason_counts=Counter(),
             finalization_lags_ms=[],
             failures=Counter({"fixture_unavailable": 1}),
+            quiescence_ms=None,
         )
     identity = _identity(
         fixture_digest=fixture_digest,
@@ -85,6 +86,7 @@ def evaluate_caller_turn_fixture(
             close_reason_counts=Counter(),
             finalization_lags_ms=[],
             failures=Counter({"fixture_invalid": 1}),
+            quiescence_ms=None,
         )
 
 
@@ -94,6 +96,13 @@ def _evaluate_loaded_fixture(
     identity: dict[str, Any],
 ) -> dict[str, Any]:
     raw_cases = fixture["cases"]
+    quiescence_ms = fixture["quiescence_ms"]
+    if (
+        isinstance(quiescence_ms, bool)
+        or not isinstance(quiescence_ms, int)
+        or not 1 <= quiescence_ms <= 5_000
+    ):
+        raise ValueError("fixture quiescence policy is invalid")
     failures: Counter[str] = Counter()
     status_counts: Counter[str] = Counter()
     close_reason_counts: Counter[str] = Counter()
@@ -102,7 +111,7 @@ def _evaluate_loaded_fixture(
 
     for raw_case in raw_cases:
         try:
-            observed = _evaluate_case(raw_case)
+            observed = _evaluate_case(raw_case, quiescence_ms=quiescence_ms)
         except (KeyError, TypeError, ValueError):
             failures["scenario_invalid"] += 1
             continue
@@ -126,10 +135,11 @@ def _evaluate_loaded_fixture(
         close_reason_counts=close_reason_counts,
         finalization_lags_ms=finalization_lags_ms,
         failures=failures,
+        quiescence_ms=quiescence_ms,
     )
 
 
-def _evaluate_case(raw_case: object):
+def _evaluate_case(raw_case: object, *, quiescence_ms: int):
     if not isinstance(raw_case, dict):
         raise TypeError("case must be an object")
     events = raw_case["events"]
@@ -141,7 +151,10 @@ def _evaluate_case(raw_case: object):
         raise TypeError("advance time must be an integer")
     typed_events = [CallerTurnEvent.from_dict(event) for event in events]
     active_epoch = typed_events[0].epoch if typed_events else 1
-    assembler = CallerTurnAssembler(active_epoch=active_epoch, quiescence_ms=100)
+    assembler = CallerTurnAssembler(
+        active_epoch=active_epoch,
+        quiescence_ms=quiescence_ms,
+    )
     observed = []
     for event in typed_events:
         observed.extend(assembler.ingest(event))
@@ -160,6 +173,7 @@ def _report(
     close_reason_counts: Counter[str],
     finalization_lags_ms: list[int],
     failures: Counter[str],
+    quiescence_ms: int | None,
 ) -> dict[str, Any]:
     evidence = {field: False for field in EVIDENCE_FIELDS}
     return {
@@ -167,6 +181,7 @@ def _report(
         "status": status,
         "scope": OFFLINE_SCOPE,
         "identity": identity,
+        "policy": {"quiescence_ms": quiescence_ms},
         "sample": {
             "scenarios": scenario_count,
             "failed_scenarios": failed_scenarios,

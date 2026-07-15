@@ -74,6 +74,21 @@ def test_adapter_supports_current_transcription_compatibility_shapes(content, ex
     assert batch.events[0].text == expected
 
 
+def test_adapter_decodes_top_level_compatibility_transcript_before_server_terminal():
+    batch = _adapt(
+        {
+            "inputTranscription": {"text": "Top-level compatibility"},
+            "serverContent": {"turnComplete": True},
+        }
+    )
+
+    assert [event.kind for event in batch.events] == [
+        CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+        CallerTurnEventKind.TURN_COMPLETE,
+    ]
+    assert batch.events[0].text == "Top-level compatibility"
+
+
 @pytest.mark.parametrize(
     ("field", "kind"),
     [

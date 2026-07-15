@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -13,6 +14,7 @@ DEFAULT_QUIESCENCE_MS = 250
 DEFAULT_MAX_EVENTS_PER_TURN = 128
 DEFAULT_MAX_TRANSCRIPT_CODEPOINTS = 4_000
 DEFAULT_MAX_TRANSCRIPT_UTF8_BYTES = 16_000
+DEFAULT_MAX_RETAINED_SEQUENCES = 1_024
 
 
 class CallerTurnEventKind(str, Enum):
@@ -187,6 +189,7 @@ class CallerTurnAssembler:
         max_events_per_turn: int = DEFAULT_MAX_EVENTS_PER_TURN,
         max_transcript_codepoints: int = DEFAULT_MAX_TRANSCRIPT_CODEPOINTS,
         max_transcript_utf8_bytes: int = DEFAULT_MAX_TRANSCRIPT_UTF8_BYTES,
+        max_retained_sequences: int = DEFAULT_MAX_RETAINED_SEQUENCES,
     ) -> None:
         self._active_epoch = _bounded_nonnegative_int(active_epoch, name="active_epoch")
         self._quiescence_ms = _bounded_nonnegative_int(quiescence_ms, name="quiescence_ms")
@@ -206,9 +209,16 @@ class CallerTurnAssembler:
         )
         if min(self._max_events, self._max_codepoints, self._max_utf8_bytes) == 0:
             raise ValueError("caller turn resource limits must be positive")
+        self._max_retained_sequences = _bounded_nonnegative_int(
+            max_retained_sequences,
+            name="max_retained_sequences",
+        )
+        if self._max_retained_sequences == 0:
+            raise ValueError("retained sequence limit must be positive")
 
         self._next_turn_id = 1
         self._seen_sequences: set[int] = set()
+        self._seen_sequence_order: deque[int] = deque()
         self._last_at_ms = 0
         self.duplicate_event_count = 0
         self.stale_event_count = 0
@@ -221,6 +231,10 @@ class CallerTurnAssembler:
     @property
     def next_deadline_ms(self) -> int | None:
         return self._deadline_ms
+
+    @property
+    def retained_sequence_count(self) -> int:
+        return len(self._seen_sequences)
 
     def ingest(self, event: CallerTurnEvent) -> tuple[RetrospectiveCallerTurn, ...]:
         if not isinstance(event, CallerTurnEvent):
@@ -243,6 +257,7 @@ class CallerTurnAssembler:
             )
             self._active_epoch = event.epoch
             self._seen_sequences.clear()
+            self._seen_sequence_order.clear()
             self._last_at_ms = event.at_ms
 
         if event.at_ms < self._last_at_ms:
@@ -253,6 +268,10 @@ class CallerTurnAssembler:
             self.duplicate_event_count += 1
             return tuple(emitted)
         self._seen_sequences.add(event.sequence)
+        self._seen_sequence_order.append(event.sequence)
+        if len(self._seen_sequence_order) > self._max_retained_sequences:
+            expired = self._seen_sequence_order.popleft()
+            self._seen_sequences.discard(expired)
 
         if event.kind is CallerTurnEventKind.RECONNECT_STARTED:
             if self._has_pending:

@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from app.services.caller_turn_alignment import (
     ActivityReference,
     AlignmentPolicy,
+    AlignmentStatus,
     CriticalSpan,
     CriticalSpanKind,
     FragmentMode,
@@ -99,6 +100,7 @@ WIRE_FACT_KINDS = frozenset(
         "audio_after_terminal",
         "audio_received",
         "caller_activity_end",
+        "caller_speech_end",
         "caller_activity_start",
         "caller_audio_sent",
         "connection_open",
@@ -626,6 +628,18 @@ def measure_activity(
         references=(expected_reference,),
         policy=alignment_policy,
     )
+    foreign_fragment_count = sum(
+        fragment_alignment.status is AlignmentStatus.MATCHED
+        and fragment_alignment.activity_ordinal != measurement.activity_ordinal
+        for fragment_alignment in (
+            align_fragments(
+                (fragment,),
+                references=measurement.references,
+                policy=alignment_policy,
+            )
+            for fragment in fragments
+        )
+    )
     reconstructed = reconstruct_fragments(fragments, policy=alignment_policy)
     normalized_reference = normalize_text(expected_reference.text, measurement.language)
     normalized_hypothesis = normalize_text(reconstructed, measurement.language)
@@ -699,9 +713,12 @@ def measure_activity(
             CriticalSpanFact(kind=value.kind.value, exact=value.exact)
             for value in expected_alignment.critical_spans
         ),
-        contamination_count=int(
-            alignment.activity_ordinal is not None
-            and alignment.activity_ordinal != measurement.activity_ordinal
+        contamination_count=max(
+            foreign_fragment_count,
+            int(
+                alignment.activity_ordinal is not None
+                and alignment.activity_ordinal != measurement.activity_ordinal
+            ),
         ),
         duplicate_count=max(0, len(turns) - 1),
         cross_epoch_acceptance_count=sum(
@@ -964,6 +981,7 @@ def derive_primitive_records_from_capsule(
             policy_ms: _attribute_session_events(
                 events,
                 references=references,
+                wire_facts=session["wire_facts"],
                 policy_ms=policy_ms,
                 advance_to_ms=max(
                     activity["advance_to_ms"] for activity in session_activities
@@ -1038,6 +1056,7 @@ def _attribute_session_events(
     events: tuple[CallerTurnEvent, ...],
     *,
     references: tuple[ActivityReference, ...],
+    wire_facts: list[Mapping[str, Any]],
     policy_ms: int,
     advance_to_ms: int,
 ) -> dict[int, tuple[CallerTurnEvent, ...]]:
@@ -1050,26 +1069,32 @@ def _attribute_session_events(
         advance_to_ms=advance_to_ms,
     )
     attributed: dict[int, list[CallerTurnEvent]] = {}
-    alignment_policy = AlignmentPolicy(fragment_mode=FragmentMode.DELTA)
-    for evidence in assembled:
+    causal_responses = tuple(
+        fact
+        for fact in sorted(
+            wire_facts,
+            key=lambda value: (value["at_ms"], value["sequence"]),
+        )
+        if fact["kind"] == "response_open"
+    )
+    reference_ordinals = {reference.activity_ordinal for reference in references}
+    if len(assembled) > len(causal_responses) or any(
+        fact["activity_ordinal"] not in reference_ordinals for fact in causal_responses
+    ):
+        raise MeasurementError("session turn lacks causal activity ownership")
+    reconstruction_policy = AlignmentPolicy(fragment_mode=FragmentMode.DELTA)
+    for evidence, response in zip(assembled, causal_responses, strict=False):
         fragments = tuple(
             event.text
             for event in evidence.events
             if event.kind is CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT
         )
         if (
-            reconstruct_fragments(fragments, policy=alignment_policy).strip()
+            reconstruct_fragments(fragments, policy=reconstruction_policy).strip()
             != evidence.turn.transcript
         ):
             raise MeasurementError("session turn transcript attribution disagrees")
-        alignment = align_fragments(
-            fragments,
-            references=references,
-            policy=alignment_policy,
-        )
-        attributed.setdefault(alignment.nearest_activity_ordinal, []).extend(
-            evidence.events
-        )
+        attributed.setdefault(response["activity_ordinal"], []).extend(evidence.events)
     return {ordinal: tuple(values) for ordinal, values in attributed.items()}
 
 
@@ -1500,9 +1525,18 @@ def _capsule_wire_observation(
         if value["kind"] == "caller_activity_end"
         and value["activity_ordinal"] == activity_ordinal
     ]
+    speech_ends = [
+        value["at_ms"]
+        for value in ordered
+        if value["kind"] == "caller_speech_end"
+        and value["activity_ordinal"] == activity_ordinal
+    ]
     if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
         raise MeasurementError("capsule activity boundaries are invalid")
-    if not starts[0] < speech_end_at_ms <= ends[0]:
+    if (
+        speech_ends != [speech_end_at_ms]
+        or not starts[0] < speech_end_at_ms <= ends[0]
+    ):
         raise MeasurementError("capsule speech boundary is invalid")
     response_opens = [
         value
@@ -1682,7 +1716,7 @@ def _reject_forbidden_capsule_keys(value: object) -> None:
 def _validate_wire_facts(raw: object) -> None:
     if not isinstance(raw, list) or len(raw) > 10_000:
         raise MeasurementError("audit capsule wire facts are invalid")
-    previous_receipt_at_ms = -1
+    previous_fact_at_ms = -1
     for index, raw_fact in enumerate(raw):
         fact = _strict_mapping(
             raw_fact,
@@ -1700,14 +1734,9 @@ def _validate_wire_facts(raw: object) -> None:
         if fact["kind"] not in WIRE_FACT_KINDS:
             raise MeasurementError("audit capsule wire fact kind is invalid")
         at_ms = _bounded_int(fact["at_ms"], label="wire fact time", maximum=7_200_000)
-        if fact["kind"] not in {
-            "caller_activity_start",
-            "caller_activity_end",
-            "caller_audio_sent",
-        }:
-            if at_ms < previous_receipt_at_ms:
-                raise MeasurementError("audit capsule receipt time moved backward")
-            previous_receipt_at_ms = at_ms
+        if at_ms < previous_fact_at_ms:
+            raise MeasurementError("audit capsule wire time moved backward")
+        previous_fact_at_ms = at_ms
         _optional_bounded_int(
             fact["response_ordinal"],
             label="response ordinal",
@@ -1744,13 +1773,22 @@ def _validate_response_wire_state(raw: list[Mapping[str, Any]]) -> None:
     active: tuple[int, int | None, int] | None = None
     opened: set[int] = set()
     closed: set[tuple[int, int | None, int]] = set()
+    latest_sent_activity: dict[int, int] = {}
     for fact in raw:
         kind = fact["kind"]
         response_ordinal = fact["response_ordinal"]
         identity = (response_ordinal, fact["activity_ordinal"], fact["epoch"])
+        if kind == "caller_audio_sent" and fact["activity_ordinal"] is not None:
+            latest_sent_activity[fact["epoch"]] = fact["activity_ordinal"]
         if kind == "response_open":
             if response_ordinal in opened or active is not None:
                 raise MeasurementError("capsule response-open facts are invalid")
+            if (
+                fact["activity_ordinal"] is not None
+                and latest_sent_activity.get(fact["epoch"])
+                != fact["activity_ordinal"]
+            ):
+                raise MeasurementError("capsule response ownership is not causal")
             opened.add(response_ordinal)
             active = identity
         elif kind == "audio_received":

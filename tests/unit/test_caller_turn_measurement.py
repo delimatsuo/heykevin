@@ -333,6 +333,15 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
                         "epoch": 1,
                         "audio_bytes": 0,
                     },
+                    {
+                        "kind": "caller_speech_end",
+                        "at_ms": 80,
+                        "response_ordinal": None,
+                        "activity_ordinal": 3,
+                        "sequence": 7,
+                        "epoch": 1,
+                        "audio_bytes": 0,
+                    },
                 ],
             }
         ],
@@ -364,6 +373,7 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
         ],
     }
 
+    _normalize_wire_sequences(capsule)
     activity_records, no_speech_records = derive_primitive_records_from_capsule(
         capsule,
         policies_ms=(100, 250, 500, 750),
@@ -459,20 +469,21 @@ def _literal_wire_capsule() -> dict[str, object]:
                 "wire_facts": [
                     fact("caller_activity_start", 0, 0),
                     fact("caller_audio_sent", 20, 1, audio_bytes=640),
-                    fact("caller_activity_end", 100, 2),
-                    fact("response_open", 220, 3, response_ordinal=1),
+                    fact("caller_speech_end", 80, 2),
+                    fact("caller_activity_end", 100, 3),
+                    fact("response_open", 220, 4, response_ordinal=1),
                     fact(
                         "audio_received",
                         220,
-                        4,
+                        5,
                         response_ordinal=1,
                         audio_bytes=640,
                     ),
-                    fact("response_terminal", 230, 5, response_ordinal=1),
+                    fact("response_terminal", 230, 6, response_ordinal=1),
                     fact(
                         "teardown_complete",
                         240,
-                        6,
+                        7,
                         activity_ordinal=None,
                     ),
                 ],
@@ -524,30 +535,24 @@ def test_literal_capsule_wire_mutations_derive_failing_primitives(
     capsule = _literal_wire_capsule()
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
     assert isinstance(facts, list)
+    response_open = next(fact for fact in facts if fact["kind"] == "response_open")
+    response_audio = next(fact for fact in facts if fact["kind"] == "audio_received")
+    response_terminal = next(
+        fact for fact in facts if fact["kind"] == "response_terminal"
+    )
+    teardown = next(fact for fact in facts if fact["kind"] == "teardown_complete")
     if mutation == "premature":
-        facts[3]["at_ms"] = 70
-        facts[4]["at_ms"] = 70
+        response_open["at_ms"] = 70
+        response_audio["at_ms"] = 70
     elif mutation == "gap":
-        facts.insert(
-            5,
-            {
-                **facts[4],
-                "at_ms": 721,
-            },
-        )
-        facts[6]["at_ms"] = 730
-        facts[7]["at_ms"] = 740
+        facts.append({**response_audio, "at_ms": 721})
+        response_terminal["at_ms"] = 730
+        teardown["at_ms"] = 740
     elif mutation == "after_terminal":
-        facts.insert(
-            6,
-            {
-                **facts[4],
-                "at_ms": 235,
-            },
-        )
-        facts[7]["at_ms"] = 240
+        facts.append({**response_audio, "at_ms": 235})
+        teardown["at_ms"] = 240
     else:
-        facts.pop(5)
+        facts.remove(response_terminal)
     _normalize_wire_sequences(capsule)
 
     records, _ = derive_primitive_records_from_capsule(
@@ -656,6 +661,12 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
         fact("response_terminal", 410, 15, activity=3, response=2),
         fact("teardown_complete", 420, 16, activity=None),
     ]
+    session["wire_facts"].extend(
+        (
+            fact("caller_speech_end", 80, 17, activity=2),
+            fact("caller_speech_end", 280, 18, activity=3),
+        )
+    )
     activities[:] = [
         {
             "activity_ordinal": 2,
@@ -687,6 +698,7 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
         },
     ]
 
+    _normalize_wire_sequences(capsule)
     records, _ = derive_primitive_records_from_capsule(
         capsule,
         policies_ms=(250,),
@@ -794,6 +806,12 @@ def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> 
         fact("response_terminal", 670, 11, activity=3, response=2),
         fact("teardown_complete", 700, 12, activity=None),
     ]
+    session["wire_facts"].extend(
+        (
+            fact("caller_speech_end", 80, 13, activity=2),
+            fact("caller_speech_end", 530, 14, activity=3),
+        )
+    )
     capsule["activities"] = [
         {
             "activity_ordinal": 2,
@@ -825,6 +843,7 @@ def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> 
         },
     ]
 
+    _normalize_wire_sequences(capsule)
     records, _ = derive_primitive_records_from_capsule(
         capsule,
         policies_ms=(250,),
@@ -848,11 +867,165 @@ def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> 
     assert by_activity[3].hypothesis_characters == len("secondphrase")
 
 
+def test_multi_activity_capsule_does_not_reassign_reversed_exact_transcripts() -> None:
+    capsule = _literal_wire_capsule()
+    session = capsule["sessions"][0]  # type: ignore[index]
+    session["events"] = [
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 50,
+            "sequence": 1,
+            "epoch": 1,
+            "text": "second phrase",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 100,
+            "sequence": 2,
+            "epoch": 1,
+            "text": "",
+        },
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 500,
+            "sequence": 3,
+            "epoch": 1,
+            "text": "first phrase",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 550,
+            "sequence": 4,
+            "epoch": 1,
+            "text": "",
+        },
+    ]
+
+    def fact(
+        kind: str,
+        at_ms: int,
+        sequence: int,
+        *,
+        activity: int | None,
+        response: int | None = None,
+        audio_bytes: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "kind": kind,
+            "at_ms": at_ms,
+            "response_ordinal": response,
+            "activity_ordinal": activity,
+            "sequence": sequence,
+            "epoch": 1,
+            "audio_bytes": audio_bytes,
+        }
+
+    session["wire_facts"] = [
+        fact("caller_activity_start", 0, 0, activity=2),
+        fact("caller_audio_sent", 20, 1, activity=2, audio_bytes=640),
+        fact("caller_activity_end", 100, 2, activity=2),
+        fact("response_open", 200, 3, activity=2, response=1),
+        fact("audio_received", 200, 4, activity=2, response=1, audio_bytes=320),
+        fact("response_terminal", 220, 5, activity=2, response=1),
+        fact("caller_activity_start", 450, 6, activity=3),
+        fact("caller_audio_sent", 470, 7, activity=3, audio_bytes=640),
+        fact("caller_activity_end", 550, 8, activity=3),
+        fact("response_open", 650, 9, activity=3, response=2),
+        fact("audio_received", 650, 10, activity=3, response=2, audio_bytes=320),
+        fact("response_terminal", 670, 11, activity=3, response=2),
+        fact("teardown_complete", 700, 12, activity=None),
+    ]
+    session["wire_facts"].extend(
+        (
+            fact("caller_speech_end", 80, 13, activity=2),
+            fact("caller_speech_end", 530, 14, activity=3),
+        )
+    )
+    capsule["activities"] = [
+        {
+            "activity_ordinal": 2,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "clean",
+            "scenario_tags": ["standard"],
+            "reference_text": "first phrase",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "speech_end_at_ms": 80,
+            "advance_to_ms": 900,
+        },
+        {
+            "activity_ordinal": 3,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "clean",
+            "scenario_tags": ["standard"],
+            "reference_text": "second phrase",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "speech_end_at_ms": 530,
+            "advance_to_ms": 900,
+        },
+    ]
+
+    _normalize_wire_sequences(capsule)
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert all(record.contamination_count == 1 for record in records)
+    assert all(
+        record.substitutions + record.insertions + record.deletions > 0
+        for record in records
+    )
+
+
+def test_measurement_detects_foreign_fragment_even_when_whole_turn_matches() -> None:
+    current = ActivityReference(3, "en", "book service today with customer details")
+    foreign = ActivityReference(4, "en", "intruder token")
+    measurement = replace(
+        _activity_input(),
+        references=(current, foreign),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                current.text,
+            ),
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                15,
+                2,
+                1,
+                foreign.text,
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 3, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.contamination_count == 1
+
+
 def test_duplicate_terminal_cannot_hide_audio_after_the_first_terminal() -> None:
     capsule = _literal_wire_capsule()
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
     assert isinstance(facts, list)
-    facts.insert(6, {**facts[5], "at_ms": 240})
+    terminal = next(fact for fact in facts if fact["kind"] == "response_terminal")
+    facts.append({**terminal, "at_ms": 240})
     _normalize_wire_sequences(capsule)
 
     with pytest.raises(MeasurementError, match="response-terminal"):
@@ -867,14 +1040,8 @@ def test_orphan_terminal_is_rejected_by_capsule_recomputation() -> None:
     capsule = _literal_wire_capsule()
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
     assert isinstance(facts, list)
-    facts.insert(
-        5,
-        {
-            **facts[5],
-            "at_ms": 225,
-            "response_ordinal": 99,
-        },
-    )
+    terminal = next(fact for fact in facts if fact["kind"] == "response_terminal")
+    facts.append({**terminal, "at_ms": 225, "response_ordinal": 99})
     _normalize_wire_sequences(capsule)
 
     with pytest.raises(MeasurementError, match="response-terminal"):
@@ -889,17 +1056,27 @@ def test_audio_reusing_closed_response_ordinal_with_wrong_identity_is_rejected()
     capsule = _literal_wire_capsule()
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
     assert isinstance(facts, list)
-    facts.insert(
-        6,
-        {
-            **facts[4],
-            "at_ms": 235,
-            "activity_ordinal": 4,
-        },
-    )
+    response_audio = next(fact for fact in facts if fact["kind"] == "audio_received")
+    facts.append({**response_audio, "at_ms": 235, "activity_ordinal": 4})
     _normalize_wire_sequences(capsule)
 
     with pytest.raises(MeasurementError, match="causally attributable"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
+def test_response_activity_label_must_match_latest_actual_caller_audio() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    for fact in facts:
+        if fact["kind"] in {"response_open", "audio_received", "response_terminal"}:
+            fact["activity_ordinal"] = 4
+
+    with pytest.raises(MeasurementError, match="ownership is not causal"):
         derive_primitive_records_from_capsule(
             capsule,
             policies_ms=(250,),

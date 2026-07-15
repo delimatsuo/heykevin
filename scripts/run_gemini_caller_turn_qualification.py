@@ -590,6 +590,7 @@ class WireFact:
             "audio_after_terminal",
             "audio_received",
             "caller_activity_end",
+            "caller_speech_end",
             "caller_activity_start",
             "caller_audio_sent",
             "connection_open",
@@ -802,6 +803,7 @@ async def execute_injected_session(
     connector: InjectedConnector,
     credential: SecretCredential,
     receipt_clock_ms: Callable[[], int],
+    outbound_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult] | None = None,
     request_reserver: Callable[[], None] | None = None,
@@ -813,8 +815,13 @@ async def execute_injected_session(
         raise TypeError("config must be a SessionExecutionConfig")
     if not isinstance(credential, SecretCredential):
         raise TypeError("credential must be a SecretCredential")
+    if not callable(outbound_clock_factory):
+        raise TypeError("outbound clock factory must be callable")
     reducer = secondary_reducer or independent_reduce_message
     validated_receipt_clock = _monotonic_receipt_clock(receipt_clock_ms)
+    validated_outbound_clock = _monotonic_receipt_clock(
+        outbound_clock_factory(plan)
+    )
     progress = _SessionProgress(
         wires={value.activity_ordinal: _MutableWire() for value in plan.activities}
     )
@@ -826,6 +833,7 @@ async def execute_injected_session(
                 connector=connector,
                 credential=credential,
                 receipt_clock_ms=validated_receipt_clock,
+                outbound_clock_ms=validated_outbound_clock,
                 sleep_ms=sleep_ms,
                 secondary_reducer=reducer,
                 request_reserver=request_reserver,
@@ -869,6 +877,7 @@ async def _execute_session_flow(
     connector: InjectedConnector,
     credential: SecretCredential,
     receipt_clock_ms: Callable[[], int],
+    outbound_clock_ms: Callable[[], int],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult],
     request_reserver: Callable[[], None] | None,
@@ -888,6 +897,9 @@ async def _execute_session_flow(
     provider_request_count = 0
     epoch_count = 0
     response_ordinal = 0
+    activity_started_at: dict[int, int] = {}
+    activity_speech_ended_at: dict[int, int] = {}
+    activity_ended_at: dict[int, int] = {}
 
     for epoch, base_at_ms, replay_inputs in _connection_segments(plan):
         if active_response_activity is not None:
@@ -964,36 +976,84 @@ async def _execute_session_flow(
                 previous_at_ms = base_at_ms
                 try:
                     for replay_input in replay_inputs:
-                        delay = replay_input.at_ms - previous_at_ms
+                        cursor_at_ms = previous_at_ms
+                        crossed_speech_ends = sorted(
+                            (
+                                activity
+                                for activity in plan.activities
+                                if activity.expected_epoch == epoch
+                                and activity.activity_ordinal
+                                not in activity_speech_ended_at
+                                and cursor_at_ms
+                                < activity.speech_end_at_ms
+                                <= replay_input.at_ms
+                            ),
+                            key=lambda activity: activity.speech_end_at_ms,
+                        )
+                        for activity in crossed_speech_ends:
+                            delay = activity.speech_end_at_ms - cursor_at_ms
+                            if delay > 0:
+                                await sleep_ms(delay)
+                            cursor_at_ms = activity.speech_end_at_ms
+                            actual_at_ms = outbound_clock_ms()
+                            activity_speech_ended_at[
+                                activity.activity_ordinal
+                            ] = actual_at_ms
+                            _record_wire_fact(
+                                wire_facts,
+                                "caller_speech_end",
+                                actual_at_ms,
+                                epoch=activity.expected_epoch,
+                                activity_ordinal=activity.activity_ordinal,
+                            )
+                        delay = replay_input.at_ms - cursor_at_ms
                         if delay > 0:
                             await sleep_ms(delay)
                         previous_at_ms = replay_input.at_ms
-                        if replay_input.kind in {
-                            "caller_activity_start",
-                            "caller_activity_end",
-                        }:
-                            _record_wire_fact(
-                                wire_facts,
-                                replay_input.kind,
-                                replay_input.at_ms,
-                                epoch=replay_input.epoch,
-                                activity_ordinal=replay_input.activity_ordinal,
-                            )
-                        elif replay_input.kind == "audio":
-                            _record_wire_fact(
-                                wire_facts,
-                                "caller_audio_sent",
-                                replay_input.at_ms,
-                                epoch=replay_input.epoch,
-                                activity_ordinal=replay_input.activity_ordinal,
-                                audio_bytes=len(replay_input.audio),
-                            )
                         if replay_input.kind in interaction_events:
                             await interaction_events[replay_input.kind].wait()
                             continue
                         outbound = _outbound_message(replay_input)
                         if outbound is not None:
                             await session.send(outbound)
+                        if replay_input.kind == "caller_activity_start":
+                            _record_wire_fact(
+                                wire_facts,
+                                replay_input.kind,
+                                outbound_clock_ms(),
+                                epoch=replay_input.epoch,
+                                activity_ordinal=replay_input.activity_ordinal,
+                            )
+                        elif replay_input.kind == "audio":
+                            actual_at_ms = outbound_clock_ms()
+                            if replay_input.activity_ordinal is None:
+                                raise RunnerError("audio activity identity is missing")
+                            activity_started_at.setdefault(
+                                replay_input.activity_ordinal,
+                                actual_at_ms,
+                            )
+                            _record_wire_fact(
+                                wire_facts,
+                                "caller_audio_sent",
+                                actual_at_ms,
+                                epoch=replay_input.epoch,
+                                activity_ordinal=replay_input.activity_ordinal,
+                                audio_bytes=len(replay_input.audio),
+                            )
+                        elif replay_input.kind == "caller_activity_end":
+                            if replay_input.activity_ordinal is None:
+                                raise RunnerError("activity end identity is missing")
+                            actual_at_ms = outbound_clock_ms()
+                            activity_ended_at[replay_input.activity_ordinal] = actual_at_ms
+                            _record_wire_fact(
+                                wire_facts,
+                                replay_input.kind,
+                                actual_at_ms,
+                                epoch=replay_input.epoch,
+                                activity_ordinal=replay_input.activity_ordinal,
+                            )
+                except _ReceiptClockError:
+                    sender_error = "receipt_clock_invalid"
                 except TimeoutError:
                     raise
                 except Exception:
@@ -1195,7 +1255,12 @@ async def _execute_session_flow(
                     break
                 sequence += len(primary.events)
                 audit_events.extend(primary.events)
-                latest_activity = _latest_activity(plan.activities, at_ms, epoch=epoch)
+                latest_activity = _latest_sent_activity(
+                    plan.activities,
+                    activity_started_at,
+                    at_ms=at_ms,
+                    epoch=epoch,
+                )
                 latest_ordinal = (
                     latest_activity.activity_ordinal if latest_activity is not None else None
                 )
@@ -1311,7 +1376,12 @@ async def _execute_session_flow(
                         )
                         break
                     if active_response_activity is None:
-                        activity = _latest_activity(plan.activities, at_ms, epoch=epoch)
+                        activity = _latest_sent_activity(
+                            plan.activities,
+                            activity_started_at,
+                            at_ms=at_ms,
+                            epoch=epoch,
+                        )
                         if activity is None:
                             error_code = "unattributed_response"
                             break
@@ -1337,29 +1407,38 @@ async def _execute_session_flow(
                             activity_ordinal=active_response_activity,
                         )
                     else:
-                        newer = _latest_activity(plan.activities, at_ms, epoch=epoch)
+                        newer = _latest_sent_activity(
+                            plan.activities,
+                            activity_started_at,
+                            at_ms=at_ms,
+                            epoch=epoch,
+                        )
                         if (
                             newer is not None
                             and newer.activity_ordinal != active_response_activity
-                            and newer.start_at_ms <= at_ms
                         ):
                             wires[newer.activity_ordinal].interruption_tail_ms = (
-                                at_ms - newer.start_at_ms
+                                at_ms - activity_started_at[newer.activity_ordinal]
                             )
-                    response_activity = next(
-                        value
-                        for value in plan.activities
-                        if value.activity_ordinal == active_response_activity
-                    )
                     if wires[active_response_activity].first_audio_ms is None:
-                        if at_ms < response_activity.end_at_ms:
+                        actual_end_at_ms = activity_ended_at.get(
+                            active_response_activity
+                        )
+                        actual_speech_end_at_ms = activity_speech_ended_at.get(
+                            active_response_activity
+                        )
+                        if (
+                            actual_end_at_ms is None
+                            or actual_speech_end_at_ms is None
+                            or at_ms < actual_end_at_ms
+                        ):
                             wires[
                                 active_response_activity
                             ].premature_current_audio_count += 1
                             error_code = "premature_current_response"
                         else:
                             wires[active_response_activity].first_audio_ms = (
-                                at_ms - response_activity.speech_end_at_ms
+                                at_ms - actual_speech_end_at_ms
                             )
                     if last_response_audio_ms is not None and (
                         at_ms - last_response_audio_ms > config.response_gap_limit_ms
@@ -1526,6 +1605,7 @@ async def execute_injected_no_speech_window(
     connector: InjectedConnector,
     credential: SecretCredential,
     receipt_clock_ms: Callable[[], int],
+    outbound_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult] | None = None,
     request_reserver: Callable[[], None] | None = None,
@@ -1537,7 +1617,12 @@ async def execute_injected_no_speech_window(
         raise TypeError("config must be a SessionExecutionConfig")
     if not isinstance(credential, SecretCredential):
         raise TypeError("credential must be a SecretCredential")
+    if not callable(outbound_clock_factory):
+        raise TypeError("outbound clock factory must be callable")
     validated_receipt_clock = _monotonic_receipt_clock(receipt_clock_ms)
+    validated_outbound_clock = _monotonic_receipt_clock(
+        outbound_clock_factory(plan)
+    )
     try:
         return await asyncio.wait_for(
             _execute_no_speech_flow(
@@ -1546,6 +1631,7 @@ async def execute_injected_no_speech_window(
                 connector=connector,
                 credential=credential,
                 receipt_clock_ms=validated_receipt_clock,
+                outbound_clock_ms=validated_outbound_clock,
                 sleep_ms=sleep_ms,
                 secondary_reducer=secondary_reducer or independent_reduce_message,
                 request_reserver=request_reserver,
@@ -1567,6 +1653,7 @@ async def _execute_no_speech_flow(
     connector: InjectedConnector,
     credential: SecretCredential,
     receipt_clock_ms: Callable[[], int],
+    outbound_clock_ms: Callable[[], int],
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult],
     request_reserver: Callable[[], None] | None,
@@ -1628,6 +1715,15 @@ async def _execute_no_speech_flow(
                                 provider=DEVELOPER_PROVIDER,
                             )
                         )
+                        _record_wire_fact(
+                            wire_facts,
+                            "caller_audio_sent",
+                            outbound_clock_ms(),
+                            epoch=1,
+                            audio_bytes=len(replay_input.audio),
+                        )
+                except _ReceiptClockError:
+                    sender_error = "receipt_clock_invalid"
                 except TimeoutError:
                     raise
                 except Exception:
@@ -1859,13 +1955,17 @@ async def _execute_no_speech_flow(
                 await sender_task
             except (asyncio.CancelledError, TimeoutError):
                 pass
+        teardown_at_ms = max(
+            last_receipt_ms,
+            max((fact.at_ms for fact in wire_facts), default=last_receipt_ms),
+        )
         try:
             await session.close()
         except Exception:
             _record_wire_fact(
                 wire_facts,
                 "teardown_failed",
-                last_receipt_ms,
+                teardown_at_ms,
                 epoch=1,
             )
             if error_code is None:
@@ -1874,7 +1974,7 @@ async def _execute_no_speech_flow(
             _record_wire_fact(
                 wire_facts,
                 "teardown_complete",
-                last_receipt_ms,
+                teardown_at_ms,
                 epoch=1,
             )
 
@@ -2135,6 +2235,7 @@ async def execute_authorized_attempt(
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
     receipt_clock_factory: Callable[[object], Callable[[], int]],
+    outbound_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     custodian_public_key: bytes,
@@ -2331,6 +2432,7 @@ async def execute_authorized_attempt(
                         connector=connector,
                         credential=credential,
                         receipt_clock_factory=receipt_clock_factory,
+                        outbound_clock_factory=outbound_clock_factory,
                         sleep_ms=sleep_ms,
                         pricing=pricing,
                         run_cost_limit_microusd=claim.cost_reserved_microusd,
@@ -2516,6 +2618,7 @@ async def execute_authorized_holdout(
     credential_loader: Callable[[str], SecretCredential],
     connector_factory: Callable[[SecretCredential], InjectedConnector],
     receipt_clock_factory: Callable[[object], Callable[[], int]],
+    outbound_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     custodian_public_key: bytes,
@@ -2744,6 +2847,7 @@ async def execute_authorized_holdout(
                         connector=connector,
                         credential=credential,
                         receipt_clock_factory=receipt_clock_factory,
+                        outbound_clock_factory=outbound_clock_factory,
                         sleep_ms=sleep_ms,
                         pricing=pricing,
                         run_cost_limit_microusd=remaining_cost_microusd,
@@ -2885,6 +2989,7 @@ async def _execute_attempt_work(
     connector: InjectedConnector,
     credential: SecretCredential,
     receipt_clock_factory: Callable[[object], Callable[[], int]],
+    outbound_clock_factory: Callable[[object], Callable[[], int]],
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     run_cost_limit_microusd: int,
@@ -2902,6 +3007,7 @@ async def _execute_attempt_work(
             connector=connector,
             credential=credential,
             receipt_clock_ms=receipt_clock_factory(plan),
+            outbound_clock_factory=outbound_clock_factory,
             sleep_ms=sleep_ms,
         )
         running_usage = _add_usage(running_usage, result.usage)
@@ -2924,6 +3030,7 @@ async def _execute_attempt_work(
             connector=connector,
             credential=credential,
             receipt_clock_ms=receipt_clock_factory(plan),
+            outbound_clock_factory=outbound_clock_factory,
             sleep_ms=sleep_ms,
         )
         running_usage = _add_usage(running_usage, result.usage)
@@ -3410,7 +3517,7 @@ def _build_audit_capsule(
                 "session_ordinal": plan.session_ordinal,
                 "split": plan.split,
                 "events": events,
-                "wire_facts": [fact.to_dict() for fact in result.wire_facts],
+                "wire_facts": _ordered_wire_fact_dicts(result.wire_facts),
             }
         )
         accounting_units.append(
@@ -3426,6 +3533,20 @@ def _build_audit_capsule(
             )
         )
         for activity in plan.activities:
+            speech_end_facts = [
+                fact.at_ms
+                for fact in result.wire_facts
+                if fact.kind == "caller_speech_end"
+                and fact.activity_ordinal == activity.activity_ordinal
+            ]
+            activity_end_facts = [
+                fact.at_ms
+                for fact in result.wire_facts
+                if fact.kind == "caller_activity_end"
+                and fact.activity_ordinal == activity.activity_ordinal
+            ]
+            if len(speech_end_facts) != 1 or len(activity_end_facts) != 1:
+                raise RunnerError("successful activity lacks actual outbound boundaries")
             activities.append(
                 {
                     "activity_ordinal": activity.activity_ordinal,
@@ -3445,9 +3566,9 @@ def _build_audit_capsule(
                     ],
                     "expected_lifecycle_status": activity.expected_lifecycle_status,
                     "expected_epoch": activity.expected_epoch,
-                    "speech_end_at_ms": activity.speech_end_at_ms,
+                    "speech_end_at_ms": speech_end_facts[0],
                     "advance_to_ms": max(
-                        activity.end_at_ms + max(VALID_POLICIES_MS),
+                        activity_end_facts[0] + max(VALID_POLICIES_MS),
                         latest_event_ms,
                     ),
                 }
@@ -3484,7 +3605,7 @@ def _build_audit_capsule(
                 "window_ordinal": plan.window_ordinal,
                 "split": plan.split,
                 "condition": plan.condition,
-                "wire_facts": [fact.to_dict() for fact in result.wire_facts],
+                "wire_facts": _ordered_wire_fact_dicts(result.wire_facts),
             }
             for plan, result in no_speech_results
         ],
@@ -3513,6 +3634,15 @@ def _accounting_unit(
         "output_audio_bytes": result.output_audio_bytes,
         **result.usage.to_dict(),
     }
+
+
+def _ordered_wire_fact_dicts(facts: tuple[WireFact, ...]) -> list[dict[str, Any]]:
+    return [
+        {**fact.to_dict(), "sequence": sequence}
+        for sequence, fact in enumerate(
+            sorted(facts, key=lambda value: (value.at_ms, value.sequence))
+        )
+    ]
 
 
 def _replay_observation_end_ms(replay_inputs: Sequence[Gate0BReplayInput]) -> int:
@@ -4153,6 +4283,33 @@ def _latest_activity(
         if value.expected_epoch == epoch and value.start_at_ms <= at_ms
     ]
     return max(eligible, key=lambda value: value.start_at_ms) if eligible else None
+
+
+def _latest_sent_activity(
+    activities: tuple[SessionActivityPlan, ...],
+    activity_started_at: Mapping[int, int],
+    *,
+    at_ms: int,
+    epoch: int,
+) -> SessionActivityPlan | None:
+    eligible = [
+        activity
+        for activity in activities
+        if activity.expected_epoch == epoch
+        and activity.activity_ordinal in activity_started_at
+        and activity_started_at[activity.activity_ordinal] <= at_ms
+    ]
+    return (
+        max(
+            eligible,
+            key=lambda activity: (
+                activity_started_at[activity.activity_ordinal],
+                activity.activity_ordinal,
+            ),
+        )
+        if eligible
+        else None
+    )
 
 
 def _has_response_terminal(message: Mapping[str, Any]) -> bool:

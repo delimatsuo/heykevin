@@ -29,6 +29,11 @@ DEVELOPER_MODEL = "gemini-3.1-flash-live-preview"
 VERTEX_MODEL = "gemini-live-2.5-flash-native-audio"
 VERTEX_LOCATION = "us-central1"
 COLD_SINGLE_TURN_SCOPE = "cold_single_turn"
+GATE_0B_RENDERED_ACTIVITY_SCHEMA_ID = "gate_0b_rendered_activity_v1"
+GATE_0B_MAX_ACTIVITIES_PER_SESSION = 10
+GATE_0B_MAX_SESSION_DURATION_MS = 120_000
+GATE_0B_FRAME_PATTERN_MS = {20, 30, 40}
+GATE_0B_CODEC_REMAINDER_BYTES = 2
 AUTOMATIC_LATENCY_P95_LIMIT_MS = 1_500
 AUTOMATIC_LATENCY_MAX_LIMIT_MS = 2_500
 MANUAL_LATENCY_P95_LIMIT_MS = 1_500
@@ -118,6 +123,116 @@ class RenderedVoiceTurn:
 class VoiceReplayInput:
     kind: str
     at_ms: int
+    audio: bytes = b""
+    duration_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Gate0BReplayActivity:
+    activity_ordinal: int
+    source_path: Path
+    source_sha256: str
+    twilio_roundtrip_sha256: str
+    duration_ms: int
+    speech_start_ms: int
+    speech_end_ms: int
+    scenario_tags: tuple[str, ...] = ()
+    fresh_restart_after: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_gate0b_ordinal(self.activity_ordinal, label="activity_ordinal")
+        _validate_gate0b_source_fields(
+            self.source_path,
+            self.source_sha256,
+            self.twilio_roundtrip_sha256,
+            self.duration_ms,
+        )
+        if (
+            isinstance(self.speech_start_ms, bool)
+            or not isinstance(self.speech_start_ms, int)
+            or isinstance(self.speech_end_ms, bool)
+            or not isinstance(self.speech_end_ms, int)
+            or self.speech_start_ms < 0
+            or self.speech_end_ms <= self.speech_start_ms
+            or self.speech_end_ms > self.duration_ms
+        ):
+            raise ValueError("Gate 0B speech boundaries are invalid")
+        if not isinstance(self.scenario_tags, tuple) or any(
+            not isinstance(tag, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_]{0,63}", tag)
+            for tag in self.scenario_tags
+        ):
+            raise ValueError("Gate 0B scenario tags are invalid")
+        if not isinstance(self.fresh_restart_after, bool):
+            raise TypeError("fresh_restart_after must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class Gate0BNoSpeechWindow:
+    window_ordinal: int
+    source_path: Path
+    source_sha256: str
+    twilio_roundtrip_sha256: str
+    duration_ms: int
+
+    def __post_init__(self) -> None:
+        _validate_gate0b_ordinal(self.window_ordinal, label="window_ordinal")
+        _validate_gate0b_source_fields(
+            self.source_path,
+            self.source_sha256,
+            self.twilio_roundtrip_sha256,
+            self.duration_ms,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Gate0BReplaySession:
+    session_ordinal: int
+    activities: tuple[Gate0BReplayActivity, ...]
+    inter_activity_gap_ms: int = 500
+
+    def __post_init__(self) -> None:
+        _validate_gate0b_ordinal(self.session_ordinal, label="session_ordinal")
+        if (
+            not isinstance(self.activities, tuple)
+            or not 1 <= len(self.activities) <= GATE_0B_MAX_ACTIVITIES_PER_SESSION
+            or not all(isinstance(activity, Gate0BReplayActivity) for activity in self.activities)
+        ):
+            raise ValueError("Gate 0B sessions require at most 10 typed activities")
+        ordinals = [activity.activity_ordinal for activity in self.activities]
+        if len(ordinals) != len(set(ordinals)):
+            raise ValueError("Gate 0B session activity ordinals must be unique")
+        if sum(activity.fresh_restart_after for activity in self.activities) > 1:
+            raise ValueError("Gate 0B session permits at most one fresh restart")
+        if self.activities[-1].fresh_restart_after:
+            raise ValueError("Gate 0B fresh restart requires a following activity")
+        if (
+            isinstance(self.inter_activity_gap_ms, bool)
+            or not isinstance(self.inter_activity_gap_ms, int)
+            or not 0 <= self.inter_activity_gap_ms <= 5_000
+        ):
+            raise ValueError("Gate 0B inter-activity gap is invalid")
+        total = sum(activity.duration_ms for activity in self.activities) + (
+            max(0, len(self.activities) - 1) * self.inter_activity_gap_ms
+        )
+        if total > GATE_0B_MAX_SESSION_DURATION_MS:
+            raise ValueError("Gate 0B session exceeds the 120 second bound")
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedGate0BActivity:
+    schema_id: str
+    pcm16k: bytes
+    duration_ms: int
+    speech_start_ms: int | None
+    speech_end_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class Gate0BReplayInput:
+    kind: str
+    at_ms: int
+    epoch: int
+    activity_ordinal: int | None
     audio: bytes = b""
     duration_ms: int = 0
 
@@ -288,6 +403,243 @@ def voice_turn_manifest_identity(
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         "corpus_sha256": hashlib.sha256(canonical).hexdigest(),
     }
+
+
+def compute_gate0b_roundtrip_sha256(pcm16k: bytes) -> str:
+    """Return the exact PCM16 16k -> Twilio mulaw 8k -> PCM16 16k digest."""
+    if not isinstance(pcm16k, bytes) or not pcm16k or len(pcm16k) % 2:
+        raise ValueError("Gate 0B PCM16 input must contain complete samples")
+    pcm8k, _ = audioop.ratecv(pcm16k, 2, 1, 16_000, 8_000, None)
+    mulaw8 = audioop.lin2ulaw(pcm8k, 2)
+    return hashlib.sha256(mulaw_to_pcm16k(mulaw8)).hexdigest()
+
+
+def render_gate0b_activity(activity: Gate0BReplayActivity) -> RenderedGate0BActivity:
+    """Render one validated Gate 0B activity through the production codec transform."""
+    if not isinstance(activity, Gate0BReplayActivity):
+        raise TypeError("activity must be a Gate0BReplayActivity")
+    pcm16k = _render_gate0b_source(activity)
+    return RenderedGate0BActivity(
+        schema_id=GATE_0B_RENDERED_ACTIVITY_SCHEMA_ID,
+        pcm16k=pcm16k,
+        duration_ms=activity.duration_ms,
+        speech_start_ms=activity.speech_start_ms,
+        speech_end_ms=activity.speech_end_ms,
+    )
+
+
+def render_gate0b_no_speech_window(
+    window: Gate0BNoSpeechWindow,
+) -> RenderedGate0BActivity:
+    """Render one validated no-speech window without inventing activity boundaries."""
+    if not isinstance(window, Gate0BNoSpeechWindow):
+        raise TypeError("window must be a Gate0BNoSpeechWindow")
+    pcm16k = _render_gate0b_source(window)
+    return RenderedGate0BActivity(
+        schema_id=GATE_0B_RENDERED_ACTIVITY_SCHEMA_ID,
+        pcm16k=pcm16k,
+        duration_ms=window.duration_ms,
+        speech_start_ms=None,
+        speech_end_ms=None,
+    )
+
+
+def build_gate0b_activity_inputs(
+    rendered: RenderedGate0BActivity,
+    *,
+    activity_ordinal: int | None,
+    epoch: int,
+    start_at_ms: int,
+    frame_pattern_ms: tuple[int, ...],
+    include_activity_boundaries: bool = True,
+) -> tuple[Gate0BReplayInput, ...]:
+    """Build a deterministic, local-only Gate 0B paced activity schedule."""
+    if not isinstance(rendered, RenderedGate0BActivity):
+        raise TypeError("rendered must be a RenderedGate0BActivity")
+    if rendered.schema_id != GATE_0B_RENDERED_ACTIVITY_SCHEMA_ID:
+        raise ValueError("unsupported Gate 0B rendered activity schema")
+    if activity_ordinal is not None:
+        _validate_gate0b_ordinal(activity_ordinal, label="activity_ordinal")
+    if include_activity_boundaries and activity_ordinal is None:
+        raise ValueError("activity boundaries require an activity ordinal")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or not 1 <= epoch <= 1_000:
+        raise ValueError("Gate 0B epoch is invalid")
+    if (
+        isinstance(start_at_ms, bool)
+        or not isinstance(start_at_ms, int)
+        or not 0 <= start_at_ms <= GATE_0B_MAX_SESSION_DURATION_MS
+    ):
+        raise ValueError("Gate 0B start time is invalid")
+    _validate_gate0b_frame_pattern(frame_pattern_ms)
+    nominal_bytes = rendered.duration_ms * 16_000 * 2 // 1_000
+    if len(rendered.pcm16k) != nominal_bytes - GATE_0B_CODEC_REMAINDER_BYTES:
+        raise ValueError("Gate 0B rendered duration does not match PCM length")
+
+    events: list[Gate0BReplayInput] = []
+    if include_activity_boundaries:
+        events.append(
+            Gate0BReplayInput(
+                kind="caller_activity_start",
+                at_ms=start_at_ms,
+                epoch=epoch,
+                activity_ordinal=activity_ordinal,
+            )
+        )
+    position = 0
+    elapsed_ms = 0
+    pattern_index = 0
+    bytes_per_ms = 16_000 * 2 // 1_000
+    while position < len(rendered.pcm16k):
+        requested_ms = frame_pattern_ms[pattern_index % len(frame_pattern_ms)]
+        pattern_index += 1
+        duration_ms = min(requested_ms, rendered.duration_ms - elapsed_ms)
+        chunk_end = position + duration_ms * bytes_per_ms
+        if elapsed_ms + duration_ms == rendered.duration_ms:
+            chunk_end = len(rendered.pcm16k)
+        chunk = rendered.pcm16k[position:chunk_end]
+        events.append(
+            Gate0BReplayInput(
+                kind="audio",
+                at_ms=start_at_ms + elapsed_ms,
+                epoch=epoch,
+                activity_ordinal=activity_ordinal,
+                audio=chunk,
+                duration_ms=duration_ms,
+            )
+        )
+        position += len(chunk)
+        elapsed_ms += duration_ms
+    if elapsed_ms != rendered.duration_ms:
+        raise ValueError("Gate 0B rendered audio did not fill its nominal duration")
+    if include_activity_boundaries:
+        events.append(
+            Gate0BReplayInput(
+                kind="caller_activity_end",
+                at_ms=start_at_ms + rendered.duration_ms,
+                epoch=epoch,
+                activity_ordinal=activity_ordinal,
+            )
+        )
+    return tuple(events)
+
+
+def build_gate0b_session_inputs(
+    session: Gate0BReplaySession,
+    *,
+    frame_pattern_ms: tuple[int, ...],
+) -> tuple[Gate0BReplayInput, ...]:
+    """Build a bounded multi-activity schedule with local interaction expectations."""
+    if not isinstance(session, Gate0BReplaySession):
+        raise TypeError("session must be a Gate0BReplaySession")
+    _validate_gate0b_frame_pattern(frame_pattern_ms)
+    events: list[Gate0BReplayInput] = []
+    epoch = 1
+    start_at_ms = 0
+    for index, activity in enumerate(session.activities):
+        rendered = render_gate0b_activity(activity)
+        events.extend(
+            build_gate0b_activity_inputs(
+                rendered,
+                activity_ordinal=activity.activity_ordinal,
+                epoch=epoch,
+                start_at_ms=start_at_ms,
+                frame_pattern_ms=frame_pattern_ms,
+            )
+        )
+        activity_end_ms = start_at_ms + rendered.duration_ms
+        marker_kinds = []
+        if "synchronous_tool_use" in activity.scenario_tags:
+            marker_kinds.append("expect_synchronous_tool")
+        if "tool_cancellation_interruption" in activity.scenario_tags:
+            marker_kinds.extend(("expect_tool_cancellation", "expect_interruption"))
+        for kind in marker_kinds:
+            events.append(
+                Gate0BReplayInput(
+                    kind=kind,
+                    at_ms=activity_end_ms,
+                    epoch=epoch,
+                    activity_ordinal=activity.activity_ordinal,
+                )
+            )
+        if activity.fresh_restart_after:
+            epoch += 1
+            events.append(
+                Gate0BReplayInput(
+                    kind="fresh_connection_restart",
+                    at_ms=activity_end_ms,
+                    epoch=epoch,
+                    activity_ordinal=activity.activity_ordinal,
+                )
+            )
+        if index < len(session.activities) - 1:
+            start_at_ms = activity_end_ms + session.inter_activity_gap_ms
+    if events and events[-1].at_ms > GATE_0B_MAX_SESSION_DURATION_MS:
+        raise ValueError("Gate 0B schedule exceeds the session bound")
+    return tuple(events)
+
+
+def _render_gate0b_source(
+    source: Gate0BReplayActivity | Gate0BNoSpeechWindow,
+) -> bytes:
+    path = source.source_path
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Gate 0B source must be a regular file")
+    expected_bytes = source.duration_ms * 16_000 * 2 // 1_000
+    if path.stat().st_size != expected_bytes:
+        raise ValueError("Gate 0B source duration does not match PCM length")
+    payload = path.read_bytes()
+    if len(payload) != expected_bytes:
+        raise ValueError("Gate 0B source duration does not match PCM length")
+    if hashlib.sha256(payload).hexdigest() != source.source_sha256:
+        raise ValueError("Gate 0B source digest mismatch")
+    pcm8k, _ = audioop.ratecv(payload, 2, 1, 16_000, 8_000, None)
+    mulaw8 = audioop.lin2ulaw(pcm8k, 2)
+    rendered = mulaw_to_pcm16k(mulaw8)
+    if len(rendered) != expected_bytes - GATE_0B_CODEC_REMAINDER_BYTES:
+        raise ValueError("Gate 0B codec render length is not reproducible")
+    if hashlib.sha256(rendered).hexdigest() != source.twilio_roundtrip_sha256:
+        raise ValueError("Gate 0B Twilio roundtrip digest mismatch")
+    return rendered
+
+
+def _validate_gate0b_ordinal(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10_000:
+        raise ValueError(f"{label} is outside its Gate 0B bound")
+    return value
+
+
+def _validate_gate0b_source_fields(
+    source_path: Path,
+    source_sha256: str,
+    roundtrip_sha256: str,
+    duration_ms: int,
+) -> None:
+    if not isinstance(source_path, Path):
+        raise TypeError("Gate 0B source_path must be a Path")
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise ValueError("Gate 0B source checksum must be SHA-256")
+    if not re.fullmatch(r"[0-9a-f]{64}", roundtrip_sha256):
+        raise ValueError("Gate 0B roundtrip checksum must be SHA-256")
+    if (
+        isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or not 20 <= duration_ms <= 30_000
+    ):
+        raise ValueError("Gate 0B duration is invalid")
+
+
+def _validate_gate0b_frame_pattern(frame_pattern_ms: tuple[int, ...]) -> None:
+    if (
+        not isinstance(frame_pattern_ms, tuple)
+        or not frame_pattern_ms
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value not in GATE_0B_FRAME_PATTERN_MS
+            for value in frame_pattern_ms
+        )
+    ):
+        raise ValueError("Gate 0B frame pattern supports only 20, 30, or 40 ms")
 
 
 def _load_voice_turn_source(

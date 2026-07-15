@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import struct
 import sys
 
 import pytest
@@ -15,8 +16,12 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 import app.services.voice_turn_replay as replay_module
+from app.services.caller_turn_qualification import compute_twilio_roundtrip_sha256
 from app.services.voice_turn_replay import (
     DEVELOPER_PROVIDER,
+    Gate0BNoSpeechWindow,
+    Gate0BReplayActivity,
+    Gate0BReplaySession,
     RenderedVoiceTurn,
     VERTEX_PROVIDER,
     VoiceReplayAttempt,
@@ -26,10 +31,14 @@ from app.services.voice_turn_replay import (
     build_gemini_activity_message,
     build_gemini_audio_message,
     build_gemini_setup_message,
+    build_gate0b_activity_inputs,
+    build_gate0b_session_inputs,
     build_paired_schedule,
     build_replay_inputs,
     evaluate_voice_turn_benchmark,
     load_voice_turn_cases,
+    render_gate0b_activity,
+    render_gate0b_no_speech_window,
     render_voice_turn_case,
     voice_turn_manifest_identity,
 )
@@ -53,6 +62,160 @@ PROVIDER_RUNBOOKS = (
     Path("docs/gemini-live-offline-replay.md"),
     FIXTURE_DIR / "README.md",
 )
+
+
+def _gate0b_activity(
+    tmp_path: Path,
+    *,
+    ordinal: int,
+    scenario_tags: tuple[str, ...] = (),
+    fresh_restart_after: bool = False,
+) -> Gate0BReplayActivity:
+    source = tmp_path / f"activity_{ordinal}.pcm"
+    payload = struct.pack("<1600h", *([1_000 + ordinal] * 1_600))
+    source.write_bytes(payload)
+    return Gate0BReplayActivity(
+        activity_ordinal=ordinal,
+        source_path=source,
+        source_sha256=hashlib.sha256(payload).hexdigest(),
+        twilio_roundtrip_sha256=replay_module.compute_gate0b_roundtrip_sha256(payload),
+        duration_ms=100,
+        speech_start_ms=0,
+        speech_end_ms=100,
+        scenario_tags=scenario_tags,
+        fresh_restart_after=fresh_restart_after,
+    )
+
+
+def test_gate0b_replay_is_namespaced_and_preserves_twilio_roundtrip(tmp_path):
+    activity = _gate0b_activity(tmp_path, ordinal=1)
+
+    rendered = render_gate0b_activity(activity)
+    events = build_gate0b_activity_inputs(
+        rendered,
+        activity_ordinal=activity.activity_ordinal,
+        epoch=1,
+        start_at_ms=0,
+        frame_pattern_ms=(20, 30, 40),
+    )
+
+    assert rendered.schema_id == "gate_0b_rendered_activity_v1"
+    assert hashlib.sha256(rendered.pcm16k).hexdigest() == activity.twilio_roundtrip_sha256
+    assert replay_module.compute_gate0b_roundtrip_sha256(
+        activity.source_path.read_bytes()
+    ) == compute_twilio_roundtrip_sha256(activity.source_path.read_bytes())
+    assert events[0].kind == "caller_activity_start"
+    assert events[-1].kind == "caller_activity_end"
+    assert [event.duration_ms for event in events if event.kind == "audio"] == [20, 30, 40, 10]
+    assert sum(event.duration_ms for event in events if event.kind == "audio") == 100
+
+
+def test_gate0b_timing_variation_does_not_mutate_audio_payload(tmp_path):
+    activity = _gate0b_activity(tmp_path, ordinal=1)
+    rendered = render_gate0b_activity(activity)
+
+    first = build_gate0b_activity_inputs(
+        rendered,
+        activity_ordinal=1,
+        epoch=1,
+        start_at_ms=0,
+        frame_pattern_ms=(20, 30, 40),
+    )
+    second = build_gate0b_activity_inputs(
+        rendered,
+        activity_ordinal=1,
+        epoch=1,
+        start_at_ms=0,
+        frame_pattern_ms=(40, 30, 20),
+    )
+
+    assert b"".join(event.audio for event in first) == rendered.pcm16k
+    assert b"".join(event.audio for event in second) == rendered.pcm16k
+    assert [event.at_ms for event in first if event.kind == "audio"] != [
+        event.at_ms for event in second if event.kind == "audio"
+    ]
+
+
+def test_gate0b_session_schedule_preserves_consecutive_boundaries_and_restart(tmp_path):
+    first = _gate0b_activity(
+        tmp_path,
+        ordinal=1,
+        scenario_tags=("synchronous_tool_use", "tool_cancellation_interruption"),
+        fresh_restart_after=True,
+    )
+    second = _gate0b_activity(tmp_path, ordinal=2)
+    session = Gate0BReplaySession(
+        session_ordinal=3,
+        activities=(first, second),
+        inter_activity_gap_ms=50,
+    )
+
+    events = build_gate0b_session_inputs(session, frame_pattern_ms=(20, 30, 40))
+
+    assert [event.at_ms for event in events] == sorted(event.at_ms for event in events)
+    assert [(event.kind, event.epoch) for event in events if event.kind == "fresh_connection_restart"] == [
+        ("fresh_connection_restart", 2)
+    ]
+    assert {event.kind for event in events} >= {
+        "expect_synchronous_tool",
+        "expect_tool_cancellation",
+        "expect_interruption",
+    }
+    starts = [event for event in events if event.kind == "caller_activity_start"]
+    assert [(event.activity_ordinal, event.at_ms, event.epoch) for event in starts] == [
+        (1, 0, 1),
+        (2, 150, 2),
+    ]
+
+
+def test_gate0b_no_speech_window_uses_audio_without_activity_boundaries(tmp_path):
+    source = tmp_path / "no-speech.pcm"
+    payload = b"\x00\x00" * 1_600
+    source.write_bytes(payload)
+    window = Gate0BNoSpeechWindow(
+        window_ordinal=4,
+        source_path=source,
+        source_sha256=hashlib.sha256(payload).hexdigest(),
+        twilio_roundtrip_sha256=replay_module.compute_gate0b_roundtrip_sha256(payload),
+        duration_ms=100,
+    )
+
+    rendered = render_gate0b_no_speech_window(window)
+    events = build_gate0b_activity_inputs(
+        rendered,
+        activity_ordinal=None,
+        epoch=1,
+        start_at_ms=0,
+        frame_pattern_ms=(40,),
+        include_activity_boundaries=False,
+    )
+
+    assert [event.kind for event in events] == ["audio", "audio", "audio"]
+    assert [event.duration_ms for event in events] == [40, 40, 20]
+
+
+def test_gate0b_replay_rejects_mutation_and_resource_overflow(tmp_path):
+    activity = _gate0b_activity(tmp_path, ordinal=1)
+    activity.source_path.write_bytes(b"\x01\x00" + activity.source_path.read_bytes()[2:])
+    with pytest.raises(ValueError, match="source digest mismatch"):
+        render_gate0b_activity(activity)
+
+    oversized = _gate0b_activity(tmp_path, ordinal=2)
+    oversized.source_path.write_bytes(oversized.source_path.read_bytes() + b"\x00\x00")
+    with pytest.raises(ValueError, match="source duration"):
+        render_gate0b_activity(oversized)
+
+    activities = tuple(_gate0b_activity(tmp_path, ordinal=index + 10) for index in range(11))
+    with pytest.raises(ValueError, match="at most 10"):
+        Gate0BReplaySession(session_ordinal=1, activities=activities)
+
+    restart_without_followup = _gate0b_activity(
+        tmp_path,
+        ordinal=30,
+        fresh_restart_after=True,
+    )
+    with pytest.raises(ValueError, match="following activity"):
+        Gate0BReplaySession(session_ordinal=2, activities=(restart_without_followup,))
 
 
 def test_offline_replay_is_not_imported_by_live_call_paths():

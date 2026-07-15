@@ -702,6 +702,126 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
     assert cancellation.interruption_tail_ms is None
 
 
+def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> None:
+    capsule = _literal_wire_capsule()
+    session = capsule["sessions"][0]  # type: ignore[index]
+    session["events"] = [
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 50,
+            "sequence": 1,
+            "epoch": 1,
+            "text": "first phrase",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 100,
+            "sequence": 2,
+            "epoch": 1,
+            "text": "",
+        },
+        {
+            "kind": "input_transcript_fragment",
+            "at_ms": 500,
+            "sequence": 3,
+            "epoch": 1,
+            "text": "second phrase",
+        },
+        {
+            "kind": "turn_complete",
+            "at_ms": 550,
+            "sequence": 4,
+            "epoch": 1,
+            "text": "",
+        },
+    ]
+
+    def fact(
+        kind: str,
+        at_ms: int,
+        sequence: int,
+        *,
+        activity: int | None,
+        response: int | None = None,
+        audio_bytes: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "kind": kind,
+            "at_ms": at_ms,
+            "response_ordinal": response,
+            "activity_ordinal": activity,
+            "sequence": sequence,
+            "epoch": 1,
+            "audio_bytes": audio_bytes,
+        }
+
+    session["wire_facts"] = [
+        fact("caller_activity_start", 0, 0, activity=2),
+        fact("caller_audio_sent", 20, 1, activity=2, audio_bytes=640),
+        fact("caller_activity_end", 100, 2, activity=2),
+        fact("response_open", 200, 3, activity=2, response=1),
+        fact("audio_received", 200, 4, activity=2, response=1, audio_bytes=320),
+        fact("response_terminal", 220, 5, activity=2, response=1),
+        fact("caller_activity_start", 450, 6, activity=3),
+        fact("caller_audio_sent", 470, 7, activity=3, audio_bytes=640),
+        fact("caller_activity_end", 550, 8, activity=3),
+        fact("response_open", 650, 9, activity=3, response=2),
+        fact("audio_received", 650, 10, activity=3, response=2, audio_bytes=320),
+        fact("response_terminal", 670, 11, activity=3, response=2),
+        fact("teardown_complete", 700, 12, activity=None),
+    ]
+    capsule["activities"] = [
+        {
+            "activity_ordinal": 2,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "clean",
+            "scenario_tags": ["standard"],
+            "reference_text": "first phrase",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "advance_to_ms": 900,
+        },
+        {
+            "activity_ordinal": 3,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "clean",
+            "scenario_tags": ["standard"],
+            "reference_text": "second phrase",
+            "critical_spans": [],
+            "expected_lifecycle_status": "retrospective_complete",
+            "expected_epoch": 1,
+            "advance_to_ms": 900,
+        },
+    ]
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    by_activity = {record.activity_ordinal: record for record in records}
+    assert {
+        ordinal: (
+            record.assignment_status,
+            record.observed_lifecycle_status,
+            record.assembled_turn_count,
+            record.duplicate_count,
+        )
+        for ordinal, record in by_activity.items()
+    } == {
+        2: ("matched", "retrospective_complete", 1, 0),
+        3: ("matched", "retrospective_complete", 1, 0),
+    }
+    assert by_activity[2].hypothesis_characters == len("firstphrase")
+    assert by_activity[3].hypothesis_characters == len("secondphrase")
+
+
 def test_duplicate_terminal_cannot_hide_audio_after_the_first_terminal() -> None:
     capsule = _literal_wire_capsule()
     facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]

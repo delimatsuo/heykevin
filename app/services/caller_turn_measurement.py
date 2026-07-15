@@ -40,6 +40,7 @@ from app.services.caller_turns import (
     CallerTurnAssembler,
     CallerTurnEvent,
     CallerTurnEventKind,
+    RetrospectiveCallerTurn,
 )
 from app.services.qualification_identity import canonical_json_bytes
 
@@ -959,6 +960,17 @@ def derive_primitive_records_from_capsule(
         session = session_index[session_activities[0]["session_ordinal"]]
         references = tuple(_capsule_reference(activity) for activity in session_activities)
         events = tuple(CallerTurnEvent.from_dict(value) for value in session["events"])
+        attributed_events_by_policy = {
+            policy_ms: _attribute_session_events(
+                events,
+                references=references,
+                policy_ms=policy_ms,
+                advance_to_ms=max(
+                    activity["advance_to_ms"] for activity in session_activities
+                ),
+            )
+            for policy_ms in policies_ms
+        }
         for activity in session_activities:
             wire, activity_end_ms = _capsule_wire_observation(
                 session["wire_facts"],
@@ -978,7 +990,10 @@ def derive_primitive_records_from_capsule(
                             condition=activity["condition"],
                             scenario_tags=tuple(activity["scenario_tags"]),
                             references=references,
-                            events=events,
+                            events=attributed_events_by_policy[policy_ms].get(
+                                activity["activity_ordinal"],
+                                (),
+                            ),
                             expected_epoch=activity["expected_epoch"],
                             expected_lifecycle_status=activity["expected_lifecycle_status"],
                             advance_to_ms=activity["advance_to_ms"],
@@ -1010,6 +1025,94 @@ def derive_primitive_records_from_capsule(
         for window in windows
     )
     return tuple(activity_records), no_speech_records
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnEvidence:
+    turn: RetrospectiveCallerTurn
+    events: tuple[CallerTurnEvent, ...]
+
+
+def _attribute_session_events(
+    events: tuple[CallerTurnEvent, ...],
+    *,
+    references: tuple[ActivityReference, ...],
+    policy_ms: int,
+    advance_to_ms: int,
+) -> dict[int, tuple[CallerTurnEvent, ...]]:
+    if not events:
+        return {}
+    assembled = _assemble_session_turn_evidence(
+        events,
+        active_epoch=min(event.epoch for event in events),
+        policy_ms=policy_ms,
+        advance_to_ms=advance_to_ms,
+    )
+    attributed: dict[int, list[CallerTurnEvent]] = {}
+    alignment_policy = AlignmentPolicy(fragment_mode=FragmentMode.DELTA)
+    for evidence in assembled:
+        fragments = tuple(
+            event.text
+            for event in evidence.events
+            if event.kind is CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT
+        )
+        if (
+            reconstruct_fragments(fragments, policy=alignment_policy).strip()
+            != evidence.turn.transcript
+        ):
+            raise MeasurementError("session turn transcript attribution disagrees")
+        alignment = align_fragments(
+            fragments,
+            references=references,
+            policy=alignment_policy,
+        )
+        attributed.setdefault(alignment.nearest_activity_ordinal, []).extend(
+            evidence.events
+        )
+    return {ordinal: tuple(values) for ordinal, values in attributed.items()}
+
+
+def _assemble_session_turn_evidence(
+    events: tuple[CallerTurnEvent, ...],
+    *,
+    active_epoch: int,
+    policy_ms: int,
+    advance_to_ms: int,
+) -> tuple[_TurnEvidence, ...]:
+    assembler = CallerTurnAssembler(
+        active_epoch=active_epoch,
+        quiescence_ms=policy_ms,
+    )
+    pending: list[CallerTurnEvent] = []
+    output: list[_TurnEvidence] = []
+
+    def capture(emitted: tuple[RetrospectiveCallerTurn, ...]) -> None:
+        if not emitted:
+            return
+        if len(emitted) != 1 or not pending:
+            raise MeasurementError("session turn attribution is inconsistent")
+        output.append(_TurnEvidence(turn=emitted[0], events=tuple(pending)))
+        pending.clear()
+
+    for event in events:
+        deadline = assembler.next_deadline_ms
+        if deadline is not None and event.at_ms >= deadline:
+            capture(assembler.advance_time(event.at_ms))
+
+        stale_before = assembler.stale_event_count
+        duplicate_before = assembler.duplicate_event_count
+        emitted = assembler.ingest(event)
+        accepted = (
+            assembler.stale_event_count == stale_before
+            and assembler.duplicate_event_count == duplicate_before
+            and event.kind is not CallerTurnEventKind.RECONNECT_STARTED
+        )
+        if accepted:
+            pending.append(event)
+        capture(emitted)
+
+    capture(assembler.advance_time(advance_to_ms))
+    return tuple(output)
 
 
 def build_signed_record_root(

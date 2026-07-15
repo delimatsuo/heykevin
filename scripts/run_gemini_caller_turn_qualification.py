@@ -1981,6 +1981,7 @@ def _build_audit_capsule(
             activities.append(
                 {
                     "activity_ordinal": activity.activity_ordinal,
+                    "session_ordinal": plan.session_ordinal,
                     "split": activity.split,
                     "language": activity.language,
                     "condition": activity.condition,
@@ -1998,7 +1999,7 @@ def _build_audit_capsule(
                     "expected_lifecycle_status": activity.expected_lifecycle_status,
                     "expected_epoch": activity.expected_epoch,
                     "advance_to_ms": max(
-                        activity.end_at_ms + policy_ms,
+                        activity.end_at_ms + max(VALID_POLICIES_MS),
                         latest_event_ms,
                     ),
                     "wire_facts": _wire_facts(activity, wire),

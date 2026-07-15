@@ -25,6 +25,7 @@ from app.services.caller_turn_measurement import (
     MeasurementError,
     WireObservation,
     build_signed_record_root,
+    derive_primitive_records_from_capsule,
     measure_activity,
     open_audit_capsule,
     require_reducer_agreement,
@@ -95,6 +96,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         "activities": [
             {
                 "activity_ordinal": 3,
+                "session_ordinal": 1,
                 "split": "development",
                 "language": "en",
                 "condition": "clean",
@@ -172,6 +174,93 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
             custodian_public_key=public_key,
             custodian_key_id="audit_custodian_1",
         )
+
+
+def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
+    capsule = {
+        "schema_id": "gate_0b_audit_capsule_v1",
+        "campaign_id": "campaign_1",
+        "policy_ms": 250,
+        "activities": [
+            {
+                "activity_ordinal": 3,
+                "session_ordinal": 1,
+                "split": "development",
+                "language": "en",
+                "condition": "clean",
+                "scenario_tags": ["standard"],
+                "reference_text": "book service today",
+                "critical_spans": [
+                    {"kind": "correction", "text": "service today", "language": "en"}
+                ],
+                "events": [
+                    {
+                        "kind": "input_transcript_fragment",
+                        "at_ms": 10,
+                        "sequence": 1,
+                        "epoch": 1,
+                        "text": "book service today",
+                    },
+                    {
+                        "kind": "turn_complete",
+                        "at_ms": 20,
+                        "sequence": 2,
+                        "epoch": 1,
+                        "text": "",
+                    },
+                ],
+                "expected_lifecycle_status": "retrospective_complete",
+                "expected_epoch": 1,
+                "advance_to_ms": 900,
+                "wire_facts": [
+                    {
+                        "kind": "caller_activity_start",
+                        "at_ms": 0,
+                        "response_ordinal": None,
+                        "activity_ordinal": 3,
+                    },
+                    {
+                        "kind": "caller_activity_end",
+                        "at_ms": 100,
+                        "response_ordinal": None,
+                        "activity_ordinal": 3,
+                    },
+                    {
+                        "kind": "response_open",
+                        "at_ms": 220,
+                        "response_ordinal": 1,
+                        "activity_ordinal": 3,
+                    },
+                    {
+                        "kind": "audio_received",
+                        "at_ms": 220,
+                        "response_ordinal": 1,
+                        "activity_ordinal": 3,
+                    },
+                ],
+            }
+        ],
+        "no_speech_windows": [
+            {
+                "window_ordinal": 0,
+                "split": "development",
+                "condition": "silence",
+                "wire_facts": [],
+            }
+        ],
+    }
+
+    activity_records, no_speech_records = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(100, 250, 500, 750),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert [record.policy_ms for record in activity_records] == [100, 250, 500, 750]
+    assert all(record.first_audio_ms == 120 for record in activity_records)
+    assert all(record.commitment for record in activity_records)
+    assert len(no_speech_records) == 1
+    assert no_speech_records[0].commitment
 
 
 def test_measurement_recomputes_alignment_lifecycle_and_keyed_commitment() -> None:

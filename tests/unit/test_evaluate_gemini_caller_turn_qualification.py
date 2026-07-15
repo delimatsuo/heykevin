@@ -207,6 +207,9 @@ def _artifact(
         "identities": IDENTITIES,
         "policy_lock_sha256": compute_policy_lock_sha256(
             activity_records=development,
+            no_speech_records=tuple(
+                record for record in no_speech_records if record.split == "development"
+            ),
             candidate_policies_ms=POLICIES,
             selected_policy_ms=selected_policy_ms,
             identities=IDENTITIES,

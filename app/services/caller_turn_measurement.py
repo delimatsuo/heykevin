@@ -29,6 +29,7 @@ from app.services.caller_turn_alignment import (
     AlignmentPolicy,
     CriticalSpan,
     CriticalSpanKind,
+    FragmentMode,
     align_caller_turn_events,
     align_fragments,
     normalize_text,
@@ -89,12 +90,15 @@ FORBIDDEN_CAPSULE_KEYS = frozenset(
 WIRE_FACT_KINDS = frozenset(
     {
         "abnormal_close",
+        "audio_after_terminal",
         "audio_received",
         "caller_activity_end",
         "caller_activity_start",
         "cancelled",
         "false_activity",
         "interrupted",
+        "malformed",
+        "premature_current_audio",
         "response_gap",
         "response_open",
         "response_terminal",
@@ -775,6 +779,97 @@ def open_audit_capsule(
     return _validate_audit_capsule(decoded)
 
 
+def derive_primitive_records_from_capsule(
+    capsule: Mapping[str, Any],
+    *,
+    policies_ms: tuple[int, ...],
+    commitment_key: bytes,
+) -> tuple[tuple[ActivityPrimitiveRecord, ...], tuple[NoSpeechPrimitiveRecord, ...]]:
+    """Independently derive committed primitives from one opened custody capsule."""
+    data = _validate_audit_capsule(capsule)
+    if (
+        not isinstance(policies_ms, tuple)
+        or not policies_ms
+        or len(policies_ms) != len(set(policies_ms))
+    ):
+        raise MeasurementError("capsule policy set is invalid")
+    for policy_ms in policies_ms:
+        _validate_policy(policy_ms)
+
+    activities = data["activities"]
+    windows = data["no_speech_windows"]
+    splits = {value["split"] for value in (*activities, *windows)}
+    if len(splits) != 1:
+        raise MeasurementError("audit capsule must contain exactly one split")
+    split = next(iter(splits))
+    if split == "holdout" and policies_ms != (data["policy_ms"],):
+        raise MeasurementError("holdout capsule must use only its selected policy")
+
+    by_session: dict[int, list[Mapping[str, Any]]] = {}
+    for activity in activities:
+        by_session.setdefault(activity["session_ordinal"], []).append(activity)
+
+    activity_records: list[ActivityPrimitiveRecord] = []
+    for session_activities in by_session.values():
+        canonical_events = canonical_json_bytes(session_activities[0]["events"])
+        if any(
+            canonical_json_bytes(activity["events"]) != canonical_events
+            for activity in session_activities[1:]
+        ):
+            raise MeasurementError("session activities must share one event stream")
+        references = tuple(_capsule_reference(activity) for activity in session_activities)
+        events = tuple(
+            CallerTurnEvent.from_dict(value) for value in session_activities[0]["events"]
+        )
+        for activity in session_activities:
+            wire, activity_end_ms = _capsule_wire_observation(activity["wire_facts"])
+            if activity["advance_to_ms"] < activity_end_ms + max(policies_ms):
+                raise MeasurementError("capsule observation window is shorter than policy set")
+            for policy_ms in policies_ms:
+                activity_records.append(
+                    measure_activity(
+                        ActivityMeasurementInput(
+                            policy_ms=policy_ms,
+                            activity_ordinal=activity["activity_ordinal"],
+                            split=activity["split"],
+                            language=activity["language"],
+                            condition=activity["condition"],
+                            scenario_tags=tuple(activity["scenario_tags"]),
+                            references=references,
+                            events=events,
+                            expected_epoch=activity["expected_epoch"],
+                            expected_lifecycle_status=activity["expected_lifecycle_status"],
+                            advance_to_ms=activity["advance_to_ms"],
+                            wire=wire,
+                        ),
+                        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+                        commitment_key=commitment_key,
+                    )
+                )
+
+    no_speech_records = tuple(
+        NoSpeechPrimitiveRecord.with_commitment(
+            NoSpeechPrimitiveRecord(
+                schema_id=NO_SPEECH_PRIMITIVE_SCHEMA_ID,
+                window_ordinal=window["window_ordinal"],
+                split=window["split"],
+                condition=window["condition"],
+                false_activity_count=_fact_count(window["wire_facts"], "false_activity"),
+                model_audio_chunk_count=_fact_count(window["wire_facts"], "audio_received"),
+                abnormal_close_count=_fact_count(window["wire_facts"], "abnormal_close"),
+                audio_after_teardown_count=_audio_after_teardown_count(
+                    window["wire_facts"]
+                ),
+                error_code=_wire_error_code(window["wire_facts"]),
+                commitment="",
+            ),
+            commitment_key=commitment_key,
+        )
+        for window in windows
+    )
+    return tuple(activity_records), no_speech_records
+
+
 def build_signed_record_root(
     *,
     activity_records: tuple[ActivityPrimitiveRecord, ...],
@@ -920,6 +1015,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             raw_activity,
             {
                 "activity_ordinal",
+                "session_ordinal",
                 "split",
                 "language",
                 "condition",
@@ -939,6 +1035,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             label="activity ordinal",
             maximum=255,
         )
+        _bounded_int(activity["session_ordinal"], label="session ordinal", maximum=63)
         language = _validate_language(activity["language"])
         _validate_split(activity["split"])
         _safe_id(activity["condition"], label="condition")
@@ -987,6 +1084,91 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         _safe_id(window["condition"], label="condition")
         _validate_wire_facts(window["wire_facts"])
     return json.loads(canonical_json_bytes(data))
+
+
+def _capsule_reference(activity: Mapping[str, Any]) -> ActivityReference:
+    return ActivityReference(
+        activity_ordinal=activity["activity_ordinal"],
+        language=activity["language"],
+        text=activity["reference_text"],
+        critical_spans=tuple(
+            CriticalSpan(
+                kind=CriticalSpanKind(span["kind"]),
+                text=span["text"],
+                language=span["language"],
+            )
+            for span in activity["critical_spans"]
+        ),
+    )
+
+
+def _capsule_wire_observation(
+    facts: list[Mapping[str, Any]],
+) -> tuple[WireObservation, int]:
+    starts = [value["at_ms"] for value in facts if value["kind"] == "caller_activity_start"]
+    ends = [value["at_ms"] for value in facts if value["kind"] == "caller_activity_end"]
+    if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
+        raise MeasurementError("capsule activity boundaries are invalid")
+    response_opens = [value["at_ms"] for value in facts if value["kind"] == "response_open"]
+    if len(response_opens) > 1 or any(value < ends[0] for value in response_opens):
+        raise MeasurementError("capsule response-open facts are invalid")
+    first_audio_ms = response_opens[0] - ends[0] if response_opens else None
+    open_times = set(response_opens)
+    interruption_audio = [
+        value["at_ms"]
+        for value in facts
+        if value["kind"] == "audio_received" and value["at_ms"] not in open_times
+    ]
+    interruption_tail_ms = (
+        min(interruption_audio) - starts[0] if interruption_audio else None
+    )
+    if interruption_tail_ms is not None and interruption_tail_ms < 0:
+        raise MeasurementError("capsule interruption timing is invalid")
+    return (
+        WireObservation(
+            timing_covered=first_audio_ms is not None,
+            first_audio_ms=first_audio_ms,
+            interruption_tail_ms=interruption_tail_ms,
+            premature_current_audio_count=_fact_count(facts, "premature_current_audio"),
+            audio_after_terminal_count=_fact_count(facts, "audio_after_terminal"),
+            response_gap_violation_count=_fact_count(facts, "response_gap"),
+            abnormal_close_count=_fact_count(facts, "abnormal_close"),
+            runaway_output_count=_fact_count(facts, "runaway_output"),
+            response_timeout_count=_fact_count(facts, "response_timeout"),
+            malformed_count=_fact_count(facts, "malformed"),
+            teardown_violation_count=_fact_count(facts, "teardown"),
+            error_code=_wire_error_code(facts),
+        ),
+        ends[0],
+    )
+
+
+def _fact_count(facts: list[Mapping[str, Any]], kind: str) -> int:
+    return sum(value["kind"] == kind for value in facts)
+
+
+def _audio_after_teardown_count(facts: list[Mapping[str, Any]]) -> int:
+    teardown_times = [value["at_ms"] for value in facts if value["kind"] == "teardown"]
+    if not teardown_times:
+        return 0
+    return sum(
+        value["kind"] == "audio_received" and value["at_ms"] > min(teardown_times)
+        for value in facts
+    )
+
+
+def _wire_error_code(facts: list[Mapping[str, Any]]) -> str | None:
+    codes = (
+        ("premature_current_audio", "premature_current_response"),
+        ("audio_after_terminal", "audio_after_terminal"),
+        ("response_gap", "response_gap_exceeded"),
+        ("abnormal_close", "provider_closed"),
+        ("runaway_output", "runaway_output"),
+        ("response_timeout", "response_terminal_missing"),
+        ("malformed", "malformed_message"),
+        ("teardown", "teardown_failure"),
+    )
+    return next((code for kind, code in codes if _fact_count(facts, kind)), None)
 
 
 def _reject_forbidden_capsule_keys(value: object) -> None:

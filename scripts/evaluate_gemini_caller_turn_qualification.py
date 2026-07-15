@@ -87,6 +87,7 @@ class EvaluationError(ValueError):
 def compute_policy_lock_sha256(
     *,
     activity_records: tuple[ActivityPrimitiveRecord, ...],
+    no_speech_records: tuple[NoSpeechPrimitiveRecord, ...],
     candidate_policies_ms: tuple[int, ...],
     selected_policy_ms: int,
     identities: Mapping[str, str],
@@ -94,13 +95,15 @@ def compute_policy_lock_sha256(
     """Bind development evidence, identities, thresholds, and selected policy."""
     if not activity_records or any(record.split != "development" for record in activity_records):
         raise EvaluationError("policy lock requires development records only")
+    if any(record.split != "development" for record in no_speech_records):
+        raise EvaluationError("policy lock requires development no-speech records only")
     _validate_policy_configuration(candidate_policies_ms, selected_policy_ms)
     identity = _validate_identities(identities)
     value = {
         "schema_id": "gate_0b_policy_lock_v1",
         "development_record_root_sha256": compute_record_merkle_root(
             activity_records=activity_records,
-            no_speech_records=(),
+            no_speech_records=no_speech_records,
         ),
         "candidate_policies_ms": list(candidate_policies_ms),
         "selected_policy_ms": selected_policy_ms,
@@ -219,8 +222,11 @@ def evaluate_evidence_artifact(
         failures["pricing_identity_invalid"] = 1
 
     development_records = tuple(record for record in records if record.split == "development")
+    development_windows = tuple(window for window in windows if window.split == "development")
+    holdout_windows = tuple(window for window in windows if window.split == "holdout")
     expected_lock = compute_policy_lock_sha256(
         activity_records=development_records,
+        no_speech_records=development_windows,
         candidate_policies_ms=parsed["candidate_policies_ms"],
         selected_policy_ms=parsed["selected_policy_ms"],
         identities=parsed["identities"],
@@ -228,8 +234,6 @@ def evaluate_evidence_artifact(
     if parsed["policy_lock_sha256"] != expected_lock:
         failures["policy_lock_invalid"] = 1
 
-    development_windows = tuple(window for window in windows if window.split == "development")
-    holdout_windows = tuple(window for window in windows if window.split == "holdout")
     candidate_results: dict[str, dict[str, bool]] = {}
     candidate_samples: dict[int, dict[str, Any]] = {}
     for policy in parsed["candidate_policies_ms"]:

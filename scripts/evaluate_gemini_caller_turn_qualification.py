@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from datetime import datetime
 from decimal import ROUND_CEILING
 import hashlib
 import hmac
@@ -46,6 +47,12 @@ from app.services.caller_turn_qualification import (  # noqa: E402
 from app.services.qualification_identity import (  # noqa: E402
     canonical_json_bytes,
     validate_ledger_snapshot,
+    verify_attempt_authorization,
+    verify_campaign_approval,
+)
+from scripts.run_gemini_caller_turn_qualification import (  # noqa: E402
+    PREREGISTRATION_EXTERNAL_FIELDS,
+    build_preregistration,
 )
 
 
@@ -66,6 +73,9 @@ EXPECTED_NO_SPEECH_WINDOWS = 64
 SMALL_CELL_MINIMUM = 8
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 PRICING_PATH = REPO_ROOT / "tests/fixtures/caller_turn_qualification/pricing.json"
+PINNED_APPROVAL_ROOT_PATH = (
+    REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
+)
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 THRESHOLDS = {
@@ -401,7 +411,9 @@ def _evaluate_custody_bundle(
         "development_capsule",
         "holdout_capsule",
         "ledger",
-        "identities",
+        "preregistration",
+        "campaign_envelope",
+        "attempt_envelope",
         "usage",
         "run_failures",
     }
@@ -483,22 +495,83 @@ def _evaluate_custody_bundle(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    identities = _validate_identities(bundle["identities"])
-    observable_identities = {
+    preregistration = bundle["preregistration"]
+    if not isinstance(preregistration, Mapping):
+        raise EvaluationError("custody preregistration is invalid")
+    immutable = preregistration.get("immutable_values")
+    if not isinstance(immutable, Mapping):
+        raise EvaluationError("custody preregistration is invalid")
+    try:
+        expected_preregistration = build_preregistration(
+            {
+                "schema_id": "gate_0b_preregistration_values_v1",
+                **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
+            }
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvaluationError("custody preregistration is invalid") from exc
+    if dict(preregistration) != expected_preregistration:
+        raise EvaluationError("custody preregistration digest is invalid")
+    approval_public_key = _load_pinned_approval_public_key()
+    if hashlib.sha256(approval_public_key).hexdigest() != immutable[
+        "approval_public_key_sha256"
+    ]:
+        raise EvaluationError("custody approval root is not preregistered")
+    claim_time = _parse_utc_time(completed_claims[0].get("at"))
+    campaign = verify_campaign_approval(
+        bundle["campaign_envelope"],
+        public_key=approval_public_key,
+        expected_key_id=immutable["approval_key_id"],
+        expected_preregistration_sha256=preregistration["preregistration_sha256"],
+        expected_source_sha=immutable["source_sha"],
+        now=claim_time,
+    )
+    authorization = verify_attempt_authorization(
+        bundle["attempt_envelope"],
+        public_key=approval_public_key,
+        expected_key_id=immutable["approval_key_id"],
+        campaign=campaign,
+        now=claim_time,
+    )
+    if (
+        ledger["preregistration_sha256"] != preregistration["preregistration_sha256"]
+        or ledger["source_sha"] != immutable["source_sha"]
+        or ledger["campaign_approval_sha256"] != campaign.signed_payload_sha256
+        or completed_claims[0]["authorization_sha256"] != authorization.signed_payload_sha256
+        or authorization.attempt_id != completed_attempt_id
+    ):
+        raise EvaluationError("custody authorization and ledger identities disagree")
+    if (
+        expected_custodian_key_id != immutable["custodian_key_id"]
+        or record_root_key_id != immutable["record_root_key_id"]
+    ):
+        raise EvaluationError("custody key identity is not preregistered")
+    identities = _validate_identities(
+        {
         "source_sha256": hashlib.sha256(ledger["source_sha"].encode("ascii")).hexdigest(),
+        "environment_sha256": immutable["environment_identity_sha256"],
         "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "corpus_sha256": immutable["corpus_sha256"],
         "pricing_sha256": hashlib.sha256(PRICING_PATH.read_bytes()).hexdigest(),
         "preregistration_sha256": ledger["preregistration_sha256"],
         "campaign_approval_sha256": ledger["campaign_approval_sha256"],
         "attempt_authorization_sha256": completed_claims[0]["authorization_sha256"],
         "development_capsule_sha256": development_capsule_sha256,
         "holdout_capsule_sha256": holdout_capsule_sha256,
-        "ledger_head_sha256": ledger["head_hash"],
+        "ledger_head_sha256": lock_transitions[0]["previous_hash"],
         "custodian_public_key_sha256": hashlib.sha256(custodian_public_key).hexdigest(),
         "record_root_public_key_sha256": hashlib.sha256(record_root_public_key).hexdigest(),
-    }
-    if any(identities[field] != value for field, value in observable_identities.items()):
-        raise EvaluationError("custody evidence identity is not observable")
+        }
+    )
+    if (
+        identities["evaluator_sha256"] != immutable["evaluator_sha256"]
+        or identities["pricing_sha256"] != immutable["pricing_sha256"]
+        or identities["custodian_public_key_sha256"]
+        != immutable["custodian_public_key_sha256"]
+        or identities["record_root_public_key_sha256"]
+        != immutable["record_root_public_key_sha256"]
+    ):
+        raise EvaluationError("custody evidence identity is not preregistered")
 
     development_capsule = open_audit_capsule(
         development_envelope,
@@ -1324,6 +1397,26 @@ def _read_private_key_file(path: Path, *, label: str) -> bytes:
     if len(value) != 32:
         raise EvaluationError(f"{label} key must be exactly 32 bytes")
     return value
+
+
+def _load_pinned_approval_public_key() -> bytes:
+    path = PINNED_APPROVAL_ROOT_PATH
+    if path.is_symlink() or path.parent.is_symlink() or not path.is_file():
+        raise EvaluationError("pinned approval root is unavailable")
+    value = path.read_bytes()
+    if len(value) != 32:
+        raise EvaluationError("pinned approval root is unprovisioned")
+    return value
+
+
+def _parse_utc_time(value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise EvaluationError("ledger claim time is invalid")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise EvaluationError("ledger claim time is invalid") from exc
+    return parsed
 
 
 def _write_private_report(path: Path, report: Mapping[str, Any]) -> None:

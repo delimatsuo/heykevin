@@ -1,5 +1,6 @@
 """Independent evaluator tests for complete Gate 0B evidence."""
 
+import base64
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -27,6 +28,7 @@ from scripts.evaluate_gemini_caller_turn_qualification import (
     evaluate_evidence_artifact,
     main,
 )
+from scripts.run_gemini_caller_turn_qualification import build_preregistration
 
 
 CAMPAIGN_KEY = b"k" * 32
@@ -273,6 +275,21 @@ def _append_ledger_record(ledger: dict[str, object], record: dict[str, object]) 
     ledger["head_hash"] = entry["record_hash"]
 
 
+def _signed_authorization(
+    private_key: Ed25519PrivateKey,
+    payload: dict[str, object],
+    *,
+    key_id: str,
+) -> dict[str, object]:
+    return {
+        "key_id": key_id,
+        "payload": payload,
+        "signature": base64.b64encode(private_key.sign(canonical_json_bytes(payload))).decode(
+            "ascii"
+        ),
+    }
+
+
 def _custody_bundle():
     artifact, _ = _artifact()
     activity_records = tuple(
@@ -291,53 +308,126 @@ def _custody_bundle():
     holdout_windows = tuple(record for record in no_speech_records if record.split == "holdout")
     custodian_key = X25519PrivateKey.generate()
     root_key = Ed25519PrivateKey.generate()
+    approval_key = Ed25519PrivateKey.generate()
+    approval_public_key = approval_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    custodian_public_key = custodian_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    root_public_key = root_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
     development_envelope = {"kind": "development"}
     holdout_envelope = {"kind": "holdout"}
     development_digest = sha256(canonical_json_bytes(development_envelope)).hexdigest()
     holdout_digest = sha256(canonical_json_bytes(holdout_envelope)).hexdigest()
     source_sha = "b" * 40
-    authorization_sha = "1" * 64
+    approval_key_id = "qualification_reviewer_1"
+    preregistration = build_preregistration(
+        {
+            "schema_id": "gate_0b_preregistration_values_v1",
+            "project": "kevin-qualification-test",
+            "credential_reference": "qualification_secret_v1",
+            "approval_key_id": approval_key_id,
+            "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
+            "custodian_key_id": "audit_custodian_1",
+            "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
+            "record_root_key_id": ROOT_KEY_ID,
+            "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
+            "source_sha": source_sha,
+            "environment_identity_sha256": "b" * 64,
+            "manifest_sha256": "c" * 64,
+            "corpus_sha256": "d" * 64,
+            "development_schedule_sha256": "e" * 64,
+            "setup_sha256": "f" * 64,
+            "pricing_sha256": sha256(
+                Path("tests/fixtures/caller_turn_qualification/pricing.json").read_bytes()
+            ).hexdigest(),
+            "runner_sha256": sha256(
+                Path("scripts/run_gemini_caller_turn_qualification.py").read_bytes()
+            ).hexdigest(),
+            "evaluator_sha256": sha256(Path(evaluator_module.__file__).read_bytes()).hexdigest(),
+            "ledger_location_sha256": "7" * 64,
+            "audit_capsule_location_sha256": "8" * 64,
+            "evidence_location_sha256": "9" * 64,
+            "consent_attestation_sha256": "a" * 64,
+            "retention_attestation_sha256": "b" * 64,
+            "zdr_or_residual_retention_acceptance_sha256": "c" * 64,
+        }
+    )
+    campaign_payload = {
+        "schema_id": "gate_0b_campaign_approval_v1",
+        "scope": "gate_0b_purpose_recorded_turn_assembly",
+        "campaign_id": "campaign_1",
+        "authorization_id": "authorization_1",
+        "nonce": "nonce_1",
+        "preregistration_sha256": preregistration["preregistration_sha256"],
+        "source_sha": source_sha,
+        "issued_at": "2026-07-15T14:59:00Z",
+        "expires_at": "2026-07-15T16:00:00Z",
+        "max_attempts": 3,
+        "max_provider_requests": 384,
+        "max_cost_microusd": 30_000_000,
+        "ledger_location_sha256": "7" * 64,
+        "real_caller_data_authorized": False,
+        "runtime_wiring_authorized": False,
+        "deployment_authorized": False,
+        "production_authorized": False,
+        "release_authorized": False,
+    }
+    attempt_payload = {
+        "schema_id": "gate_0b_attempt_authorization_v1",
+        "campaign_id": "campaign_1",
+        "authorization_id": "authorization_1",
+        "attempt_id": "attempt_1",
+        "attempt_index": 1,
+        "prior_attempt_id": None,
+        "outage_enum": None,
+        "preregistration_sha256": preregistration["preregistration_sha256"],
+        "source_sha": source_sha,
+        "issued_at": "2026-07-15T14:59:00Z",
+        "expires_at": "2026-07-15T16:00:00Z",
+        "provider_request_reservation": 128,
+        "cost_reservation_microusd": 10_000_000,
+    }
+    campaign_envelope = _signed_authorization(
+        approval_key,
+        campaign_payload,
+        key_id=approval_key_id,
+    )
+    attempt_envelope = _signed_authorization(
+        approval_key,
+        attempt_payload,
+        key_id=approval_key_id,
+    )
+    campaign_approval_sha = sha256(canonical_json_bytes(campaign_payload)).hexdigest()
+    authorization_sha = sha256(canonical_json_bytes(attempt_payload)).hexdigest()
     identities = {
         "source_sha256": sha256(source_sha.encode("ascii")).hexdigest(),
         "environment_sha256": "b" * 64,
         "evaluator_sha256": sha256(Path(evaluator_module.__file__).read_bytes()).hexdigest(),
         "corpus_sha256": "d" * 64,
-        "pricing_sha256": sha256(
-            Path("tests/fixtures/caller_turn_qualification/pricing.json").read_bytes()
-        ).hexdigest(),
-        "preregistration_sha256": "e" * 64,
-        "campaign_approval_sha256": "f" * 64,
+        "pricing_sha256": preregistration["immutable_values"]["pricing_sha256"],
+        "preregistration_sha256": preregistration["preregistration_sha256"],
+        "campaign_approval_sha256": campaign_approval_sha,
         "attempt_authorization_sha256": authorization_sha,
         "development_capsule_sha256": development_digest,
         "holdout_capsule_sha256": holdout_digest,
         "ledger_head_sha256": "0" * 64,
-        "custodian_public_key_sha256": sha256(
-            custodian_key.public_key().public_bytes(
-                serialization.Encoding.Raw,
-                serialization.PublicFormat.Raw,
-            )
-        ).hexdigest(),
-        "record_root_public_key_sha256": sha256(
-            root_key.public_key().public_bytes(
-                serialization.Encoding.Raw,
-                serialization.PublicFormat.Raw,
-            )
-        ).hexdigest(),
+        "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
+        "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
     }
-    policy_lock = compute_policy_lock_sha256(
-        activity_records=development_records,
-        no_speech_records=development_windows,
-        candidate_policies_ms=POLICIES,
-        selected_policy_ms=100,
-        identities=identities,
-    )
     ledger = {
         "schema_id": "gate_0b_attempt_ledger_v1",
         "campaign_id": "campaign_1",
         "authorization_id": "authorization_1",
-        "preregistration_sha256": identities["preregistration_sha256"],
+        "preregistration_sha256": preregistration["preregistration_sha256"],
         "source_sha": source_sha,
-        "campaign_approval_sha256": identities["campaign_approval_sha256"],
+        "campaign_approval_sha256": campaign_approval_sha,
         "ledger_location_sha256": "7" * 64,
         "max_attempts": 3,
         "max_provider_requests": 384,
@@ -390,6 +480,14 @@ def _custody_bundle():
             "at": "2026-07-15T15:10:00Z",
         },
     )
+    identities["ledger_head_sha256"] = ledger["head_hash"]
+    policy_lock = compute_policy_lock_sha256(
+        activity_records=development_records,
+        no_speech_records=development_windows,
+        candidate_policies_ms=POLICIES,
+        selected_policy_ms=100,
+        identities=identities,
+    )
     for current, target, capsule, materialized in (
         ("development_collection", "policy_selection_locked", development_digest, False),
         ("policy_selection_locked", "holdout_collection", None, True),
@@ -408,14 +506,15 @@ def _custody_bundle():
                 "at": "2026-07-15T15:11:00Z",
             },
         )
-    identities["ledger_head_sha256"] = ledger["head_hash"]
     bundle = {
         "schema_id": "gate_0b_custody_bundle_v1",
         "campaign_id": "campaign_1",
         "development_capsule": development_envelope,
         "holdout_capsule": holdout_envelope,
         "ledger": ledger,
-        "identities": identities,
+        "preregistration": preregistration,
+        "campaign_envelope": campaign_envelope,
+        "attempt_envelope": attempt_envelope,
         "usage": artifact["usage"],
         "run_failures": [],
     }
@@ -423,13 +522,13 @@ def _custody_bundle():
         "development": (development_records, development_windows),
         "holdout": (holdout_records, holdout_windows),
     }
-    return bundle, custodian_key, root_key, derived
+    return bundle, custodian_key, root_key, approval_public_key, derived
 
 
 def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, derived = _custody_bundle()
+    bundle, custodian_key, root_key, approval_public_key, derived = _custody_bundle()
     opened: list[str] = []
 
     def open_capsule(envelope, **_kwargs):
@@ -441,6 +540,11 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
 
     monkeypatch.setattr(evaluator_module, "open_audit_capsule", open_capsule)
     monkeypatch.setattr(evaluator_module, "derive_primitive_records_from_capsule", derive)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
 
     report = evaluate_custody_bundle(
         bundle,
@@ -461,7 +565,12 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
 def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, derived = _custody_bundle()
+    bundle, custodian_key, root_key, approval_public_key, derived = _custody_bundle()
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
     injected = dict(bundle)
     injected["activity_records"] = []
     injected_report = evaluate_custody_bundle(
@@ -511,6 +620,109 @@ def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption
 
     assert blocked["status"] == "no_go"
     assert opened == ["development"]
+
+
+def test_custody_bundle_rejects_replaced_approval_root_before_capsule_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, custodian_key, root_key, _approval_public_key, _derived = _custody_bundle()
+    opened: list[str] = []
+    replacement = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: replacement,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: opened.append(envelope["kind"]),
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == []
+
+
+def test_custody_bundle_rejects_tampered_authorization_before_capsule_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, custodian_key, root_key, approval_public_key, _derived = _custody_bundle()
+    bundle["campaign_envelope"]["signature"] = base64.b64encode(b"\x00" * 64).decode(
+        "ascii"
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: opened.append(envelope["kind"]),
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == []
+
+
+@pytest.mark.parametrize("substitution", ("custodian", "record_root"))
+def test_custody_bundle_rejects_substituted_preregistered_keys_before_capsule_open(
+    substitution: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, custodian_key, root_key, approval_public_key, _derived = _custody_bundle()
+    opened: list[str] = []
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: opened.append(envelope["kind"]),
+    )
+    if substitution == "custodian":
+        custodian_key = X25519PrivateKey.generate()
+    else:
+        root_key = Ed25519PrivateKey.generate()
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == []
 
 
 def test_evaluator_recomputes_complete_gate_and_publishes_only_aggregates() -> None:
@@ -613,7 +825,7 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, derived = _custody_bundle()
+    bundle, custodian_key, root_key, approval_public_key, derived = _custody_bundle()
     bundle_path = tmp_path / "custody-bundle.json"
     commitment_path = tmp_path / "commitment.key"
     custodian_path = tmp_path / "custodian.key"
@@ -650,6 +862,11 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         evaluator_module,
         "derive_primitive_records_from_capsule",
         lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
     )
 
     exit_code = main(

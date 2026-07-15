@@ -105,6 +105,8 @@ PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
         "approval_public_key_sha256",
         "custodian_key_id",
         "custodian_public_key_sha256",
+        "record_root_key_id",
+        "record_root_public_key_sha256",
         "source_sha",
         "environment_identity_sha256",
         "manifest_sha256",
@@ -2729,6 +2731,8 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "approval_public_key_sha256": None,
             "custodian_key_id": None,
             "custodian_public_key_sha256": None,
+            "record_root_key_id": None,
+            "record_root_public_key_sha256": None,
             "source_sha": None,
             "environment_identity_sha256": None,
             "manifest_sha256": None,
@@ -2798,7 +2802,12 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         raise RunnerError("preregistration project is invalid")
 
     validated: dict[str, str] = {"project": project}
-    for field in ("credential_reference", "approval_key_id", "custodian_key_id"):
+    for field in (
+        "credential_reference",
+        "approval_key_id",
+        "custodian_key_id",
+        "record_root_key_id",
+    ):
         validated[field] = _safe_id(values[field], label=field.replace("_", " "))
     source_sha = values["source_sha"]
     if not isinstance(source_sha, str) or not SOURCE_SHA.fullmatch(source_sha):
@@ -2809,6 +2818,7 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         "credential_reference",
         "approval_key_id",
         "custodian_key_id",
+        "record_root_key_id",
         "source_sha",
     }:
         value = values[field]

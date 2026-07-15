@@ -588,10 +588,14 @@ The executor treats `claim_attempt` and `resume_holdout` return values as
 untrusted hints. Before credential lookup, DNS, or connector construction, it must
 replay a fresh post-mutation signed snapshot and prove the exact attempt identity,
 claim time, request/cost reservation, phase, and changed one-shot holdout-claim
-state. A stale, unsigned, truncated, wrong-identity, inflated-reservation, or
-unreplayable export blocks execution. Development checkpoint and terminal outcome
-mutations are likewise replayed from a fresh signed snapshot before success is
-reported.
+state. Every accepted post-mutation record sequence must equal the previously
+accepted signed sequence plus exactly one expected event; a merely different head
+or independently valid alternate fork is rejected. The signed claim stores the
+SHA-256 of the opaque lease capability, and the executor compares that digest before
+credentials and again when holdout resumes. A stale, unsigned, truncated,
+wrong-identity, inflated-reservation, substituted-lease, forked, or unreplayable
+export blocks execution. Development checkpoint and terminal outcome mutations are
+likewise replayed from a fresh signed snapshot before success is reported.
 
 One attempt remains active across development, policy lock, release, and holdout.
 Holdout execution requires one irreversible signed `holdout_execution_claim`; it
@@ -635,9 +639,12 @@ Use distinct terms and hard ceilings:
 - `cost_usd_per_whole_run`: maximum 10.00;
 - `cost_usd_across_approved_attempts`: maximum 30.00.
 
-The approval may set lower values but never higher ones except that exact corpus and
-no-speech counts cannot change. A request allowance is consumed immediately before
-connector construction. No retry occurs for a case, session, provider error, setup
+Campaign ceilings may be lower but never higher, in which case execution remains
+non-runnable. An executable attempt authorization must reserve the exact
+preregistered per-run liability of 128 requests and USD 10 before its first custody
+claim; a smaller request or cost reservation blocks before credential lookup. A
+request allowance is consumed immediately before connector construction. No retry
+occurs for a case, session, provider error, setup
 rejection, timeout, malformed response, or failed gate. A whole-run replacement is
 allowed only for a preregistered infrastructure-outage enum before policy lock and
 before any holdout materialization, access, or provider request. It requires a new
@@ -704,7 +711,8 @@ crash-consumed attempt, tamper-evident ledger, replacement linkage, changed
 digest/value, pre-lock-only replacement, post-lock/holdout replacement rejection,
 exact shared Python/uv environment identity, fully bound signed custody exports,
 post-mutation replay, stale/unsigned/wrong-identity export rejection, and proof that
-failure occurs before credential, DNS, or connector access.
+validly signed alternate forks, duplicate replacement IDs, and substituted lease
+capabilities fail before credential, DNS, or connector access.
 
 ### Task 3: Reuse and extend deterministic audio replay
 
@@ -769,7 +777,8 @@ cost reservation, current-versus-prior output-turn attribution, premature curren
 response rejection, bounded prior-turn interruption tail, total session/run
 deadlines, output disposal, capsule handoff, typed claim validation, signed
 post-claim and post-resume proof, reservation inflation, failed append, crash replay,
-and durable terminal-outcome replay.
+minimum safe cost liability, accepted-chain prefix continuity, signed lease-digest
+binding, and durable terminal-outcome replay.
 
 The executor computes no verdict. The selected authentication transport has failure-
 path tests proving credentials and authenticated URLs cannot enter output, logs,

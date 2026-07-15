@@ -1508,6 +1508,7 @@ def _require_exact_claim(
     campaign: CampaignApproval,
     authorization: AttemptAuthorization,
     label: str,
+    expected_lease_id_sha256: str | None = None,
 ) -> AttemptClaim:
     if (
         not isinstance(claim, AttemptClaim)
@@ -1520,7 +1521,70 @@ def _require_exact_claim(
         or claim.cost_reserved_microusd != authorization.cost_reservation_microusd
     ):
         raise RunnerError(f"{label} custodian returned an invalid active claim")
+    lease_id_sha256 = sha256(claim.lease_id.encode("ascii")).hexdigest()
+    if (
+        expected_lease_id_sha256 is not None
+        and lease_id_sha256 != expected_lease_id_sha256
+    ):
+        raise RunnerError(f"{label} custodian returned a substituted lease")
     return claim
+
+
+def _require_preregistered_attempt_liability(
+    authorization: AttemptAuthorization,
+    preregistration: Mapping[str, Any],
+) -> None:
+    immutable = preregistration["immutable_values"]
+    if (
+        authorization.provider_request_reservation
+        != immutable["usage_caps"]["provider_requests_per_run"]
+        or authorization.cost_reservation_microusd
+        != immutable["cost_caps_microusd"]["per_run"]
+    ):
+        raise RunnerError("signed attempt reservation does not cover preregistered liability")
+
+
+def _require_single_signed_append(
+    before: CustodyLedgerState,
+    after: CustodyLedgerState,
+    *,
+    expected_event: str,
+) -> None:
+    if (
+        not before.record_sha256s
+        or len(after.record_sha256s) != len(before.record_sha256s) + 1
+        or after.record_sha256s[:-1] != before.record_sha256s
+        or after.record_events[:-1] != before.record_events
+        or after.record_events[-1] != expected_event
+        or before.final_ledger_head_sha256 != before.record_sha256s[-1]
+        or after.final_ledger_head_sha256 != after.record_sha256s[-1]
+    ):
+        raise RunnerError("signed ledger mutation does not extend the accepted chain")
+
+
+def _require_preclaim_state(
+    state: CustodyLedgerState,
+    *,
+    campaign: CampaignApproval,
+    authorization: AttemptAuthorization,
+) -> None:
+    invalid = (
+        state.campaign_approval_sha256 != campaign.signed_payload_sha256
+        or state.active_attempt_id is not None
+        or state.completed_attempt_id is not None
+        or len(state.attempt_ids) != authorization.attempt_index - 1
+    )
+    if authorization.attempt_index == 1:
+        invalid = invalid or state.phase != "preregistered" or state.attempt_ids != ()
+    else:
+        invalid = (
+            invalid
+            or state.phase != "development_collection"
+            or not state.attempt_ids
+            or state.attempt_ids[-1] != authorization.prior_attempt_id
+        )
+    if invalid:
+        raise RunnerError("signed ledger is not ready for this attempt claim")
 
 
 def _require_postclaim_state(
@@ -1528,6 +1592,7 @@ def _require_postclaim_state(
     *,
     campaign: CampaignApproval,
     authorization: AttemptAuthorization,
+    claim: AttemptClaim,
     expected_claimed_at: datetime,
 ) -> None:
     if (
@@ -1539,6 +1604,8 @@ def _require_postclaim_state(
         or state.campaign_approval_sha256 != campaign.signed_payload_sha256
         or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
         or state.attempt_claimed_at != expected_claimed_at
+        or state.lease_id_sha256
+        != sha256(claim.lease_id.encode("ascii")).hexdigest()
         or state.provider_requests_reserved
         != authorization.provider_request_reservation
         or state.cost_reserved_microusd != authorization.cost_reservation_microusd
@@ -1628,6 +1695,19 @@ async def execute_authorized_attempt(
     )
     if required_requests > authorization.provider_request_reservation:
         raise RunnerError("signed request reservation is insufficient")
+    _require_preregistered_attempt_liability(authorization, preregistration)
+    preclaim_state = _replay_bound_ledger_snapshot(
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        identity=ledger_identity,
+        campaign=campaign,
+        authorization=authorization,
+    )
+    _require_preclaim_state(
+        preclaim_state,
+        campaign=campaign,
+        authorization=authorization,
+    )
     claim = _require_exact_claim(
         ledger.claim_attempt(
             campaign=campaign,
@@ -1649,7 +1729,13 @@ async def execute_authorized_attempt(
         claimed_state,
         campaign=campaign,
         authorization=authorization,
+        claim=claim,
         expected_claimed_at=now,
+    )
+    _require_single_signed_append(
+        preclaim_state,
+        claimed_state,
+        expected_event="claim",
     )
 
     budget = _RequestBudget(claim.provider_requests_reserved)
@@ -1808,10 +1894,13 @@ async def execute_authorized_attempt(
                 != usage_evidence_digest
                 or final_state.development_provider_requests != budget.consumed
                 or final_state.development_cost_microusd != cost_microusd
-                or final_state.final_ledger_head_sha256
-                == claimed_state.final_ledger_head_sha256
             ):
                 raise RunnerError("signed development checkpoint is not durable")
+            _require_single_signed_append(
+                claimed_state,
+                final_state,
+                expected_event="development_checkpoint",
+            )
         else:
             ledger.record_terminal_outcome(
                 claim=claim,
@@ -1838,10 +1927,13 @@ async def execute_authorized_attempt(
                 or final_state.final_usage_evidence_sha256 != usage_evidence_digest
                 or final_state.actual_provider_requests != budget.consumed
                 or final_state.actual_cost_microusd != cost_microusd
-                or final_state.final_ledger_head_sha256
-                == claimed_state.final_ledger_head_sha256
             ):
                 raise RunnerError("signed terminal outcome is not durable")
+            _require_single_signed_append(
+                claimed_state,
+                final_state,
+                expected_event="terminal_outcome",
+            )
 
     return AttemptExecutionResult(
         complete=complete,
@@ -1940,6 +2032,7 @@ async def execute_authorized_holdout(
         or state.holdout_manifest_sha256 != holdout_manifest_sha256
         or state.holdout_execution_claimed
         or state.development_usage_evidence_sha256 is None
+        or state.lease_id_sha256 is None
     ):
         raise RunnerError("holdout release does not match the active signed attempt")
     required_requests = sum(len(_connection_segments(plan)) for plan in plans) + len(
@@ -1958,6 +2051,7 @@ async def execute_authorized_holdout(
         or state.development_cost_microusd < 0
     ):
         raise RunnerError("holdout remaining reservation is insufficient")
+    _require_preregistered_attempt_liability(authorization, preregistration)
     claim = _require_exact_claim(
         ledger.resume_holdout(
             campaign=campaign,
@@ -1970,6 +2064,7 @@ async def execute_authorized_holdout(
         campaign=campaign,
         authorization=authorization,
         label="holdout",
+        expected_lease_id_sha256=state.lease_id_sha256,
     )
     resumed_state = _replay_bound_ledger_snapshot(
         ledger=ledger,
@@ -1993,9 +2088,14 @@ async def execute_authorized_holdout(
         != authorization.cost_reservation_microusd
         or resumed_state.development_usage_evidence_sha256
         != state.development_usage_evidence_sha256
-        or resumed_state.final_ledger_head_sha256 == state.final_ledger_head_sha256
+        or resumed_state.lease_id_sha256 != state.lease_id_sha256
     ):
         raise RunnerError("signed ledger did not durably consume the holdout claim")
+    _require_single_signed_append(
+        state,
+        resumed_state,
+        expected_event="holdout_execution_claim",
+    )
 
     budget = _RequestBudget(remaining_requests)
     holdout_cost_microusd = 0
@@ -2147,10 +2247,13 @@ async def execute_authorized_holdout(
             or final_state.actual_cost_microusd != total_cost_microusd
             or final_state.holdout_capsule_sha256
             != (capsule_sha256 if complete else None)
-            or final_state.final_ledger_head_sha256
-            == resumed_state.final_ledger_head_sha256
         ):
             raise RunnerError("signed holdout terminal outcome is not durable")
+        _require_single_signed_append(
+            resumed_state,
+            final_state,
+            expected_event="terminal_outcome",
+        )
 
     return AttemptExecutionResult(
         complete=complete,

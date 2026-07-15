@@ -73,6 +73,7 @@ class CustodyLedgerState:
     campaign_approval_sha256: str
     attempt_authorization_sha256: str | None
     attempt_claimed_at: datetime | None
+    lease_id_sha256: str | None
     provider_requests_reserved: int
     cost_reserved_microusd: int
     selected_policy_ms: int | None
@@ -88,6 +89,8 @@ class CustodyLedgerState:
     development_cost_microusd: int
     actual_provider_requests: int
     actual_cost_microusd: int
+    record_sha256s: tuple[str, ...]
+    record_events: tuple[str, ...]
     final_ledger_head_sha256: str
 
 
@@ -125,6 +128,7 @@ class _ReplayState:
     active_cost_reservation: int = 0
     active_authorization: str | None = None
     active_claimed_at: datetime | None = None
+    active_lease_id_sha256: str | None = None
     reserved_requests: int = 0
     reserved_cost: int = 0
     last_outage_attempt: str | None = None
@@ -241,6 +245,8 @@ def validate_custody_ledger_snapshot(
     replay = _ReplayState()
     previous = "0" * 64
     previous_time: datetime | None = None
+    record_sha256s: list[str] = []
+    record_events: list[str] = []
     for sequence, envelope in enumerate(records, start=1):
         payload, record_sha = _verify_record(
             envelope,
@@ -261,6 +267,8 @@ def validate_custody_ledger_snapshot(
             previous_hash=previous,
             record_time=record_time,
         )
+        record_sha256s.append(record_sha)
+        record_events.append(_safe_id(payload["event"], label="ledger event"))
         previous = record_sha
     if data["head_hash"] != previous:
         raise CustodyLedgerError("ledger export head is invalid")
@@ -285,6 +293,7 @@ def validate_custody_ledger_snapshot(
             replay.completed_authorization or replay.active_authorization
         ),
         attempt_claimed_at=replay.completed_claimed_at or replay.active_claimed_at,
+        lease_id_sha256=replay.active_lease_id_sha256,
         provider_requests_reserved=(
             replay.completed_request_reservation or replay.active_request_reservation
         ),
@@ -304,6 +313,8 @@ def validate_custody_ledger_snapshot(
         development_cost_microusd=replay.development_cost,
         actual_provider_requests=replay.actual_requests,
         actual_cost_microusd=replay.actual_cost,
+        record_sha256s=tuple(record_sha256s),
+        record_events=tuple(record_events),
         final_ledger_head_sha256=previous,
     )
 
@@ -485,6 +496,7 @@ def _replay_claim(
         {
             "attempt_index",
             "authorization_sha256",
+            "lease_id_sha256",
             "prior_attempt_id",
             "outage_enum",
             "provider_requests_reserved",
@@ -492,7 +504,12 @@ def _replay_claim(
         },
         label="ledger claim body",
     )
-    if attempt_id is None or state.active_attempt is not None or after != "development_collection":
+    if (
+        attempt_id is None
+        or attempt_id in state.attempts
+        or state.active_attempt is not None
+        or after != "development_collection"
+    ):
         raise CustodyLedgerError("ledger claim state is invalid")
     if before not in {"preregistered", "development_collection"}:
         raise CustodyLedgerError("ledger claim phase is invalid")
@@ -536,6 +553,10 @@ def _replay_claim(
     state.active_cost_reservation = cost_reservation
     state.active_authorization = authorization
     state.active_claimed_at = record_time
+    state.active_lease_id_sha256 = _digest(
+        body["lease_id_sha256"],
+        label="lease ID",
+    )
     state.attempts.append(attempt_id)
     state.last_outage_attempt = None
     state.last_outage_enum = None
@@ -771,6 +792,7 @@ def _replay_terminal_outcome(
     state.active_cost_reservation = 0
     state.active_authorization = None
     state.active_claimed_at = None
+    state.active_lease_id_sha256 = None
     state.final_usage = final_usage
     state.actual_requests = requests
     state.actual_cost = cost

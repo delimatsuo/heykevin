@@ -521,6 +521,7 @@ def _custody_bundle():
         body={
             "attempt_index": 1,
             "authorization_sha256": authorization_sha,
+            "lease_id_sha256": sha256(b"lease-capability-1").hexdigest(),
             "prior_attempt_id": None,
             "outage_enum": None,
             "provider_requests_reserved": 128,

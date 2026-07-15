@@ -7,6 +7,7 @@ from hashlib import sha256
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+import scripts.run_gemini_caller_turn_qualification as runner_module
 
 from app.services.qualification_identity import canonical_json_bytes
 from app.services.qualification_ledger import (
@@ -26,6 +27,8 @@ SOURCE_SHA = "b" * 40
 LEDGER_LOCATION_SHA = "c" * 64
 CAMPAIGN_APPROVAL_SHA = "d" * 64
 ATTEMPT_AUTHORIZATION_SHA = "e" * 64
+LEASE_ID = "lease-capability-1"
+LEASE_ID_SHA = sha256(LEASE_ID.encode("ascii")).hexdigest()
 
 
 def validate_custody_ledger_snapshot(
@@ -101,7 +104,11 @@ def _record(
     snapshot["head_hash"] = sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def _snapshot(private: Ed25519PrivateKey) -> dict[str, object]:
+def _snapshot(
+    private: Ed25519PrivateKey,
+    *,
+    genesis_at: datetime = NOW,
+) -> dict[str, object]:
     value: dict[str, object] = {
         "schema_id": "gate_0b_custodian_ledger_export_v1",
         "ledger_instance_id": LEDGER_INSTANCE_ID,
@@ -127,7 +134,7 @@ def _snapshot(private: Ed25519PrivateKey) -> dict[str, object]:
             "max_provider_requests": 384,
             "max_cost_microusd": 30_000_000,
         },
-        at=NOW,
+        at=genesis_at,
     )
     return value
 
@@ -152,6 +159,7 @@ def _append_claim(
         body={
             "attempt_index": attempt_index,
             "authorization_sha256": ATTEMPT_AUTHORIZATION_SHA,
+            "lease_id_sha256": LEASE_ID_SHA,
             "prior_attempt_id": prior_attempt_id,
             "outage_enum": outage_enum,
             "provider_requests_reserved": 128,
@@ -364,6 +372,122 @@ def test_holdout_cannot_complete_without_one_shot_execution_claim() -> None:
             public_key=public,
             expected_key_id=KEY_ID,
             expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+        )
+
+
+def test_active_claim_exposes_only_the_signed_lease_digest() -> None:
+    private, public = _key_pair()
+    snapshot = _snapshot(private)
+    _append_claim(private, snapshot)
+
+    state = validate_custody_ledger_snapshot(
+        snapshot,
+        public_key=public,
+        expected_key_id=KEY_ID,
+        expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+    )
+
+    assert state.lease_id_sha256 == LEASE_ID_SHA
+    assert LEASE_ID not in repr(state)
+
+
+def test_replacement_attempt_id_cannot_reuse_any_prior_attempt_id() -> None:
+    private, public = _key_pair()
+    snapshot = _snapshot(private)
+    _append_claim(private, snapshot)
+    _record(
+        private,
+        snapshot,
+        event="terminal_outcome",
+        phase_before="development_collection",
+        phase_after="development_collection",
+        attempt_id="attempt_1",
+        body={
+            "outcome": "infrastructure_outage",
+            "outage_enum": "provider_dns_outage",
+            "holdout_capsule_sha256": None,
+            "usage_evidence_sha256": "6" * 64,
+            "actual_provider_requests": 0,
+            "actual_cost_microusd": 0,
+        },
+        at=NOW + timedelta(seconds=2),
+    )
+    _append_claim(
+        private,
+        snapshot,
+        attempt_id="attempt_1",
+        attempt_index=2,
+        prior_attempt_id="attempt_1",
+        outage_enum="provider_dns_outage",
+        at=NOW + timedelta(seconds=3),
+    )
+
+    with pytest.raises(CustodyLedgerError, match="claim state"):
+        validate_custody_ledger_snapshot(
+            snapshot,
+            public_key=public,
+            expected_key_id=KEY_ID,
+            expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected_event"),
+    (
+        ("claim", "claim"),
+        ("checkpoint", "development_checkpoint"),
+        ("holdout_resume", "holdout_execution_claim"),
+        ("terminal", "terminal_outcome"),
+    ),
+)
+def test_validly_signed_alternate_fork_cannot_satisfy_mutation_continuity(
+    boundary: str,
+    expected_event: str,
+) -> None:
+    private, public = _key_pair()
+    accepted = _snapshot(private)
+    fork = _snapshot(private, genesis_at=NOW + timedelta(microseconds=1))
+
+    if boundary != "claim":
+        _append_claim(private, accepted)
+    _append_claim(private, fork)
+    if boundary == "checkpoint":
+        _append_development_checkpoint(private, fork)
+    elif boundary in {"holdout_resume", "terminal"}:
+        _append_completed_lifecycle(private, accepted)
+        _append_completed_lifecycle(private, fork)
+        accepted_records = accepted["records"]
+        fork_records = fork["records"]
+        assert isinstance(accepted_records, list)
+        assert isinstance(fork_records, list)
+        del accepted_records[5:]
+        accepted["head_hash"] = sha256(
+            canonical_json_bytes(accepted_records[-1]["payload"])
+        ).hexdigest()
+        if boundary == "holdout_resume":
+            del fork_records[6:]
+            fork["head_hash"] = sha256(
+                canonical_json_bytes(fork_records[-1]["payload"])
+            ).hexdigest()
+
+    before = validate_custody_ledger_snapshot(
+        accepted,
+        public_key=public,
+        expected_key_id=KEY_ID,
+        expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+    )
+    after = validate_custody_ledger_snapshot(
+        fork,
+        public_key=public,
+        expected_key_id=KEY_ID,
+        expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+    )
+
+    with pytest.raises(runner_module.RunnerError, match="accepted chain"):
+        runner_module._require_single_signed_append(
+            before,
+            after,
+            expected_event=expected_event,
         )
 
 

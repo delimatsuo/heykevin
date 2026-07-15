@@ -135,6 +135,12 @@ REQUIRED_CRITICAL_KINDS = frozenset(
         "language_to_english",
     }
 )
+CODE_SWITCH_TAGS = frozenset(
+    {
+        "code_switch_english_to_language",
+        "code_switch_language_to_english",
+    }
+)
 
 
 class EvaluationError(ValueError):
@@ -1196,11 +1202,23 @@ def _edit_rate_passes(
 
 
 def _code_switch_rates_pass(records: tuple[ActivityPrimitiveRecord, ...]) -> bool:
-    tagged = defaultdict(list)
+    tagged: defaultdict[tuple[str, str], list[ActivityPrimitiveRecord]] = defaultdict(
+        list
+    )
     for record in records:
-        if any(tag.startswith("code_switch_") for tag in record.scenario_tags):
-            tagged[record.language].append(record)
-    return all(
+        directions = CODE_SWITCH_TAGS.intersection(record.scenario_tags)
+        if not directions:
+            continue
+        if len(directions) != 1 or record.language == "en":
+            return False
+        tagged[(record.language, next(iter(directions)))].append(record)
+    languages = {language for language, _direction in tagged}
+    expected = {
+        (language, direction)
+        for language in languages
+        for direction in CODE_SWITCH_TAGS
+    }
+    return set(tagged) == expected and all(
         _edit_rate_passes(
             group,
             maximum_micros=THRESHOLDS["cer_stratum_micros"],

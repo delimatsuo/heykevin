@@ -321,6 +321,32 @@ def test_evaluator_cardinality_rejects_all_standard_false_green_probe() -> None:
     assert failures["activity_strata_invalid"] == 1
 
 
+def test_code_switch_cer_is_gated_by_language_and_direction() -> None:
+    artifact, _ = _artifact()
+    records = tuple(
+        ActivityPrimitiveRecord.from_dict(value)
+        for value in artifact["activity_records"]  # type: ignore[union-attr]
+    )
+    spanish = tuple(
+        record
+        for record in records
+        if record.split == "development"
+        and record.policy_ms == 100
+        and record.language == "es"
+        and any(tag.startswith("code_switch_") for tag in record.scenario_tags)
+    )
+    assert len(spanish) == 2
+    masked = tuple(
+        replace(record, substitutions=2)
+        if "code_switch_english_to_language" in record.scenario_tags
+        else record
+        for record in spanish
+    )
+
+    assert evaluator_module._edit_rate_micros(masked, word=False) == 100_000
+    assert evaluator_module._code_switch_rates_pass(masked) is False
+
+
 def _append_ledger_record(
     private_key: Ed25519PrivateKey,
     ledger: dict[str, object],

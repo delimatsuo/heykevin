@@ -89,3 +89,60 @@ def test_private_paths_reject_symlinked_ancestor(tmp_path: Path) -> None:
 
     with pytest.raises(PrivatePathError, match="symlinks"):
         validate_private_output_path(linked_parent / "report.json", repo_root=Path.cwd())
+
+
+def test_private_write_rejects_parent_swap_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _private_directory(tmp_path)
+    displaced = tmp_path / "original-custody"
+    substitute = tmp_path / "substitute-custody"
+    substitute.mkdir(mode=0o700)
+    output = parent / "report.json"
+    original_validate = private_paths.validate_private_output_path
+
+    def validate_then_swap(path: Path, *, repo_root: Path) -> Path:
+        canonical = original_validate(path, repo_root=repo_root)
+        parent.rename(displaced)
+        parent.symlink_to(substitute, target_is_directory=True)
+        return canonical
+
+    monkeypatch.setattr(
+        private_paths,
+        "validate_private_output_path",
+        validate_then_swap,
+    )
+
+    with pytest.raises(PrivatePathError, match="ancestry|parent|unavailable"):
+        write_private_file(output, b"evidence", repo_root=Path.cwd())
+
+    assert not (substitute / output.name).exists()
+
+
+def test_private_read_rejects_parent_swap_after_path_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _private_directory(tmp_path)
+    source = parent / "evidence.json"
+    source.write_bytes(b"original")
+    source.chmod(0o600)
+    displaced = tmp_path / "original-custody"
+    substitute = tmp_path / "substitute-custody"
+    substitute.mkdir(mode=0o700)
+    substitute_source = substitute / source.name
+    substitute_source.write_bytes(b"substitute")
+    substitute_source.chmod(0o600)
+    original_validate = private_paths._validate_external_path
+
+    def validate_then_swap(path: Path, *, repo_root: Path) -> Path:
+        canonical = original_validate(path, repo_root=repo_root)
+        parent.rename(displaced)
+        parent.symlink_to(substitute, target_is_directory=True)
+        return canonical
+
+    monkeypatch.setattr(private_paths, "_validate_external_path", validate_then_swap)
+
+    with pytest.raises(PrivatePathError, match="ancestry|parent|unavailable"):
+        read_private_file(source, repo_root=Path.cwd(), maximum_bytes=32)

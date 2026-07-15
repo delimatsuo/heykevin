@@ -46,9 +46,11 @@ from app.services.caller_turn_qualification import (  # noqa: E402
 )
 from app.services.qualification_identity import (  # noqa: E402
     canonical_json_bytes,
-    validate_ledger_snapshot,
     verify_attempt_authorization,
     verify_campaign_approval,
+)
+from app.services.qualification_ledger import (  # noqa: E402
+    validate_custody_ledger_snapshot,
 )
 from scripts.run_gemini_caller_turn_qualification import (  # noqa: E402
     PREREGISTRATION_EXTERNAL_FIELDS,
@@ -73,9 +75,7 @@ EXPECTED_NO_SPEECH_WINDOWS = 64
 SMALL_CELL_MINIMUM = 8
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 PRICING_PATH = REPO_ROOT / "tests/fixtures/caller_turn_qualification/pricing.json"
-PINNED_APPROVAL_ROOT_PATH = (
-    REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
-)
+PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 THRESHOLDS = {
@@ -152,9 +152,7 @@ def compute_policy_lock_sha256(
         "selected_policy_ms": selected_policy_ms,
         "selection_rule": "lowest_passing_quiescence_ms",
         "thresholds": THRESHOLDS,
-        "identities": {
-            field: identity[field] for field in sorted(POLICY_LOCK_IDENTITY_FIELDS)
-        },
+        "identities": {field: identity[field] for field in sorted(POLICY_LOCK_IDENTITY_FIELDS)},
     }
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
@@ -190,8 +188,7 @@ def compute_evidence_context_commitment(
     if not isinstance(activity_records, list) or not isinstance(no_speech_records, list):
         raise EvaluationError("evidence context record collections are invalid")
     context = {
-        field: artifact[field]
-        for field in fields - {"activity_records", "no_speech_records"}
+        field: artifact[field] for field in fields - {"activity_records", "no_speech_records"}
     }
     context["activity_record_count"] = len(activity_records)
     context["no_speech_record_count"] = len(no_speech_records)
@@ -261,9 +258,10 @@ def evaluate_evidence_artifact(
         failures["run_failure_present"] = len(parsed["run_failures"])
     if not _usage_is_complete_and_bounded(parsed["usage"]):
         failures["usage_or_budget_invalid"] = 1
-    if parsed["identities"]["pricing_sha256"] != hashlib.sha256(
-        PRICING_PATH.read_bytes()
-    ).hexdigest():
+    if (
+        parsed["identities"]["pricing_sha256"]
+        != hashlib.sha256(PRICING_PATH.read_bytes()).hexdigest()
+    ):
         failures["pricing_identity_invalid"] = 1
 
     development_records = tuple(record for record in records if record.split == "development")
@@ -283,11 +281,7 @@ def evaluate_evidence_artifact(
     candidate_samples: dict[int, dict[str, Any]] = {}
     for policy in parsed["candidate_policies_ms"]:
         sample = _evaluate_sample(
-            tuple(
-                record
-                for record in development_records
-                if record.policy_ms == policy
-            ),
+            tuple(record for record in development_records if record.policy_ms == policy),
             no_speech_records=development_windows,
         )
         candidate_samples[policy] = sample
@@ -298,9 +292,7 @@ def evaluate_evidence_artifact(
             "passed": sample["passed"],
         }
     passing_policies = [
-        policy
-        for policy in parsed["candidate_policies_ms"]
-        if candidate_samples[policy]["passed"]
+        policy for policy in parsed["candidate_policies_ms"] if candidate_samples[policy]["passed"]
     ]
     selected_by_rule = min(passing_policies) if passing_policies else None
     if selected_by_rule is None:
@@ -379,6 +371,7 @@ def evaluate_custody_bundle(
     commitment_key: bytes,
     custodian_private_key: X25519PrivateKey,
     expected_custodian_key_id: str,
+    ledger_custodian_public_key: bytes,
     record_root_signing_key: Ed25519PrivateKey,
     record_root_key_id: str,
 ) -> dict[str, Any]:
@@ -389,6 +382,7 @@ def evaluate_custody_bundle(
             commitment_key=commitment_key,
             custodian_private_key=custodian_private_key,
             expected_custodian_key_id=expected_custodian_key_id,
+            ledger_custodian_public_key=ledger_custodian_public_key,
             record_root_signing_key=record_root_signing_key,
             record_root_key_id=record_root_key_id,
         )
@@ -402,6 +396,7 @@ def _evaluate_custody_bundle(
     commitment_key: bytes,
     custodian_private_key: X25519PrivateKey,
     expected_custodian_key_id: str,
+    ledger_custodian_public_key: bytes,
     record_root_signing_key: Ed25519PrivateKey,
     record_root_key_id: str,
 ) -> dict[str, Any]:
@@ -425,76 +420,7 @@ def _evaluate_custody_bundle(
     ledger = bundle["ledger"]
     if not isinstance(ledger, Mapping) or ledger.get("campaign_id") != campaign_id:
         raise EvaluationError("custody ledger campaign is invalid")
-    state = validate_ledger_snapshot(ledger)
-    if (
-        state.phase.value != "completed"
-        or tuple(value.value for value in state.phase_history) != EXPECTED_PHASE_HISTORY
-        or not state.holdout_materialized
-        or state.selected_policy_ms is None
-        or state.policy_lock_sha256 is None
-    ):
-        raise EvaluationError("custody ledger phase history is incomplete")
 
-    development_envelope = bundle["development_capsule"]
-    holdout_envelope = bundle["holdout_capsule"]
-    if not isinstance(development_envelope, Mapping) or not isinstance(
-        holdout_envelope, Mapping
-    ):
-        raise EvaluationError("custody capsule envelope is invalid")
-    development_capsule_sha256 = hashlib.sha256(
-        canonical_json_bytes(development_envelope)
-    ).hexdigest()
-    holdout_capsule_sha256 = hashlib.sha256(
-        canonical_json_bytes(holdout_envelope)
-    ).hexdigest()
-
-    completed_outcomes = [
-        record
-        for record in ledger["records"]
-        if record.get("event") == "outcome" and record.get("outcome") == "completed"
-    ]
-    lock_transitions = [
-        record
-        for record in ledger["records"]
-        if record.get("event") == "phase_transition"
-        and record.get("to_phase") == "policy_selection_locked"
-    ]
-    completion_transitions = [
-        record
-        for record in ledger["records"]
-        if record.get("event") == "phase_transition"
-        and record.get("to_phase") == "completed"
-    ]
-    if (
-        len(completed_outcomes) != 1
-        or len(lock_transitions) != 1
-        or len(completion_transitions) != 1
-        or completed_outcomes[0].get("capsule_sha256") != development_capsule_sha256
-        or lock_transitions[0].get("capsule_sha256") != development_capsule_sha256
-        or completion_transitions[0].get("capsule_sha256") != holdout_capsule_sha256
-    ):
-        raise EvaluationError("custody capsule and ledger identities disagree")
-
-    claims = [record for record in ledger["records"] if record.get("event") == "claim"]
-    completed_attempt_id = completed_outcomes[0].get("attempt_id")
-    completed_claims = [
-        record for record in claims if record.get("attempt_id") == completed_attempt_id
-    ]
-    if len(completed_claims) != 1:
-        raise EvaluationError("completed attempt authorization is missing")
-
-    if not isinstance(custodian_private_key, X25519PrivateKey) or not isinstance(
-        record_root_signing_key, Ed25519PrivateKey
-    ):
-        raise EvaluationError("custody key type is invalid")
-    custodian_public_key = custodian_private_key.public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
-    )
-    record_root_public_key = record_root_signing_key.public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
-    )
     preregistration = bundle["preregistration"]
     if not isinstance(preregistration, Mapping):
         raise EvaluationError("custody preregistration is invalid")
@@ -512,12 +438,64 @@ def _evaluate_custody_bundle(
         raise EvaluationError("custody preregistration is invalid") from exc
     if dict(preregistration) != expected_preregistration:
         raise EvaluationError("custody preregistration digest is invalid")
+    if (
+        not isinstance(ledger_custodian_public_key, bytes)
+        or hashlib.sha256(ledger_custodian_public_key).hexdigest()
+        != immutable["ledger_custodian_public_key_sha256"]
+    ):
+        raise EvaluationError("ledger custodian root is not preregistered")
+    state = validate_custody_ledger_snapshot(
+        ledger,
+        public_key=ledger_custodian_public_key,
+        expected_key_id=immutable["ledger_custodian_key_id"],
+        expected_ledger_instance_id=immutable["ledger_instance_id"],
+    )
+    if (
+        state.phase != "completed"
+        or state.phase_history != EXPECTED_PHASE_HISTORY
+        or state.selected_policy_ms is None
+        or state.policy_lock_sha256 is None
+    ):
+        raise EvaluationError("custody ledger phase history is incomplete")
+
+    development_envelope = bundle["development_capsule"]
+    holdout_envelope = bundle["holdout_capsule"]
+    if not isinstance(development_envelope, Mapping) or not isinstance(holdout_envelope, Mapping):
+        raise EvaluationError("custody capsule envelope is invalid")
+    development_capsule_sha256 = hashlib.sha256(
+        canonical_json_bytes(development_envelope)
+    ).hexdigest()
+    holdout_capsule_sha256 = hashlib.sha256(canonical_json_bytes(holdout_envelope)).hexdigest()
+
+    if (
+        state.development_capsule_sha256 != development_capsule_sha256
+        or state.holdout_capsule_sha256 != holdout_capsule_sha256
+    ):
+        raise EvaluationError("custody capsule and ledger identities disagree")
+    if (
+        state.completed_attempt_id is None
+        or state.attempt_authorization_sha256 is None
+        or state.attempt_claimed_at is None
+        or state.development_ledger_head_sha256 is None
+    ):
+        raise EvaluationError("completed attempt authorization is missing")
+
+    if not isinstance(custodian_private_key, X25519PrivateKey) or not isinstance(
+        record_root_signing_key, Ed25519PrivateKey
+    ):
+        raise EvaluationError("custody key type is invalid")
+    custodian_public_key = custodian_private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    record_root_public_key = record_root_signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
     approval_public_key = _load_pinned_approval_public_key()
-    if hashlib.sha256(approval_public_key).hexdigest() != immutable[
-        "approval_public_key_sha256"
-    ]:
+    if hashlib.sha256(approval_public_key).hexdigest() != immutable["approval_public_key_sha256"]:
         raise EvaluationError("custody approval root is not preregistered")
-    claim_time = _parse_utc_time(completed_claims[0].get("at"))
+    claim_time = state.attempt_claimed_at
     campaign = verify_campaign_approval(
         bundle["campaign_envelope"],
         public_key=approval_public_key,
@@ -536,9 +514,13 @@ def _evaluate_custody_bundle(
     if (
         ledger["preregistration_sha256"] != preregistration["preregistration_sha256"]
         or ledger["source_sha"] != immutable["source_sha"]
-        or ledger["campaign_approval_sha256"] != campaign.signed_payload_sha256
-        or completed_claims[0]["authorization_sha256"] != authorization.signed_payload_sha256
-        or authorization.attempt_id != completed_attempt_id
+        or state.campaign_approval_sha256 != campaign.signed_payload_sha256
+        or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
+        or authorization.attempt_id != state.completed_attempt_id
+        or campaign.ledger_instance_id != immutable["ledger_instance_id"]
+        or campaign.ledger_custodian_key_id != immutable["ledger_custodian_key_id"]
+        or campaign.ledger_custodian_public_key_sha256
+        != immutable["ledger_custodian_public_key_sha256"]
     ):
         raise EvaluationError("custody authorization and ledger identities disagree")
     if (
@@ -548,28 +530,26 @@ def _evaluate_custody_bundle(
         raise EvaluationError("custody key identity is not preregistered")
     identities = _validate_identities(
         {
-        "source_sha256": hashlib.sha256(ledger["source_sha"].encode("ascii")).hexdigest(),
-        "environment_sha256": immutable["environment_identity_sha256"],
-        "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "corpus_sha256": immutable["corpus_sha256"],
-        "pricing_sha256": hashlib.sha256(PRICING_PATH.read_bytes()).hexdigest(),
-        "preregistration_sha256": ledger["preregistration_sha256"],
-        "campaign_approval_sha256": ledger["campaign_approval_sha256"],
-        "attempt_authorization_sha256": completed_claims[0]["authorization_sha256"],
-        "development_capsule_sha256": development_capsule_sha256,
-        "holdout_capsule_sha256": holdout_capsule_sha256,
-        "ledger_head_sha256": lock_transitions[0]["previous_hash"],
-        "custodian_public_key_sha256": hashlib.sha256(custodian_public_key).hexdigest(),
-        "record_root_public_key_sha256": hashlib.sha256(record_root_public_key).hexdigest(),
+            "source_sha256": hashlib.sha256(ledger["source_sha"].encode("ascii")).hexdigest(),
+            "environment_sha256": immutable["environment_identity_sha256"],
+            "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "corpus_sha256": immutable["corpus_sha256"],
+            "pricing_sha256": hashlib.sha256(PRICING_PATH.read_bytes()).hexdigest(),
+            "preregistration_sha256": ledger["preregistration_sha256"],
+            "campaign_approval_sha256": state.campaign_approval_sha256,
+            "attempt_authorization_sha256": state.attempt_authorization_sha256,
+            "development_capsule_sha256": development_capsule_sha256,
+            "holdout_capsule_sha256": holdout_capsule_sha256,
+            "ledger_head_sha256": state.development_ledger_head_sha256,
+            "custodian_public_key_sha256": hashlib.sha256(custodian_public_key).hexdigest(),
+            "record_root_public_key_sha256": hashlib.sha256(record_root_public_key).hexdigest(),
         }
     )
     if (
         identities["evaluator_sha256"] != immutable["evaluator_sha256"]
         or identities["pricing_sha256"] != immutable["pricing_sha256"]
-        or identities["custodian_public_key_sha256"]
-        != immutable["custodian_public_key_sha256"]
-        or identities["record_root_public_key_sha256"]
-        != immutable["record_root_public_key_sha256"]
+        or identities["custodian_public_key_sha256"] != immutable["custodian_public_key_sha256"]
+        or identities["record_root_public_key_sha256"] != immutable["record_root_public_key_sha256"]
     ):
         raise EvaluationError("custody evidence identity is not preregistered")
 
@@ -633,10 +613,10 @@ def _evaluate_custody_bundle(
         "schema_id": EVIDENCE_SCHEMA_ID,
         "campaign_id": campaign_id,
         "attempt_completed": True,
-        "phase_history": [value.value for value in state.phase_history],
+        "phase_history": list(state.phase_history),
         "candidate_policies_ms": list(EXPECTED_POLICIES),
         "selected_policy_ms": selected_policy_ms,
-        "holdout_materialized_after_lock": state.holdout_materialized,
+        "holdout_materialized_after_lock": state.holdout_manifest_sha256 is not None,
         "identities": identities,
         "policy_lock_sha256": state.policy_lock_sha256,
         "activity_records": [record.to_dict() for record in activity_records],
@@ -764,17 +744,14 @@ def _validate_cardinality(
     ):
         failures["development_policy_evidence_mismatch"] = 1
     holdout_ordinals = [record.activity_ordinal for record in holdout]
-    if (
-        len(holdout) != EXPECTED_HOLDOUT_ACTIVITIES
-        or len(set(holdout_ordinals)) != len(holdout_ordinals)
+    if len(holdout) != EXPECTED_HOLDOUT_ACTIVITIES or len(set(holdout_ordinals)) != len(
+        holdout_ordinals
     ):
         failures["holdout_cardinality_invalid"] = 1
     if any(record.policy_ms != selected_policy for record in holdout):
         failures["holdout_policy_violation"] = 1
     selected_development = tuple(
-        record
-        for record in development
-        if record.policy_ms == selected_policy
+        record for record in development if record.policy_ms == selected_policy
     )
     if not _strata_are_exact(selected_development) or not _strata_are_exact(holdout):
         failures["activity_strata_invalid"] = 1
@@ -789,9 +766,10 @@ def _validate_cardinality(
         or len(window_ordinals) != len(set(window_ordinals))
     ):
         failures["no_speech_cardinality_invalid"] = 1
-    if sum(window.split == "development" for window in windows) != 32 or sum(
-        window.split == "holdout" for window in windows
-    ) != 32:
+    if (
+        sum(window.split == "development" for window in windows) != 32
+        or sum(window.split == "holdout" for window in windows) != 32
+    ):
         failures["no_speech_split_invalid"] = 1
     return failures
 
@@ -825,15 +803,14 @@ def _evaluate_sample(
         "teardown_violation_count",
     )
     lifecycle_exact = all(
-        record.expected_lifecycle_status == record.observed_lifecycle_status
-        for record in records
+        record.expected_lifecycle_status == record.observed_lifecycle_status for record in records
     )
     structural_zero = all(
-        getattr(record, field) == 0
-        for record in records
-        for field in exact_zero_fields
+        getattr(record, field) == 0 for record in records for field in exact_zero_fields
     )
-    assembly_passed = assembly_overall and assembly_languages and lifecycle_exact and structural_zero
+    assembly_passed = (
+        assembly_overall and assembly_languages and lifecycle_exact and structural_zero
+    )
 
     fidelity_passed = (
         _edit_rate_passes(
@@ -912,11 +889,7 @@ def _evaluate_sample(
                 and max(interruption) <= THRESHOLDS["interruption_tail_max_ms"]
             )
         )
-        and all(
-            getattr(record, field) == 0
-            for record in records
-            for field in wire_zero_fields
-        )
+        and all(getattr(record, field) == 0 for record in records for field in wire_zero_fields)
         and all(record.error_code is None for record in records)
         and no_speech_passed
     )
@@ -934,8 +907,7 @@ def _evaluate_sample(
         ),
         "no_speech_response_free_rate": _rate_summary(
             sum(
-                window.false_activity_count == 0
-                and window.model_audio_chunk_count == 0
+                window.false_activity_count == 0 and window.model_audio_chunk_count == 0
                 for window in no_speech_records
             ),
             len(no_speech_records),
@@ -971,8 +943,7 @@ def _record_fidelity_passes(record: ActivityPrimitiveRecord) -> bool:
         _single_edit_rate_micros(record, word=False) <= THRESHOLDS["cer_stratum_micros"]
         and (
             record.reference_words is None
-            or _single_edit_rate_micros(record, word=True)
-            <= THRESHOLDS["wer_language_micros"]
+            or _single_edit_rate_micros(record, word=True) <= THRESHOLDS["wer_language_micros"]
         )
         and all(fact.exact for fact in record.critical_spans)
     )
@@ -1001,7 +972,9 @@ def _edit_rate_micros(records: Sequence[ActivityPrimitiveRecord], *, word: bool)
         )
         denominator = sum(record.reference_words for record in eligible)
     else:
-        edits = sum(record.substitutions + record.insertions + record.deletions for record in records)
+        edits = sum(
+            record.substitutions + record.insertions + record.deletions for record in records
+        )
         denominator = sum(record.reference_characters for record in records)
     return _ratio_micros(edits, denominator) if denominator else None
 
@@ -1022,8 +995,7 @@ def _edit_summary(
         denominator = sum(record.reference_words for record in eligible)
     else:
         edits = sum(
-            record.substitutions + record.insertions + record.deletions
-            for record in records
+            record.substitutions + record.insertions + record.deletions for record in records
         )
         denominator = sum(record.reference_characters for record in records)
     return {
@@ -1202,18 +1174,14 @@ def _bisect_probability(function, *, target: float, increasing: bool) -> float:
 
 def _binomial_cdf(successes: int, trials: int, probability: float) -> float:
     return sum(
-        math.comb(trials, count)
-        * probability**count
-        * (1 - probability) ** (trials - count)
+        math.comb(trials, count) * probability**count * (1 - probability) ** (trials - count)
         for count in range(successes + 1)
     )
 
 
 def _binomial_upper_tail(successes: int, trials: int, probability: float) -> float:
     return sum(
-        math.comb(trials, count)
-        * probability**count
-        * (1 - probability) ** (trials - count)
+        math.comb(trials, count) * probability**count * (1 - probability) ** (trials - count)
         for count in range(successes, trials + 1)
     )
 
@@ -1293,11 +1261,11 @@ def _usage_is_complete_and_bounded(usage: Mapping[str, Any]) -> bool:
     expected_cost_microusd = int(
         (
             pricing.cost_usd(
-            input_audio_tokens=usage["input_audio_tokens"],
-            output_audio_tokens=usage["output_audio_tokens"],
-            input_text_tokens=usage["input_text_tokens"],
-            output_text_tokens=usage["output_text_tokens"],
-        )
+                input_audio_tokens=usage["input_audio_tokens"],
+                output_audio_tokens=usage["output_audio_tokens"],
+                input_text_tokens=usage["input_text_tokens"],
+                output_text_tokens=usage["output_text_tokens"],
+            )
             * 1_000_000
         ).to_integral_value(rounding=ROUND_CEILING)
     )
@@ -1352,6 +1320,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commitment-key", type=Path, required=True)
     parser.add_argument("--custodian-private-key", type=Path, required=True)
     parser.add_argument("--custodian-key-id", required=True)
+    parser.add_argument("--ledger-custodian-public-key", type=Path, required=True)
     parser.add_argument("--record-root-signing-key", type=Path, required=True)
     parser.add_argument("--record-root-key-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1375,6 +1344,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _read_private_key_file(args.custodian_private_key, label="custodian")
             ),
             expected_custodian_key_id=args.custodian_key_id,
+            ledger_custodian_public_key=_read_public_key_file(
+                args.ledger_custodian_public_key,
+                label="ledger custodian",
+            ),
             record_root_signing_key=Ed25519PrivateKey.from_private_bytes(
                 _read_private_key_file(
                     args.record_root_signing_key,
@@ -1396,6 +1369,15 @@ def _read_private_key_file(path: Path, *, label: str) -> bytes:
     value = path.read_bytes()
     if len(value) != 32:
         raise EvaluationError(f"{label} key must be exactly 32 bytes")
+    return value
+
+
+def _read_public_key_file(path: Path, *, label: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise EvaluationError(f"{label} public key file is invalid")
+    value = path.read_bytes()
+    if len(value) != 32:
+        raise EvaluationError(f"{label} public key must be exactly 32 bytes")
     return value
 
 

@@ -70,9 +70,7 @@ def _record(
     envelope = {
         "key_id": KEY_ID,
         "payload": payload,
-        "signature": base64.b64encode(private.sign(canonical_json_bytes(payload))).decode(
-            "ascii"
-        ),
+        "signature": base64.b64encode(private.sign(canonical_json_bytes(payload))).decode("ascii"),
     }
     records.append(envelope)
     snapshot["head_hash"] = sha256(canonical_json_bytes(payload)).hexdigest()
@@ -243,8 +241,16 @@ def test_signed_custody_ledger_replays_one_attempt_across_both_splits() -> None:
     )
     assert state.attempt_ids == ("attempt_1",)
     assert state.active_attempt_id is None
+    assert state.completed_attempt_id == "attempt_1"
+    assert state.campaign_approval_sha256 == CAMPAIGN_APPROVAL_SHA
+    assert state.attempt_authorization_sha256 == ATTEMPT_AUTHORIZATION_SHA
+    assert state.attempt_claimed_at == NOW + timedelta(seconds=1)
     assert state.selected_policy_ms == 100
     assert state.development_ledger_head_sha256 is not None
+    assert state.development_usage_evidence_sha256 == "2" * 64
+    assert state.final_usage_evidence_sha256 == "6" * 64
+    assert state.actual_provider_requests == 120
+    assert state.actual_cost_microusd == 2_000_000
     assert state.final_ledger_head_sha256 == snapshot["head_hash"]
 
 

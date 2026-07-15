@@ -64,12 +64,20 @@ class CustodyLedgerState:
     phase_history: tuple[str, ...]
     attempt_ids: tuple[str, ...]
     active_attempt_id: str | None
+    completed_attempt_id: str | None
+    campaign_approval_sha256: str
+    attempt_authorization_sha256: str | None
+    attempt_claimed_at: datetime | None
     selected_policy_ms: int | None
     policy_lock_sha256: str | None
     development_capsule_sha256: str | None
     development_ledger_head_sha256: str | None
     holdout_manifest_sha256: str | None
     holdout_capsule_sha256: str | None
+    development_usage_evidence_sha256: str | None
+    final_usage_evidence_sha256: str | None
+    actual_provider_requests: int
+    actual_cost_microusd: int
     final_ledger_head_sha256: str
 
 
@@ -101,6 +109,8 @@ class _ReplayState:
     active_attempt_index: int | None = None
     active_request_reservation: int = 0
     active_cost_reservation: int = 0
+    active_authorization: str | None = None
+    active_claimed_at: datetime | None = None
     reserved_requests: int = 0
     reserved_cost: int = 0
     last_outage_attempt: str | None = None
@@ -116,6 +126,13 @@ class _ReplayState:
     policy_lock_receipt: str | None = None
     holdout_manifest: str | None = None
     holdout_capsule: str | None = None
+    campaign_approval: str | None = None
+    completed_attempt: str | None = None
+    completed_authorization: str | None = None
+    completed_claimed_at: datetime | None = None
+    final_usage: str | None = None
+    actual_requests: int = 0
+    actual_cost: int = 0
     max_attempts: int = 0
     max_requests: int = 0
     max_cost: int = 0
@@ -203,7 +220,12 @@ def validate_custody_ledger_snapshot(
         if previous_time is not None and record_time < previous_time:
             raise CustodyLedgerError("ledger receipt time moved backward")
         previous_time = record_time
-        _replay_record(replay, payload, previous_hash=previous)
+        _replay_record(
+            replay,
+            payload,
+            previous_hash=previous,
+            record_time=record_time,
+        )
         previous = record_sha
     if data["head_hash"] != previous:
         raise CustodyLedgerError("ledger export head is invalid")
@@ -212,17 +234,28 @@ def validate_custody_ledger_snapshot(
 
     assert replay.history is not None
     assert replay.attempts is not None
+    assert replay.campaign_approval is not None
     return CustodyLedgerState(
         phase=replay.phase,
         phase_history=tuple(replay.history),
         attempt_ids=tuple(replay.attempts),
         active_attempt_id=replay.active_attempt,
+        completed_attempt_id=replay.completed_attempt,
+        campaign_approval_sha256=replay.campaign_approval,
+        attempt_authorization_sha256=(
+            replay.completed_authorization or replay.active_authorization
+        ),
+        attempt_claimed_at=replay.completed_claimed_at or replay.active_claimed_at,
         selected_policy_ms=replay.selected_policy,
         policy_lock_sha256=replay.policy_lock,
         development_capsule_sha256=replay.development_capsule,
         development_ledger_head_sha256=replay.development_head,
         holdout_manifest_sha256=replay.holdout_manifest,
         holdout_capsule_sha256=replay.holdout_capsule,
+        development_usage_evidence_sha256=replay.development_usage,
+        final_usage_evidence_sha256=replay.final_usage,
+        actual_provider_requests=replay.actual_requests,
+        actual_cost_microusd=replay.actual_cost,
         final_ledger_head_sha256=previous,
     )
 
@@ -279,6 +312,7 @@ def _replay_record(
     payload: Mapping[str, Any],
     *,
     previous_hash: str,
+    record_time: datetime,
 ) -> None:
     event = _safe_id(payload["event"], label="ledger event")
     before = _phase(payload["phase_before"])
@@ -296,7 +330,14 @@ def _replay_record(
     elif not state.genesis_seen:
         raise CustodyLedgerError("ledger genesis receipt is missing")
     elif event == "claim":
-        _replay_claim(state, body, before=before, after=after, attempt_id=attempt_id)
+        _replay_claim(
+            state,
+            body,
+            before=before,
+            after=after,
+            attempt_id=attempt_id,
+            record_time=record_time,
+        )
     elif event == "development_checkpoint":
         _replay_development_checkpoint(
             state,
@@ -355,7 +396,10 @@ def _replay_genesis(
     )
     if state.genesis_seen or before != "preregistered" or after != before or attempt_id is not None:
         raise CustodyLedgerError("ledger genesis receipt is invalid")
-    _digest(body["campaign_approval_sha256"], label="campaign approval")
+    state.campaign_approval = _digest(
+        body["campaign_approval_sha256"],
+        label="campaign approval",
+    )
     state.max_attempts = _bounded_int(body["max_attempts"], label="max attempts", maximum=3)
     state.max_requests = _bounded_int(
         body["max_provider_requests"],
@@ -377,6 +421,7 @@ def _replay_claim(
     before: str,
     after: str,
     attempt_id: str | None,
+    record_time: datetime,
 ) -> None:
     body = _strict_mapping(
         raw,
@@ -398,7 +443,7 @@ def _replay_claim(
     index = _bounded_int(body["attempt_index"], label="attempt index", maximum=3)
     if index != len(state.attempts) + 1 or index > state.max_attempts:
         raise CustodyLedgerError("ledger attempt index is invalid")
-    _digest(body["authorization_sha256"], label="attempt authorization")
+    authorization = _digest(body["authorization_sha256"], label="attempt authorization")
     prior = body["prior_attempt_id"]
     outage = body["outage_enum"]
     if index == 1:
@@ -433,6 +478,8 @@ def _replay_claim(
     state.active_attempt_index = index
     state.active_request_reservation = request_reservation
     state.active_cost_reservation = cost_reservation
+    state.active_authorization = authorization
+    state.active_claimed_at = record_time
     state.attempts.append(attempt_id)
     state.last_outage_attempt = None
     state.last_outage_enum = None
@@ -441,6 +488,9 @@ def _replay_claim(
     state.development_usage = None
     state.development_requests = 0
     state.development_cost = 0
+    state.final_usage = None
+    state.actual_requests = 0
+    state.actual_cost = 0
     state.transition(after)
 
 
@@ -614,6 +664,7 @@ def _replay_terminal_outcome(
     if requests < state.development_requests or cost < state.development_cost:
         raise CustodyLedgerError("terminal outcome understates development usage")
     _digest(body["usage_evidence_sha256"], label="usage evidence")
+    final_usage = _digest(body["usage_evidence_sha256"], label="usage evidence")
     outcome = body["outcome"]
     outage = body["outage_enum"]
     capsule = body["holdout_capsule_sha256"]
@@ -621,6 +672,9 @@ def _replay_terminal_outcome(
         if before != "holdout_collection" or after != "completed" or outage is not None:
             raise CustodyLedgerError("completed outcome phase is invalid")
         state.holdout_capsule = _digest(capsule, label="holdout capsule")
+        state.completed_attempt = attempt_id
+        state.completed_authorization = state.active_authorization
+        state.completed_claimed_at = state.active_claimed_at
         state.transition(after)
     elif outcome == "infrastructure_outage":
         if (
@@ -644,6 +698,11 @@ def _replay_terminal_outcome(
     state.active_attempt_index = None
     state.active_request_reservation = 0
     state.active_cost_reservation = 0
+    state.active_authorization = None
+    state.active_claimed_at = None
+    state.final_usage = final_usage
+    state.actual_requests = requests
+    state.actual_cost = cost
 
 
 def _strict_mapping(raw: object, fields: set[str], *, label: str) -> dict[str, Any]:

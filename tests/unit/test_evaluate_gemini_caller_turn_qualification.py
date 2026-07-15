@@ -77,13 +77,9 @@ def _activity_record(
     scenario_tags = (
         ("tool_cancellation_interruption",)
         if interruption
-        else (
-            "code_switch_english_to_language",
-        )
+        else ("code_switch_english_to_language",)
         if ordinal % 16 == 1
-        else (
-            "code_switch_language_to_english",
-        )
+        else ("code_switch_language_to_english",)
         if ordinal % 16 == 2
         else ("standard",)
     )
@@ -262,17 +258,45 @@ def _evaluate(artifact: dict[str, object], public_key: bytes) -> dict[str, objec
     )
 
 
-def _append_ledger_record(ledger: dict[str, object], record: dict[str, object]) -> None:
+def _append_ledger_record(
+    private_key: Ed25519PrivateKey,
+    ledger: dict[str, object],
+    *,
+    event: str,
+    phase_before: str,
+    phase_after: str,
+    attempt_id: str | None,
+    body: dict[str, object],
+    at: str,
+) -> None:
     records = ledger["records"]
     assert isinstance(records, list)
-    entry = {
+    payload = {
+        "schema_id": "gate_0b_custodian_ledger_record_v1",
+        "ledger_instance_id": ledger["ledger_instance_id"],
+        "campaign_id": ledger["campaign_id"],
+        "authorization_id": ledger["authorization_id"],
+        "preregistration_sha256": ledger["preregistration_sha256"],
+        "source_sha": ledger["source_sha"],
+        "ledger_location_sha256": ledger["ledger_location_sha256"],
         "sequence": len(records) + 1,
         "previous_hash": ledger["head_hash"],
-        **record,
+        "event": event,
+        "phase_before": phase_before,
+        "phase_after": phase_after,
+        "attempt_id": attempt_id,
+        "at": at,
+        "body": body,
     }
-    entry["record_hash"] = sha256(canonical_json_bytes(entry)).hexdigest()
+    entry = {
+        "key_id": ledger["ledger_key_id"],
+        "payload": payload,
+        "signature": base64.b64encode(private_key.sign(canonical_json_bytes(payload))).decode(
+            "ascii"
+        ),
+    }
     records.append(entry)
-    ledger["head_hash"] = entry["record_hash"]
+    ledger["head_hash"] = sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def _signed_authorization(
@@ -309,6 +333,7 @@ def _custody_bundle():
     custodian_key = X25519PrivateKey.generate()
     root_key = Ed25519PrivateKey.generate()
     approval_key = Ed25519PrivateKey.generate()
+    ledger_key = Ed25519PrivateKey.generate()
     approval_public_key = approval_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
@@ -318,6 +343,10 @@ def _custody_bundle():
         serialization.PublicFormat.Raw,
     )
     root_public_key = root_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    ledger_public_key = ledger_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
@@ -340,7 +369,7 @@ def _custody_bundle():
             "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
             "ledger_instance_id": "ledger_instance_1",
             "ledger_custodian_key_id": "ledger_custodian_1",
-            "ledger_custodian_public_key_sha256": "6" * 64,
+            "ledger_custodian_public_key_sha256": sha256(ledger_public_key).hexdigest(),
             "source_sha": source_sha,
             "environment_identity_sha256": "b" * 64,
             "manifest_sha256": "c" * 64,
@@ -377,7 +406,7 @@ def _custody_bundle():
         "max_cost_microusd": 30_000_000,
         "ledger_instance_id": "ledger_instance_1",
         "ledger_custodian_key_id": "ledger_custodian_1",
-        "ledger_custodian_public_key_sha256": "6" * 64,
+        "ledger_custodian_public_key_sha256": sha256(ledger_public_key).hexdigest(),
         "ledger_location_sha256": "7" * 64,
         "real_caller_data_authorized": False,
         "runtime_wiring_authorized": False,
@@ -428,63 +457,63 @@ def _custody_bundle():
         "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
     }
     ledger = {
-        "schema_id": "gate_0b_attempt_ledger_v1",
+        "schema_id": "gate_0b_custodian_ledger_export_v1",
+        "ledger_instance_id": "ledger_instance_1",
+        "ledger_key_id": "ledger_custodian_1",
         "campaign_id": "campaign_1",
         "authorization_id": "authorization_1",
         "preregistration_sha256": preregistration["preregistration_sha256"],
         "source_sha": source_sha,
-        "campaign_approval_sha256": campaign_approval_sha,
         "ledger_location_sha256": "7" * 64,
-        "max_attempts": 3,
-        "max_provider_requests": 384,
-        "max_cost_microusd": 30_000_000,
         "records": [],
         "head_hash": "0" * 64,
     }
     _append_ledger_record(
+        ledger_key,
         ledger,
-        {
-            "event": "phase_transition",
-            "from_phase": "preregistered",
-            "to_phase": "development_collection",
-            "selected_policy_ms": None,
-            "policy_lock_sha256": None,
-            "capsule_sha256": None,
-            "holdout_materialized": False,
-            "at": "2026-07-15T15:00:00Z",
+        event="genesis",
+        phase_before="preregistered",
+        phase_after="preregistered",
+        attempt_id=None,
+        body={
+            "campaign_approval_sha256": campaign_approval_sha,
+            "max_attempts": 3,
+            "max_provider_requests": 384,
+            "max_cost_microusd": 30_000_000,
         },
+        at="2026-07-15T14:59:59Z",
     )
     _append_ledger_record(
+        ledger_key,
         ledger,
-        {
-            "event": "claim",
-            "attempt_id": "attempt_1",
+        event="claim",
+        phase_before="preregistered",
+        phase_after="development_collection",
+        attempt_id="attempt_1",
+        body={
             "attempt_index": 1,
-            "lease_id": "8" * 64,
-            "phase": "development_collection",
-            "holdout_materialized": False,
-            "provider_requests_reserved": 128,
-            "cost_reserved_microusd": 10_000_000,
             "authorization_sha256": authorization_sha,
             "prior_attempt_id": None,
             "outage_enum": None,
-            "at": "2026-07-15T15:00:01Z",
+            "provider_requests_reserved": 128,
+            "cost_reserved_microusd": 10_000_000,
         },
+        at="2026-07-15T15:00:00Z",
     )
     _append_ledger_record(
+        ledger_key,
         ledger,
-        {
-            "event": "outcome",
-            "attempt_id": "attempt_1",
-            "attempt_index": 1,
-            "lease_id": "8" * 64,
-            "outcome": "completed",
-            "outage_enum": None,
+        event="development_checkpoint",
+        phase_before="development_collection",
+        phase_after="development_collection",
+        attempt_id="attempt_1",
+        body={
+            "development_capsule_sha256": development_digest,
+            "usage_evidence_sha256": "2" * 64,
             "actual_provider_requests": 64,
             "actual_cost_microusd": artifact["usage"]["cost_microusd"],
-            "capsule_sha256": development_digest,
-            "at": "2026-07-15T15:10:00Z",
         },
+        at="2026-07-15T15:10:00Z",
     )
     identities["ledger_head_sha256"] = ledger["head_hash"]
     policy_lock = compute_policy_lock_sha256(
@@ -494,24 +523,55 @@ def _custody_bundle():
         selected_policy_ms=100,
         identities=identities,
     )
-    for current, target, capsule, materialized in (
-        ("development_collection", "policy_selection_locked", development_digest, False),
-        ("policy_selection_locked", "holdout_collection", None, True),
-        ("holdout_collection", "completed", holdout_digest, True),
-    ):
-        _append_ledger_record(
-            ledger,
-            {
-                "event": "phase_transition",
-                "from_phase": current,
-                "to_phase": target,
-                "selected_policy_ms": 100,
-                "policy_lock_sha256": policy_lock,
-                "capsule_sha256": capsule,
-                "holdout_materialized": materialized,
-                "at": "2026-07-15T15:11:00Z",
-            },
-        )
+    _append_ledger_record(
+        ledger_key,
+        ledger,
+        event="policy_lock",
+        phase_before="development_collection",
+        phase_after="policy_selection_locked",
+        attempt_id="attempt_1",
+        body={
+            "development_ledger_head_sha256": identities["ledger_head_sha256"],
+            "development_capsule_sha256": development_digest,
+            "selected_policy_ms": 100,
+            "policy_lock_sha256": policy_lock,
+        },
+        at="2026-07-15T15:11:00Z",
+    )
+    policy_lock_receipt = ledger["head_hash"]
+    _append_ledger_record(
+        ledger_key,
+        ledger,
+        event="holdout_release",
+        phase_before="policy_selection_locked",
+        phase_after="holdout_collection",
+        attempt_id="attempt_1",
+        body={
+            "policy_lock_receipt_sha256": policy_lock_receipt,
+            "selected_policy_ms": 100,
+            "policy_lock_sha256": policy_lock,
+            "holdout_manifest_sha256": "4" * 64,
+            "release_nonce": "release_nonce_1",
+        },
+        at="2026-07-15T15:12:00Z",
+    )
+    _append_ledger_record(
+        ledger_key,
+        ledger,
+        event="terminal_outcome",
+        phase_before="holdout_collection",
+        phase_after="completed",
+        attempt_id="attempt_1",
+        body={
+            "outcome": "completed",
+            "outage_enum": None,
+            "holdout_capsule_sha256": holdout_digest,
+            "usage_evidence_sha256": "6" * 64,
+            "actual_provider_requests": 120,
+            "actual_cost_microusd": artifact["usage"]["cost_microusd"],
+        },
+        at="2026-07-15T15:20:00Z",
+    )
     bundle = {
         "schema_id": "gate_0b_custody_bundle_v1",
         "campaign_id": "campaign_1",
@@ -528,13 +588,20 @@ def _custody_bundle():
         "development": (development_records, development_windows),
         "holdout": (holdout_records, holdout_windows),
     }
-    return bundle, custodian_key, root_key, approval_public_key, derived
+    return bundle, custodian_key, root_key, approval_public_key, ledger_public_key, derived
 
 
 def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, approval_public_key, derived = _custody_bundle()
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
     opened: list[str] = []
 
     def open_capsule(envelope, **_kwargs):
@@ -557,6 +624,7 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
         commitment_key=CAMPAIGN_KEY,
         custodian_private_key=custodian_key,
         expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
         record_root_signing_key=root_key,
         record_root_key_id=ROOT_KEY_ID,
     )
@@ -571,7 +639,14 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
 def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, approval_public_key, derived = _custody_bundle()
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
     monkeypatch.setattr(
         evaluator_module,
         "_load_pinned_approval_public_key",
@@ -584,6 +659,7 @@ def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption
         commitment_key=CAMPAIGN_KEY,
         custodian_private_key=custodian_key,
         expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
         record_root_signing_key=root_key,
         record_root_key_id=ROOT_KEY_ID,
     )
@@ -620,6 +696,7 @@ def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption
         commitment_key=CAMPAIGN_KEY,
         custodian_private_key=custodian_key,
         expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
         record_root_signing_key=root_key,
         record_root_key_id=ROOT_KEY_ID,
     )
@@ -631,11 +708,22 @@ def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption
 def test_custody_bundle_rejects_replaced_approval_root_before_capsule_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, _approval_public_key, _derived = _custody_bundle()
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        _approval_public_key,
+        ledger_public_key,
+        _derived,
+    ) = _custody_bundle()
     opened: list[str] = []
-    replacement = Ed25519PrivateKey.generate().public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
+    replacement = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
     )
     monkeypatch.setattr(
         evaluator_module,
@@ -653,6 +741,7 @@ def test_custody_bundle_rejects_replaced_approval_root_before_capsule_open(
         commitment_key=CAMPAIGN_KEY,
         custodian_private_key=custodian_key,
         expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
         record_root_signing_key=root_key,
         record_root_key_id=ROOT_KEY_ID,
     )
@@ -665,10 +754,15 @@ def test_custody_bundle_rejects_replaced_approval_root_before_capsule_open(
 def test_custody_bundle_rejects_tampered_authorization_before_capsule_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, approval_public_key, _derived = _custody_bundle()
-    bundle["campaign_envelope"]["signature"] = base64.b64encode(b"\x00" * 64).decode(
-        "ascii"
-    )
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        _derived,
+    ) = _custody_bundle()
+    bundle["campaign_envelope"]["signature"] = base64.b64encode(b"\x00" * 64).decode("ascii")
     opened: list[str] = []
     monkeypatch.setattr(
         evaluator_module,
@@ -686,6 +780,58 @@ def test_custody_bundle_rejects_tampered_authorization_before_capsule_open(
         commitment_key=CAMPAIGN_KEY,
         custodian_private_key=custodian_key,
         expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == []
+
+
+@pytest.mark.parametrize("mutation", ("signature", "public_key"))
+def test_custody_bundle_rejects_substituted_ledger_custody_before_capsule_open(
+    mutation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        _derived,
+    ) = _custody_bundle()
+    if mutation == "signature":
+        bundle["ledger"]["records"][2]["signature"] = base64.b64encode(b"\x00" * 64).decode("ascii")
+    else:
+        ledger_public_key = (
+            Ed25519PrivateKey.generate()
+            .public_key()
+            .public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        )
+    opened: list[str] = []
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: opened.append(envelope["kind"]),
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
         record_root_signing_key=root_key,
         record_root_key_id=ROOT_KEY_ID,
     )
@@ -700,7 +846,14 @@ def test_custody_bundle_rejects_substituted_preregistered_keys_before_capsule_op
     substitution: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, approval_public_key, _derived = _custody_bundle()
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        _derived,
+    ) = _custody_bundle()
     opened: list[str] = []
     monkeypatch.setattr(
         evaluator_module,
@@ -722,6 +875,7 @@ def test_custody_bundle_rejects_substituted_preregistered_keys_before_capsule_op
         commitment_key=CAMPAIGN_KEY,
         custodian_private_key=custodian_key,
         expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
         record_root_signing_key=root_key,
         record_root_key_id=ROOT_KEY_ID,
     )
@@ -831,11 +985,19 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, custodian_key, root_key, approval_public_key, derived = _custody_bundle()
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
     bundle_path = tmp_path / "custody-bundle.json"
     commitment_path = tmp_path / "commitment.key"
     custodian_path = tmp_path / "custodian.key"
     root_path = tmp_path / "record-root.key"
+    ledger_public_path = tmp_path / "ledger-custodian.pub"
     output = tmp_path / "report.json"
     bundle_path.write_text(json.dumps(bundle))
     commitment_path.write_bytes(CAMPAIGN_KEY)
@@ -856,6 +1018,7 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         )
     )
     root_path.chmod(0o600)
+    ledger_public_path.write_bytes(ledger_public_key)
     monkeypatch.setattr(
         evaluator_module,
         "open_audit_capsule",
@@ -885,6 +1048,8 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
             str(custodian_path),
             "--custodian-key-id",
             "audit_custodian_1",
+            "--ledger-custodian-public-key",
+            str(ledger_public_path),
             "--record-root-signing-key",
             str(root_path),
             "--record-root-key-id",

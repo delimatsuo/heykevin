@@ -74,6 +74,7 @@ EXECUTION_DEPENDENCY_PATHS = (
     "config/qualification/gate_0b_approval_root.ed25519.pub",
     "app/services/caller_turn_qualification.py",
     "app/services/qualification_identity.py",
+    "app/services/qualification_ledger.py",
     "app/services/caller_turn_alignment.py",
     "app/services/caller_turn_measurement.py",
     "app/services/caller_turns.py",
@@ -93,6 +94,7 @@ EXECUTION_IMPORT_NAMES = (
     "cryptography",
     "app.services.caller_turn_qualification",
     "app.services.qualification_identity",
+    "app.services.qualification_ledger",
     "app.utils.audio",
 )
 PREREGISTRATION_EXTERNAL_FIELDS = frozenset(

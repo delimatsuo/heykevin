@@ -34,6 +34,7 @@ from app.services.qualification_identity import (
     canonical_json_bytes,
     ledger_location_sha256,
 )
+from app.services.qualification_environment import execution_identity_report_sha256
 from app.services.qualification_ledger import (
     CustodyLedgerState,
     LedgerCustodyIdentity,
@@ -46,6 +47,7 @@ from scripts.run_gemini_caller_turn_qualification import (
     AuthorizedAssetRelease,
     AuthorizedAttemptConfig,
     CapsuleHandoffReceipt,
+    CapturedExecutionIdentity,
     ConnectionPolicy,
     NoSpeechWindowPlan,
     ProviderSessionClosed,
@@ -75,6 +77,45 @@ CANARY_SECRET = "qualification-canary-secret-must-not-escape"
 NOW = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
 PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
+TEST_EXECUTION_IDENTITY_REPORT = {
+    "schema_id": "gate_0b_environment_identity_v2",
+    "source": {
+        "source_sha": SOURCE_SHA,
+        "clean": True,
+        "dependencies": {
+            "0" * 64: {
+                "worktree_sha256": "1" * 64,
+                "git_blob_id": "2" * 40,
+            }
+        },
+    },
+    "environment": {
+        "python_version": "3.12.13",
+        "uv_version": "0.11.7",
+        "python_executable_sha256": "3" * 64,
+        "uv_executable_sha256": "4" * 64,
+        "python_executable_location_sha256": "5" * 64,
+        "uv_executable_location_sha256": "6" * 64,
+        "runtime_image_kind": "interpreter",
+        "runtime_image_sha256": "3" * 64,
+        "platform_id": "test-platform",
+        "architecture": "test-architecture",
+        "unicode_version": "15.1.0",
+        "monotonic_clock_implementation": "test-monotonic",
+        "monotonic_clock_resolution_ns": 1,
+        "bytecode_write_disabled": False,
+        "openssl_version": "OpenSSL test",
+        "ca_bundle_sha256": "7" * 64,
+        "lock_sha256": "8" * 64,
+        "codec_golden_sha256": "9" * 64,
+        "import_sha256": {"app.test": "a" * 64},
+        "distributions": {"test-package": "1.0.0"},
+        "distribution_files_sha256": {"test-package": "b" * 64},
+    },
+}
+TEST_EXECUTION_IDENTITY_SHA256 = execution_identity_report_sha256(
+    TEST_EXECUTION_IDENTITY_REPORT
+)
 KEY_ID = "qualification-reviewer-v1"
 LEDGER_PUBLIC_KEY = b"l" * 32
 LEDGER_PUBLIC_KEY_SHA256 = sha256(LEDGER_PUBLIC_KEY).hexdigest()
@@ -111,7 +152,10 @@ def _fixed_execution_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         runner_module,
         "_capture_current_execution_identity",
-        lambda *, expected_source_sha: "2" * 64,
+        lambda *, expected_source_sha: CapturedExecutionIdentity(
+            report=TEST_EXECUTION_IDENTITY_REPORT,
+            sha256=TEST_EXECUTION_IDENTITY_SHA256,
+        ),
     )
     monkeypatch.setattr(
         runner_module,
@@ -1050,9 +1094,17 @@ def _preregistration(
     plans, no_speech_plans = _development_schedule()
     return build_preregistration(
         {
-            "schema_id": "gate_0b_preregistration_values_v1",
+            "schema_id": "gate_0b_preregistration_values_v2",
             "project": _config().project,
+            "project_number": "123456789012",
             "credential_reference": "qualification_secret_v1",
+            "credential_key_resource_sha256": "1" * 64,
+            "credential_restrictions_sha256": "2" * 64,
+            "provider_quota_sha256": "3" * 64,
+            "credential_activated_at": "2026-07-15T14:00:00Z",
+            "credential_expires_at": "2026-07-15T16:00:00Z",
+            "credential_revocation_required_by": "2026-07-15T16:00:00Z",
+            "credential_revocation_policy_sha256": "4" * 64,
             "approval_key_id": KEY_ID,
             "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
             "custodian_key_id": "audit_custodian_1",
@@ -1067,7 +1119,8 @@ def _preregistration(
             "ledger_custodian_key_id": "ledger_custodian_1",
             "ledger_custodian_public_key_sha256": ledger_custodian_public_key_sha256,
             "source_sha": SOURCE_SHA,
-            "environment_identity_sha256": "2" * 64,
+            "source_fact_bundle_sha256": "5" * 64,
+            "environment_identity_sha256": TEST_EXECUTION_IDENTITY_SHA256,
             "manifest_sha256": "3" * 64,
             "corpus_sha256": "4" * 64,
             "development_schedule_sha256": compute_development_schedule_sha256(
@@ -2276,10 +2329,13 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         campaign_envelope=campaign,
     )
 
-    def source_identity_check(*, expected_source_sha: str) -> str:
+    def source_identity_check(*, expected_source_sha: str) -> CapturedExecutionIdentity:
         assert expected_source_sha == SOURCE_SHA
         order.append("source")
-        return "2" * 64
+        return CapturedExecutionIdentity(
+            report=TEST_EXECUTION_IDENTITY_REPORT,
+            sha256=TEST_EXECUTION_IDENTITY_SHA256,
+        )
 
     monkeypatch.setattr(
         runner_module,
@@ -2346,7 +2402,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         "source",
         "credential:qualification_secret_v1",
     ]
-    assert order[6:-2] == ["connector"] * 64
+    assert order[6:-2] == ["connector"] * 64 + ["source"]
     assert order[-2:] == ["development_checkpoint", "export_snapshot"]
     envelope = json.loads(capsule_path.read_bytes())
     opened = open_audit_capsule(
@@ -2354,6 +2410,12 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         custodian_private_key=custodian,
         expected_key_id="audit_custodian_1",
     )
+    assert opened["schema_id"] == "gate_0b_audit_capsule_v6"
+    assert opened["source_fact_bundle_sha256"] == "5" * 64
+    assert opened["runtime_identity_before_sha256"] == TEST_EXECUTION_IDENTITY_SHA256
+    assert opened["runtime_identity_after_sha256"] == TEST_EXECUTION_IDENTITY_SHA256
+    assert opened["runtime_identity_before"] == TEST_EXECUTION_IDENTITY_REPORT
+    assert opened["runtime_identity_after"] == TEST_EXECUTION_IDENTITY_REPORT
     assert opened["activities"][0]["reference_text"] == "purpose recorded phrase 0"
     assert [
         fact["kind"] for fact in opened["no_speech_windows"][0]["wire_facts"]
@@ -2742,7 +2804,10 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
     monkeypatch.setattr(
         runner_module,
         "_capture_current_execution_identity",
-        lambda *, expected_source_sha: "f" * 64,
+        lambda *, expected_source_sha: CapturedExecutionIdentity(
+            report=TEST_EXECUTION_IDENTITY_REPORT,
+            sha256="f" * 64,
+        ),
     )
     campaign, attempt = _approval_envelopes(
         private,
@@ -3958,7 +4023,13 @@ def test_cli_help_and_dry_run_name_every_immutable_value(
         "consent_attestation_sha256",
         "corpus_sha256",
         "cost_caps_microusd",
+        "credential_activated_at",
+        "credential_expires_at",
+        "credential_key_resource_sha256",
         "credential_reference",
+        "credential_restrictions_sha256",
+        "credential_revocation_policy_sha256",
+        "credential_revocation_required_by",
         "custodian_key_id",
         "custodian_public_key_sha256",
         "privacy_custodian_key_id",
@@ -3978,10 +4049,13 @@ def test_cli_help_and_dry_run_name_every_immutable_value(
         "model",
         "pricing_sha256",
         "project",
+        "project_number",
+        "provider_quota_sha256",
         "retention_attestation_sha256",
         "runner_sha256",
         "setup_sha256",
         "source_sha",
+        "source_fact_bundle_sha256",
         "transport",
         "usage_caps",
         "zdr_or_residual_retention_acceptance_sha256",
@@ -3993,6 +4067,20 @@ def test_cli_help_and_dry_run_name_every_immutable_value(
     assert all(field in help_text for field in required_fields)
     assert document["immutable_values"]["project"] is None
     assert document["immutable_values"]["credential_reference"] is None
+    assert all(
+        document["immutable_values"][field] is None
+        for field in (
+            "project_number",
+            "credential_key_resource_sha256",
+            "credential_restrictions_sha256",
+            "provider_quota_sha256",
+            "credential_activated_at",
+            "credential_expires_at",
+            "credential_revocation_required_by",
+            "credential_revocation_policy_sha256",
+            "source_fact_bundle_sha256",
+        )
+    )
     assert document["credential_default_present"] is False
     assert document["provider_execution_authorized"] is False
     assert all(value is False for value in document["evidence"].values())
@@ -4004,9 +4092,17 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
     tmp_path: Path,
 ) -> None:
     values = {
-        "schema_id": "gate_0b_preregistration_values_v1",
+        "schema_id": "gate_0b_preregistration_values_v2",
         "project": "kevin-qualification-test",
+        "project_number": "123456789012",
         "credential_reference": "qualification_secret_v1",
+        "credential_key_resource_sha256": "a" * 64,
+        "credential_restrictions_sha256": "b" * 64,
+        "provider_quota_sha256": "c" * 64,
+        "credential_activated_at": "2026-07-15T14:00:00Z",
+        "credential_expires_at": "2026-07-15T16:00:00Z",
+        "credential_revocation_required_by": "2026-07-15T16:00:00Z",
+        "credential_revocation_policy_sha256": "d" * 64,
         "approval_key_id": KEY_ID,
         "approval_public_key_sha256": "1" * 64,
         "custodian_key_id": "audit_custodian_1",
@@ -4019,6 +4115,7 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
         "ledger_custodian_key_id": "ledger_custodian_1",
         "ledger_custodian_public_key_sha256": "2" * 64,
         "source_sha": SOURCE_SHA,
+        "source_fact_bundle_sha256": "e" * 64,
         "environment_identity_sha256": "2" * 64,
         "manifest_sha256": "3" * 64,
         "corpus_sha256": "4" * 64,
@@ -4072,6 +4169,22 @@ def test_exact_preregistration_uses_strict_external_values_and_canonical_digest(
             {
                 **values,
                 "privacy_custodian_key_id": values["custodian_key_id"],
+            }
+        )
+    with pytest.raises(ValueError, match="project number"):
+        build_preregistration({**values, "project_number": "not-a-number"})
+    with pytest.raises(ValueError, match="credential lifetime"):
+        build_preregistration(
+            {
+                **values,
+                "credential_revocation_required_by": "2026-07-15T16:00:01Z",
+            }
+        )
+    with pytest.raises(ValueError, match="credential timestamps"):
+        build_preregistration(
+            {
+                **values,
+                "credential_activated_at": "2026-07-15T14:00:00.000000Z",
             }
         )
     with pytest.raises(ValueError, match="distinct identities"):

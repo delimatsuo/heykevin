@@ -8,7 +8,7 @@ import asyncio
 import base64
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING
 from hashlib import sha256
 import json
@@ -46,7 +46,10 @@ from app.services.voice_turn_replay import (  # noqa: E402
     Gate0BReplayInput,
     build_gemini_audio_message,
 )
-from app.services.qualification_environment import execution_identity_sha256  # noqa: E402
+from app.services.qualification_environment import (  # noqa: E402
+    build_execution_identity_report,
+    execution_identity_report_sha256,
+)
 from app.services.qualification_allocation import (  # noqa: E402
     AllocationActivity,
     AllocationError,
@@ -88,6 +91,7 @@ OFFICIAL_ENDPOINT = (
 EXACT_MODEL = "models/gemini-3.1-flash-live-preview"
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+PROJECT_NUMBER = re.compile(r"[0-9]{6,20}")
 VALID_SPLITS = frozenset({"development", "holdout"})
 VALID_LANGUAGES = frozenset({"ar", "en", "es", "fr", "hi", "ht", "pt", "zh"})
 VALID_POLICIES_MS = frozenset({100, 250, 500, 750})
@@ -101,7 +105,15 @@ PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_r
 PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
     {
         "project",
+        "project_number",
         "credential_reference",
+        "credential_key_resource_sha256",
+        "credential_restrictions_sha256",
+        "provider_quota_sha256",
+        "credential_activated_at",
+        "credential_expires_at",
+        "credential_revocation_required_by",
+        "credential_revocation_policy_sha256",
         "approval_key_id",
         "approval_public_key_sha256",
         "custodian_key_id",
@@ -114,6 +126,7 @@ PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
         "ledger_custodian_key_id",
         "ledger_custodian_public_key_sha256",
         "source_sha",
+        "source_fact_bundle_sha256",
         "environment_identity_sha256",
         "manifest_sha256",
         "corpus_sha256",
@@ -135,6 +148,12 @@ PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
 
 class RunnerError(ValueError):
     """Raised for local runner contract violations."""
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedExecutionIdentity:
+    report: Mapping[str, Any]
+    sha256: str
 
 
 class ProviderSessionClosed(Exception):
@@ -2392,6 +2411,8 @@ async def execute_authorized_attempt(
     )
 
     budget = _RequestBudget(claim.provider_requests_reserved)
+    execution_started_at = datetime.now(timezone.utc)
+    environment_identity: CapturedExecutionIdentity | None = None
     cost_microusd = 0
     error_code: str | None = None
     capsule_handed_off = False
@@ -2402,11 +2423,11 @@ async def execute_authorized_attempt(
 
     try:
         try:
-            environment_identity_sha256 = _capture_current_execution_identity(
+            environment_identity = _capture_current_execution_identity(
                 expected_source_sha=config.source_sha
             )
             if (
-                environment_identity_sha256
+                environment_identity.sha256
                 != preregistration["immutable_values"]["environment_identity_sha256"]
             ):
                 raise RunnerError("execution environment identity mismatch")
@@ -2473,9 +2494,32 @@ async def execute_authorized_attempt(
 
         if error_code is None:
             try:
+                environment_identity_after = _capture_current_execution_identity(
+                    expected_source_sha=config.source_sha
+                )
+                if (
+                    environment_identity is None
+                    or environment_identity_after != environment_identity
+                ):
+                    raise RunnerError("execution environment identity drifted")
+            except Exception:
+                error_code = "source_identity_failed"
+
+        if error_code is None:
+            try:
                 capsule = _build_audit_capsule(
                     campaign_id=campaign.campaign_id,
                     policy_ms=config.policy_ms,
+                    source_fact_bundle_sha256=preregistration["immutable_values"][
+                        "source_fact_bundle_sha256"
+                    ],
+                    execution_started_at=execution_started_at,
+                    execution_completed_at=datetime.now(timezone.utc),
+                    provider_revision=None,
+                    runtime_identity_before_sha256=environment_identity.sha256,
+                    runtime_identity_after_sha256=environment_identity_after.sha256,
+                    runtime_identity_before=environment_identity.report,
+                    runtime_identity_after=environment_identity_after.report,
                     session_results=session_results,
                     no_speech_results=no_speech_results,
                 )
@@ -2806,6 +2850,8 @@ async def execute_authorized_holdout(
     )
 
     budget = _RequestBudget(remaining_requests)
+    execution_started_at = datetime.now(timezone.utc)
+    environment_identity: CapturedExecutionIdentity | None = None
     holdout_cost_microusd = 0
     error_code: str | None = None
     capsule_handed_off = False
@@ -2815,11 +2861,11 @@ async def execute_authorized_holdout(
     no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
     try:
         try:
-            environment_identity_sha256 = _capture_current_execution_identity(
+            environment_identity = _capture_current_execution_identity(
                 expected_source_sha=config.source_sha
             )
             if (
-                environment_identity_sha256
+                environment_identity.sha256
                 != preregistration["immutable_values"]["environment_identity_sha256"]
             ):
                 raise RunnerError("execution environment identity mismatch")
@@ -2883,9 +2929,32 @@ async def execute_authorized_holdout(
 
         if error_code is None:
             try:
+                environment_identity_after = _capture_current_execution_identity(
+                    expected_source_sha=config.source_sha
+                )
+                if (
+                    environment_identity is None
+                    or environment_identity_after != environment_identity
+                ):
+                    raise RunnerError("execution environment identity drifted")
+            except Exception:
+                error_code = "source_identity_failed"
+
+        if error_code is None:
+            try:
                 capsule = _build_audit_capsule(
                     campaign_id=campaign.campaign_id,
                     policy_ms=config.policy_ms,
+                    source_fact_bundle_sha256=preregistration["immutable_values"][
+                        "source_fact_bundle_sha256"
+                    ],
+                    execution_started_at=execution_started_at,
+                    execution_completed_at=datetime.now(timezone.utc),
+                    provider_revision=None,
+                    runtime_identity_before_sha256=environment_identity.sha256,
+                    runtime_identity_after_sha256=environment_identity_after.sha256,
+                    runtime_identity_before=environment_identity.report,
+                    runtime_identity_after=environment_identity_after.report,
                     session_results=session_results,
                     no_speech_results=no_speech_results,
                 )
@@ -3336,7 +3405,7 @@ def _verify_execution_preregistration(
         raise RunnerError("preregistration document is invalid")
     try:
         values = {
-            "schema_id": "gate_0b_preregistration_values_v1",
+            "schema_id": "gate_0b_preregistration_values_v2",
             **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
         }
     except KeyError as exc:
@@ -3419,10 +3488,16 @@ def _load_pinned_approval_public_key() -> bytes:
     return data
 
 
-def _capture_current_execution_identity(*, expected_source_sha: str) -> str:
-    return execution_identity_sha256(
+def _capture_current_execution_identity(
+    *, expected_source_sha: str
+) -> CapturedExecutionIdentity:
+    report = build_execution_identity_report(
         REPO_ROOT,
         expected_source_sha=expected_source_sha,
+    )
+    return CapturedExecutionIdentity(
+        report=report,
+        sha256=execution_identity_report_sha256(report),
     )
 
 
@@ -3493,6 +3568,14 @@ def _build_audit_capsule(
     *,
     campaign_id: str,
     policy_ms: int,
+    source_fact_bundle_sha256: str,
+    execution_started_at: datetime,
+    execution_completed_at: datetime,
+    provider_revision: str | None,
+    runtime_identity_before_sha256: str,
+    runtime_identity_after_sha256: str,
+    runtime_identity_before: Mapping[str, Any],
+    runtime_identity_after: Mapping[str, Any],
     session_results: Sequence[tuple[SessionPlan, SessionExecutionResult]],
     no_speech_results: Sequence[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]],
 ) -> dict[str, Any]:
@@ -3592,9 +3675,17 @@ def _build_audit_capsule(
     if len(splits) != 1:
         raise RunnerError("audit capsule results must contain exactly one split")
     return {
-        "schema_id": "gate_0b_audit_capsule_v5",
+        "schema_id": "gate_0b_audit_capsule_v6",
         "campaign_id": campaign_id,
         "policy_ms": policy_ms,
+        "source_fact_bundle_sha256": source_fact_bundle_sha256,
+        "execution_started_at": _format_utc_timestamp(execution_started_at),
+        "execution_completed_at": _format_utc_timestamp(execution_completed_at),
+        "provider_revision": provider_revision,
+        "runtime_identity_before_sha256": runtime_identity_before_sha256,
+        "runtime_identity_after_sha256": runtime_identity_after_sha256,
+        "runtime_identity_before": runtime_identity_before,
+        "runtime_identity_after": runtime_identity_after,
         "accounting": {
             "schema_id": "gate_0b_capsule_accounting_v1",
             "split": next(iter(splits)),
@@ -4482,7 +4573,7 @@ async def _receive_with_completion_drain(
 def build_dry_run_preregistration() -> dict[str, Any]:
     """Describe the exact Gate 0B contract without creating executable approval."""
     return {
-        "schema_id": "gate_0b_preregistration_dry_run_v1",
+        "schema_id": "gate_0b_preregistration_dry_run_v2",
         "scope": "gate_0b_purpose_recorded_turn_assembly",
         "status": "implementation_only_not_executable",
         "immutable_values": {
@@ -4491,7 +4582,15 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "endpoint": OFFICIAL_ENDPOINT,
             "transport": "websocket_bidi_tls",
             "project": None,
+            "project_number": None,
             "credential_reference": None,
+            "credential_key_resource_sha256": None,
+            "credential_restrictions_sha256": None,
+            "provider_quota_sha256": None,
+            "credential_activated_at": None,
+            "credential_expires_at": None,
+            "credential_revocation_required_by": None,
+            "credential_revocation_policy_sha256": None,
             "approval_key_id": None,
             "approval_public_key_sha256": None,
             "custodian_key_id": None,
@@ -4504,6 +4603,7 @@ def build_dry_run_preregistration() -> dict[str, Any]:
             "ledger_custodian_key_id": None,
             "ledger_custodian_public_key_sha256": None,
             "source_sha": None,
+            "source_fact_bundle_sha256": None,
             "environment_identity_sha256": None,
             "manifest_sha256": None,
             "corpus_sha256": None,
@@ -4561,7 +4661,7 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         *PREREGISTRATION_EXTERNAL_FIELDS,
     }:
         raise RunnerError("preregistration values fields are invalid")
-    if values.get("schema_id") != "gate_0b_preregistration_values_v1":
+    if values.get("schema_id") != "gate_0b_preregistration_values_v2":
         raise RunnerError("preregistration values schema is invalid")
     project = values["project"]
     if (
@@ -4573,6 +4673,10 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         raise RunnerError("preregistration project is invalid")
 
     validated: dict[str, str] = {"project": project}
+    project_number = values["project_number"]
+    if not isinstance(project_number, str) or not PROJECT_NUMBER.fullmatch(project_number):
+        raise RunnerError("preregistration project number is invalid")
+    validated["project_number"] = project_number
     for field_name in (
         "credential_reference",
         "approval_key_id",
@@ -4590,8 +4694,43 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(source_sha, str) or not SOURCE_SHA.fullmatch(source_sha):
         raise RunnerError("preregistration source SHA is invalid")
     validated["source_sha"] = source_sha
+    activated_at = _parse_utc_timestamp(
+        values["credential_activated_at"],
+        label="credential activation time",
+    )
+    expires_at = _parse_utc_timestamp(
+        values["credential_expires_at"],
+        label="credential expiry time",
+    )
+    revocation_required_by = _parse_utc_timestamp(
+        values["credential_revocation_required_by"],
+        label="credential revocation deadline",
+    )
+    if not activated_at < revocation_required_by <= expires_at:
+        raise RunnerError("preregistration credential lifetime is invalid")
+    if expires_at - activated_at > timedelta(hours=24):
+        raise RunnerError("preregistration credential lifetime is invalid")
+    if any(
+        values[field] != _format_utc_timestamp(value)
+        for field, value in (
+            ("credential_activated_at", activated_at),
+            ("credential_expires_at", expires_at),
+            ("credential_revocation_required_by", revocation_required_by),
+        )
+    ):
+        raise RunnerError("preregistration credential timestamps are not canonical")
+    validated.update(
+        {
+            "credential_activated_at": _format_utc_timestamp(activated_at),
+            "credential_expires_at": _format_utc_timestamp(expires_at),
+            "credential_revocation_required_by": _format_utc_timestamp(
+                revocation_required_by
+            ),
+        }
+    )
     for field_name in PREREGISTRATION_EXTERNAL_FIELDS - {
         "project",
+        "project_number",
         "credential_reference",
         "approval_key_id",
         "custodian_key_id",
@@ -4600,6 +4739,9 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
         "ledger_instance_id",
         "ledger_custodian_key_id",
         "source_sha",
+        "credential_activated_at",
+        "credential_expires_at",
+        "credential_revocation_required_by",
     }:
         value = values[field_name]
         if not isinstance(value, str) or not SHA256.fullmatch(value):
@@ -4630,6 +4772,22 @@ def build_preregistration(values: Mapping[str, Any]) -> dict[str, Any]:
     document["immutable_values"].update(validated)
     document["preregistration_sha256"] = sha256(canonical_json_bytes(document)).hexdigest()
     return document
+
+
+def _parse_utc_timestamp(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise RunnerError(f"{label} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise RunnerError(f"{label} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise RunnerError(f"{label} is invalid")
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _load_external_values(path_value: str) -> Mapping[str, Any]:

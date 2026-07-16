@@ -9,12 +9,16 @@ from hashlib import sha256
 import importlib.metadata
 import importlib.util
 import json
+import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import ssl
 # Subprocess use is limited to fixed identity-tool argv with shell execution disabled.
 import subprocess  # nosec B404
+import sys
+import time
 from typing import Any, Mapping, Sequence
 import unicodedata
 
@@ -62,7 +66,7 @@ class SourceIdentity:
             "source_sha": self.source_sha,
             "clean": self.clean,
             "dependencies": {
-                name: {
+                sha256(name.encode("utf-8")).hexdigest(): {
                     "worktree_sha256": identity.worktree_sha256,
                     "git_blob_id": identity.git_blob_id,
                 }
@@ -75,27 +79,51 @@ class SourceIdentity:
 class EnvironmentIdentity:
     python_version: str
     uv_version: str
+    python_executable_sha256: str
+    uv_executable_sha256: str
+    python_executable_location_sha256: str
+    uv_executable_location_sha256: str
+    runtime_image_kind: str
+    runtime_image_sha256: str
     platform_id: str
     architecture: str
     unicode_version: str
+    monotonic_clock_implementation: str
+    monotonic_clock_resolution_ns: int
+    bytecode_write_disabled: bool
     openssl_version: str
     ca_bundle_sha256: str
     lock_sha256: str
+    codec_golden_sha256: str
     import_sha256: dict[str, str]
     distributions: dict[str, str]
+    distribution_files_sha256: dict[str, str]
 
     def redacted_report_dict(self) -> dict[str, Any]:
         return {
             "python_version": self.python_version,
             "uv_version": self.uv_version,
+            "python_executable_sha256": self.python_executable_sha256,
+            "uv_executable_sha256": self.uv_executable_sha256,
+            "python_executable_location_sha256": self.python_executable_location_sha256,
+            "uv_executable_location_sha256": self.uv_executable_location_sha256,
+            "runtime_image_kind": self.runtime_image_kind,
+            "runtime_image_sha256": self.runtime_image_sha256,
             "platform_id": self.platform_id,
             "architecture": self.architecture,
             "unicode_version": self.unicode_version,
+            "monotonic_clock_implementation": self.monotonic_clock_implementation,
+            "monotonic_clock_resolution_ns": self.monotonic_clock_resolution_ns,
+            "bytecode_write_disabled": self.bytecode_write_disabled,
             "openssl_version": self.openssl_version,
             "ca_bundle_sha256": self.ca_bundle_sha256,
             "lock_sha256": self.lock_sha256,
+            "codec_golden_sha256": self.codec_golden_sha256,
             "import_sha256": dict(sorted(self.import_sha256.items())),
             "distributions": dict(sorted(self.distributions.items())),
+            "distribution_files_sha256": dict(
+                sorted(self.distribution_files_sha256.items())
+            ),
         }
 
 
@@ -228,6 +256,25 @@ def capture_environment_identity(
     match = re.fullmatch(r"uv ([0-9]+\.[0-9]+\.[0-9]+)(?: .*)?", uv_output)
     if match is None or match.group(1) != expected_uv:
         raise IdentityError("uv version mismatch")
+    python_executable = Path(sys.executable).resolve()
+    uv_location = shutil.which("uv")
+    if not python_executable.is_file() or uv_location is None:
+        raise IdentityError("runtime executable identity is unavailable")
+    uv_executable = Path(uv_location).resolve()
+    if not uv_executable.is_file():
+        raise IdentityError("runtime executable identity is unavailable")
+    python_executable_sha256 = sha256(python_executable.read_bytes()).hexdigest()
+    uv_executable_sha256 = sha256(uv_executable.read_bytes()).hexdigest()
+    container_digest = os.environ.get("QUALIFICATION_CONTAINER_IMAGE_DIGEST")
+    if container_digest is None:
+        runtime_image_kind = "interpreter"
+        runtime_image_sha256 = python_executable_sha256
+    else:
+        match = re.fullmatch(r"sha256:([0-9a-f]{64})", container_digest)
+        if match is None:
+            raise IdentityError("container image identity is invalid")
+        runtime_image_kind = "container"
+        runtime_image_sha256 = match.group(1)
     lock_path = root / "uv.lock"
     if not lock_path.is_file() or lock_path.is_symlink():
         raise IdentityError("uv.lock is unavailable")
@@ -237,6 +284,7 @@ def capture_environment_identity(
         raise IdentityError("CA bundle identity is unavailable")
     import_sha256: dict[str, str] = {}
     distributions: dict[str, str] = {}
+    distribution_files_sha256: dict[str, str] = {}
     for name in import_names:
         spec = importlib.util.find_spec(name)
         if spec is None or spec.origin is None:
@@ -252,22 +300,49 @@ def capture_environment_identity(
         import_sha256[name] = sha256(origin.read_bytes()).hexdigest()
         distribution_name = name.split(".", 1)[0]
         try:
-            distributions[distribution_name] = importlib.metadata.version(distribution_name)
+            distribution = importlib.metadata.distribution(distribution_name)
+            distributions[distribution_name] = distribution.version
+            distribution_files_sha256[distribution_name] = _distribution_files_sha256(
+                distribution
+            )
         except importlib.metadata.PackageNotFoundError:
             if not name.startswith("app."):
                 raise IdentityError("approved distribution metadata is unavailable") from None
 
+    clock = time.get_clock_info("monotonic")
+    if not clock.monotonic or clock.adjustable or clock.resolution <= 0:
+        raise IdentityError("monotonic clock identity is invalid")
+    from app.services.voice_turn_replay import compute_gate0b_roundtrip_sha256
+
+    golden_pcm = b"".join(
+        sample.to_bytes(2, "little", signed=True)
+        for sample in range(-16_000, 16_000, 1_000)
+    )
+
     return EnvironmentIdentity(
         python_version=python_version,
         uv_version=expected_uv,
+        python_executable_sha256=python_executable_sha256,
+        uv_executable_sha256=uv_executable_sha256,
+        python_executable_location_sha256=sha256(
+            str(python_executable).encode("utf-8")
+        ).hexdigest(),
+        uv_executable_location_sha256=sha256(str(uv_executable).encode("utf-8")).hexdigest(),
+        runtime_image_kind=runtime_image_kind,
+        runtime_image_sha256=runtime_image_sha256,
         platform_id=platform.system().lower() + "-" + platform.release(),
         architecture=platform.machine().lower(),
         unicode_version=unicodedata.unidata_version,
+        monotonic_clock_implementation=clock.implementation,
+        monotonic_clock_resolution_ns=max(1, round(clock.resolution * 1_000_000_000)),
+        bytecode_write_disabled=sys.dont_write_bytecode,
         openssl_version=ssl.OPENSSL_VERSION,
         ca_bundle_sha256=sha256(Path(ca_file).read_bytes()).hexdigest(),
         lock_sha256=sha256(lock_path.read_bytes()).hexdigest(),
+        codec_golden_sha256=compute_gate0b_roundtrip_sha256(golden_pcm),
         import_sha256=import_sha256,
         distributions=distributions,
+        distribution_files_sha256=distribution_files_sha256,
     )
 
 
@@ -581,6 +656,24 @@ def _command(*args: str) -> str:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise IdentityError("environment identity command failed") from exc
     return completed.stdout.strip()
+
+
+def _distribution_files_sha256(distribution: importlib.metadata.Distribution) -> str:
+    files = distribution.files
+    if not files:
+        raise IdentityError("approved distribution files are unavailable")
+    identities = []
+    for relative in sorted(files, key=str):
+        candidate = Path(distribution.locate_file(relative))
+        if candidate.is_symlink() or not candidate.is_file():
+            raise IdentityError("approved distribution file identity is unavailable")
+        identities.append(
+            {
+                "name": str(relative),
+                "sha256": sha256(candidate.read_bytes()).hexdigest(),
+            }
+        )
+    return sha256(canonical_json_bytes(identities)).hexdigest()
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

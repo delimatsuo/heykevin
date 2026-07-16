@@ -116,11 +116,19 @@ not an approval artifact.
 
 Do this only after the implementation PR is merged and an exact clean detached
 worktree exists at the merged commit. The external values document uses schema
-`gate_0b_preregistration_values_v1` and must contain exactly:
+`gate_0b_preregistration_values_v2` and must contain exactly:
 
 ```text
 project
+project_number
 credential_reference
+credential_key_resource_sha256
+credential_restrictions_sha256
+provider_quota_sha256
+credential_activated_at
+credential_expires_at
+credential_revocation_required_by
+credential_revocation_policy_sha256
 approval_key_id
 approval_public_key_sha256
 custodian_key_id
@@ -133,6 +141,7 @@ ledger_instance_id
 ledger_custodian_key_id
 ledger_custodian_public_key_sha256
 source_sha
+source_fact_bundle_sha256
 environment_identity_sha256
 manifest_sha256
 corpus_sha256
@@ -150,8 +159,11 @@ retention_attestation_sha256
 zdr_or_residual_retention_acceptance_sha256
 ```
 
-The credential reference is an opaque identifier for the later approved secret
-delivery path. The values file must never contain a credential, authenticated URL,
+The project number and digest-bound key resource, API restrictions, quota,
+activation, expiry, and revocation controls are externally reviewed Task 9/10
+values; the implementation-only template leaves them unset. The credential
+reference is an opaque identifier for the later approved secret delivery path. The
+values file must never contain a credential, authenticated URL,
 token, private key, real phone number, participant identity, transcript, audio,
 provider request ID, provider session ID, or local asset path.
 
@@ -235,13 +247,20 @@ holdout schedule commitment before the one-shot holdout claim.
 
 Raw provider messages are reduced independently twice and then discarded. Output
 audio is counted and discarded. Canonical references and transcript fragments may
-exist only inside the allowlisted encrypted audit capsule. Capsule schema v5 stores
+exist only inside the allowlisted encrypted audit capsule. Capsule schema v6 stores
 adapted transcript events and ordered raw wire facts once per logical session;
 activity entries contain metadata and references only. The evaluator independently
 derives timing, premature output, response gaps, terminal ordering, causal tool
 cancellation/interruption, close, malformed-message, runaway-output, and teardown
 facts from that session evidence. The storage sink must return a digest-matched
 handoff receipt before an attempt can be marked complete.
+
+Each sealed capsule retains the complete payload-safe runtime identity report before
+and after its provider split, together with both report hashes. The evaluator binds
+those reports to preregistration, rejects intra-split or cross-split drift, and
+publishes the campaign's complete before/after reports and hashes in the final report.
+Repository-relative dependency names and executable locations appear only as
+SHA-256 identifiers; the report contains no cleartext file path.
 
 Every external values file, capsule, custody bundle, key, and report uses an
 absolute path outside the repository. Input files must be current-user-owned,

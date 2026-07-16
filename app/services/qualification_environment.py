@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
 from pathlib import Path
-from typing import Any
+import re
+from typing import Any, Mapping
 
 from app.services.qualification_identity import (
     canonical_json_bytes,
@@ -15,12 +17,18 @@ from app.services.qualification_identity import (
 
 EXPECTED_PYTHON = "3.12.13"
 EXPECTED_UV = "0.11.7"
+EXECUTION_IDENTITY_SCHEMA_ID = "gate_0b_environment_identity_v2"
+SHA256 = re.compile(r"[0-9a-f]{64}")
+SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 EXECUTION_DEPENDENCY_PATHS = (
     "config/qualification/gate_0b_approval_root.ed25519.pub",
     "app/services/caller_turn_qualification.py",
     "app/services/qualification_environment.py",
     "app/services/qualification_identity.py",
     "app/services/qualification_ledger.py",
+    "app/services/qualification_allocation.py",
+    "app/services/qualification_privacy.py",
+    "app/services/qualification_private_paths.py",
     "app/services/caller_turn_alignment.py",
     "app/services/caller_turn_measurement.py",
     "app/services/caller_turns.py",
@@ -33,15 +41,24 @@ EXECUTION_DEPENDENCY_PATHS = (
     "app/services/gemini_pipeline.py",
     "app/services/voice_pipeline.py",
     "app/config.py",
+    "tests/fixtures/caller_turn_qualification/pricing.json",
     "uv.lock",
 )
 EXECUTION_IMPORT_NAMES = (
     "websockets",
     "cryptography",
+    "app.services.caller_turn_alignment",
+    "app.services.caller_turn_measurement",
     "app.services.caller_turn_qualification",
+    "app.services.caller_turns",
+    "app.services.gemini_turn_events",
+    "app.services.qualification_allocation",
     "app.services.qualification_environment",
     "app.services.qualification_identity",
     "app.services.qualification_ledger",
+    "app.services.qualification_privacy",
+    "app.services.qualification_private_paths",
+    "app.services.voice_turn_replay",
     "app.utils.audio",
 )
 
@@ -64,10 +81,142 @@ def build_execution_identity_report(
         import_names=EXECUTION_IMPORT_NAMES,
     )
     return {
-        "schema_id": "gate_0b_environment_identity_v1",
+        "schema_id": EXECUTION_IDENTITY_SCHEMA_ID,
         "source": source.redacted_report_dict(),
         "environment": environment.redacted_report_dict(),
     }
+
+
+def validate_execution_identity_report(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, Mapping) or set(raw) != {"schema_id", "source", "environment"}:
+        raise ValueError("execution identity report fields are invalid")
+    if raw["schema_id"] != EXECUTION_IDENTITY_SCHEMA_ID:
+        raise ValueError("execution identity report schema is invalid")
+    source = raw["source"]
+    if not isinstance(source, Mapping) or set(source) != {
+        "source_sha",
+        "clean",
+        "dependencies",
+    }:
+        raise ValueError("execution source identity is invalid")
+    if (
+        not isinstance(source["source_sha"], str)
+        or not SOURCE_SHA.fullmatch(source["source_sha"])
+        or source["clean"] is not True
+        or not isinstance(source["dependencies"], Mapping)
+        or not source["dependencies"]
+    ):
+        raise ValueError("execution source identity is invalid")
+    for name, identity in source["dependencies"].items():
+        if (
+            not isinstance(name, str)
+            or not SHA256.fullmatch(name)
+            or not isinstance(identity, Mapping)
+            or set(identity) != {"worktree_sha256", "git_blob_id"}
+            or not isinstance(identity["worktree_sha256"], str)
+            or not SHA256.fullmatch(identity["worktree_sha256"])
+            or not isinstance(identity["git_blob_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{40,64}", identity["git_blob_id"])
+        ):
+            raise ValueError("execution dependency identity is invalid")
+
+    environment = raw["environment"]
+    fields = {
+        "python_version",
+        "uv_version",
+        "python_executable_sha256",
+        "uv_executable_sha256",
+        "python_executable_location_sha256",
+        "uv_executable_location_sha256",
+        "runtime_image_kind",
+        "runtime_image_sha256",
+        "platform_id",
+        "architecture",
+        "unicode_version",
+        "monotonic_clock_implementation",
+        "monotonic_clock_resolution_ns",
+        "bytecode_write_disabled",
+        "openssl_version",
+        "ca_bundle_sha256",
+        "lock_sha256",
+        "codec_golden_sha256",
+        "import_sha256",
+        "distributions",
+        "distribution_files_sha256",
+    }
+    if not isinstance(environment, Mapping) or set(environment) != fields:
+        raise ValueError("execution environment identity is invalid")
+    for field in (
+        "python_executable_sha256",
+        "uv_executable_sha256",
+        "python_executable_location_sha256",
+        "uv_executable_location_sha256",
+        "runtime_image_sha256",
+        "ca_bundle_sha256",
+        "lock_sha256",
+        "codec_golden_sha256",
+    ):
+        if not isinstance(environment[field], str) or not SHA256.fullmatch(environment[field]):
+            raise ValueError("execution environment digest is invalid")
+    for field in (
+        "python_version",
+        "uv_version",
+        "platform_id",
+        "architecture",
+        "unicode_version",
+        "monotonic_clock_implementation",
+        "openssl_version",
+    ):
+        if not isinstance(environment[field], str) or not 0 < len(environment[field]) <= 512:
+            raise ValueError("execution environment value is invalid")
+    if (
+        environment["python_version"] != EXPECTED_PYTHON
+        or environment["uv_version"] != EXPECTED_UV
+        or environment["runtime_image_kind"] not in {"container", "interpreter"}
+        or (
+            environment["runtime_image_kind"] == "interpreter"
+            and environment["runtime_image_sha256"]
+            != environment["python_executable_sha256"]
+        )
+        or isinstance(environment["monotonic_clock_resolution_ns"], bool)
+        or not isinstance(environment["monotonic_clock_resolution_ns"], int)
+        or not 1 <= environment["monotonic_clock_resolution_ns"] <= 1_000_000_000
+        or not isinstance(environment["bytecode_write_disabled"], bool)
+    ):
+        raise ValueError("execution runtime policy is invalid")
+    _validate_digest_map(environment["import_sha256"], label="import")
+    _validate_digest_map(
+        environment["distribution_files_sha256"],
+        label="distribution file",
+    )
+    distributions = environment["distributions"]
+    if not isinstance(distributions, Mapping) or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(version, str)
+        or not version
+        or len(version) > 128
+        for name, version in distributions.items()
+    ):
+        raise ValueError("execution distribution versions are invalid")
+    if set(distributions) != set(environment["distribution_files_sha256"]):
+        raise ValueError("execution distribution identities are inconsistent")
+    return json.loads(canonical_json_bytes(raw))
+
+
+def execution_identity_report_sha256(raw: object) -> str:
+    return sha256(canonical_json_bytes(validate_execution_identity_report(raw))).hexdigest()
+
+
+def _validate_digest_map(raw: object, *, label: str) -> None:
+    if not isinstance(raw, Mapping) or not raw or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(digest, str)
+        or not SHA256.fullmatch(digest)
+        for name, digest in raw.items()
+    ):
+        raise ValueError(f"execution {label} identities are invalid")
 
 
 def execution_identity_sha256(

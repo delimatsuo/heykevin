@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from collections import Counter
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
@@ -37,6 +38,10 @@ from app.services.caller_turn_alignment import (
     normalize_text,
     reconstruct_fragments,
 )
+from app.services.qualification_environment import (
+    execution_identity_report_sha256,
+    validate_execution_identity_report,
+)
 from app.services.caller_turns import (
     CallerTurnAssembler,
     CallerTurnEvent,
@@ -47,7 +52,7 @@ from app.services.qualification_identity import canonical_json_bytes
 
 ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v1"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
-AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v5"
+AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v6"
 CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
 SEALED_CAPSULE_SCHEMA_ID = "gate_0b_sealed_capsule_v1"
 SIGNED_ROOT_SCHEMA_ID = "gate_0b_signed_record_root_v1"
@@ -67,6 +72,7 @@ VALID_LIFECYCLE_STATUSES = frozenset(
 VALID_ASSIGNMENT_STATUSES = frozenset({"matched", "ambiguous", "unassigned"})
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+PROVIDER_REVISION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 MAX_COUNTER = 100_000
 MAX_TEXT_LENGTH = 16_000
 MAX_CAPSULE_BYTES = 16 * 1024 * 1024
@@ -1324,6 +1330,14 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             "schema_id",
             "campaign_id",
             "policy_ms",
+            "source_fact_bundle_sha256",
+            "execution_started_at",
+            "execution_completed_at",
+            "provider_revision",
+            "runtime_identity_before_sha256",
+            "runtime_identity_after_sha256",
+            "runtime_identity_before",
+            "runtime_identity_after",
             "accounting",
             "sessions",
             "activities",
@@ -1335,6 +1349,38 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise MeasurementError("audit capsule schema is invalid")
     _safe_id(data["campaign_id"], label="campaign ID")
     _validate_policy(data["policy_ms"])
+    for field in (
+        "source_fact_bundle_sha256",
+        "runtime_identity_before_sha256",
+        "runtime_identity_after_sha256",
+    ):
+        if not isinstance(data[field], str) or not SHA256.fullmatch(data[field]):
+            raise MeasurementError("audit capsule identity digest is invalid")
+    if data["runtime_identity_before_sha256"] != data["runtime_identity_after_sha256"]:
+        raise MeasurementError("audit capsule runtime identity drifted")
+    try:
+        runtime_before = validate_execution_identity_report(data["runtime_identity_before"])
+        runtime_after = validate_execution_identity_report(data["runtime_identity_after"])
+    except ValueError as exc:
+        raise MeasurementError("audit capsule runtime identity is invalid") from exc
+    if (
+        runtime_before != runtime_after
+        or execution_identity_report_sha256(runtime_before)
+        != data["runtime_identity_before_sha256"]
+        or execution_identity_report_sha256(runtime_after)
+        != data["runtime_identity_after_sha256"]
+    ):
+        raise MeasurementError("audit capsule runtime identity drifted")
+    started_at = _parse_utc_timestamp(data["execution_started_at"])
+    completed_at = _parse_utc_timestamp(data["execution_completed_at"])
+    if completed_at < started_at:
+        raise MeasurementError("audit capsule execution timestamps are invalid")
+    provider_revision = data["provider_revision"]
+    if provider_revision is not None and (
+        not isinstance(provider_revision, str)
+        or not PROVIDER_REVISION.fullmatch(provider_revision)
+    ):
+        raise MeasurementError("audit capsule provider revision is invalid")
     sessions = data["sessions"]
     activities = data["activities"]
     windows = data["no_speech_windows"]
@@ -1472,6 +1518,21 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise MeasurementError("audit capsule accounting identity is invalid")
     return json.loads(canonical_json_bytes(data))
+
+
+def _parse_utc_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise MeasurementError("audit capsule timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise MeasurementError("audit capsule timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise MeasurementError("audit capsule timestamp is invalid")
+    normalized = parsed.astimezone(timezone.utc)
+    if value != normalized.isoformat(timespec="seconds").replace("+00:00", "Z"):
+        raise MeasurementError("audit capsule timestamp is invalid")
+    return normalized
 
 
 def _validate_capsule_accounting(raw: object) -> dict[str, Any]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 import subprocess
 
@@ -133,6 +134,9 @@ def test_clean_source_identity_binds_head_blob_and_file(tmp_path: Path) -> None:
         "rev-parse",
         "HEAD:tracked.py",
     )
+    redacted = identity.redacted_report_dict()
+    assert "tracked.py" not in canonical_json_bytes(redacted).decode("ascii")
+    assert sha256(b"tracked.py").hexdigest() in redacted["dependencies"]
 
 
 @pytest.mark.parametrize("dirty_kind", ["unstaged", "staged", "untracked"])
@@ -188,8 +192,19 @@ def test_environment_identity_binds_exact_runtime_and_imports() -> None:
 
     assert identity.python_version == "3.12.13"
     assert identity.uv_version == "0.11.7"
+    assert identity.python_executable_sha256
+    assert identity.uv_executable_sha256
+    assert identity.python_executable_location_sha256
+    assert identity.uv_executable_location_sha256
+    assert identity.runtime_image_kind in {"container", "interpreter"}
+    assert identity.runtime_image_sha256
+    assert identity.monotonic_clock_implementation
+    assert identity.monotonic_clock_resolution_ns > 0
+    assert isinstance(identity.bytecode_write_disabled, bool)
+    assert identity.codec_golden_sha256
     assert identity.lock_sha256
     assert set(identity.import_sha256) == {"websockets", "app.utils.audio"}
+    assert identity.distribution_files_sha256["websockets"]
     assert all("/" not in value for value in identity.redacted_report_dict().values() if isinstance(value, str))
 
 

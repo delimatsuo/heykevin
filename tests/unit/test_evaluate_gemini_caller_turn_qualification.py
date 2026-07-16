@@ -1,6 +1,7 @@
 """Independent evaluator tests for complete Gate 0B evidence."""
 
 import base64
+from copy import deepcopy
 from dataclasses import replace
 import json
 from hashlib import sha256
@@ -23,6 +24,7 @@ from app.services.caller_turn_measurement import (
     combined_usage_evidence_sha256,
     usage_evidence_sha256,
 )
+from app.services.qualification_environment import execution_identity_report_sha256
 from app.services.qualification_identity import canonical_json_bytes
 from scripts.evaluate_gemini_caller_turn_qualification import (
     compute_evidence_context_commitment,
@@ -53,9 +55,47 @@ STRESS_TAGS = (
 )
 POLICIES = (100, 250, 500, 750)
 ROOT_KEY_ID = "evidence_custodian_1"
+RUNTIME_IDENTITY_REPORT = {
+    "schema_id": "gate_0b_environment_identity_v2",
+    "source": {
+        "source_sha": "b" * 40,
+        "clean": True,
+        "dependencies": {
+            "0" * 64: {
+                "worktree_sha256": "1" * 64,
+                "git_blob_id": "2" * 40,
+            }
+        },
+    },
+    "environment": {
+        "python_version": "3.12.13",
+        "uv_version": "0.11.7",
+        "python_executable_sha256": "3" * 64,
+        "uv_executable_sha256": "4" * 64,
+        "python_executable_location_sha256": "5" * 64,
+        "uv_executable_location_sha256": "6" * 64,
+        "runtime_image_kind": "interpreter",
+        "runtime_image_sha256": "3" * 64,
+        "platform_id": "darwin-test",
+        "architecture": "arm64",
+        "unicode_version": "15.0.0",
+        "monotonic_clock_implementation": "mach_absolute_time",
+        "monotonic_clock_resolution_ns": 1,
+        "bytecode_write_disabled": True,
+        "openssl_version": "OpenSSL 3.0.0",
+        "ca_bundle_sha256": "7" * 64,
+        "lock_sha256": "8" * 64,
+        "codec_golden_sha256": "9" * 64,
+        "import_sha256": {"app.services.example": "a" * 64},
+        "distributions": {"test-package": "1.0.0"},
+        "distribution_files_sha256": {"test-package": "b" * 64},
+    },
+}
+RUNTIME_IDENTITY_SHA256 = execution_identity_report_sha256(RUNTIME_IDENTITY_REPORT)
 IDENTITIES = {
-    "source_sha256": "a" * 64,
-    "environment_sha256": "b" * 64,
+    "source_sha256": sha256(("b" * 40).encode("ascii")).hexdigest(),
+    "source_fact_bundle_sha256": "7" * 64,
+    "environment_sha256": RUNTIME_IDENTITY_SHA256,
     "evaluator_sha256": "c" * 64,
     "corpus_sha256": "d" * 64,
     "pricing_sha256": sha256(
@@ -234,7 +274,7 @@ def _artifact(
         key_id=ROOT_KEY_ID,
     )
     artifact = {
-        "schema_id": "gate_0b_evidence_v2",
+        "schema_id": "gate_0b_evidence_v3",
         "campaign_id": "campaign_1",
         "attempt_authorization_validated": True,
         "authorization_consumed": True,
@@ -276,6 +316,13 @@ def _artifact(
             "output_text_tokens": 500,
         },
         "run_failures": [],
+        "execution_started_at": "2026-07-15T15:00:00Z",
+        "execution_completed_at": "2026-07-15T15:20:00Z",
+        "provider_revision": None,
+        "runtime_identity_before_sha256": IDENTITIES["environment_sha256"],
+        "runtime_identity_after_sha256": IDENTITIES["environment_sha256"],
+        "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+        "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
     }
     artifact["context_commitment"] = compute_evidence_context_commitment(
         artifact,
@@ -291,6 +338,28 @@ def _evaluate(artifact: dict[str, object], public_key: bytes) -> dict[str, objec
         root_public_key=public_key,
         expected_root_key_id=ROOT_KEY_ID,
     )
+
+
+def _opened_capsule(envelope: dict[str, str]) -> dict[str, object]:
+    kind = envelope["kind"]
+    if kind == "development":
+        started_at = "2026-07-15T15:00:00Z"
+        completed_at = "2026-07-15T15:10:00Z"
+    else:
+        started_at = "2026-07-15T15:12:00Z"
+        completed_at = "2026-07-15T15:20:00Z"
+    return {
+        "campaign_id": "campaign_1",
+        "kind": kind,
+        "source_fact_bundle_sha256": "5" * 64,
+        "execution_started_at": started_at,
+        "execution_completed_at": completed_at,
+        "provider_revision": None,
+        "runtime_identity_before_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+        "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
+    }
 
 
 def test_evaluator_cardinality_rejects_all_standard_false_green_probe() -> None:
@@ -486,9 +555,17 @@ def _custody_bundle(
     approval_key_id = "qualification_reviewer_1"
     preregistration = build_preregistration(
         {
-            "schema_id": "gate_0b_preregistration_values_v1",
+            "schema_id": "gate_0b_preregistration_values_v2",
             "project": "kevin-qualification-test",
+            "project_number": "123456789012",
             "credential_reference": "qualification_secret_v1",
+            "credential_key_resource_sha256": "1" * 64,
+            "credential_restrictions_sha256": "2" * 64,
+            "provider_quota_sha256": "3" * 64,
+            "credential_activated_at": "2026-07-15T14:00:00Z",
+            "credential_expires_at": "2026-07-15T16:00:00Z",
+            "credential_revocation_required_by": "2026-07-15T16:00:00Z",
+            "credential_revocation_policy_sha256": "4" * 64,
             "approval_key_id": approval_key_id,
             "approval_public_key_sha256": sha256(approval_public_key).hexdigest(),
             "custodian_key_id": "audit_custodian_1",
@@ -503,7 +580,8 @@ def _custody_bundle(
             "ledger_custodian_key_id": "ledger_custodian_1",
             "ledger_custodian_public_key_sha256": sha256(ledger_public_key).hexdigest(),
             "source_sha": source_sha,
-            "environment_identity_sha256": "b" * 64,
+            "source_fact_bundle_sha256": "5" * 64,
+            "environment_identity_sha256": RUNTIME_IDENTITY_SHA256,
             "manifest_sha256": "c" * 64,
             "corpus_sha256": "d" * 64,
             "development_schedule_sha256": "e" * 64,
@@ -647,7 +725,10 @@ def _custody_bundle(
     authorization_sha = sha256(canonical_json_bytes(attempt_payload)).hexdigest()
     identities = {
         "source_sha256": sha256(source_sha.encode("ascii")).hexdigest(),
-        "environment_sha256": "b" * 64,
+        "source_fact_bundle_sha256": preregistration["immutable_values"][
+            "source_fact_bundle_sha256"
+        ],
+        "environment_sha256": RUNTIME_IDENTITY_SHA256,
         "evaluator_sha256": sha256(Path(evaluator_module.__file__).read_bytes()).hexdigest(),
         "corpus_sha256": "d" * 64,
         "pricing_sha256": preregistration["immutable_values"]["pricing_sha256"],
@@ -856,7 +937,7 @@ def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
 
     def open_capsule(envelope, **_kwargs):
         opened.append(envelope["kind"])
-        return {"campaign_id": "campaign_1", "kind": envelope["kind"]}
+        return _opened_capsule(envelope)
 
     def derive(capsule, **_kwargs):
         return derived[capsule["kind"]]
@@ -911,10 +992,7 @@ def test_custody_bundle_requires_both_signed_privacy_receipts(
     monkeypatch.setattr(
         evaluator_module,
         "open_audit_capsule",
-        lambda envelope, **_kwargs: {
-            "campaign_id": "campaign_1",
-            "kind": envelope["kind"],
-        },
+        lambda envelope, **_kwargs: _opened_capsule(envelope),
     )
     monkeypatch.setattr(
         evaluator_module,
@@ -1011,10 +1089,7 @@ def test_custody_bundle_rejects_nonexact_requests_and_campaign_ceilings(
     monkeypatch.setattr(
         evaluator_module,
         "open_audit_capsule",
-        lambda envelope, **_kwargs: {
-            "campaign_id": "campaign_1",
-            "kind": envelope["kind"],
-        },
+        lambda envelope, **_kwargs: _opened_capsule(envelope),
     )
     monkeypatch.setattr(
         evaluator_module,
@@ -1061,7 +1136,7 @@ def test_custody_bundle_rejects_capsule_accounting_that_disagrees_with_signed_le
 
     def open_capsule(envelope, **_kwargs):
         opened.append(envelope["kind"])
-        return {"campaign_id": "campaign_1", "kind": envelope["kind"]}
+        return _opened_capsule(envelope)
 
     def changed_accounting(capsule):
         usage, failures = derived["accounting"][capsule["kind"]]
@@ -1429,6 +1504,106 @@ def test_evaluator_recomputes_complete_gate_and_publishes_only_aggregates() -> N
     assert "commitment" not in serialized
 
 
+def test_evidence_requires_bound_execution_metadata() -> None:
+    artifact, public_key = _artifact()
+    artifact.update(
+        {
+            "execution_started_at": "2026-07-15T15:00:00Z",
+            "execution_completed_at": "2026-07-15T15:20:00Z",
+            "provider_revision": None,
+            "runtime_identity_before_sha256": IDENTITIES["environment_sha256"],
+            "runtime_identity_after_sha256": IDENTITIES["environment_sha256"],
+            "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+            "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
+        }
+    )
+    artifact["context_commitment"] = compute_evidence_context_commitment(
+        artifact,
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    report = _evaluate(artifact, public_key)
+
+    assert report["status"] == "pass"
+    assert report["execution"]["provider_revision"] is None
+    assert report["execution"]["runtime_identity_before_sha256"] == (
+        IDENTITIES["environment_sha256"]
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "execution_started_at",
+        "execution_completed_at",
+        "provider_revision",
+        "runtime_identity_before_sha256",
+        "runtime_identity_after_sha256",
+        "runtime_identity_before",
+        "runtime_identity_after",
+    ),
+)
+def test_evidence_rejects_missing_execution_metadata(field: str) -> None:
+    artifact, public_key = _artifact()
+    artifact.pop(field)
+
+    report = _evaluate(artifact, public_key)
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"artifact_invalid": 1}
+
+
+def test_evidence_rejects_runtime_identity_drift() -> None:
+    artifact, public_key = _artifact()
+    artifact["runtime_identity_after_sha256"] = "9" * 64
+    artifact["context_commitment"] = compute_evidence_context_commitment(
+        artifact,
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    report = _evaluate(artifact, public_key)
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"artifact_invalid": 1}
+
+
+def test_evidence_rejects_runtime_report_bound_to_another_source() -> None:
+    artifact, _ = _artifact()
+    other_source_report = deepcopy(RUNTIME_IDENTITY_REPORT)
+    other_source_report["source"]["source_sha"] = "c" * 40
+    other_digest = execution_identity_report_sha256(other_source_report)
+    artifact["identities"] = {
+        **artifact["identities"],
+        "environment_sha256": other_digest,
+    }
+    artifact["runtime_identity_before_sha256"] = other_digest
+    artifact["runtime_identity_after_sha256"] = other_digest
+    artifact["runtime_identity_before"] = other_source_report
+    artifact["runtime_identity_after"] = other_source_report
+
+    with pytest.raises(evaluator_module.EvaluationError, match="runtime identity"):
+        evaluator_module._parse_artifact(artifact)
+
+
+def test_published_report_has_timing_and_structural_outcomes_for_every_stratum() -> None:
+    records = tuple(
+        _activity_record(policy_ms=100, ordinal=ordinal, split="development")
+        for ordinal in range(128)
+    )
+
+    sample = evaluator_module._evaluate_sample(
+        records,
+        no_speech_records=tuple(_no_speech_record(ordinal) for ordinal in range(32)),
+    )["published"]
+
+    assert {"languages", "conditions", "scenarios"} <= set(sample)
+    for dimension in ("languages", "conditions", "scenarios"):
+        for stratum in sample[dimension].values():
+            if not stratum["suppressed"]:
+                assert "histogram" in stratum["first_audio_ms"]
+                assert "structural_outcomes" in stratum
+
+
 def test_evaluator_vetoes_contamination_even_when_fidelity_metrics_pass() -> None:
     records = tuple(
         _activity_record(
@@ -1576,10 +1751,7 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     monkeypatch.setattr(
         evaluator_module,
         "open_audit_capsule",
-        lambda envelope, **_kwargs: {
-            "campaign_id": "campaign_1",
-            "kind": envelope["kind"],
-        },
+        lambda envelope, **_kwargs: _opened_capsule(envelope),
     )
     monkeypatch.setattr(
         evaluator_module,

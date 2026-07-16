@@ -57,6 +57,10 @@ from app.services.qualification_identity import (  # noqa: E402
     verify_attempt_authorization,
     verify_campaign_approval,
 )
+from app.services.qualification_environment import (  # noqa: E402
+    execution_identity_report_sha256,
+    validate_execution_identity_report,
+)
 from app.services.qualification_ledger import (  # noqa: E402
     validate_custody_ledger_snapshot,
 )
@@ -72,9 +76,9 @@ from scripts.run_gemini_caller_turn_qualification import (  # noqa: E402
 )
 
 
-EVIDENCE_SCHEMA_ID = "gate_0b_evidence_v2"
+EVIDENCE_SCHEMA_ID = "gate_0b_evidence_v3"
 CUSTODY_BUNDLE_SCHEMA_ID = "gate_0b_custody_bundle_v2"
-REPORT_SCHEMA_ID = "gate_0b_evaluation_report_v1"
+REPORT_SCHEMA_ID = "gate_0b_evaluation_report_v2"
 EXPECTED_POLICIES = (100, 250, 500, 750)
 EXPECTED_PHASE_HISTORY = (
     "preregistered",
@@ -92,6 +96,7 @@ PRICING_PATH = REPO_ROOT / "tests/fixtures/caller_turn_qualification/pricing.jso
 PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+PROVIDER_REVISION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 THRESHOLDS = {
     "assembly_rate_micros": 990_000,
     "cer_overall_micros": 50_000,
@@ -103,10 +108,11 @@ THRESHOLDS = {
     "interruption_tail_p95_ms": 250,
     "interruption_tail_max_ms": 500,
 }
-EVIDENCE_CONTEXT_HMAC_DOMAIN = b"gate-0b-evidence-context-v2\x00"
+EVIDENCE_CONTEXT_HMAC_DOMAIN = b"gate-0b-evidence-context-v3\x00"
 FINAL_IDENTITY_FIELDS = frozenset(
     {
         "source_sha256",
+        "source_fact_bundle_sha256",
         "environment_sha256",
         "evaluator_sha256",
         "corpus_sha256",
@@ -201,6 +207,13 @@ def compute_evidence_context_commitment(
         "signed_record_root",
         "usage",
         "run_failures",
+        "execution_started_at",
+        "execution_completed_at",
+        "provider_revision",
+        "runtime_identity_before_sha256",
+        "runtime_identity_after_sha256",
+        "runtime_identity_before",
+        "runtime_identity_after",
         "activity_records",
         "no_speech_records",
     }
@@ -392,6 +405,17 @@ def evaluate_evidence_artifact(
             "key_id": parsed["signed_record_root"]["key_id"],
         },
         "identities": parsed["identities"],
+        "execution": {
+            "started_at": parsed["execution_started_at"],
+            "completed_at": parsed["execution_completed_at"],
+            "provider_revision": parsed["provider_revision"],
+            "runtime_identity_before_sha256": parsed[
+                "runtime_identity_before_sha256"
+            ],
+            "runtime_identity_after_sha256": parsed["runtime_identity_after_sha256"],
+            "runtime_identity_before": parsed["runtime_identity_before"],
+            "runtime_identity_after": parsed["runtime_identity_after"],
+        },
         "samples": {
             "development": selected_development["published"],
             "holdout": holdout_sample["published"],
@@ -470,7 +494,7 @@ def _evaluate_custody_bundle(
     try:
         expected_preregistration = build_preregistration(
             {
-                "schema_id": "gate_0b_preregistration_values_v1",
+                "schema_id": "gate_0b_preregistration_values_v2",
                 **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
             }
         )
@@ -652,6 +676,7 @@ def _evaluate_custody_bundle(
     identities = _validate_identities(
         {
             "source_sha256": hashlib.sha256(ledger["source_sha"].encode("ascii")).hexdigest(),
+            "source_fact_bundle_sha256": immutable["source_fact_bundle_sha256"],
             "environment_sha256": immutable["environment_identity_sha256"],
             "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "corpus_sha256": immutable["corpus_sha256"],
@@ -733,6 +758,11 @@ def _evaluate_custody_bundle(
     )
     if holdout_capsule["campaign_id"] != campaign_id:
         raise EvaluationError("holdout capsule campaign mismatch")
+    execution_metadata = _capsule_execution_metadata(
+        development_capsule,
+        holdout_capsule,
+        immutable=immutable,
+    )
     holdout_records, holdout_windows = derive_primitive_records_from_capsule(
         holdout_capsule,
         policies_ms=(selected_policy_ms,),
@@ -792,6 +822,7 @@ def _evaluate_custody_bundle(
         "signed_record_root": signed_root,
         "usage": usage_with_cost,
         "run_failures": list(run_failures),
+        **execution_metadata,
     }
     artifact["context_commitment"] = compute_evidence_context_commitment(
         artifact,
@@ -824,6 +855,13 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
         "signed_record_root",
         "usage",
         "run_failures",
+        "execution_started_at",
+        "execution_completed_at",
+        "provider_revision",
+        "runtime_identity_before_sha256",
+        "runtime_identity_after_sha256",
+        "runtime_identity_before",
+        "runtime_identity_after",
         "context_commitment",
     }
     if not isinstance(raw, Mapping) or set(raw) != fields:
@@ -868,6 +906,46 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise EvaluationError("signed record root is invalid")
     usage = _validate_usage(raw["usage"])
     run_failures = _safe_id_list(raw["run_failures"], label="run failures", maximum=64)
+    started_at = _parse_utc_time(raw["execution_started_at"])
+    completed_at = _parse_utc_time(raw["execution_completed_at"])
+    if completed_at < started_at:
+        raise EvaluationError("execution timestamps are invalid")
+    provider_revision = raw["provider_revision"]
+    if provider_revision is not None and (
+        not isinstance(provider_revision, str)
+        or not PROVIDER_REVISION.fullmatch(provider_revision)
+    ):
+        raise EvaluationError("provider revision is invalid")
+    runtime_before = raw["runtime_identity_before_sha256"]
+    runtime_after = raw["runtime_identity_after_sha256"]
+    if (
+        not isinstance(runtime_before, str)
+        or not SHA256.fullmatch(runtime_before)
+        or not isinstance(runtime_after, str)
+        or not SHA256.fullmatch(runtime_after)
+        or runtime_before != identities["environment_sha256"]
+        or runtime_after != identities["environment_sha256"]
+    ):
+        raise EvaluationError("runtime identity evidence is invalid")
+    try:
+        runtime_before_report = validate_execution_identity_report(
+            raw["runtime_identity_before"]
+        )
+        runtime_after_report = validate_execution_identity_report(
+            raw["runtime_identity_after"]
+        )
+    except ValueError as exc:
+        raise EvaluationError("runtime identity report is invalid") from exc
+    if (
+        runtime_before_report != runtime_after_report
+        or execution_identity_report_sha256(runtime_before_report) != runtime_before
+        or execution_identity_report_sha256(runtime_after_report) != runtime_after
+        or hashlib.sha256(
+            runtime_before_report["source"]["source_sha"].encode("ascii")
+        ).hexdigest()
+        != identities["source_sha256"]
+    ):
+        raise EvaluationError("runtime identity report drifted")
     return {
         "campaign_id": campaign_id,
         "attempt_authorization_validated": raw["attempt_authorization_validated"],
@@ -885,7 +963,92 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
         "signed_record_root": signed_root,
         "usage": usage,
         "run_failures": run_failures,
+        "execution_started_at": raw["execution_started_at"],
+        "execution_completed_at": raw["execution_completed_at"],
+        "provider_revision": provider_revision,
+        "runtime_identity_before_sha256": runtime_before,
+        "runtime_identity_after_sha256": runtime_after,
+        "runtime_identity_before": runtime_before_report,
+        "runtime_identity_after": runtime_after_report,
         "context_commitment": raw["context_commitment"],
+    }
+
+
+def _capsule_execution_metadata(
+    development: Mapping[str, Any],
+    holdout: Mapping[str, Any],
+    *,
+    immutable: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "source_fact_bundle_sha256",
+        "execution_started_at",
+        "execution_completed_at",
+        "provider_revision",
+        "runtime_identity_before_sha256",
+        "runtime_identity_after_sha256",
+        "runtime_identity_before",
+        "runtime_identity_after",
+    }
+    if not fields <= set(development) or not fields <= set(holdout):
+        raise EvaluationError("capsule execution metadata is incomplete")
+    for capsule in (development, holdout):
+        try:
+            runtime_before = validate_execution_identity_report(
+                capsule["runtime_identity_before"]
+            )
+            runtime_after = validate_execution_identity_report(
+                capsule["runtime_identity_after"]
+            )
+        except ValueError as exc:
+            raise EvaluationError("capsule runtime identity report is invalid") from exc
+        if (
+            capsule["source_fact_bundle_sha256"]
+            != immutable["source_fact_bundle_sha256"]
+            or capsule["runtime_identity_before_sha256"]
+            != immutable["environment_identity_sha256"]
+            or capsule["runtime_identity_after_sha256"]
+            != immutable["environment_identity_sha256"]
+            or execution_identity_report_sha256(runtime_before)
+            != capsule["runtime_identity_before_sha256"]
+            or execution_identity_report_sha256(runtime_after)
+            != capsule["runtime_identity_after_sha256"]
+            or runtime_before != runtime_after
+            or runtime_before["source"]["source_sha"] != immutable["source_sha"]
+        ):
+            raise EvaluationError("capsule execution identity is invalid")
+    development_started = _parse_utc_time(development["execution_started_at"])
+    development_completed = _parse_utc_time(development["execution_completed_at"])
+    holdout_started = _parse_utc_time(holdout["execution_started_at"])
+    holdout_completed = _parse_utc_time(holdout["execution_completed_at"])
+    if not (
+        development_started
+        <= development_completed
+        <= holdout_started
+        <= holdout_completed
+    ):
+        raise EvaluationError("capsule execution timestamps are invalid")
+    provider_revision = development["provider_revision"]
+    if provider_revision != holdout["provider_revision"] or (
+        provider_revision is not None
+        and (
+            not isinstance(provider_revision, str)
+            or not PROVIDER_REVISION.fullmatch(provider_revision)
+        )
+    ):
+        raise EvaluationError("capsule provider revision is invalid")
+    return {
+        "execution_started_at": development["execution_started_at"],
+        "execution_completed_at": holdout["execution_completed_at"],
+        "provider_revision": provider_revision,
+        "runtime_identity_before_sha256": development[
+            "runtime_identity_before_sha256"
+        ],
+        "runtime_identity_after_sha256": holdout[
+            "runtime_identity_after_sha256"
+        ],
+        "runtime_identity_before": development["runtime_identity_before"],
+        "runtime_identity_after": holdout["runtime_identity_after"],
     }
 
 
@@ -1104,6 +1267,8 @@ def _evaluate_sample(
         ),
         "languages": _published_groups(records, key="language"),
         "conditions": _published_groups(records, key="condition"),
+        "scenarios": _published_scenario_groups(records),
+        "structural_outcomes": _structural_outcomes(records),
     }
     return {
         "assembly_passed": assembly_passed,
@@ -1323,17 +1488,90 @@ def _published_groups(
         if len(group) < SMALL_CELL_MINIMUM:
             result[name] = {"count": len(group), "suppressed": True}
             continue
-        successes = sum(_assembly_success(record) for record in group)
-        result[name] = {
-            "count": len(group),
-            "suppressed": False,
-            "assembly_rate": _rate_summary(successes, len(group)),
-            "cer_micros": _edit_rate_micros(group, word=False),
-            "wer_micros": _edit_rate_micros(group, word=True),
-            "cer": _edit_summary(group, word=False),
-            "wer": _edit_summary(group, word=True),
-        }
+        result[name] = _published_stratum(group)
     return result
+
+
+def _published_scenario_groups(
+    records: Sequence[ActivityPrimitiveRecord],
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[ActivityPrimitiveRecord]] = defaultdict(list)
+    for record in records:
+        for scenario in record.scenario_tags:
+            grouped[scenario].append(record)
+    result: dict[str, dict[str, Any]] = {}
+    for name, group in sorted(grouped.items()):
+        if len(group) < SMALL_CELL_MINIMUM:
+            result[name] = {"count": len(group), "suppressed": True}
+            continue
+        result[name] = _published_stratum(group)
+    return result
+
+
+def _published_stratum(
+    records: Sequence[ActivityPrimitiveRecord],
+) -> dict[str, Any]:
+    successes = sum(_assembly_success(record) for record in records)
+    return {
+        "count": len(records),
+        "suppressed": False,
+        "assembly_rate": _rate_summary(successes, len(records)),
+        "cer_micros": _edit_rate_micros(records, word=False),
+        "wer_micros": _edit_rate_micros(records, word=True),
+        "cer": _edit_summary(records, word=False),
+        "wer": _edit_summary(records, word=True),
+        "first_audio_ms": _timing_summary(
+            [record.first_audio_ms for record in records if record.first_audio_ms is not None]
+        ),
+        "interruption_tail_ms": _timing_summary(
+            [
+                record.interruption_tail_ms
+                for record in records
+                if record.interruption_tail_ms is not None
+            ]
+        ),
+        "structural_outcomes": _structural_outcomes(records),
+    }
+
+
+def _structural_outcomes(
+    records: Sequence[ActivityPrimitiveRecord],
+) -> dict[str, Any]:
+    resource_errors = {
+        "cost_reservation_exhausted",
+        "provider_request_reservation_exhausted",
+        "run_output_audio_cap_exceeded",
+        "session_cost_cap_exceeded",
+        "session_timeout",
+    }
+    return {
+        "assignment_status": {
+            status: sum(record.assignment_status == status for record in records)
+            for status in ("matched", "ambiguous", "unassigned")
+        },
+        "lifecycle_status": {
+            status: sum(record.observed_lifecycle_status == status for record in records)
+            for status in (
+                "retrospective_complete",
+                "partial",
+                "cancelled",
+                "dropped",
+                "missing",
+                "duplicate",
+            )
+        },
+        "duplicate_count": sum(record.duplicate_count for record in records),
+        "contamination_count": sum(record.contamination_count for record in records),
+        "late_fragment_count": sum(
+            record.late_fragment_mutation_count for record in records
+        ),
+        "malformed_count": sum(record.malformed_count for record in records),
+        "stale_count": sum(record.stale_count for record in records),
+        "teardown_count": sum(record.teardown_violation_count for record in records),
+        "resource_outcome_count": sum(
+            record.error_code in resource_errors for record in records
+        ),
+    }
 
 
 def _rate_passes(numerator: int, denominator: int, *, minimum_micros: int) -> bool:
@@ -1414,14 +1652,35 @@ def _percentile(values: Sequence[int], percentile: int) -> int:
     return ordered[rank - 1]
 
 
-def _timing_summary(values: Sequence[int]) -> dict[str, int | None]:
+def _timing_summary(values: Sequence[int]) -> dict[str, Any]:
     if not values:
-        return {"count": 0, "p50": None, "p95": None, "max": None}
+        return {
+            "count": 0,
+            "p50": None,
+            "p95": None,
+            "max": None,
+            "histogram": {
+                "le_250": 0,
+                "251_500": 0,
+                "501_1000": 0,
+                "1001_1500": 0,
+                "1501_2500": 0,
+                "gt_2500": 0,
+            },
+        }
     return {
         "count": len(values),
         "p50": _percentile(values, 50),
         "p95": _percentile(values, 95),
         "max": max(values),
+        "histogram": {
+            "le_250": sum(value <= 250 for value in values),
+            "251_500": sum(250 < value <= 500 for value in values),
+            "501_1000": sum(500 < value <= 1_000 for value in values),
+            "1001_1500": sum(1_000 < value <= 1_500 for value in values),
+            "1501_2500": sum(1_500 < value <= 2_500 for value in values),
+            "gt_2500": sum(value > 2_500 for value in values),
+        },
     }
 
 
@@ -1556,6 +1815,15 @@ def _failure_report(failures: Mapping[str, int]) -> dict[str, Any]:
         "candidate_policy_results": {},
         "record_root": {"sha256": None, "leaf_count": 0, "key_id": None},
         "identities": {},
+        "execution": {
+            "started_at": None,
+            "completed_at": None,
+            "provider_revision": None,
+            "runtime_identity_before_sha256": None,
+            "runtime_identity_after_sha256": None,
+            "runtime_identity_before": None,
+            "runtime_identity_after": None,
+        },
         "samples": {"development": {}, "holdout": {}},
         "usage": {},
         "failures": dict(sorted(failures.items())),
@@ -1653,6 +1921,8 @@ def _parse_utc_time(value: object) -> datetime:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
         raise EvaluationError("ledger claim time is invalid") from exc
+    if value != parsed.isoformat(timespec="seconds").replace("+00:00", "Z"):
+        raise EvaluationError("ledger claim time is invalid")
     return parsed
 
 

@@ -35,9 +35,47 @@ from app.services.caller_turn_measurement import (
     verify_signed_record_root,
 )
 from app.services.caller_turns import CallerTurnEvent, CallerTurnEventKind
+from app.services.qualification_environment import execution_identity_report_sha256
 
 
 CAMPAIGN_KEY = b"c" * 32
+RUNTIME_IDENTITY_REPORT = {
+    "schema_id": "gate_0b_environment_identity_v2",
+    "source": {
+        "source_sha": "a" * 40,
+        "clean": True,
+        "dependencies": {
+            "0" * 64: {
+                "worktree_sha256": "1" * 64,
+                "git_blob_id": "2" * 40,
+            }
+        },
+    },
+    "environment": {
+        "python_version": "3.12.13",
+        "uv_version": "0.11.7",
+        "python_executable_sha256": "3" * 64,
+        "uv_executable_sha256": "4" * 64,
+        "python_executable_location_sha256": "5" * 64,
+        "uv_executable_location_sha256": "6" * 64,
+        "runtime_image_kind": "interpreter",
+        "runtime_image_sha256": "3" * 64,
+        "platform_id": "darwin-test",
+        "architecture": "arm64",
+        "unicode_version": "15.0.0",
+        "monotonic_clock_implementation": "mach_absolute_time",
+        "monotonic_clock_resolution_ns": 1,
+        "bytecode_write_disabled": True,
+        "openssl_version": "OpenSSL 3.0.0",
+        "ca_bundle_sha256": "7" * 64,
+        "lock_sha256": "8" * 64,
+        "codec_golden_sha256": "9" * 64,
+        "import_sha256": {"app.services.example": "a" * 64},
+        "distributions": {"test-package": "1.0.0"},
+        "distribution_files_sha256": {"test-package": "b" * 64},
+    },
+}
+RUNTIME_IDENTITY_SHA256 = execution_identity_report_sha256(RUNTIME_IDENTITY_REPORT)
 
 
 def _events(text: str = "book service today") -> tuple[CallerTurnEvent, ...]:
@@ -91,9 +129,17 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         serialization.PublicFormat.Raw,
     )
     payload = {
-        "schema_id": "gate_0b_audit_capsule_v5",
+        "schema_id": "gate_0b_audit_capsule_v6",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
+        "source_fact_bundle_sha256": "1" * 64,
+        "execution_started_at": "2026-07-15T15:00:00Z",
+        "execution_completed_at": "2026-07-15T15:01:00Z",
+        "provider_revision": None,
+        "runtime_identity_before_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+        "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
         "accounting": {
             "schema_id": "gate_0b_capsule_accounting_v1",
             "split": "development",
@@ -175,6 +221,31 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         custodian_private_key=private_key,
         expected_key_id="audit_custodian_1",
     ) == payload
+    for field in ("runtime_identity_after_sha256", "runtime_identity_after"):
+        missing_identity = deepcopy(payload)
+        missing_identity.pop(field)
+        with pytest.raises(MeasurementError, match="fields"):
+            seal_audit_capsule(
+                missing_identity,
+                custodian_public_key=public_key,
+                custodian_key_id="audit_custodian_1",
+            )
+    drifted = deepcopy(payload)
+    drifted["runtime_identity_after_sha256"] = "3" * 64
+    with pytest.raises(MeasurementError, match="runtime identity drifted"):
+        seal_audit_capsule(
+            drifted,
+            custodian_public_key=public_key,
+            custodian_key_id="audit_custodian_1",
+        )
+    noncanonical_time = deepcopy(payload)
+    noncanonical_time["execution_started_at"] = "2026-07-15T15:00:00.000Z"
+    with pytest.raises(MeasurementError, match="timestamp"):
+        seal_audit_capsule(
+            noncanonical_time,
+            custodian_public_key=public_key,
+            custodian_key_id="audit_custodian_1",
+        )
     with pytest.raises(InvalidTag):
         open_audit_capsule(
             envelope,
@@ -221,9 +292,17 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
 
 def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v5",
+        "schema_id": "gate_0b_audit_capsule_v6",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
+        "source_fact_bundle_sha256": "1" * 64,
+        "execution_started_at": "2026-07-15T15:00:00Z",
+        "execution_completed_at": "2026-07-15T15:01:00Z",
+        "provider_revision": None,
+        "runtime_identity_before_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+        "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
         "accounting": {
             "schema_id": "gate_0b_capsule_accounting_v1",
             "split": "development",
@@ -434,9 +513,17 @@ def _literal_wire_capsule() -> dict[str, object]:
         }
 
     return {
-        "schema_id": "gate_0b_audit_capsule_v5",
+        "schema_id": "gate_0b_audit_capsule_v6",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
+        "source_fact_bundle_sha256": "1" * 64,
+        "execution_started_at": "2026-07-15T15:00:00Z",
+        "execution_completed_at": "2026-07-15T15:01:00Z",
+        "provider_revision": None,
+        "runtime_identity_before_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+        "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
         "accounting": {
             "schema_id": "gate_0b_capsule_accounting_v1",
             "split": "development",
@@ -1287,7 +1374,7 @@ def test_measurement_does_not_apply_chinese_character_units_to_english_reference
 
 def test_compensating_missing_and_extra_turns_follow_causal_activity_ownership() -> None:
     capsule = _literal_wire_capsule()
-    capsule["schema_id"] = "gate_0b_audit_capsule_v5"
+    capsule["schema_id"] = "gate_0b_audit_capsule_v6"
     session = capsule["sessions"][0]  # type: ignore[index]
     session["events"] = [
         {
@@ -1514,9 +1601,17 @@ def test_response_activity_label_must_match_latest_actual_caller_audio() -> None
 
 def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v5",
+        "schema_id": "gate_0b_audit_capsule_v6",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
+        "source_fact_bundle_sha256": "1" * 64,
+        "execution_started_at": "2026-07-15T15:00:00Z",
+        "execution_completed_at": "2026-07-15T15:01:00Z",
+        "provider_revision": None,
+        "runtime_identity_before_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
+        "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
+        "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
         "accounting": {
             "schema_id": "gate_0b_capsule_accounting_v1",
             "split": "development",

@@ -15,16 +15,23 @@ path is intentionally blocked. The checked-in approval root contains exactly
 `UNPROVISIONED`, so campaign approval verification cannot succeed.
 
 Every executable Gate 0B entry point is allowlisted behind
-`scripts/launch_qualification.py` and must start with `python -I -S`. Direct
+`scripts/launch_qualification.py` and must start with `python -B -I -S`. Direct
 runner, evaluator, and environment-verifier execution fails before project or
 third-party imports. The launcher ignores ambient Python path configuration,
 does not process `.pth` files or customization modules, and binds its canonical
-startup policy into environment identity v5. Before adding either import root, it
+startup policy into environment identity v6. Before adding either import root, it
 checks the externally approved source SHA and a complete, path-redacted manifest
 of runtime site-packages source, bytecode, native extensions, distribution
-metadata, and data. It redirects bytecode-cache lookup to a bound nonexistent path
-and rejects sourceless bytecode in repository import roots, so ignored
-`__pycache__` content cannot replace reviewed source.
+metadata, and data. Project modules and the target then execute only from an
+in-memory snapshot whose bytes were rechecked against that preflight; later pathname
+replacement cannot change executed project code. It redirects bytecode-cache lookup
+to a bound nonexistent path and rejects sourceless bytecode in repository import
+roots, so ignored `__pycache__` content cannot replace reviewed source.
+
+Interpreter installation v2 recursively binds the Python executable, framework or
+`libpython`, standard-library and site native extensions, linked OpenSSL/runtime
+libraries, and the platform loader identity. `LD_*` and `DYLD_*` configuration is
+forbidden, and a loaded native image outside that closure blocks startup.
 
 ## Fixed Boundary
 
@@ -60,31 +67,35 @@ Run from a clean worktree at the reviewed implementation commit:
 ```bash
 uv lock --check
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -m pytest \
+  python -m pytest tests/unit --tb=short -q
+uv run --locked --no-sync --extra dev --python 3.12.13 \
+  ruff check app/services/caller_turn_alignment.py \
+  app/services/caller_turn_measurement.py \
+  app/services/caller_turn_qualification.py \
+  app/services/qualification_allocation.py \
+  app/services/qualification_environment.py \
+  app/services/qualification_identity.py \
+  app/services/qualification_ledger.py \
+  app/services/qualification_privacy.py \
+  app/services/qualification_private_paths.py \
+  app/services/voice_turn_replay.py \
+  scripts/launch_qualification.py \
+  scripts/evaluate_gemini_caller_turn_qualification.py \
+  scripts/run_gemini_caller_turn_qualification.py \
+  scripts/verify_qualification_environment.py \
+  tests/unit/test_caller_turn_alignment.py \
+  tests/unit/test_caller_turn_measurement.py \
+  tests/unit/test_caller_turn_qualification.py \
+  tests/unit/test_evaluate_gemini_caller_turn_qualification.py \
+  tests/unit/test_gate0b_offline_boundaries.py \
+  tests/unit/test_qualification_allocation.py \
+  tests/unit/test_qualification_environment.py \
   tests/unit/test_qualification_identity.py \
   tests/unit/test_qualification_ledger.py \
-  tests/unit/test_qualification_allocation.py \
   tests/unit/test_qualification_privacy.py \
   tests/unit/test_qualification_private_paths.py \
-  tests/unit/test_caller_turn_measurement.py \
   tests/unit/test_run_gemini_caller_turn_qualification.py \
-  tests/unit/test_evaluate_gemini_caller_turn_qualification.py \
-  tests/unit/test_gate0b_offline_boundaries.py -q
-uv run --locked --no-sync --extra dev --python 3.12.13 \
-  ruff check app/services/qualification_identity.py \
-  app/services/qualification_environment.py \
-  app/services/qualification_ledger.py \
-  app/services/caller_turn_alignment.py \
-  app/services/caller_turn_measurement.py \
-  scripts/launch_qualification.py \
-  scripts/run_gemini_caller_turn_qualification.py \
-  scripts/evaluate_gemini_caller_turn_qualification.py \
-  scripts/verify_qualification_environment.py \
-  tests/unit/test_qualification_identity.py \
-  tests/unit/test_qualification_ledger.py \
-  tests/unit/test_caller_turn_measurement.py \
-  tests/unit/test_run_gemini_caller_turn_qualification.py \
-  tests/unit/test_evaluate_gemini_caller_turn_qualification.py
+  tests/unit/test_voice_turn_replay.py
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   bandit -q -lll app/services/qualification_identity.py \
   app/services/qualification_environment.py \
@@ -95,6 +106,8 @@ uv run --locked --no-sync --extra dev --python 3.12.13 \
   scripts/run_gemini_caller_turn_qualification.py \
   scripts/evaluate_gemini_caller_turn_qualification.py \
   scripts/verify_qualification_environment.py
+uv run --locked --no-sync --extra dev --python 3.12.13 \
+  python -m compileall -q app/services scripts
 ```
 
 These commands perform no DNS lookup, socket connection, provider request, secret
@@ -125,21 +138,21 @@ QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualificatio
 STARTUP_PROBE="$QUALIFICATION_ROOT/preregistration/gate0b-startup-probe.json"
 umask 077
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -I -S scripts/launch_qualification.py probe > "$STARTUP_PROBE"
+  python -B -I -S scripts/launch_qualification.py probe > "$STARTUP_PROBE"
 QUALIFICATION_EXPECTED_SOURCE_SHA="$(
-  python -I -S -c \
+  python -B -I -S -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["source_preflight"]["source_sha"])' \
     "$STARTUP_PROBE"
 )"
 QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256="$(
-  python -I -S -c \
+  python -B -I -S -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["runtime_site_packages_manifest"]["manifest_sha256"])' \
     "$STARTUP_PROBE"
 )"
 readonly QUALIFICATION_EXPECTED_SOURCE_SHA
 readonly QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -I -S scripts/launch_qualification.py run-qualification \
+  python -B -I -S scripts/launch_qualification.py run-qualification \
   --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA" \
   --expected-runtime-site-packages-sha256 \
     "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" \
@@ -214,17 +227,17 @@ Generate the canonical artifact outside the repository:
 QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
 STARTUP_PROBE="$QUALIFICATION_ROOT/preregistration/gate0b-startup-probe.json"
 QUALIFICATION_EXPECTED_SOURCE_SHA="$(
-  python -I -S -c \
+  python -B -I -S -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["source_preflight"]["source_sha"])' \
     "$STARTUP_PROBE"
 )"
 QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256="$(
-  python -I -S -c \
+  python -B -I -S -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["runtime_site_packages_manifest"]["manifest_sha256"])' \
     "$STARTUP_PROBE"
 )"
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -I -S scripts/launch_qualification.py run-qualification \
+  python -B -I -S scripts/launch_qualification.py run-qualification \
   --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA" \
   --expected-runtime-site-packages-sha256 \
     "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" \
@@ -256,7 +269,7 @@ test -n "$REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256"
 readonly REVIEWED_GATE0B_SOURCE_SHA
 readonly REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256
 # Add the target-specific approved arguments after these launcher approvals.
-python -I -S scripts/launch_qualification.py run-qualification \
+python -B -I -S scripts/launch_qualification.py run-qualification \
   --expected-source-sha "$REVIEWED_GATE0B_SOURCE_SHA" \
   --expected-runtime-site-packages-sha256 \
     "$REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256"
@@ -295,8 +308,10 @@ preregistration and campaign approval. Every exported receipt is signature-check
 strictly sequenced, hash-chained, and replayed from genesis.
 
 An approved attempt must atomically consume its one-use authorization in that
-external ledger before source revalidation, credential lookup, provider DNS, or
-connector construction. Before that claim, its authorization must reserve the exact
+external ledger before credential lookup, provider DNS, or connector construction.
+Source and runtime identity are validated before the claim, immediately after the
+claim before credential lookup, and before every connector open, including a fresh
+connection restart. Before that claim, its authorization must reserve the exact
 preregistered per-run liability of 128 requests and USD 10. Every post-mutation
 snapshot must contain the previously accepted signed record sequence plus exactly
 one expected event; an independently valid alternate history is not continuity. The
@@ -306,8 +321,9 @@ spans development checkpoint, policy
 lock, holdout release, holdout execution, and terminal outcome. The custodian must
 append a signed one-shot `holdout_execution_claim` before the first holdout provider
 request; a missing or duplicate claim fails closed. A crash after that claim cannot
-resume or replace the holdout. Each provider request consumes reserved allowance
-immediately before connector construction. There are no case, session, setup,
+resume or replace the holdout. Each provider request revalidates execution identity
+and then consumes reserved allowance immediately before connector construction.
+There are no case, session, setup,
 provider, malformed-message, timeout, or gate retries.
 
 Corpus and schedule bytes are not executor arguments. A separate opaque loader may
@@ -349,12 +365,12 @@ Each sealed capsule retains the complete payload-safe runtime identity report be
 and after its provider split, together with both report hashes. The evaluator binds
 those reports to preregistration, rejects intra-split or cross-split drift, and
 publishes the campaign's complete before/after reports and hashes in the final report.
-Environment identity v5 includes the target-independent trusted-startup policy:
+Environment identity v6 includes the target-independent trusted-startup policy:
 isolated/no-site flags, bytecode policy, canonical effective-path hashes, bound
 identities for inert runtime `.pth` and customization artifacts, the verified
-source preflight, the complete interpreter installation, and the complete runtime
-site-packages manifest. The runtime recaptures those identities after imports and
-rejects drift.
+source preflight and executed-source snapshot, the complete interpreter installation
+and linked native-runtime closure, and the complete runtime site-packages manifest.
+The runtime recaptures those identities after imports and rejects drift.
 Repository-relative dependency names and executable locations appear only as
 SHA-256 identifiers; the report contains no cleartext file path.
 
@@ -362,6 +378,9 @@ Every external values file, capsule, custody bundle, key, and report uses an
 absolute path outside the repository. Input files must be current-user-owned,
 single-link regular files with mode `0600`; output parents must be
 current-user-owned directories with mode `0700`; symlink ancestry is rejected.
+Before opening any evaluator private key, the evaluator descriptor-opens the pinned
+approval root through no-follow ancestry, matches its bytes to startup source
+identity, and verifies the signed campaign and attempt envelopes.
 
 Request counts, modality token totals, input duration, output bytes, observed
 elapsed time, completion state, and bounded failure enums are also stored only in

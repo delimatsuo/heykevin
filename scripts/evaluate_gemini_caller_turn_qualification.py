@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
 _TRUSTED_STARTUP_FLAGS = (
     sys.flags.isolated == 1
+    and sys.flags.dont_write_bytecode == 1
     and sys.flags.no_site == 1
     and sys.flags.ignore_environment == 1
     and sys.flags.no_user_site == 1
@@ -76,6 +77,7 @@ from app.services.qualification_identity import (  # noqa: E402
     IdentityError,
     canonical_json_bytes,
     capture_trusted_startup_identity,
+    read_identity_bound_file,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -542,6 +544,7 @@ def evaluate_custody_bundle(
     ledger_custodian_public_key: bytes,
     record_root_signing_key: Ed25519PrivateKey,
     record_root_key_id: str,
+    approval_public_key: bytes | None = None,
 ) -> dict[str, Any]:
     """Open custody evidence, independently derive primitives, and evaluate it."""
     try:
@@ -553,6 +556,7 @@ def evaluate_custody_bundle(
             ledger_custodian_public_key=ledger_custodian_public_key,
             record_root_signing_key=record_root_signing_key,
             record_root_key_id=record_root_key_id,
+            approval_public_key=approval_public_key,
         )
     except (EvaluationError, MeasurementError, KeyError, TypeError, ValueError):
         return _failure_report({"custody_bundle_invalid": 1})
@@ -567,6 +571,7 @@ def _evaluate_custody_bundle(
     ledger_custodian_public_key: bytes,
     record_root_signing_key: Ed25519PrivateKey,
     record_root_key_id: str,
+    approval_public_key: bytes | None,
 ) -> dict[str, Any]:
     fields = {
         "schema_id",
@@ -662,7 +667,8 @@ def _evaluate_custody_bundle(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    approval_public_key = _load_pinned_approval_public_key()
+    if approval_public_key is None:
+        approval_public_key = _load_pinned_approval_public_key()
     if hashlib.sha256(approval_public_key).hexdigest() != immutable["approval_public_key_sha256"]:
         raise EvaluationError("custody approval root is not preregistered")
     claim_time = state.attempt_claimed_at
@@ -2688,10 +2694,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        capture_trusted_startup_identity(
+        startup = capture_trusted_startup_identity(
             REPO_ROOT,
             expected_target="evaluate-qualification",
         )
+        source_identity = startup.policy_report_dict()["source_preflight"]
+        approval_public_key = _load_pinned_approval_public_key(source_identity)
         raw = read_private_file(
             args.bundle,
             repo_root=REPO_ROOT,
@@ -2701,6 +2709,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
             bundle = {}
+        _verify_authorization_before_private_keys(
+            bundle,
+            approval_public_key=approval_public_key,
+        )
         report = evaluate_custody_bundle(
             bundle,
             commitment_key=_read_private_key_file(args.commitment_key, label="commitment"),
@@ -2719,6 +2731,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             ),
             record_root_key_id=args.record_root_key_id,
+            approval_public_key=approval_public_key,
         )
         _write_private_report(args.output, report)
     except (
@@ -2754,11 +2767,64 @@ def _read_public_key_file(path: Path, *, label: str) -> bytes:
     return value
 
 
-def _load_pinned_approval_public_key() -> bytes:
-    path = PINNED_APPROVAL_ROOT_PATH
-    if path.is_symlink() or path.parent.is_symlink() or not path.is_file():
-        raise EvaluationError("pinned approval root is unavailable")
-    value = path.read_bytes()
+def _verify_authorization_before_private_keys(
+    bundle: Mapping[str, Any],
+    *,
+    approval_public_key: bytes,
+) -> None:
+    if not isinstance(bundle, Mapping):
+        raise EvaluationError("custody bundle fields are invalid")
+    preregistration = _validated_preregistration(bundle.get("preregistration"))
+    immutable = preregistration["immutable_values"]
+    if (
+        not isinstance(approval_public_key, bytes)
+        or hashlib.sha256(approval_public_key).hexdigest()
+        != immutable["approval_public_key_sha256"]
+    ):
+        raise EvaluationError("custody approval root is not preregistered")
+    attempt_envelope = bundle.get("attempt_envelope")
+    if not isinstance(attempt_envelope, Mapping):
+        raise EvaluationError("attempt authorization envelope is invalid")
+    attempt_payload = attempt_envelope.get("payload")
+    if not isinstance(attempt_payload, Mapping):
+        raise EvaluationError("attempt authorization envelope is invalid")
+    authorization_time = _parse_utc_time(attempt_payload.get("issued_at"))
+    campaign = verify_campaign_approval(
+        bundle.get("campaign_envelope", {}),
+        public_key=approval_public_key,
+        expected_key_id=immutable["approval_key_id"],
+        expected_preregistration_sha256=preregistration["preregistration_sha256"],
+        expected_source_sha=immutable["source_sha"],
+        now=authorization_time,
+    )
+    verify_attempt_authorization(
+        attempt_envelope,
+        public_key=approval_public_key,
+        expected_key_id=immutable["approval_key_id"],
+        campaign=campaign,
+        now=authorization_time,
+    )
+
+
+def _load_pinned_approval_public_key(
+    source_identity: Mapping[str, Any] | None = None,
+) -> bytes:
+    if source_identity is None:
+        startup = capture_trusted_startup_identity(
+            REPO_ROOT,
+            expected_target="evaluate-qualification",
+        )
+        source_identity = startup.policy_report_dict()["source_preflight"]
+    try:
+        relative = PINNED_APPROVAL_ROOT_PATH.relative_to(REPO_ROOT)
+        value = read_identity_bound_file(
+            REPO_ROOT,
+            relative_path=relative,
+            source_identity=source_identity,
+            maximum_bytes=32,
+        )
+    except (IdentityError, ValueError) as exc:
+        raise EvaluationError("pinned approval root is unavailable") from exc
     if len(value) != 32:
         raise EvaluationError("pinned approval root is unprovisioned")
     return value

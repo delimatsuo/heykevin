@@ -10,12 +10,11 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING
-from hashlib import sha1, sha256
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
-import stat
 import sys
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
@@ -24,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
 _TRUSTED_STARTUP_FLAGS = (
     sys.flags.isolated == 1
+    and sys.flags.dont_write_bytecode == 1
     and sys.flags.no_site == 1
     and sys.flags.ignore_environment == 1
     and sys.flags.no_user_site == 1
@@ -78,6 +78,7 @@ from app.services.qualification_identity import (  # noqa: E402
     IdentityError,
     canonical_json_bytes,
     capture_trusted_startup_identity,
+    read_identity_bound_file,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -283,6 +284,10 @@ class PrivateFileCapsuleSink:
 
 class RequestReservationError(RunnerError):
     """Raised when the signed request reservation has been consumed."""
+
+
+class ExecutionIdentityDriftError(RunnerError):
+    """Raised before a credential or provider boundary when identity changed."""
 
 
 class _AbortConnection(Exception):
@@ -944,6 +949,13 @@ async def _execute_session_flow(
     activity_ended_at: dict[int, int] = {}
 
     for epoch, base_at_ms, replay_inputs in _connection_segments(plan):
+        segment_activity_ordinals = {
+            activity.activity_ordinal
+            for activity in plan.activities
+            if activity.expected_epoch == epoch
+        }
+        if not segment_activity_ordinals:
+            raise RunnerError("connection segment has no caller activities")
         if active_response_activity is not None:
             error_code = "response_crossed_restart"
             break
@@ -962,6 +974,9 @@ async def _execute_session_flow(
         )
         try:
             session = await connector.connect(request)
+        except ExecutionIdentityDriftError:
+            error_code = "source_identity_failed"
+            break
         except RequestReservationError:
             raise
         except Exception:
@@ -1135,7 +1150,7 @@ async def _execute_session_flow(
                         completion_pending=(
                             usage_frame_count > 0
                             and active_response_activity is None
-                            and len(terminal_activities) == len(plan.activities)
+                            and segment_activity_ordinals <= terminal_activities
                         ),
                         quiet_timeout_ms=config.response_gap_limit_ms,
                     )
@@ -2078,12 +2093,15 @@ class _ReservedConnector:
         budget: _RequestBudget,
         credential: SecretCredential,
         factory: Callable[[SecretCredential], InjectedConnector],
+        identity_guard: Callable[[], None],
     ) -> None:
         self._budget = budget
         self._credential = credential
         self._factory = factory
+        self._identity_guard = identity_guard
 
     async def connect(self, request: InjectedConnectionRequest) -> InjectedSession:
+        self._identity_guard()
         self._budget.consume()
         connector = self._factory(self._credential)
         if connector is None or not callable(getattr(connector, "connect", None)):
@@ -2478,6 +2496,14 @@ async def execute_authorized_attempt(
         credential: SecretCredential | None = None
         if error_code is None:
             try:
+                _require_unchanged_execution_identity(
+                    environment_identity,
+                    expected_source_sha=config.source_sha,
+                )
+            except Exception:
+                error_code = "source_identity_failed"
+        if error_code is None:
+            try:
                 credential = credential_loader(config.credential_reference)
                 if not isinstance(credential, SecretCredential):
                     raise TypeError
@@ -2489,6 +2515,10 @@ async def execute_authorized_attempt(
                 budget=budget,
                 credential=credential,
                 factory=connector_factory,
+                identity_guard=lambda: _require_unchanged_execution_identity(
+                    environment_identity,
+                    expected_source_sha=config.source_sha,
+                ),
             )
             try:
                 session_results, no_speech_results = await asyncio.wait_for(
@@ -2914,6 +2944,14 @@ async def execute_authorized_holdout(
         credential: SecretCredential | None = None
         if error_code is None:
             try:
+                _require_unchanged_execution_identity(
+                    environment_identity,
+                    expected_source_sha=config.source_sha,
+                )
+            except Exception:
+                error_code = "source_identity_failed"
+        if error_code is None:
+            try:
                 credential = credential_loader(config.credential_reference)
                 if not isinstance(credential, SecretCredential):
                     raise TypeError
@@ -2925,6 +2963,10 @@ async def execute_authorized_holdout(
                 budget=budget,
                 credential=credential,
                 factory=connector_factory,
+                identity_guard=lambda: _require_unchanged_execution_identity(
+                    environment_identity,
+                    expected_source_sha=config.source_sha,
+                ),
             )
             try:
                 session_results, no_speech_results = await asyncio.wait_for(
@@ -3517,149 +3559,29 @@ def _verify_execution_preregistration(
 def _load_pinned_approval_public_key(
     environment_identity: CapturedExecutionIdentity,
 ) -> bytes:
-    expected_worktree_sha256, expected_git_blob_id = (
-        _approval_root_dependency_identity(environment_identity)
-    )
     try:
         relative = PINNED_APPROVAL_ROOT_PATH.relative_to(REPO_ROOT)
     except ValueError as exc:
         raise RunnerError("pinned approval trust root is unavailable") from exc
     if relative != PINNED_APPROVAL_ROOT_RELATIVE_PATH:
         raise RunnerError("pinned approval trust root is unavailable")
-
-    descriptors: list[int] = []
-    opened_entries: list[tuple[int, str, os.stat_result]] = []
     try:
-        directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-        root_fd = os.open(REPO_ROOT, directory_flags)
-        descriptors.append(root_fd)
-        root_metadata = os.fstat(root_fd)
-        if not stat.S_ISDIR(root_metadata.st_mode):
-            raise RunnerError("pinned approval trust root is unavailable")
-
-        parent_fd = root_fd
-        for component in relative.parts[:-1]:
-            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
-            descriptors.append(child_fd)
-            child_metadata = os.fstat(child_fd)
-            if not stat.S_ISDIR(child_metadata.st_mode):
-                raise RunnerError("pinned approval trust root is unavailable")
-            opened_entries.append((parent_fd, component, child_metadata))
-            parent_fd = child_fd
-
-        file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-        file_fd = os.open(relative.name, file_flags, dir_fd=parent_fd)
-        descriptors.append(file_fd)
-        file_metadata_before = os.fstat(file_fd)
-        if (
-            not stat.S_ISREG(file_metadata_before.st_mode)
-            or file_metadata_before.st_nlink != 1
-        ):
-            raise RunnerError("pinned approval trust root is unavailable")
-        opened_entries.append((parent_fd, relative.name, file_metadata_before))
-        data = _read_bounded_descriptor(file_fd, maximum=APPROVAL_ROOT_BYTES)
-        file_metadata_after = os.fstat(file_fd)
-        if _stable_metadata(file_metadata_before) != _stable_metadata(
-            file_metadata_after
-        ):
-            raise RunnerError("pinned approval trust root is unavailable")
-
-        current_root = os.stat(REPO_ROOT, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(current_root.st_mode)
-            or _entry_identity(current_root) != _entry_identity(root_metadata)
-        ):
-            raise RunnerError("pinned approval trust root is unavailable")
-        for entry_parent_fd, component, opened_metadata in opened_entries:
-            current = os.stat(
-                component,
-                dir_fd=entry_parent_fd,
-                follow_symlinks=False,
-            )
-            if _entry_identity(current) != _entry_identity(opened_metadata):
-                raise RunnerError("pinned approval trust root is unavailable")
-    except OSError as exc:
+        data = read_identity_bound_file(
+            REPO_ROOT,
+            relative_path=relative,
+            source_identity=environment_identity.report["source"],
+            maximum_bytes=APPROVAL_ROOT_BYTES,
+        )
+    except (IdentityError, KeyError, TypeError) as exc:
+        if "source identity mismatch" in str(exc):
+            raise RunnerError(
+                "pinned approval trust root source identity mismatch"
+            ) from exc
         raise RunnerError("pinned approval trust root is unavailable") from exc
-    finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
 
     if len(data) != APPROVAL_ROOT_BYTES:
         raise RunnerError("pinned approval trust root is unprovisioned")
-    if (
-        sha256(data).hexdigest() != expected_worktree_sha256
-        or _git_blob_id(data, expected=expected_git_blob_id) != expected_git_blob_id
-    ):
-        raise RunnerError("pinned approval trust root source identity mismatch")
     return data
-
-
-def _approval_root_dependency_identity(
-    environment_identity: CapturedExecutionIdentity,
-) -> tuple[str, str]:
-    if not isinstance(environment_identity, CapturedExecutionIdentity):
-        raise TypeError("environment_identity must be a CapturedExecutionIdentity")
-    try:
-        source = environment_identity.report["source"]
-        dependencies = source["dependencies"]
-        path_sha256 = sha256(
-            PINNED_APPROVAL_ROOT_RELATIVE_PATH.as_posix().encode("utf-8")
-        ).hexdigest()
-        dependency = dependencies[path_sha256]
-        worktree_sha256 = dependency["worktree_sha256"]
-        git_blob_id = dependency["git_blob_id"]
-    except (KeyError, TypeError) as exc:
-        raise RunnerError("pinned approval trust root source identity mismatch") from exc
-    if (
-        not isinstance(worktree_sha256, str)
-        or not SHA256.fullmatch(worktree_sha256)
-        or not isinstance(git_blob_id, str)
-        or not SOURCE_SHA.fullmatch(git_blob_id)
-    ):
-        raise RunnerError("pinned approval trust root source identity mismatch")
-    return worktree_sha256, git_blob_id
-
-
-def _read_bounded_descriptor(file_fd: int, *, maximum: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = maximum + 1
-    while remaining:
-        chunk = os.read(file_fd, remaining)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-def _stable_metadata(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_mode,
-        value.st_nlink,
-        value.st_uid,
-        value.st_gid,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
-
-
-def _entry_identity(value: os.stat_result) -> tuple[int, int, int]:
-    return value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode)
-
-
-def _git_blob_id(data: bytes, *, expected: str) -> str:
-    payload = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
-    if len(expected) == 40:
-        return sha1(payload, usedforsecurity=False).hexdigest()
-    if len(expected) == 64:
-        return sha256(payload).hexdigest()
-    raise RunnerError("pinned approval trust root source identity mismatch")
 
 
 def _capture_current_execution_identity(
@@ -3678,6 +3600,20 @@ def _capture_current_execution_identity(
         report=report,
         sha256=execution_identity_report_sha256(report),
     )
+
+
+def _require_unchanged_execution_identity(
+    expected: CapturedExecutionIdentity,
+    *,
+    expected_source_sha: str,
+) -> None:
+    if not isinstance(expected, CapturedExecutionIdentity):
+        raise TypeError("expected identity must be a CapturedExecutionIdentity")
+    current = _capture_current_execution_identity(
+        expected_source_sha=expected_source_sha
+    )
+    if current != expected:
+        raise ExecutionIdentityDriftError("execution environment identity drifted")
 
 
 def artifact_location_sha256(path: Path) -> str:

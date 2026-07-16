@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from hashlib import sha256
+from hashlib import sha1, sha256
 import importlib.metadata
 import importlib.util
 import json
@@ -15,6 +16,7 @@ import platform
 import re
 import shutil
 import ssl
+import stat
 # Subprocess use is limited to fixed identity-tool argv with shell execution disabled.
 import subprocess  # nosec B404
 import sys
@@ -43,9 +45,10 @@ OUTAGE_ENUMS = {
     "qualification_host_failure",
 }
 GIT_BINARY = "/usr/bin/git"
-TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v3"
-TRUSTED_STARTUP_POLICY_SCHEMA_ID = "gate_0b_trusted_startup_policy_v3"
-INTERPRETER_INSTALLATION_SCHEMA_ID = "gate_0b_interpreter_installation_v1"
+TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v5"
+TRUSTED_STARTUP_POLICY_SCHEMA_ID = "gate_0b_trusted_startup_policy_v5"
+INTERPRETER_INSTALLATION_SCHEMA_ID = "gate_0b_interpreter_installation_v2"
+NATIVE_RUNTIME_CLOSURE_SCHEMA_ID = "gate_0b_native_runtime_closure_v1"
 RUNTIME_SITE_PACKAGES_SCHEMA_ID = "gate_0b_runtime_site_packages_v1"
 STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
 STARTUP_FLAG_NAMES = (
@@ -103,10 +106,150 @@ EXECUTION_DEPENDENCY_PATHS = (
 STDLIB_BYTECODE_SUFFIXES = (".pyc", ".pyo")
 STDLIB_SOURCE_BYTECODE_SUFFIXES = (".py", *STDLIB_BYTECODE_SUFFIXES)
 NATIVE_EXTENSION_SUFFIXES = (".dll", ".dylib", ".pyd", ".so")
+NATIVE_LOADER_ENV_PREFIXES = ("DYLD_", "LD_")
+DARWIN_LINK_TOOL = "/usr/bin/otool"
+LINUX_LINK_TOOL = "/usr/bin/ldd"
 
 
 class IdentityError(ValueError):
     """Raised when execution identity or authorization cannot be trusted."""
+
+
+def read_identity_bound_file(
+    repo_root: str | Path,
+    *,
+    relative_path: str | Path,
+    source_identity: Mapping[str, Any],
+    maximum_bytes: int,
+) -> bytes:
+    """Read one repository file through a descriptor bound to source identity."""
+    root = Path(repo_root)
+    relative = Path(relative_path)
+    if (
+        not root.is_absolute()
+        or relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or maximum_bytes < 1
+    ):
+        raise IdentityError("identity-bound file is unavailable")
+
+    validated_source = _validated_redacted_source_preflight(source_identity)
+    dependency_key = sha256(relative.as_posix().encode("utf-8")).hexdigest()
+    try:
+        dependency = validated_source["dependencies"][dependency_key]
+        expected_worktree_sha256 = dependency["worktree_sha256"]
+        expected_git_blob_id = dependency["git_blob_id"]
+    except (KeyError, TypeError) as exc:
+        raise IdentityError("identity-bound file source identity mismatch") from exc
+
+    descriptors: list[int] = []
+    opened_entries: list[tuple[int, str, os.stat_result]] = []
+    try:
+        directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(root, directory_flags)
+        descriptors.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise IdentityError("identity-bound file is unavailable")
+
+        parent_fd = root_fd
+        for component in relative.parts[:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            descriptors.append(child_fd)
+            child_metadata = os.fstat(child_fd)
+            if not stat.S_ISDIR(child_metadata.st_mode):
+                raise IdentityError("identity-bound file is unavailable")
+            opened_entries.append((parent_fd, component, child_metadata))
+            parent_fd = child_fd
+
+        file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        file_fd = os.open(relative.name, file_flags, dir_fd=parent_fd)
+        descriptors.append(file_fd)
+        file_metadata_before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(file_metadata_before.st_mode)
+            or file_metadata_before.st_nlink != 1
+        ):
+            raise IdentityError("identity-bound file is unavailable")
+        opened_entries.append((parent_fd, relative.name, file_metadata_before))
+        data = _read_bounded_descriptor(file_fd, maximum=maximum_bytes)
+        file_metadata_after = os.fstat(file_fd)
+        if _stable_metadata(file_metadata_before) != _stable_metadata(
+            file_metadata_after
+        ):
+            raise IdentityError("identity-bound file is unavailable")
+
+        current_root = os.stat(root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(current_root.st_mode)
+            or _entry_identity(current_root) != _entry_identity(root_metadata)
+        ):
+            raise IdentityError("identity-bound file is unavailable")
+        for entry_parent_fd, component, opened_metadata in opened_entries:
+            current = os.stat(
+                component,
+                dir_fd=entry_parent_fd,
+                follow_symlinks=False,
+            )
+            if _entry_identity(current) != _entry_identity(opened_metadata):
+                raise IdentityError("identity-bound file is unavailable")
+    except OSError as exc:
+        raise IdentityError("identity-bound file is unavailable") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    if len(data) > maximum_bytes:
+        raise IdentityError("identity-bound file is unavailable")
+    if (
+        sha256(data).hexdigest() != expected_worktree_sha256
+        or _git_blob_id(data, expected=expected_git_blob_id) != expected_git_blob_id
+    ):
+        raise IdentityError("identity-bound file source identity mismatch")
+    return data
+
+
+def _read_bounded_descriptor(file_fd: int, *, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = maximum + 1
+    while remaining:
+        chunk = os.read(file_fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _stable_metadata(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _entry_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode)
+
+
+def _git_blob_id(data: bytes, *, expected: str) -> str:
+    payload = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+    if len(expected) == 40:
+        return sha1(payload, usedforsecurity=False).hexdigest()
+    if len(expected) == 64:
+        return sha256(payload).hexdigest()
+    raise IdentityError("identity-bound file source identity mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +484,7 @@ def capture_trusted_startup_identity(
         raise IdentityError("trusted qualification startup is unavailable")
     if SELF_ASSERTED_RUNTIME_ENV in os.environ:
         raise IdentityError("self-asserted runtime image identity is forbidden")
+    _reject_native_loader_environment()
     try:
         raw = json.loads(encoded)
     except json.JSONDecodeError as exc:
@@ -371,6 +515,7 @@ def capture_trusted_startup_identity(
     startup_flags = _validated_startup_flags(marker["startup_flags"])
     if (
         startup_flags["isolated"] != 1
+        or startup_flags["dont_write_bytecode"] != 1
         or startup_flags["no_site"] != 1
         or startup_flags["ignore_environment"] != 1
         or startup_flags["no_user_site"] != 1
@@ -730,6 +875,23 @@ def capture_interpreter_installation_identity(
 
     if not source_bytecode or not native_extensions:
         raise IdentityError("interpreter installation identity is incomplete")
+    runtime_site = _current_runtime_site_packages()
+    site_native_extensions = tuple(
+        candidate
+        for candidate in sorted(runtime_site.rglob("*"))
+        if candidate.is_file()
+        and not candidate.is_symlink()
+        and candidate.suffix.lower() in NATIVE_EXTENSION_SUFFIXES
+    )
+    native_runtime_closure, allowed_native_images = _capture_native_runtime_closure(
+        executable,
+        roots=(
+            *(Path(_canonical_path(path)) for path in seen_files if Path(path).suffix.lower() in NATIVE_EXTENSION_SUFFIXES),
+            *site_native_extensions,
+            *_python_process_image_roots(),
+        ),
+    )
+    _require_loaded_native_images_within_closure(allowed_native_images)
     identity: dict[str, Any] = {
         "schema_id": INTERPRETER_INSTALLATION_SCHEMA_ID,
         "python_executable_sha256": sha256(executable.read_bytes()).hexdigest(),
@@ -741,6 +903,7 @@ def capture_interpreter_installation_identity(
         "stdlib_archive_count": len(archives),
         "native_extension_sha256": _interpreter_manifest_sha256(native_extensions),
         "native_extension_count": len(native_extensions),
+        "native_runtime_closure": native_runtime_closure,
     }
     identity["installation_sha256"] = sha256(
         canonical_json_bytes(identity)
@@ -758,6 +921,7 @@ def validate_interpreter_installation_identity(raw: object) -> dict[str, Any]:
         "stdlib_archive_count",
         "native_extension_sha256",
         "native_extension_count",
+        "native_runtime_closure",
         "installation_sha256",
     }
     identity = _strict_object(
@@ -786,10 +950,293 @@ def validate_interpreter_installation_identity(raw: object) -> dict[str, Any]:
         value = identity[field]
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise IdentityError("interpreter installation count is invalid")
+    _validate_native_runtime_closure(identity["native_runtime_closure"])
     unsigned = dict(identity)
     claimed = unsigned.pop("installation_sha256")
     if sha256(canonical_json_bytes(unsigned)).hexdigest() != claimed:
         raise IdentityError("interpreter installation aggregate is invalid")
+    return json.loads(canonical_json_bytes(identity))
+
+
+def _capture_native_runtime_closure(
+    executable: Path,
+    *,
+    roots: Sequence[Path],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    queue = [Path(_canonical_path(executable)), *map(lambda path: Path(_canonical_path(path)), roots)]
+    allowed: dict[str, str] = {}
+    virtual_dependencies: set[str] = set()
+    while queue:
+        candidate = queue.pop()
+        canonical = _canonical_path(candidate)
+        if canonical in allowed:
+            continue
+        path = Path(canonical)
+        if path.is_symlink() or not path.is_file():
+            raise IdentityError("native runtime dependency is unavailable")
+        digest = sha256(path.read_bytes()).hexdigest()
+        allowed[canonical] = digest
+        linked_paths, virtual = _linked_native_dependencies(
+            path,
+            executable=Path(_canonical_path(executable)),
+        )
+        queue.extend(linked_paths)
+        virtual_dependencies.update(virtual)
+
+    records = [
+        {
+            "location_sha256": sha256(path.encode("utf-8")).hexdigest(),
+            "sha256": digest,
+        }
+        for path, digest in sorted(allowed.items())
+    ]
+    virtual_records = sorted(
+        sha256(value.encode("utf-8")).hexdigest()
+        for value in virtual_dependencies
+    )
+    identity: dict[str, Any] = {
+        "schema_id": NATIVE_RUNTIME_CLOSURE_SCHEMA_ID,
+        "regular_file_count": len(records),
+        "regular_files_sha256": sha256(canonical_json_bytes(records)).hexdigest(),
+        "virtual_dependency_count": len(virtual_records),
+        "virtual_dependencies_sha256": sha256(
+            canonical_json_bytes(virtual_records)
+        ).hexdigest(),
+        "system_loader_identity_sha256": _system_loader_identity_sha256(
+            virtual_dependencies
+        ),
+    }
+    identity["closure_sha256"] = sha256(canonical_json_bytes(identity)).hexdigest()
+    return identity, allowed
+
+
+def _linked_native_dependencies(
+    path: Path,
+    *,
+    executable: Path,
+) -> tuple[list[Path], set[str]]:
+    system = platform.system()
+    if system == "Darwin":
+        command = [DARWIN_LINK_TOOL, "-L", str(path)]
+    elif system == "Linux":
+        command = [LINUX_LINK_TOOL, str(path)]
+    else:
+        raise IdentityError("native runtime platform is unsupported")
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )  # nosec B603
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise IdentityError("native runtime dependency inspection failed") from exc
+    if system == "Darwin":
+        return _parse_darwin_dependencies(
+            completed.stdout,
+            binary=path,
+            executable=executable,
+        )
+    return _parse_linux_dependencies(completed.stdout)
+
+
+def _parse_darwin_dependencies(
+    output: str,
+    *,
+    binary: Path,
+    executable: Path,
+) -> tuple[list[Path], set[str]]:
+    resolved: list[Path] = []
+    virtual: set[str] = set()
+    first_load_for_architecture = True
+    for raw_line in output.splitlines()[1:]:
+        if not raw_line.startswith("\t"):
+            first_load_for_architecture = True
+            continue
+        line = raw_line.strip()
+        if not line:
+            continue
+        load_name = line.split(" (", 1)[0]
+        if first_load_for_architecture and Path(load_name).name == binary.name:
+            first_load_for_architecture = False
+            continue
+        first_load_for_architecture = False
+        if load_name.startswith("@loader_path/"):
+            candidate = binary.parent / load_name.removeprefix("@loader_path/")
+        elif load_name.startswith("@executable_path/"):
+            candidate = executable.parent / load_name.removeprefix("@executable_path/")
+        elif load_name.startswith("@rpath/"):
+            local = binary.parent / load_name.removeprefix("@rpath/")
+            if local.is_file():
+                candidate = local
+            else:
+                virtual.add(load_name)
+                continue
+        elif load_name.startswith("/"):
+            candidate = Path(load_name)
+        else:
+            virtual.add(load_name)
+            continue
+        if candidate.is_file():
+            if _canonical_path(candidate) == _canonical_path(binary):
+                continue
+            resolved.append(candidate)
+        elif load_name.startswith(("/usr/lib/", "/System/Library/")):
+            virtual.add(load_name)
+        else:
+            raise IdentityError("native runtime dependency is unavailable")
+    return resolved, virtual
+
+
+def _parse_linux_dependencies(output: str) -> tuple[list[Path], set[str]]:
+    resolved: list[Path] = []
+    virtual: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=>" in line:
+            load_name, remainder = line.split("=>", 1)
+            fields = remainder.split()
+            if fields[:2] == ["not", "found"] or not fields:
+                raise IdentityError("native runtime dependency is unavailable")
+            target = fields[0]
+        else:
+            load_name = line.split(maxsplit=1)[0]
+            target = load_name
+        if target.startswith("/"):
+            candidate = Path(target)
+            if not candidate.is_file():
+                raise IdentityError("native runtime dependency is unavailable")
+            resolved.append(candidate)
+        else:
+            virtual.add(load_name.strip())
+    return resolved, virtual
+
+
+def _system_loader_identity_sha256(virtual_dependencies: set[str]) -> str:
+    if platform.system() == "Darwin":
+        buffer = (ctypes.c_ubyte * 16)()
+        library = ctypes.CDLL(None)
+        function = library._dyld_get_shared_cache_uuid
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = ctypes.c_bool
+        if not function(buffer):
+            raise IdentityError("dyld shared cache identity is unavailable")
+        system_identity = {
+            "platform": "darwin",
+            "shared_cache_uuid": bytes(buffer).hex(),
+        }
+    else:
+        system_identity = {
+            "platform": platform.system().lower(),
+            "release": platform.release(),
+            "architecture": platform.machine().lower(),
+        }
+    system_identity["virtual_dependencies"] = sorted(virtual_dependencies)
+    return sha256(canonical_json_bytes(system_identity)).hexdigest()
+
+
+def _loaded_native_image_paths() -> tuple[str, ...]:
+    if platform.system() == "Darwin":
+        library = ctypes.CDLL(None)
+        count = library._dyld_image_count
+        count.argtypes = []
+        count.restype = ctypes.c_uint32
+        name = library._dyld_get_image_name
+        name.argtypes = [ctypes.c_uint32]
+        name.restype = ctypes.c_char_p
+        return tuple(
+            decoded
+            for index in range(count())
+            if (raw := name(index)) is not None
+            if (decoded := raw.decode("utf-8", errors="strict"))
+        )
+    if platform.system() == "Linux":
+        try:
+            lines = Path("/proc/self/maps").read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise IdentityError("loaded native image map is unavailable") from exc
+        paths: set[str] = set()
+        for line in lines:
+            fields = line.split(maxsplit=5)
+            if len(fields) == 6 and "x" in fields[1] and fields[5].startswith("/"):
+                paths.add(fields[5])
+        return tuple(sorted(paths))
+    raise IdentityError("loaded native image platform is unsupported")
+
+
+def _python_process_image_roots() -> tuple[Path, ...]:
+    if platform.system() != "Darwin":
+        return ()
+    candidate = (
+        Path(sys.base_prefix)
+        / "Resources"
+        / "Python.app"
+        / "Contents"
+        / "MacOS"
+        / "Python"
+    )
+    return (candidate,) if candidate.is_file() else ()
+
+
+def _require_loaded_native_images_within_closure(
+    allowed_native_images: Mapping[str, str],
+) -> None:
+    for raw_path in _loaded_native_image_paths():
+        if platform.system() == "Darwin" and raw_path.startswith(
+            ("/usr/lib/", "/System/Library/")
+        ):
+            continue
+        path = Path(raw_path.removesuffix(" (deleted)"))
+        if path.is_file():
+            canonical = _canonical_path(path)
+            expected = allowed_native_images.get(canonical)
+            if expected is None or sha256(Path(canonical).read_bytes()).hexdigest() != expected:
+                raise IdentityError("loaded native image is outside the approved closure")
+        else:
+            raise IdentityError("loaded native image is unavailable")
+
+
+def _validate_native_runtime_closure(raw: object) -> dict[str, Any]:
+    fields = {
+        "schema_id",
+        "regular_file_count",
+        "regular_files_sha256",
+        "virtual_dependency_count",
+        "virtual_dependencies_sha256",
+        "system_loader_identity_sha256",
+        "closure_sha256",
+    }
+    identity = _strict_object(
+        raw,
+        allowed=fields,
+        label="native runtime closure",
+    )
+    if identity["schema_id"] != NATIVE_RUNTIME_CLOSURE_SCHEMA_ID:
+        raise IdentityError("native runtime closure schema is invalid")
+    for field in (
+        "regular_files_sha256",
+        "virtual_dependencies_sha256",
+        "system_loader_identity_sha256",
+        "closure_sha256",
+    ):
+        if not isinstance(identity[field], str) or not SHA256_PATTERN.fullmatch(
+            identity[field]
+        ):
+            raise IdentityError("native runtime closure digest is invalid")
+    for field, minimum in (
+        ("regular_file_count", 1),
+        ("virtual_dependency_count", 0),
+    ):
+        value = identity[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise IdentityError("native runtime closure count is invalid")
+    unsigned = dict(identity)
+    claimed = unsigned.pop("closure_sha256")
+    if sha256(canonical_json_bytes(unsigned)).hexdigest() != claimed:
+        raise IdentityError("native runtime closure aggregate is invalid")
     return json.loads(canonical_json_bytes(identity))
 
 
@@ -929,6 +1376,7 @@ def capture_environment_identity(
 ) -> EnvironmentIdentity:
     if SELF_ASSERTED_RUNTIME_ENV in os.environ:
         raise IdentityError("self-asserted runtime image identity is forbidden")
+    _reject_native_loader_environment()
     root = Path(repo_root).resolve()
     python_version = platform.python_version()
     if python_version != expected_python:
@@ -1031,6 +1479,14 @@ def capture_environment_identity(
         distributions=distributions,
         distribution_files_sha256=distribution_files_sha256,
     )
+
+
+def _reject_native_loader_environment() -> None:
+    if any(
+        name.startswith(NATIVE_LOADER_ENV_PREFIXES)
+        for name in os.environ
+    ):
+        raise IdentityError("native loader environment is forbidden")
 
 
 def verify_campaign_approval(

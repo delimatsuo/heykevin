@@ -22,7 +22,7 @@ from app.services.qualification_identity import (
 
 EXPECTED_PYTHON = "3.12.13"
 EXPECTED_UV = "0.11.7"
-EXECUTION_IDENTITY_SCHEMA_ID = "gate_0b_environment_identity_v5"
+EXECUTION_IDENTITY_SCHEMA_ID = "gate_0b_environment_identity_v6"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 EXECUTION_IMPORT_NAMES = (

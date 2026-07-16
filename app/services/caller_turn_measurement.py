@@ -956,6 +956,11 @@ def _assemble_session_events(
         return unique_owners
 
     for event, owner in zip(events, event_activity_ordinals, strict=True):
+        # Gemini tool cancellation controls the prior model response. The wire
+        # record measures it, but it is not a terminal for the caller activity
+        # whose speech caused the interruption.
+        if event.kind is CallerTurnEventKind.TOOL_CALL_CANCELLED:
+            continue
         pending_before = tuple(pending_owners)
         deadline_before = assembler.next_deadline_ms
         stale_before = assembler.stale_event_count

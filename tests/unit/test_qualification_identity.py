@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
-from hashlib import sha256
+from hashlib import sha1, sha256
 import json
 from pathlib import Path
 import subprocess
@@ -27,6 +27,7 @@ from app.services.qualification_identity import (
     capture_source_identity,
     capture_trusted_startup_identity,
     ledger_location_sha256,
+    read_identity_bound_file,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -43,7 +44,7 @@ def _trusted_startup_flags() -> dict[str, int | bool]:
         "bytes_warning": 0,
         "debug": 0,
         "dev_mode": False,
-        "dont_write_bytecode": 0,
+        "dont_write_bytecode": 1,
         "hash_randomization": 1,
         "ignore_environment": 1,
         "inspect": 0,
@@ -62,8 +63,17 @@ def _trusted_startup_flags() -> dict[str, int | bool]:
 
 
 def _interpreter_report() -> dict[str, object]:
+    closure: dict[str, object] = {
+        "schema_id": "gate_0b_native_runtime_closure_v1",
+        "regular_file_count": 2,
+        "regular_files_sha256": "5" * 64,
+        "virtual_dependency_count": 1,
+        "virtual_dependencies_sha256": "6" * 64,
+        "system_loader_identity_sha256": "7" * 64,
+    }
+    closure["closure_sha256"] = sha256(canonical_json_bytes(closure)).hexdigest()
     report: dict[str, object] = {
-        "schema_id": "gate_0b_interpreter_installation_v1",
+        "schema_id": "gate_0b_interpreter_installation_v2",
         "python_executable_sha256": sha256(b"python").hexdigest(),
         "stdlib_source_bytecode_sha256": "1" * 64,
         "stdlib_source_bytecode_count": 1,
@@ -71,6 +81,7 @@ def _interpreter_report() -> dict[str, object]:
         "stdlib_archive_count": 0,
         "native_extension_sha256": "3" * 64,
         "native_extension_count": 1,
+        "native_runtime_closure": closure,
     }
     report["installation_sha256"] = sha256(canonical_json_bytes(report)).hexdigest()
     return report
@@ -99,6 +110,184 @@ def _git(repo: Path, *args: str) -> str:
         text=True,
     )
     return completed.stdout.strip()
+
+
+@pytest.mark.parametrize("module", (identity_module, launcher_module))
+def test_native_dependency_parser_handles_linux_ldd_output(
+    tmp_path: Path,
+    module: object,
+) -> None:
+    libpython = tmp_path / "libpython3.12.so.1.0"
+    loader = tmp_path / "ld-linux-x86-64.so.2"
+    libpython.write_bytes(b"python")
+    loader.write_bytes(b"loader")
+    output = (
+        "linux-vdso.so.1 (0x00007fff)\n"
+        f"libpython3.12.so.1.0 => {libpython} (0x00007f00)\n"
+        f"{loader} (0x00007f01)\n"
+    )
+
+    resolved, virtual = module._parse_linux_dependencies(output)
+
+    assert resolved == [libpython, loader]
+    assert virtual == {"linux-vdso.so.1"}
+
+
+@pytest.mark.parametrize(
+    ("module", "error_type"),
+    (
+        (identity_module, IdentityError),
+        (launcher_module, launcher_module.BootstrapError),
+    ),
+)
+def test_native_dependency_parser_rejects_missing_linux_dependency(
+    module: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type, match="native runtime dependency is unavailable"):
+        module._parse_linux_dependencies("libmissing.so =>\tnot found\n")
+
+
+@pytest.mark.parametrize("module", (identity_module, launcher_module))
+def test_native_dependency_parser_handles_darwin_fat_binary_output(
+    tmp_path: Path,
+    module: object,
+) -> None:
+    binary = tmp_path / "libnative.dylib"
+    executable = tmp_path / "bin" / "python"
+    loader_dependency = tmp_path / "libloader.dylib"
+    executable_dependency = executable.parent / "libexecutable.dylib"
+    rpath_dependency = tmp_path / "librpath.dylib"
+    absolute_dependency = tmp_path / "libabsolute.dylib"
+    same_name_dependency = tmp_path / "other" / binary.name
+    executable.parent.mkdir()
+    same_name_dependency.parent.mkdir()
+    for path in (
+        binary,
+        executable,
+        loader_dependency,
+        executable_dependency,
+        rpath_dependency,
+        absolute_dependency,
+        same_name_dependency,
+    ):
+        path.write_bytes(path.name.encode("ascii"))
+    output = (
+        f"{binary} (architecture x86_64):\n"
+        f"\t{binary} (compatibility version 0.0.0, current version 0.0.0)\n"
+        "\t@loader_path/libloader.dylib (compatibility version 1.0.0)\n"
+        "\t@executable_path/libexecutable.dylib (compatibility version 1.0.0)\n"
+        "\t@rpath/librpath.dylib (compatibility version 1.0.0)\n"
+        f"\t{absolute_dependency} (compatibility version 1.0.0)\n"
+        f"\t{same_name_dependency} (compatibility version 1.0.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+        f"{binary} (architecture arm64):\n"
+        "\t@rpath/libmissing.dylib (compatibility version 1.0.0)\n"
+        "\tlibrelative-install-name.dylib (compatibility version 1.0.0)\n"
+    )
+
+    resolved, virtual = module._parse_darwin_dependencies(
+        output,
+        binary=binary,
+        executable=executable,
+    )
+
+    assert resolved == [
+        loader_dependency,
+        executable_dependency,
+        rpath_dependency,
+        absolute_dependency,
+        same_name_dependency,
+    ]
+    assert virtual == {
+        "/usr/lib/libSystem.B.dylib",
+        "@rpath/libmissing.dylib",
+        "librelative-install-name.dylib",
+    }
+
+
+def _redacted_source_identity_for(
+    relative_path: str,
+    contents: bytes,
+) -> dict[str, object]:
+    dependencies = {
+        sha256(path.encode("utf-8")).hexdigest(): {
+            "worktree_sha256": sha256(f"fixture:{path}".encode("utf-8")).hexdigest(),
+            "git_blob_id": "1" * 40,
+        }
+        for path in EXECUTION_DEPENDENCY_PATHS
+    }
+    dependencies[sha256(relative_path.encode("utf-8")).hexdigest()] = {
+        "worktree_sha256": sha256(contents).hexdigest(),
+        "git_blob_id": sha1(
+            b"blob "
+            + str(len(contents)).encode("ascii")
+            + b"\0"
+            + contents,
+            usedforsecurity=False,
+        ).hexdigest(),
+    }
+    return {
+        "source_sha": SOURCE_SHA,
+        "clean": True,
+        "dependencies": dependencies,
+    }
+
+
+def test_identity_bound_file_reads_captured_regular_file(tmp_path: Path) -> None:
+    relative = "config/qualification/gate_0b_approval_root.ed25519.pub"
+    contents = b"a" * 32
+    root = tmp_path / "repo"
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(contents)
+
+    loaded = read_identity_bound_file(
+        root,
+        relative_path=relative,
+        source_identity=_redacted_source_identity_for(relative, contents),
+        maximum_bytes=32,
+    )
+
+    assert loaded == contents
+
+
+def test_identity_bound_file_rejects_content_replaced_after_capture(
+    tmp_path: Path,
+) -> None:
+    relative = "config/qualification/gate_0b_approval_root.ed25519.pub"
+    captured = b"a" * 32
+    root = tmp_path / "repo"
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"b" * 32)
+
+    with pytest.raises(IdentityError, match="source identity mismatch"):
+        read_identity_bound_file(
+            root,
+            relative_path=relative,
+            source_identity=_redacted_source_identity_for(relative, captured),
+            maximum_bytes=32,
+        )
+
+
+def test_identity_bound_file_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    relative = "config/qualification/gate_0b_approval_root.ed25519.pub"
+    contents = b"a" * 32
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "gate_0b_approval_root.ed25519.pub").write_bytes(contents)
+    (root / "config" / "qualification").symlink_to(external)
+
+    with pytest.raises(IdentityError, match="unavailable"):
+        read_identity_bound_file(
+            root,
+            relative_path=relative,
+            source_identity=_redacted_source_identity_for(relative, contents),
+            maximum_bytes=32,
+        )
 
 
 def _git_repo(tmp_path: Path) -> Path:
@@ -324,8 +513,31 @@ def test_environment_identity_binds_exact_runtime_and_imports() -> None:
 
 def test_launcher_and_runtime_capture_the_same_complete_path_redacted_interpreter_identity(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executable, stdlib_paths, _files = _interpreter_fixture(tmp_path)
+    closure = _interpreter_report()["native_runtime_closure"]
+    allowed = {str(executable.resolve()): sha256(executable.read_bytes()).hexdigest()}
+    monkeypatch.setattr(
+        launcher_module,
+        "_capture_native_runtime_closure",
+        lambda *_args, **_kwargs: (closure, allowed),
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "_capture_native_runtime_closure",
+        lambda *_args, **_kwargs: (closure, allowed),
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_require_loaded_native_images_within_closure",
+        lambda _allowed: None,
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "_require_loaded_native_images_within_closure",
+        lambda _allowed: None,
+    )
 
     launcher = launcher_module._capture_interpreter_installation_identity(
         stdlib_paths=stdlib_paths,
@@ -337,7 +549,7 @@ def test_launcher_and_runtime_capture_the_same_complete_path_redacted_interprete
     )
 
     assert launcher == runtime
-    assert launcher["schema_id"] == "gate_0b_interpreter_installation_v1"
+    assert launcher["schema_id"] == "gate_0b_interpreter_installation_v2"
     assert launcher["stdlib_source_bytecode_count"] == 2
     assert launcher["stdlib_archive_count"] == 1
     assert launcher["native_extension_count"] == 1
@@ -349,8 +561,20 @@ def test_launcher_and_runtime_capture_the_same_complete_path_redacted_interprete
 def test_interpreter_installation_identity_detects_every_runtime_byte_drift(
     tmp_path: Path,
     component: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executable, stdlib_paths, files = _interpreter_fixture(tmp_path)
+    closure = _interpreter_report()["native_runtime_closure"]
+    monkeypatch.setattr(
+        launcher_module,
+        "_capture_native_runtime_closure",
+        lambda *_args, **_kwargs: (closure, {}),
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_require_loaded_native_images_within_closure",
+        lambda _allowed: None,
+    )
     before = launcher_module._capture_interpreter_installation_identity(
         stdlib_paths=stdlib_paths,
         python_executable=str(executable),
@@ -363,6 +587,90 @@ def test_interpreter_installation_identity_detects_every_runtime_byte_drift(
     )
 
     assert after["installation_sha256"] != before["installation_sha256"]
+
+
+def test_interpreter_installation_identity_detects_linked_core_runtime_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, stdlib_paths, _files = _interpreter_fixture(tmp_path)
+    core_runtime = tmp_path / "runtime" / "lib" / "Python"
+    core_runtime.write_bytes(b"core-runtime-v1")
+
+    def closure(*_args, **_kwargs):
+        records_sha256 = sha256(core_runtime.read_bytes()).hexdigest()
+        unsigned: dict[str, object] = {
+            "schema_id": "gate_0b_native_runtime_closure_v1",
+            "regular_file_count": 2,
+            "regular_files_sha256": records_sha256,
+            "virtual_dependency_count": 0,
+            "virtual_dependencies_sha256": sha256(b"[]").hexdigest(),
+            "system_loader_identity_sha256": "7" * 64,
+        }
+        return (
+            {
+                **unsigned,
+                "closure_sha256": sha256(canonical_json_bytes(unsigned)).hexdigest(),
+            },
+            {},
+        )
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_capture_native_runtime_closure",
+        closure,
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_require_loaded_native_images_within_closure",
+        lambda _allowed: None,
+    )
+    before = launcher_module._capture_interpreter_installation_identity(
+        stdlib_paths=stdlib_paths,
+        python_executable=str(executable),
+    )
+
+    core_runtime.write_bytes(b"core-runtime-v2")
+    after = launcher_module._capture_interpreter_installation_identity(
+        stdlib_paths=stdlib_paths,
+        python_executable=str(executable),
+    )
+
+    assert after["native_runtime_closure"] != before["native_runtime_closure"]
+    assert after["installation_sha256"] != before["installation_sha256"]
+
+
+def test_loaded_native_image_outside_closure_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = tmp_path / "approved.so"
+    injected = tmp_path / "injected.so"
+    approved.write_bytes(b"approved")
+    injected.write_bytes(b"injected")
+    monkeypatch.setattr(
+        identity_module,
+        "_loaded_native_image_paths",
+        lambda: (str(approved), str(injected)),
+    )
+
+    with pytest.raises(IdentityError, match="outside the approved closure"):
+        identity_module._require_loaded_native_images_within_closure(
+            {
+                str(approved.resolve()): sha256(approved.read_bytes()).hexdigest(),
+            }
+        )
+
+
+@pytest.mark.parametrize("variable", ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES"))
+def test_native_loader_environment_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    monkeypatch.setenv(variable, "/unapproved/native-hook")
+
+    with pytest.raises(IdentityError, match="native loader environment"):
+        identity_module._reject_native_loader_environment()
 
 
 def test_launcher_and_runtime_capture_the_same_complete_path_redacted_site_manifest(

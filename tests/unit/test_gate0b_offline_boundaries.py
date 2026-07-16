@@ -73,7 +73,7 @@ def _startup_probe(
     launcher: Path = TRUSTED_STARTUP,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(python), "-I", "-S", str(launcher), "probe"],
+        [str(python), "-B", "-I", "-S", str(launcher), "probe"],
         cwd=Path.cwd(),
         env=environment,
         check=False,
@@ -175,6 +175,7 @@ def _approved_target_command(
 ) -> list[str]:
     return [
         str(python),
+        "-B",
         "-I",
         "-S",
         str(repo / TRUSTED_STARTUP),
@@ -211,13 +212,17 @@ def test_trusted_startup_launcher_is_stdlib_only_and_target_allowlisted() -> Non
 
     assert imported_roots <= {
         "__future__",
+        "ctypes",
         "hashlib",
+        "importlib",
         "json",
         "os",
         "pathlib",
-        "runpy",
+        "platform",
+        "stat",
         "subprocess",
         "sys",
+        "types",
         "typing",
     }
     assert "site.addsitedir" not in source
@@ -231,6 +236,70 @@ def test_trusted_startup_launcher_is_stdlib_only_and_target_allowlisted() -> Non
         "run-qualification",
         "verify-environment",
     }
+
+
+def test_verified_target_executes_captured_bytes_after_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    target = repo / "scripts" / "target.py"
+    target.parent.mkdir(parents=True)
+    approved_sentinel = tmp_path / "approved"
+    replacement_sentinel = tmp_path / "replacement"
+    approved_source = (
+        "from pathlib import Path\n"
+        f"Path({str(approved_sentinel)!r}).write_text('approved', encoding='utf-8')\n"
+    ).encode("utf-8")
+    target.write_bytes(approved_source)
+    snapshot = {"scripts/target.py": approved_source}
+    target.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(replacement_sentinel)!r}).write_text('replacement', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "TARGETS",
+        {"test-target": "scripts/target.py"},
+    )
+
+    launcher_module._execute_snapshot_target(
+        str(repo),
+        target="test-target",
+        target_args=(),
+        snapshot=snapshot,
+    )
+
+    assert approved_sentinel.read_text(encoding="utf-8") == "approved"
+    assert replacement_sentinel.exists() is False
+
+
+def test_verified_target_bounds_unapproved_project_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    target = repo / "scripts" / "target.py"
+    target.parent.mkdir(parents=True)
+    source = b"import app.not_in_approved_snapshot\n"
+    target.write_bytes(source)
+    monkeypatch.setattr(
+        launcher_module,
+        "TARGETS",
+        {"test-target": "scripts/target.py"},
+    )
+
+    with pytest.raises(
+        launcher_module.BootstrapError,
+        match="outside the approved runtime",
+    ):
+        launcher_module._execute_snapshot_target(
+            str(repo),
+            target="test-target",
+            target_args=(),
+            snapshot={"scripts/target.py": source},
+        )
 
 
 def test_trusted_startup_preflight_binds_current_committed_component_bytes(
@@ -283,6 +352,7 @@ def test_executable_targets_require_external_source_and_site_approvals(
     completed = subprocess.run(
         [
             sys.executable,
+            "-B",
             "-I",
             "-S",
             str(qualification_repo / TRUSTED_STARTUP),
@@ -561,8 +631,8 @@ assert main(["--dry-run"]) == 0
 def test_trusted_startup_rejects_nonisolated_or_site_enabled_invocation() -> None:
     for command in (
         [sys.executable, str(TRUSTED_STARTUP), "probe"],
-        [sys.executable, "-I", str(TRUSTED_STARTUP), "probe"],
-        [sys.executable, "-S", str(TRUSTED_STARTUP), "probe"],
+        [sys.executable, "-B", "-I", str(TRUSTED_STARTUP), "probe"],
+        [sys.executable, "-B", "-S", str(TRUSTED_STARTUP), "probe"],
     ):
         completed = subprocess.run(
             command,
@@ -578,6 +648,29 @@ def test_trusted_startup_rejects_nonisolated_or_site_enabled_invocation() -> Non
             "error_code": "qualification_startup_not_isolated",
             "status": "blocked",
         }
+
+
+def test_trusted_startup_requires_bytecode_disabled_at_interpreter_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flags = {
+        name: getattr(sys.flags, name)
+        for name in launcher_module.STARTUP_FLAG_NAMES
+    }
+    flags.update(
+        dont_write_bytecode=0,
+        ignore_environment=1,
+        isolated=1,
+        no_site=1,
+        no_user_site=1,
+        safe_path=True,
+    )
+    monkeypatch.setattr(launcher_module.sys, "flags", SimpleNamespace(**flags))
+    for module_name in launcher_module.AUTOMATIC_STARTUP_MODULES:
+        monkeypatch.delitem(launcher_module.sys.modules, module_name, raising=False)
+
+    with pytest.raises(launcher_module.BootstrapError, match="python -B -I -S"):
+        launcher_module._require_isolated_no_site_startup()
 
 
 @pytest.mark.parametrize("target", (RUNNER, EVALUATOR, ENVIRONMENT_VERIFIER))
@@ -651,6 +744,7 @@ def test_trusted_startup_neutralizes_ambient_python_paths_and_customize_hooks(
     assert report["startup_flags"]["isolated"] == 1
     assert report["startup_flags"]["no_site"] == 1
     assert report["startup_flags"]["ignore_environment"] == 1
+    assert report["startup_flags"]["dont_write_bytecode"] == 1
     assert report["startup_flags"]["no_user_site"] == 1
     assert report["startup_flags"]["safe_path"] is True
     assert report["bytecode_write_disabled"] is True
@@ -873,12 +967,12 @@ def test_ci_uses_exact_locked_qualification_environment() -> None:
         "run: uv run --locked --no-sync --extra dev --python 3.12.13 "
         "python -m pytest --tb=short -q"
     ) in normalized
-    assert "scripts/launch_qualification.py probe" in normalized
+    assert "python -B -I -S scripts/launch_qualification.py probe" in normalized
     assert "QUALIFICATION_EXPECTED_SOURCE_SHA" in source
     assert "QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" in source
     assert normalized.count("--expected-source-sha") == 2
     assert normalized.count("--expected-runtime-site-packages-sha256") == 2
-    assert "verify-environment --expected-source-sha" in normalized
+    assert "python -B -I -S scripts/launch_qualification.py verify-environment" in normalized
     assert "--phase before" in normalized
     assert "--phase after" in normalized
     assert "python -m compileall -q app/services scripts" in normalized

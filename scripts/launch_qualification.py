@@ -3,21 +3,27 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from hashlib import sha256
+import importlib.abc
+import importlib.util
 import json
 import os
 from pathlib import Path
-import runpy
+import platform
+import stat
 import subprocess  # nosec B404
-from typing import Mapping, Sequence
+from types import ModuleType
+from typing import Any, Mapping, Sequence
 
 
 sys.dont_write_bytecode = True
 
 
-TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v3"
-INTERPRETER_INSTALLATION_SCHEMA_ID = "gate_0b_interpreter_installation_v1"
+TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v5"
+INTERPRETER_INSTALLATION_SCHEMA_ID = "gate_0b_interpreter_installation_v2"
+NATIVE_RUNTIME_CLOSURE_SCHEMA_ID = "gate_0b_native_runtime_closure_v1"
 RUNTIME_SITE_PACKAGES_SCHEMA_ID = "gate_0b_runtime_site_packages_v1"
 STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
 STARTUP_FLAG_NAMES = (
@@ -44,6 +50,7 @@ AMBIENT_PYTHON_PATH_ENV = ("PYTHONHOME", "PYTHONPATH")
 AUTOMATIC_STARTUP_MODULES = ("site", "sitecustomize", "usercustomize")
 SELF_ASSERTED_RUNTIME_ENV = "QUALIFICATION_CONTAINER_IMAGE_DIGEST"
 MAX_STARTUP_ARTIFACT_BYTES = 1024 * 1024
+MAX_EXECUTABLE_SOURCE_BYTES = 2 * 1024 * 1024
 GIT_BINARY = "/usr/bin/git"
 EXECUTION_DEPENDENCY_PATHS = (
     "config/qualification/gate_0b_approval_root.ed25519.pub",
@@ -77,6 +84,9 @@ EXECUTABLE_MODULE_ROOTS = ("app", "cryptography", "scripts", "websockets")
 STDLIB_BYTECODE_SUFFIXES = (".pyc", ".pyo")
 STDLIB_SOURCE_BYTECODE_SUFFIXES = (".py", *STDLIB_BYTECODE_SUFFIXES)
 NATIVE_EXTENSION_SUFFIXES = (".dll", ".dylib", ".pyd", ".so")
+NATIVE_LOADER_ENV_PREFIXES = ("DYLD_", "LD_")
+DARWIN_LINK_TOOL = "/usr/bin/otool"
+LINUX_LINK_TOOL = "/usr/bin/ldd"
 TARGETS = {
     "evaluate-qualification": "scripts/evaluate_gemini_caller_turn_qualification.py",
     "run-qualification": "scripts/run_gemini_caller_turn_qualification.py",
@@ -86,6 +96,75 @@ TARGETS = {
 
 class BootstrapError(RuntimeError):
     """Raised before any project or third-party import can be trusted."""
+
+
+class _SnapshotLoader(importlib.abc.Loader):
+    def __init__(
+        self,
+        *,
+        source: bytes,
+        origin: str,
+        is_package: bool,
+    ) -> None:
+        self._source = source
+        self._origin = origin
+        self._is_package = is_package
+
+    def create_module(self, _spec: object) -> ModuleType | None:
+        return None
+
+    def exec_module(self, module: ModuleType) -> None:
+        code = compile(
+            self._source,
+            self._origin,
+            "exec",
+            dont_inherit=True,
+        )
+        exec(code, module.__dict__)
+
+
+class _SnapshotFinder(importlib.abc.MetaPathFinder):
+    def __init__(
+        self,
+        repo_root: str,
+        snapshot: Mapping[str, bytes],
+    ) -> None:
+        self._modules: dict[str, tuple[bytes, str, bool]] = {}
+        for relative, source in snapshot.items():
+            module_name, is_package = _module_name_for_source(relative)
+            self._modules[module_name] = (
+                source,
+                str(Path(repo_root, relative)),
+                is_package,
+            )
+        self._modules.setdefault(
+            "scripts",
+            (b"", str(Path(repo_root, "scripts", "__init__.py")), True),
+        )
+
+    def find_spec(
+        self,
+        fullname: str,
+        _path: object = None,
+        _target: object = None,
+    ) -> object:
+        entry = self._modules.get(fullname)
+        if entry is not None:
+            source, origin, is_package = entry
+            loader = _SnapshotLoader(
+                source=source,
+                origin=origin,
+                is_package=is_package,
+            )
+            return importlib.util.spec_from_loader(
+                fullname,
+                loader,
+                origin=origin,
+                is_package=is_package,
+            )
+        if fullname.split(".", 1)[0] in {"app", "scripts"}:
+            raise ImportError("project import is outside the approved source snapshot")
+        return None
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -118,12 +197,13 @@ def _require_isolated_no_site_startup() -> None:
     flags = _startup_flags()
     if (
         flags["isolated"] != 1
+        or flags["dont_write_bytecode"] != 1
         or flags["no_site"] != 1
         or flags["ignore_environment"] != 1
         or flags["no_user_site"] != 1
         or flags["safe_path"] is not True
     ):
-        raise BootstrapError("qualification startup requires python -I -S")
+        raise BootstrapError("qualification startup requires python -B -I -S")
     if any(name in sys.modules for name in AUTOMATIC_STARTUP_MODULES):
         raise BootstrapError("automatic startup modules are already loaded")
 
@@ -229,6 +309,138 @@ def _capture_source_preflight(
         "clean": True,
         "dependencies": dependencies,
     }
+
+
+def _capture_execution_source_snapshot(
+    repo_root: str,
+    source_preflight: Mapping[str, object],
+) -> dict[str, bytes]:
+    dependencies = source_preflight.get("dependencies")
+    if not isinstance(dependencies, Mapping):
+        raise BootstrapError("qualification source snapshot identity is invalid")
+    snapshot: dict[str, bytes] = {}
+    for relative in EXECUTION_DEPENDENCY_PATHS:
+        if not relative.endswith(".py"):
+            continue
+        identity = dependencies.get(relative)
+        if not isinstance(identity, Mapping):
+            raise BootstrapError("qualification source snapshot identity is invalid")
+        expected_sha256 = identity.get("worktree_sha256")
+        if not isinstance(expected_sha256, str):
+            raise BootstrapError("qualification source snapshot identity is invalid")
+        source = _read_executable_source(Path(repo_root, relative))
+        if sha256(source).hexdigest() != expected_sha256:
+            raise BootstrapError("qualification source changed before snapshot")
+        snapshot[relative] = source
+    expected_sources = {
+        relative for relative in EXECUTION_DEPENDENCY_PATHS if relative.endswith(".py")
+    }
+    if set(snapshot) != expected_sources:
+        raise BootstrapError("qualification source snapshot is incomplete")
+    return snapshot
+
+
+def _read_executable_source(path: Path) -> bytes:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            metadata_before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata_before.st_mode)
+                or metadata_before.st_nlink != 1
+                or metadata_before.st_size > MAX_EXECUTABLE_SOURCE_BYTES
+            ):
+                raise BootstrapError("qualification source snapshot is unavailable")
+            chunks: list[bytes] = []
+            remaining = MAX_EXECUTABLE_SOURCE_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            source = b"".join(chunks)
+            metadata_after = os.fstat(descriptor)
+            if (
+                len(source) > MAX_EXECUTABLE_SOURCE_BYTES
+                or _stable_file_metadata(metadata_before)
+                != _stable_file_metadata(metadata_after)
+            ):
+                raise BootstrapError("qualification source snapshot is unavailable")
+            return source
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise BootstrapError("qualification source snapshot is unavailable") from exc
+
+
+def _stable_file_metadata(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _module_name_for_source(relative: str) -> tuple[str, bool]:
+    path = Path(relative)
+    if path.suffix != ".py" or path.is_absolute():
+        raise BootstrapError("qualification source module path is invalid")
+    if path.name == "__init__.py":
+        parts = path.parent.parts
+        is_package = True
+    else:
+        parts = (*path.parent.parts, path.stem)
+        is_package = False
+    if not parts or parts[0] not in {"app", "scripts"}:
+        raise BootstrapError("qualification source module path is invalid")
+    return ".".join(parts), is_package
+
+
+def _execute_snapshot_target(
+    repo_root: str,
+    *,
+    target: str,
+    target_args: Sequence[str],
+    snapshot: Mapping[str, bytes],
+) -> None:
+    relative = TARGETS.get(target)
+    if relative is None or relative not in snapshot:
+        raise BootstrapError("qualification target snapshot is unavailable")
+    target_path = str(Path(repo_root, relative))
+    finder = _SnapshotFinder(repo_root, snapshot)
+    sys.meta_path.insert(0, finder)
+    previous_argv = sys.argv
+    try:
+        sys.argv = [target_path, *target_args]
+        globals_dict: dict[str, Any] = {
+            "__builtins__": __builtins__,
+            "__cached__": None,
+            "__file__": target_path,
+            "__loader__": None,
+            "__name__": "__main__",
+            "__package__": None,
+            "__spec__": None,
+        }
+        code = compile(snapshot[relative], target_path, "exec", dont_inherit=True)
+        try:
+            exec(code, globals_dict)
+        except ImportError as exc:
+            raise BootstrapError(
+                "qualification target import is outside the approved runtime"
+            ) from exc
+    finally:
+        sys.argv = previous_argv
+        if sys.meta_path[:1] != [finder]:
+            raise BootstrapError("qualification source importer order changed")
+        del sys.meta_path[0]
 
 
 def _bytecode_source(path: Path) -> Path:
@@ -379,6 +591,27 @@ def _capture_interpreter_installation_identity(
 
     if not source_bytecode or not native_extensions:
         raise BootstrapError("interpreter installation identity is incomplete")
+    runtime_site = Path(_runtime_site_packages())
+    site_native_extensions = tuple(
+        candidate
+        for candidate in sorted(runtime_site.rglob("*"))
+        if candidate.is_file()
+        and not candidate.is_symlink()
+        and candidate.suffix.lower() in NATIVE_EXTENSION_SUFFIXES
+    )
+    native_runtime_closure, allowed_native_images = _capture_native_runtime_closure(
+        executable,
+        roots=(
+            *(
+                Path(_canonical_path(path))
+                for path in seen_files
+                if Path(path).suffix.lower() in NATIVE_EXTENSION_SUFFIXES
+            ),
+            *site_native_extensions,
+            *_python_process_image_roots(),
+        ),
+    )
+    _require_loaded_native_images_within_closure(allowed_native_images)
     identity: dict[str, object] = {
         "schema_id": INTERPRETER_INSTALLATION_SCHEMA_ID,
         "python_executable_sha256": sha256(executable.read_bytes()).hexdigest(),
@@ -388,11 +621,256 @@ def _capture_interpreter_installation_identity(
         "stdlib_archive_count": len(archives),
         "native_extension_sha256": _manifest_sha256(native_extensions),
         "native_extension_count": len(native_extensions),
+        "native_runtime_closure": native_runtime_closure,
     }
     identity["installation_sha256"] = sha256(
         _canonical_json_bytes(identity)
     ).hexdigest()
     return identity
+
+
+def _capture_native_runtime_closure(
+    executable: Path,
+    *,
+    roots: Sequence[Path],
+) -> tuple[dict[str, object], dict[str, str]]:
+    queue = [
+        Path(_canonical_path(executable)),
+        *(Path(_canonical_path(path)) for path in roots),
+    ]
+    allowed: dict[str, str] = {}
+    virtual_dependencies: set[str] = set()
+    while queue:
+        candidate = queue.pop()
+        canonical = _canonical_path(candidate)
+        if canonical in allowed:
+            continue
+        path = Path(canonical)
+        if path.is_symlink() or not path.is_file():
+            raise BootstrapError("native runtime dependency is unavailable")
+        digest = sha256(path.read_bytes()).hexdigest()
+        allowed[canonical] = digest
+        linked_paths, virtual = _linked_native_dependencies(
+            path,
+            executable=Path(_canonical_path(executable)),
+        )
+        queue.extend(linked_paths)
+        virtual_dependencies.update(virtual)
+
+    records = [
+        {
+            "location_sha256": sha256(path.encode("utf-8")).hexdigest(),
+            "sha256": digest,
+        }
+        for path, digest in sorted(allowed.items())
+    ]
+    virtual_records = sorted(
+        sha256(value.encode("utf-8")).hexdigest()
+        for value in virtual_dependencies
+    )
+    identity: dict[str, object] = {
+        "schema_id": NATIVE_RUNTIME_CLOSURE_SCHEMA_ID,
+        "regular_file_count": len(records),
+        "regular_files_sha256": sha256(_canonical_json_bytes(records)).hexdigest(),
+        "virtual_dependency_count": len(virtual_records),
+        "virtual_dependencies_sha256": sha256(
+            _canonical_json_bytes(virtual_records)
+        ).hexdigest(),
+        "system_loader_identity_sha256": _system_loader_identity_sha256(
+            virtual_dependencies
+        ),
+    }
+    identity["closure_sha256"] = sha256(_canonical_json_bytes(identity)).hexdigest()
+    return identity, allowed
+
+
+def _linked_native_dependencies(
+    path: Path,
+    *,
+    executable: Path,
+) -> tuple[list[Path], set[str]]:
+    system = platform.system()
+    if system == "Darwin":
+        command = [DARWIN_LINK_TOOL, "-L", str(path)]
+    elif system == "Linux":
+        command = [LINUX_LINK_TOOL, str(path)]
+    else:
+        raise BootstrapError("native runtime platform is unsupported")
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )  # nosec B603
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise BootstrapError("native runtime dependency inspection failed") from exc
+    if system == "Darwin":
+        return _parse_darwin_dependencies(
+            completed.stdout,
+            binary=path,
+            executable=executable,
+        )
+    return _parse_linux_dependencies(completed.stdout)
+
+
+def _parse_darwin_dependencies(
+    output: str,
+    *,
+    binary: Path,
+    executable: Path,
+) -> tuple[list[Path], set[str]]:
+    resolved: list[Path] = []
+    virtual: set[str] = set()
+    first_load_for_architecture = True
+    for raw_line in output.splitlines()[1:]:
+        if not raw_line.startswith("\t"):
+            first_load_for_architecture = True
+            continue
+        line = raw_line.strip()
+        if not line:
+            continue
+        load_name = line.split(" (", 1)[0]
+        if first_load_for_architecture and Path(load_name).name == binary.name:
+            first_load_for_architecture = False
+            continue
+        first_load_for_architecture = False
+        if load_name.startswith("@loader_path/"):
+            candidate = binary.parent / load_name.removeprefix("@loader_path/")
+        elif load_name.startswith("@executable_path/"):
+            candidate = executable.parent / load_name.removeprefix("@executable_path/")
+        elif load_name.startswith("@rpath/"):
+            local = binary.parent / load_name.removeprefix("@rpath/")
+            if local.is_file():
+                candidate = local
+            else:
+                virtual.add(load_name)
+                continue
+        elif load_name.startswith("/"):
+            candidate = Path(load_name)
+        else:
+            virtual.add(load_name)
+            continue
+        if candidate.is_file():
+            if _canonical_path(candidate) == _canonical_path(binary):
+                continue
+            resolved.append(candidate)
+        elif load_name.startswith(("/usr/lib/", "/System/Library/")):
+            virtual.add(load_name)
+        else:
+            raise BootstrapError("native runtime dependency is unavailable")
+    return resolved, virtual
+
+
+def _parse_linux_dependencies(output: str) -> tuple[list[Path], set[str]]:
+    resolved: list[Path] = []
+    virtual: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=>" in line:
+            load_name, remainder = line.split("=>", 1)
+            fields = remainder.split()
+            if fields[:2] == ["not", "found"] or not fields:
+                raise BootstrapError("native runtime dependency is unavailable")
+            target = fields[0]
+        else:
+            load_name = line.split(maxsplit=1)[0]
+            target = load_name
+        if target.startswith("/"):
+            candidate = Path(target)
+            if not candidate.is_file():
+                raise BootstrapError("native runtime dependency is unavailable")
+            resolved.append(candidate)
+        else:
+            virtual.add(load_name.strip())
+    return resolved, virtual
+
+
+def _system_loader_identity_sha256(virtual_dependencies: set[str]) -> str:
+    if platform.system() == "Darwin":
+        buffer = (ctypes.c_ubyte * 16)()
+        library = ctypes.CDLL(None)
+        function = library._dyld_get_shared_cache_uuid
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = ctypes.c_bool
+        if not function(buffer):
+            raise BootstrapError("dyld shared cache identity is unavailable")
+        system_identity: dict[str, object] = {
+            "platform": "darwin",
+            "shared_cache_uuid": bytes(buffer).hex(),
+        }
+    else:
+        system_identity = {
+            "platform": platform.system().lower(),
+            "release": platform.release(),
+            "architecture": platform.machine().lower(),
+        }
+    system_identity["virtual_dependencies"] = sorted(virtual_dependencies)
+    return sha256(_canonical_json_bytes(system_identity)).hexdigest()
+
+
+def _loaded_native_image_paths() -> tuple[str, ...]:
+    if platform.system() == "Darwin":
+        library = ctypes.CDLL(None)
+        count = library._dyld_image_count
+        count.argtypes = []
+        count.restype = ctypes.c_uint32
+        name = library._dyld_get_image_name
+        name.argtypes = [ctypes.c_uint32]
+        name.restype = ctypes.c_char_p
+        return tuple(
+            decoded
+            for index in range(count())
+            if (raw := name(index)) is not None
+            if (decoded := raw.decode("utf-8", errors="strict"))
+        )
+    if platform.system() == "Linux":
+        try:
+            lines = Path("/proc/self/maps").read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise BootstrapError("loaded native image map is unavailable") from exc
+        paths: set[str] = set()
+        for line in lines:
+            fields = line.split(maxsplit=5)
+            if len(fields) == 6 and "x" in fields[1] and fields[5].startswith("/"):
+                paths.add(fields[5])
+        return tuple(sorted(paths))
+    raise BootstrapError("loaded native image platform is unsupported")
+
+
+def _python_process_image_roots() -> tuple[Path, ...]:
+    if platform.system() != "Darwin":
+        return ()
+    candidate = (
+        Path(sys.base_prefix)
+        / "Resources"
+        / "Python.app"
+        / "Contents"
+        / "MacOS"
+        / "Python"
+    )
+    return (candidate,) if candidate.is_file() else ()
+
+
+def _require_loaded_native_images_within_closure(
+    allowed_native_images: Mapping[str, str],
+) -> None:
+    for raw_path in _loaded_native_image_paths():
+        if platform.system() == "Darwin" and raw_path.startswith(
+            ("/usr/lib/", "/System/Library/")
+        ):
+            continue
+        path = Path(raw_path.removesuffix(" (deleted)"))
+        if path.is_file():
+            canonical = _canonical_path(path)
+            expected = allowed_native_images.get(canonical)
+            if expected is None or sha256(Path(canonical).read_bytes()).hexdigest() != expected:
+                raise BootstrapError("loaded native image is outside the approved closure")
+        else:
+            raise BootstrapError("loaded native image is unavailable")
 
 
 def _stdlib_paths() -> list[str]:
@@ -491,6 +969,7 @@ def _build_marker(
         raise BootstrapError("trusted startup marker already exists")
     if SELF_ASSERTED_RUNTIME_ENV in os.environ:
         raise BootstrapError("self-asserted runtime image identity is forbidden")
+    _reject_native_loader_environment()
     neutralized_environment = list(AMBIENT_PYTHON_PATH_ENV)
     for name in AMBIENT_PYTHON_PATH_ENV:
         os.environ.pop(name, None)
@@ -551,6 +1030,14 @@ def _build_marker(
         "interpreter_installation": interpreter_installation,
         "runtime_site_packages_manifest": runtime_site_packages_manifest,
     }
+
+
+def _reject_native_loader_environment() -> None:
+    if any(
+        name.startswith(NATIVE_LOADER_ENV_PREFIXES)
+        for name in os.environ
+    ):
+        raise BootstrapError("native loader environment is forbidden")
 
 
 def _redact_path_map(values: Mapping[str, str]) -> dict[str, str]:
@@ -697,13 +1184,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_source_sha=expected_source_sha,
             expected_runtime_site_packages_sha256=expected_site_sha256,
         )
+        source_snapshot = _capture_execution_source_snapshot(
+            repo_root,
+            marker["source_preflight"],
+        )
         os.environ[STARTUP_MARKER_ENV] = _canonical_json_bytes(marker).decode("ascii")
         if target == "probe":
             print(_canonical_json_bytes(_redacted_marker(marker)).decode("ascii"))
             return 0
-        target_path = _target_path(repo_root, target)
-        sys.argv = [str(target_path), *target_args]
-        runpy.run_path(str(target_path), run_name="__main__")
+        _target_path(repo_root, target)
+        _execute_snapshot_target(
+            repo_root,
+            target=target,
+            target_args=target_args,
+            snapshot=source_snapshot,
+        )
     except BootstrapError:
         _blocked("qualification_startup_invalid")
         return 2

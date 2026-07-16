@@ -87,8 +87,22 @@ PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
 APPROVAL_ROOT_RELATIVE_PATH = "config/qualification/gate_0b_approval_root.ed25519.pub"
 APPROVAL_ROOT_PATH_SHA256 = sha256(APPROVAL_ROOT_RELATIVE_PATH.encode("utf-8")).hexdigest()
+_NATIVE_RUNTIME_CLOSURE_UNSIGNED = {
+    "schema_id": "gate_0b_native_runtime_closure_v1",
+    "regular_file_count": 2,
+    "regular_files_sha256": "9" * 64,
+    "virtual_dependency_count": 1,
+    "virtual_dependencies_sha256": "a" * 64,
+    "system_loader_identity_sha256": "b" * 64,
+}
+NATIVE_RUNTIME_CLOSURE = {
+    **_NATIVE_RUNTIME_CLOSURE_UNSIGNED,
+    "closure_sha256": sha256(
+        canonical_json_bytes(_NATIVE_RUNTIME_CLOSURE_UNSIGNED)
+    ).hexdigest(),
+}
 _INTERPRETER_INSTALLATION_UNSIGNED = {
-    "schema_id": "gate_0b_interpreter_installation_v1",
+    "schema_id": "gate_0b_interpreter_installation_v2",
     "python_executable_sha256": "3" * 64,
     "stdlib_source_bytecode_sha256": "4" * 64,
     "stdlib_source_bytecode_count": 1,
@@ -96,6 +110,7 @@ _INTERPRETER_INSTALLATION_UNSIGNED = {
     "stdlib_archive_count": 0,
     "native_extension_sha256": "6" * 64,
     "native_extension_count": 1,
+    "native_runtime_closure": NATIVE_RUNTIME_CLOSURE,
 }
 INTERPRETER_INSTALLATION = {
     **_INTERPRETER_INSTALLATION_UNSIGNED,
@@ -143,7 +158,7 @@ TRUSTED_STARTUP_REPORT = {
         "bytes_warning": 0,
         "debug": 0,
         "dev_mode": False,
-        "dont_write_bytecode": 0,
+        "dont_write_bytecode": 1,
         "hash_randomization": 1,
         "ignore_environment": 1,
         "inspect": 0,
@@ -903,9 +918,9 @@ def _restart_plan() -> SessionPlan:
         reference=ActivityReference(2, "en", "book service today 2"),
         expected_lifecycle_status="retrospective_complete",
         expected_epoch=2,
-        start_at_ms=150,
-        speech_end_at_ms=230,
-        end_at_ms=250,
+        start_at_ms=700,
+        speech_end_at_ms=780,
+        end_at_ms=800,
     )
     return SessionPlan(
         session_ordinal=1,
@@ -916,9 +931,9 @@ def _restart_plan() -> SessionPlan:
             Gate0BReplayInput("audio", 20, 1, 1, audio=b"\x00\x00" * 319, duration_ms=20),
             Gate0BReplayInput("caller_activity_end", 100, 1, 1),
             Gate0BReplayInput("fresh_connection_restart", 100, 2, 1),
-            Gate0BReplayInput("caller_activity_start", 150, 2, 2),
-            Gate0BReplayInput("audio", 170, 2, 2, audio=b"\x00\x00" * 319, duration_ms=20),
-            Gate0BReplayInput("caller_activity_end", 250, 2, 2),
+            Gate0BReplayInput("caller_activity_start", 700, 2, 2),
+            Gate0BReplayInput("audio", 720, 2, 2, audio=b"\x00\x00" * 319, duration_ms=20),
+            Gate0BReplayInput("caller_activity_end", 800, 2, 2),
         ),
     )
 
@@ -1890,23 +1905,32 @@ def test_synchronous_tool_response_precedes_the_next_caller_activity() -> None:
 
 
 def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() -> None:
-    session = FakeSession(
+    first = {
+        "serverContent": {
+            "inputTranscription": {"text": "book service today 1"},
+        },
+        "toolCall": {
+            "functionCalls": [
+                {"id": "tool_1", "name": "synthetic_lookup", "args": {}}
+            ]
+        },
+    }
+    second = {
+        "serverContent": {
+            "inputTranscription": {"text": "book service today 2"},
+            "interrupted": True,
+        },
+        "toolCallCancellation": {"ids": ["tool_1"]},
+    }
+    session = CausallySequencedFakeSession(
         [
             {"setupComplete": {}},
-            {
-                "toolCall": {
-                    "functionCalls": [
-                        {"id": "tool_1", "name": "synthetic_lookup", "args": {}}
-                    ]
-                }
-            },
-            {
-                "serverContent": {"interrupted": True},
-                "toolCallCancellation": {"ids": ["tool_1"]},
-            },
+            first,
+            second,
             _usage_message(),
             None,
-        ]
+        ],
+        response_audio_counts=(1, 2),
     )
 
     result = asyncio.run(
@@ -1922,7 +1946,9 @@ def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() ->
 
     assert result.complete is True
     assert [event.kind for event in result.audit_events] == [
+        CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
         CallerTurnEventKind.TOOL_CALL_STARTED,
+        CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
         CallerTurnEventKind.INTERRUPTED,
         CallerTurnEventKind.TOOL_CALL_CANCELLED,
     ]
@@ -1933,6 +1959,36 @@ def test_combined_tool_cancellation_and_interruption_satisfies_both_markers() ->
         if isinstance(value.get("realtimeInput"), dict) and "audio" in value["realtimeInput"]
     ]
     assert len(audio_inputs) == 2
+
+    capsule = runner_module._build_audit_capsule(
+        campaign_id="campaign_001",
+        policy_ms=100,
+        source_fact_bundle_sha256="5" * 64,
+        execution_started_at=NOW,
+        execution_completed_at=NOW + timedelta(seconds=1),
+        provider_revision=None,
+        runtime_identity_before_sha256=TEST_EXECUTION_IDENTITY_SHA256,
+        runtime_identity_after_sha256=TEST_EXECUTION_IDENTITY_SHA256,
+        runtime_identity_before=TEST_EXECUTION_IDENTITY_REPORT,
+        runtime_identity_after=TEST_EXECUTION_IDENTITY_REPORT,
+        session_results=((_cancellation_interaction_plan(), result),),
+        no_speech_results=(),
+    )
+    records, no_speech_records = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(100,),
+        commitment_key=b"c" * 32,
+    )
+
+    assert no_speech_records == ()
+    assert [record.observed_lifecycle_status for record in records] == [
+        "retrospective_complete",
+        "retrospective_complete",
+    ]
+    assert all(record.assembled_turn_count == 1 for record in records)
+    assert all(record.contamination_count == 0 for record in records)
+    assert all(record.duplicate_count == 0 for record in records)
+    assert all(record.stale_count == 0 for record in records)
 
 
 @pytest.mark.parametrize(
@@ -2149,7 +2205,7 @@ def test_fresh_restart_uses_new_connection_and_epoch_without_context_restoration
             config=_config(),
             connector=connector,
             credential=SecretCredential(CANARY_SECRET),
-            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 150, 300, 310]),
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 700, 820, 830]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
@@ -2202,9 +2258,42 @@ def test_fresh_restart_uses_new_connection_and_epoch_without_context_restoration
     assert all(record.assembled_turn_count == 1 for record in records)
     assert all(record.stale_count == 0 for record in records)
     assert [record.observed_lifecycle_status for record in records] == [
-        "partial",
+        "retrospective_complete",
         "retrospective_complete",
     ]
+
+
+def test_fresh_restart_drains_each_persistent_connection_segment() -> None:
+    first = HangingAfterMessagesSession(
+        [{"setupComplete": {}}, _server_event(text="first epoch"), _usage_message()]
+    )
+    second = HangingAfterMessagesSession(
+        [{"setupComplete": {}}, _server_event(text="second epoch"), _usage_message()]
+    )
+    connector = FakeConnector([first, second])
+
+    result = asyncio.run(
+        execute_injected_session(
+            _restart_plan(),
+            config=replace(
+                _config(),
+                session_timeout_seconds=2,
+            ),
+            connector=connector,
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=_measurement_clock_factory(
+                [0, 120, 130, 700, 820, 830]
+            ),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is True
+    assert result.provider_request_count == 2
+    assert result.epoch_count == 2
+    assert [request.epoch for request in connector.requests] == [1, 2]
+    assert first.closed is True
+    assert second.closed is True
 
 
 def test_generation_complete_does_not_close_the_response_before_turn_complete() -> None:
@@ -2545,16 +2634,17 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert result.provider_request_count == 64
     assert result.cost_microusd == 4_992
     assert stat.S_IMODE(capsule_path.stat().st_mode) == 0o600
-    assert order[:6] == [
+    assert order[:7] == [
         "source",
         "asset",
         "export_snapshot",
         "claim",
         "export_snapshot",
+        "source",
         "credential:qualification_secret_v1",
     ]
-    assert order[6:-2] == ["connector"] * 64 + ["source"]
-    assert order[-2:] == ["development_checkpoint", "export_snapshot"]
+    assert order[7:-3] == ["source", "connector"] * 64
+    assert order[-3:] == ["source", "development_checkpoint", "export_snapshot"]
     envelope = json.loads(capsule_path.read_bytes())
     opened = open_audit_capsule(
         envelope,
@@ -2598,6 +2688,134 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         checkpoint["development_capsule_sha256"]
         == sha256(capsule_path.read_bytes().rstrip(b"\n")).hexdigest()
     )
+
+
+def test_identity_drift_blocks_reconnect_before_budget_or_connector_factory() -> None:
+    session = FakeSession([])
+    underlying = FakeConnector([session, session])
+    budget = runner_module._RequestBudget(limit=2)
+    guard_calls = 0
+    factory_calls = 0
+
+    def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            raise runner_module.ExecutionIdentityDriftError(
+                "execution environment identity drifted"
+            )
+
+    def factory(_credential: SecretCredential):
+        nonlocal factory_calls
+        factory_calls += 1
+        return underlying
+
+    connector = runner_module._ReservedConnector(
+        budget=budget,
+        credential=SecretCredential(CANARY_SECRET),
+        factory=factory,
+        identity_guard=guard,
+    )
+    request = runner_module.InjectedConnectionRequest(
+        endpoint=OFFICIAL_ENDPOINT,
+        project="kevin-qualification-test",
+        credential=SecretCredential(CANARY_SECRET),
+        policy=ConnectionPolicy(),
+        epoch=1,
+    )
+
+    assert asyncio.run(connector.connect(request)) is session
+    with pytest.raises(
+        runner_module.ExecutionIdentityDriftError,
+        match="identity drifted",
+    ):
+        asyncio.run(connector.connect(replace(request, epoch=2)))
+
+    assert guard_calls == 2
+    assert budget.consumed == 1
+    assert factory_calls == 1
+    assert len(underlying.requests) == 1
+
+
+def test_postclaim_identity_drift_blocks_before_secret_or_connector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(public, ledger_path, custodian_public)
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    plans, no_speech_plans = _development_schedule()
+    ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
+    touched: list[str] = []
+    monkeypatch.setattr(
+        runner_module,
+        "_load_pinned_approval_public_key",
+        lambda _identity: public,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_require_unchanged_execution_identity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runner_module.ExecutionIdentityDriftError(
+                "execution environment identity drifted"
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        execute_authorized_attempt(
+            _asset_release(
+                plans,
+                no_speech_plans,
+                preregistration,
+                campaign,
+                attempt,
+                split="development",
+            ),
+            preregistration=preregistration,
+            config=AuthorizedAttemptConfig(
+                preregistration_sha256=preregistration["preregistration_sha256"],
+                source_sha=SOURCE_SHA,
+                approval_key_id=KEY_ID,
+                credential_reference="qualification_secret_v1",
+                policy_ms=250,
+                whole_run_timeout_seconds=30,
+            ),
+            session_config=_config(),
+            campaign_envelope=campaign,
+            attempt_envelope=attempt,
+            ledger=ledger,
+            ledger_custodian_public_key=LEDGER_PUBLIC_KEY,
+            now=NOW,
+            credential_loader=lambda _reference: touched.append("credential"),
+            connector_factory=lambda _credential: touched.append("connector"),
+            measurement_clock_factory=lambda _plan: ReceiptClock([]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+            pricing=load_pricing(PRICING_PATH),
+            custodian_public_key=custodian_public,
+            custodian_key_id="audit_custodian_1",
+            capsule_path=_capsule_path(ledger_path),
+            capsule_sink=PrivateFileCapsuleSink(),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "source_identity_failed"
+    assert result.provider_request_count == 0
+    assert touched == []
+    assert [name for name, _ in ledger.calls] == [
+        "export_snapshot",
+        "claim",
+        "export_snapshot",
+        "terminal_outcome",
+        "export_snapshot",
+    ]
 
 
 @pytest.mark.parametrize(

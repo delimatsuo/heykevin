@@ -49,8 +49,22 @@ from app.services.qualification_identity import (
 
 
 CAMPAIGN_KEY = b"c" * 32
+_NATIVE_RUNTIME_CLOSURE_UNSIGNED = {
+    "schema_id": "gate_0b_native_runtime_closure_v1",
+    "regular_file_count": 2,
+    "regular_files_sha256": "9" * 64,
+    "virtual_dependency_count": 1,
+    "virtual_dependencies_sha256": "a" * 64,
+    "system_loader_identity_sha256": "b" * 64,
+}
+NATIVE_RUNTIME_CLOSURE = {
+    **_NATIVE_RUNTIME_CLOSURE_UNSIGNED,
+    "closure_sha256": sha256(
+        canonical_json_bytes(_NATIVE_RUNTIME_CLOSURE_UNSIGNED)
+    ).hexdigest(),
+}
 _INTERPRETER_INSTALLATION_UNSIGNED = {
-    "schema_id": "gate_0b_interpreter_installation_v1",
+    "schema_id": "gate_0b_interpreter_installation_v2",
     "python_executable_sha256": "3" * 64,
     "stdlib_source_bytecode_sha256": "4" * 64,
     "stdlib_source_bytecode_count": 1,
@@ -58,6 +72,7 @@ _INTERPRETER_INSTALLATION_UNSIGNED = {
     "stdlib_archive_count": 0,
     "native_extension_sha256": "6" * 64,
     "native_extension_count": 1,
+    "native_runtime_closure": NATIVE_RUNTIME_CLOSURE,
 }
 INTERPRETER_INSTALLATION = {
     **_INTERPRETER_INSTALLATION_UNSIGNED,
@@ -97,7 +112,7 @@ TRUSTED_STARTUP_REPORT = {
         "bytes_warning": 0,
         "debug": 0,
         "dev_mode": False,
-        "dont_write_bytecode": 0,
+        "dont_write_bytecode": 1,
         "hash_randomization": 1,
         "ignore_environment": 1,
         "inspect": 0,

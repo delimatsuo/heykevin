@@ -7,6 +7,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 import stat
+from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -75,6 +76,17 @@ ROOT_KEY_ID = "evidence_custodian_1"
 RUNNER_SOURCE_PATH = "scripts/run_gemini_caller_turn_qualification.py"
 EVALUATOR_SOURCE_PATH = "scripts/evaluate_gemini_caller_turn_qualification.py"
 SOURCE_SHA = "b" * 40
+NATIVE_RUNTIME_CLOSURE = {
+    "schema_id": "gate_0b_native_runtime_closure_v1",
+    "regular_file_count": 2,
+    "regular_files_sha256": "9" * 64,
+    "virtual_dependency_count": 1,
+    "virtual_dependencies_sha256": "a" * 64,
+    "system_loader_identity_sha256": "b" * 64,
+}
+NATIVE_RUNTIME_CLOSURE["closure_sha256"] = sha256(
+    canonical_json_bytes(NATIVE_RUNTIME_CLOSURE)
+).hexdigest()
 INTERPRETER_INSTALLATION = {
     "schema_id": INTERPRETER_INSTALLATION_SCHEMA_ID,
     "python_executable_sha256": "3" * 64,
@@ -84,6 +96,7 @@ INTERPRETER_INSTALLATION = {
     "stdlib_archive_count": 0,
     "native_extension_sha256": "6" * 64,
     "native_extension_count": 1,
+    "native_runtime_closure": NATIVE_RUNTIME_CLOSURE,
 }
 INTERPRETER_INSTALLATION["installation_sha256"] = sha256(
     canonical_json_bytes(INTERPRETER_INSTALLATION)
@@ -125,7 +138,7 @@ TRUSTED_STARTUP_REPORT = {
         "bytes_warning": 0,
         "debug": 0,
         "dev_mode": False,
-        "dont_write_bytecode": 0,
+        "dont_write_bytecode": 1,
         "hash_randomization": 1,
         "ignore_environment": 1,
         "inspect": 0,
@@ -2225,9 +2238,11 @@ def test_contradictory_or_tampered_records_never_reach_metric_algebra() -> None:
     assert report["gate_0b_sample_passed"] is False
 
 
+@pytest.mark.parametrize("tamper_authorization", (False, True))
 def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    tamper_authorization: bool,
 ) -> None:
     (
         bundle,
@@ -2237,6 +2252,10 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         ledger_public_key,
         derived,
     ) = _custody_bundle()
+    if tamper_authorization:
+        bundle["attempt_envelope"]["signature"] = base64.b64encode(b"x" * 64).decode(
+            "ascii"
+        )
     bundle_path = tmp_path / "custody-bundle.json"
     commitment_path = tmp_path / "commitment.key"
     custodian_path = tmp_path / "custodian.key"
@@ -2280,15 +2299,33 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         "derive_audit_capsule_accounting",
         lambda capsule: derived["accounting"][capsule["kind"]],
     )
+    access_order: list[str] = []
+    original_private_reader = evaluator_module._read_private_key_file
+    original_public_reader = evaluator_module._read_public_key_file
+
+    def read_private(*args, **kwargs):
+        access_order.append("private_key")
+        return original_private_reader(*args, **kwargs)
+
+    def read_public(*args, **kwargs):
+        access_order.append("public_key")
+        return original_public_reader(*args, **kwargs)
+
+    monkeypatch.setattr(evaluator_module, "_read_private_key_file", read_private)
+    monkeypatch.setattr(evaluator_module, "_read_public_key_file", read_public)
     monkeypatch.setattr(
         evaluator_module,
         "_load_pinned_approval_public_key",
-        lambda: approval_public_key,
+        lambda *_args, **_kwargs: (
+            access_order.append("approval_root") or approval_public_key
+        ),
     )
     monkeypatch.setattr(
         evaluator_module,
         "capture_trusted_startup_identity",
-        lambda *_args, **_kwargs: object(),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            policy_report_dict=lambda: TRUSTED_STARTUP_REPORT
+        ),
     )
 
     exit_code = main(
@@ -2312,6 +2349,12 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         ]
     )
 
+    if tamper_authorization:
+        assert exit_code == 2
+        assert access_order == ["approval_root"]
+        assert not output.exists()
+        return
+
     assert exit_code == 0
     persisted = json.loads(output.read_text())
     assert persisted["status"] == "pass"
@@ -2319,6 +2362,7 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
     assert CAMPAIGN_KEY.hex() not in output.read_text()
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert "--artifact" not in evaluator_module.build_parser().format_help()
+    assert access_order[0] == "approval_root"
 
 
 @pytest.mark.parametrize(

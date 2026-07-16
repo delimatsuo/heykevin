@@ -15,8 +15,19 @@ import scripts.verify_qualification_environment as verifier_module
 
 
 SOURCE_SHA = "b" * 40
+NATIVE_RUNTIME_CLOSURE = {
+    "schema_id": "gate_0b_native_runtime_closure_v1",
+    "regular_file_count": 2,
+    "regular_files_sha256": "9" * 64,
+    "virtual_dependency_count": 1,
+    "virtual_dependencies_sha256": "a" * 64,
+    "system_loader_identity_sha256": "b" * 64,
+}
+NATIVE_RUNTIME_CLOSURE["closure_sha256"] = sha256(
+    canonical_json_bytes(NATIVE_RUNTIME_CLOSURE)
+).hexdigest()
 INTERPRETER_INSTALLATION = {
-    "schema_id": "gate_0b_interpreter_installation_v1",
+    "schema_id": "gate_0b_interpreter_installation_v2",
     "python_executable_sha256": "3" * 64,
     "stdlib_source_bytecode_sha256": "4" * 64,
     "stdlib_source_bytecode_count": 1,
@@ -24,6 +35,7 @@ INTERPRETER_INSTALLATION = {
     "stdlib_archive_count": 0,
     "native_extension_sha256": "6" * 64,
     "native_extension_count": 1,
+    "native_runtime_closure": NATIVE_RUNTIME_CLOSURE,
 }
 INTERPRETER_INSTALLATION["installation_sha256"] = sha256(
     canonical_json_bytes(INTERPRETER_INSTALLATION)
@@ -52,12 +64,12 @@ SOURCE_PREFLIGHT = {
     },
 }
 STARTUP_POLICY = {
-    "schema_id": "gate_0b_trusted_startup_policy_v3",
+    "schema_id": "gate_0b_trusted_startup_policy_v5",
     "startup_flags": {
         "bytes_warning": 0,
         "debug": 0,
         "dev_mode": False,
-        "dont_write_bytecode": 0,
+        "dont_write_bytecode": 1,
         "hash_randomization": 1,
         "ignore_environment": 1,
         "inspect": 0,
@@ -139,7 +151,7 @@ def test_verifier_binds_trusted_startup_to_before_and_after_snapshot(
         verifier_module,
         "_identity_report",
         lambda _source_sha, *, trusted_startup: {
-            "schema_id": "gate_0b_environment_identity_v5",
+            "schema_id": "gate_0b_environment_identity_v6",
             "trusted_startup": deepcopy(trusted_startup),
         },
     )

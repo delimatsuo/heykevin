@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
 _TRUSTED_STARTUP_FLAGS = (
     sys.flags.isolated == 1
+    and sys.flags.dont_write_bytecode == 1
     and sys.flags.no_site == 1
     and sys.flags.ignore_environment == 1
     and sys.flags.no_user_site == 1

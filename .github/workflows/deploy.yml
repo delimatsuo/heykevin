@@ -62,8 +62,8 @@ jobs:
           umask 077
           probe_path="$RUNNER_TEMP/gate0b-startup-probe.json"
           uv run --locked --no-sync --extra dev --python 3.12.13 \
-            python -I -S scripts/launch_qualification.py probe > "$probe_path"
-          python -I -S - "$probe_path" >> "$GITHUB_ENV" <<'PY'
+            python -B -I -S scripts/launch_qualification.py probe > "$probe_path"
+          python -B -I -S - "$probe_path" >> "$GITHUB_ENV" <<'PY'
           import json
           from pathlib import Path
           import sys
@@ -82,7 +82,7 @@ jobs:
       - name: Capture qualification environment before tests
         run: >-
           uv run --locked --no-sync --extra dev --python 3.12.13
-          python -I -S scripts/launch_qualification.py verify-environment
+          python -B -I -S scripts/launch_qualification.py verify-environment
           --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA"
           --expected-runtime-site-packages-sha256 "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256"
           --phase before
@@ -136,7 +136,7 @@ jobs:
       - name: Verify qualification environment after tests
         run: >-
           uv run --locked --no-sync --extra dev --python 3.12.13
-          python -I -S scripts/launch_qualification.py verify-environment
+          python -B -I -S scripts/launch_qualification.py verify-environment
           --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA"
           --expected-runtime-site-packages-sha256 "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256"
           --phase after

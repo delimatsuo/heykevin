@@ -83,23 +83,27 @@ lookup, or corpus access.
 ## Dry-Run Template
 
 All preregistration and evidence artifacts live outside the repository. Prepare an
-access-restricted root owned by the qualification operator:
+access-restricted root as the qualification operator. Do not run this block with
+`sudo`; the final directories must be owned by the account that runs qualification:
 
 ```bash
-sudo install -d -m 0700 /var/lib/hey-kevin-qualification/
-sudo install -d -m 0700 /var/lib/hey-kevin-qualification/preregistration/
-sudo install -d -m 0700 /var/lib/hey-kevin-qualification/evidence/
-sudo install -d -m 0700 /var/lib/hey-kevin-qualification/capsules/
-sudo install -d -m 0700 /var/lib/hey-kevin-qualification/ledger/
+QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
+install -d -m 0700 \
+  "$QUALIFICATION_ROOT" \
+  "$QUALIFICATION_ROOT/preregistration" \
+  "$QUALIFICATION_ROOT/evidence" \
+  "$QUALIFICATION_ROOT/capsules" \
+  "$QUALIFICATION_ROOT/ledger"
 ```
 
 Emit the implementation-only template:
 
 ```bash
+QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   python scripts/run_gemini_caller_turn_qualification.py \
   --dry-run \
-  --output /var/lib/hey-kevin-qualification/preregistration/gate0b-template.json
+  --output "$QUALIFICATION_ROOT/preregistration/gate0b-template.json"
 ```
 
 The file is created exclusively with mode `0600`. Existing files, symlinks,
@@ -154,11 +158,12 @@ provider request ID, provider session ID, or local asset path.
 Generate the canonical artifact outside the repository:
 
 ```bash
+QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   python scripts/run_gemini_caller_turn_qualification.py \
   --dry-run \
-  --values /var/lib/hey-kevin-qualification/preregistration/gate0b-values.json \
-  --output /var/lib/hey-kevin-qualification/preregistration/gate0b-preregistration.json
+  --values "$QUALIFICATION_ROOT/preregistration/gate0b-values.json" \
+  --output "$QUALIFICATION_ROOT/preregistration/gate0b-preregistration.json"
 ```
 
 The builder rejects missing or unknown fields, a production project, the live Hey

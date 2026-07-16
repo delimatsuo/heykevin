@@ -14,11 +14,16 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
-from app.services.caller_turn_alignment import ActivityReference
-from app.services.caller_turn_measurement import (
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.services.caller_turn_alignment import ActivityReference  # noqa: E402
+from app.services.caller_turn_measurement import (  # noqa: E402
     MeasurementError,
     WireObservation,
     combined_usage_evidence_sha256,
@@ -27,28 +32,28 @@ from app.services.caller_turn_measurement import (
     seal_audit_capsule,
     usage_evidence_sha256,
 )
-from app.services.caller_turn_qualification import (
+from app.services.caller_turn_qualification import (  # noqa: E402
     PricingSchedule,
     empty_evidence_flags,
 )
-from app.services.caller_turns import CallerTurnEvent, CallerTurnEventKind
-from app.services.gemini_turn_events import (
+from app.services.caller_turns import CallerTurnEvent, CallerTurnEventKind  # noqa: E402
+from app.services.gemini_turn_events import (  # noqa: E402
     GeminiTurnEventAdapter,
     GeminiTurnEventDecodeStatus,
 )
-from app.services.voice_turn_replay import (
+from app.services.voice_turn_replay import (  # noqa: E402
     DEVELOPER_PROVIDER,
     Gate0BReplayInput,
     build_gemini_audio_message,
 )
-from app.services.qualification_environment import execution_identity_sha256
-from app.services.qualification_allocation import (
+from app.services.qualification_environment import execution_identity_sha256  # noqa: E402
+from app.services.qualification_allocation import (  # noqa: E402
     AllocationActivity,
     AllocationError,
     NoSpeechAllocation,
     validate_gate0b_allocation,
 )
-from app.services.qualification_identity import (
+from app.services.qualification_identity import (  # noqa: E402
     AttemptAuthorization,
     AttemptClaim,
     CampaignApproval,
@@ -56,19 +61,19 @@ from app.services.qualification_identity import (
     verify_attempt_authorization,
     verify_campaign_approval,
 )
-from app.services.qualification_ledger import (
+from app.services.qualification_ledger import (  # noqa: E402
     CustodyLedgerState,
     LedgerCustodyClient,
     LedgerCustodyIdentity,
     validate_custody_ledger_snapshot,
 )
-from app.services.qualification_privacy import (
+from app.services.qualification_privacy import (  # noqa: E402
     OpaqueQualificationAssetLoader,
     PrivacyCustodyAuthorization,
     QualificationAssets,
     verify_privacy_custody,
 )
-from app.services.qualification_private_paths import (
+from app.services.qualification_private_paths import (  # noqa: E402
     PrivatePathError,
     read_private_file,
     validate_private_output_path,
@@ -92,7 +97,6 @@ MAX_COST_PER_SESSION_MICROUSD = 250_000
 MAX_WHOLE_RUN_SECONDS = 3_600
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
-REPO_ROOT = Path(__file__).resolve().parents[1]
 PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
 PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
     {

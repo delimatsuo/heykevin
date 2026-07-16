@@ -42,17 +42,67 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: '3.12'
-          cache: pip
+          python-version: '3.12.13'
 
       - name: Install qualification runtime
         run: python -m pip install "uv==0.11.7"
 
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
+      - name: Verify dependency lock
+        run: uv lock --check
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --extra dev --python 3.12.13
+
+      - name: Capture qualification environment before tests
+        run: >-
+          uv run --locked --no-sync --extra dev --python 3.12.13
+          python scripts/verify_qualification_environment.py --phase before
 
       - name: Run tests
-        run: pytest --tb=short -q
+        run: uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest --tb=short -q
+
+      - name: Run qualification static checks
+        run: |
+          uv run --locked --no-sync --extra dev --python 3.12.13 \
+            ruff check app/services/caller_turn_alignment.py \
+            app/services/caller_turn_measurement.py \
+            app/services/caller_turn_qualification.py \
+            app/services/qualification_allocation.py \
+            app/services/qualification_environment.py \
+            app/services/qualification_identity.py \
+            app/services/qualification_ledger.py \
+            app/services/qualification_privacy.py \
+            app/services/qualification_private_paths.py \
+            app/services/voice_turn_replay.py \
+            scripts/evaluate_gemini_caller_turn_qualification.py \
+            scripts/run_gemini_caller_turn_qualification.py \
+            scripts/verify_qualification_environment.py \
+            tests/unit/test_caller_turn_alignment.py \
+            tests/unit/test_caller_turn_measurement.py \
+            tests/unit/test_caller_turn_qualification.py \
+            tests/unit/test_evaluate_gemini_caller_turn_qualification.py \
+            tests/unit/test_gate0b_offline_boundaries.py \
+            tests/unit/test_qualification_allocation.py \
+            tests/unit/test_qualification_environment.py \
+            tests/unit/test_qualification_identity.py \
+            tests/unit/test_qualification_ledger.py \
+            tests/unit/test_qualification_privacy.py \
+            tests/unit/test_qualification_private_paths.py \
+            tests/unit/test_run_gemini_caller_turn_qualification.py \
+            tests/unit/test_voice_turn_replay.py
+          uv run --locked --no-sync --extra dev --python 3.12.13 \
+            bandit -q -lll app/services/qualification_identity.py \
+            app/services/qualification_ledger.py \
+            app/services/caller_turn_measurement.py \
+            scripts/run_gemini_caller_turn_qualification.py \
+            scripts/evaluate_gemini_caller_turn_qualification.py
+          uv run --locked --no-sync --extra dev --python 3.12.13 \
+            python -m compileall -q app/services scripts
+
+      - name: Verify qualification environment after tests
+        run: >-
+          uv run --locked --no-sync --extra dev --python 3.12.13
+          python scripts/verify_qualification_environment.py --phase after
 
   deploy-staging:
     name: Deploy to Staging

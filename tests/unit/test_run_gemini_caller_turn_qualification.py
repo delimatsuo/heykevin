@@ -4110,7 +4110,8 @@ def test_gate0b_runbook_is_pending_external_only_and_non_authorizing() -> None:
     }
 
     assert "Status: Implementation-only; provider execution not approved" in runbook
-    assert "/var/lib/hey-kevin-qualification/" in runbook
+    assert 'QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}' in runbook
+    assert "sudo install" not in runbook
     assert "--dry-run" in runbook
     assert "--output" in runbook
     assert "--credential" not in runbook

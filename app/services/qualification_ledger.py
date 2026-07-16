@@ -15,8 +15,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from app.services.qualification_identity import AttemptClaim, canonical_json_bytes
 
 
-LEDGER_EXPORT_SCHEMA_ID = "gate_0b_custodian_ledger_export_v1"
-LEDGER_RECORD_SCHEMA_ID = "gate_0b_custodian_ledger_record_v1"
+LEDGER_EXPORT_SCHEMA_ID = "gate_0b_custodian_ledger_export_v2"
+LEDGER_RECORD_SCHEMA_ID = "gate_0b_custodian_ledger_record_v2"
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
@@ -36,6 +36,9 @@ OUTAGE_ENUMS = {
     "qualification_host_failure",
 }
 POLICIES_MS = {100, 250, 500, 750}
+MAX_ATTEMPT_INPUT_AUDIO_MS = 3_600_000
+MAX_ATTEMPT_OUTPUT_AUDIO_BYTES = 1_800 * 24_000 * 2
+MAX_ATTEMPT_ELAPSED_MS = 3_600_000
 
 
 class CustodyLedgerError(ValueError):
@@ -88,6 +91,9 @@ class CustodyLedgerState:
     final_usage_evidence_sha256: str | None
     development_provider_requests: int
     development_cost_microusd: int
+    development_input_audio_ms: int
+    development_output_audio_bytes: int
+    development_elapsed_ms: int
     actual_provider_requests: int
     actual_cost_microusd: int
     campaign_max_attempts: int
@@ -142,6 +148,9 @@ class _ReplayState:
     development_usage: str | None = None
     development_requests: int = 0
     development_cost: int = 0
+    development_input_audio_ms: int = 0
+    development_output_audio_bytes: int = 0
+    development_elapsed_ms: int = 0
     development_head: str | None = None
     selected_policy: int | None = None
     policy_lock: str | None = None
@@ -317,6 +326,9 @@ def validate_custody_ledger_snapshot(
         final_usage_evidence_sha256=replay.final_usage,
         development_provider_requests=replay.development_requests,
         development_cost_microusd=replay.development_cost,
+        development_input_audio_ms=replay.development_input_audio_ms,
+        development_output_audio_bytes=replay.development_output_audio_bytes,
+        development_elapsed_ms=replay.development_elapsed_ms,
         actual_provider_requests=replay.actual_requests,
         actual_cost_microusd=replay.actual_cost,
         campaign_max_attempts=replay.max_attempts,
@@ -575,6 +587,9 @@ def _replay_claim(
     state.development_usage = None
     state.development_requests = 0
     state.development_cost = 0
+    state.development_input_audio_ms = 0
+    state.development_output_audio_bytes = 0
+    state.development_elapsed_ms = 0
     state.final_usage = None
     state.actual_requests = 0
     state.actual_cost = 0
@@ -596,6 +611,9 @@ def _replay_development_checkpoint(
             "usage_evidence_sha256",
             "actual_provider_requests",
             "actual_cost_microusd",
+            "input_audio_duration_ms",
+            "output_audio_bytes",
+            "elapsed_ms",
         },
         label="development checkpoint body",
     )
@@ -618,6 +636,24 @@ def _replay_development_checkpoint(
         maximum=state.active_cost_reservation,
         minimum=0,
     )
+    input_audio_ms = _bounded_int(
+        body["input_audio_duration_ms"],
+        label="development input audio duration",
+        maximum=MAX_ATTEMPT_INPUT_AUDIO_MS,
+        minimum=0,
+    )
+    output_audio_bytes = _bounded_int(
+        body["output_audio_bytes"],
+        label="development output audio bytes",
+        maximum=MAX_ATTEMPT_OUTPUT_AUDIO_BYTES,
+        minimum=0,
+    )
+    elapsed_ms = _bounded_int(
+        body["elapsed_ms"],
+        label="development elapsed time",
+        maximum=MAX_ATTEMPT_ELAPSED_MS,
+        minimum=0,
+    )
     state.development_checkpoint_attempt = attempt_id
     state.development_capsule = _digest(
         body["development_capsule_sha256"],
@@ -626,6 +662,9 @@ def _replay_development_checkpoint(
     state.development_usage = _digest(body["usage_evidence_sha256"], label="usage evidence")
     state.development_requests = requests
     state.development_cost = cost
+    state.development_input_audio_ms = input_audio_ms
+    state.development_output_audio_bytes = output_audio_bytes
+    state.development_elapsed_ms = elapsed_ms
 
 
 def _replay_policy_lock(

@@ -338,8 +338,16 @@ snapshot must contain the previously accepted signed record sequence plus exactl
 one expected event; an independently valid alternate history is not continuity. The
 claim signs only the SHA-256 of its opaque lease capability, and the executor matches
 that digest before credential lookup and again at holdout resume. One active attempt
-spans development checkpoint, policy
-lock, holdout release, holdout execution, and terminal outcome. The custodian must
+spans development checkpoint, policy lock, holdout release, holdout execution, and
+terminal outcome. Custodian ledger export and record schemas are v2. The signed
+development checkpoint includes exact input-audio milliseconds, output-audio bytes,
+and monotonic execution milliseconds in addition to request and cost usage. Holdout
+must preserve those counters, reject a known exhausted combined budget before its
+one-shot claim or credential lookup, subtract development time from the approved
+whole-run timeout, and count development output against the combined output cap.
+The evaluator independently matches checkpoint input and output counters to the
+decrypted development capsule and enforces the exact combined capsule ceilings.
+The custodian must
 append a signed one-shot `holdout_execution_claim` before the first holdout provider
 request; a missing or duplicate claim fails closed. A crash after that claim cannot
 resume or replace the holdout. Each provider request revalidates execution identity

@@ -804,7 +804,10 @@ def _evaluate_custody_bundle(
         policies_ms=EXPECTED_POLICIES,
         commitment_key=commitment_key,
     )
-    development_usage, development_failures = derive_audit_capsule_accounting(development_capsule)
+    development_accounting, development_failures = derive_audit_capsule_accounting(
+        development_capsule
+    )
+    development_usage = _public_capsule_usage(development_accounting)
     development_cost_microusd = _cost_microusd_from_usage(development_usage)
     development_usage_digest = usage_evidence_sha256(
         development_usage,
@@ -817,6 +820,10 @@ def _evaluate_custody_bundle(
         or state.development_usage_evidence_sha256 != development_usage_digest
         or state.development_provider_requests != development_usage["provider_requests"]
         or state.development_cost_microusd != development_cost_microusd
+        or state.development_input_audio_ms
+        != development_accounting["input_audio_duration_ms"]
+        or state.development_output_audio_bytes
+        != development_accounting["output_audio_bytes"]
     ):
         raise EvaluationError("development capsule accounting is invalid")
     candidate_samples = {
@@ -859,7 +866,10 @@ def _evaluate_custody_bundle(
         policies_ms=(selected_policy_ms,),
         commitment_key=commitment_key,
     )
-    holdout_usage, holdout_failures = derive_audit_capsule_accounting(holdout_capsule)
+    holdout_accounting, holdout_failures = derive_audit_capsule_accounting(
+        holdout_capsule
+    )
+    holdout_usage = _public_capsule_usage(holdout_accounting)
     usage = _combine_usage(development_usage, holdout_usage)
     holdout_cost_microusd = _cost_microusd_from_usage(holdout_usage)
     holdout_usage_digest = usage_evidence_sha256(
@@ -882,6 +892,15 @@ def _evaluate_custody_bundle(
         )
         or state.actual_provider_requests != usage["provider_requests"]
         or state.actual_cost_microusd != cost_microusd
+        or development_accounting["input_audio_duration_ms"]
+        + holdout_accounting["input_audio_duration_ms"]
+        > 3_600_000
+        or development_accounting["output_audio_bytes"]
+        + holdout_accounting["output_audio_bytes"]
+        > 1_800 * 24_000 * 2
+        or development_accounting["observed_elapsed_ms"]
+        + holdout_accounting["observed_elapsed_ms"]
+        > 3_600_000
         or usage["provider_requests"] > authorization.provider_request_reservation
         or cost_microusd > authorization.cost_reservation_microusd
     ):
@@ -2627,6 +2646,34 @@ def _combine_usage(
             raise EvaluationError("capsule usage value is invalid")
         combined[field] = left_value + right_value
     return combined
+
+
+def _public_capsule_usage(
+    usage: Mapping[str, int | bool],
+) -> dict[str, int | bool]:
+    fields = {
+        "metadata_complete",
+        "provider_requests",
+        "wall_clock_seconds",
+        "input_audio_seconds",
+        "output_audio_seconds",
+        "input_audio_tokens",
+        "output_audio_tokens",
+        "input_text_tokens",
+        "output_text_tokens",
+    }
+    resource_fields = {
+        "observed_elapsed_ms",
+        "input_audio_duration_ms",
+        "output_audio_bytes",
+    }
+    if set(usage) != fields | resource_fields:
+        raise EvaluationError("capsule accounting fields are invalid")
+    for field in resource_fields:
+        value = usage[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise EvaluationError("capsule resource accounting is invalid")
+    return {field: usage[field] for field in fields}
 
 
 def _cost_microusd_from_usage(usage: Mapping[str, int | bool]) -> int:

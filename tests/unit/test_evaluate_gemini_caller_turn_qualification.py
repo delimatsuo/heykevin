@@ -603,7 +603,7 @@ def _append_ledger_record(
     records = ledger["records"]
     assert isinstance(records, list)
     payload = {
-        "schema_id": "gate_0b_custodian_ledger_record_v1",
+        "schema_id": "gate_0b_custodian_ledger_record_v2",
         "ledger_instance_id": ledger["ledger_instance_id"],
         "campaign_id": ledger["campaign_id"],
         "authorization_id": ledger["authorization_id"],
@@ -654,11 +654,15 @@ def _custody_bundle(
     ledger_max_provider_requests: int | None = None,
     holdout_privacy_issued_at: str = "2026-07-15T15:12:00+00:00",
     holdout_privacy_expires_at: str = "2026-07-15T15:27:00+00:00",
+    development_input_audio_ms: int | None = None,
 ):
     artifact, _ = _artifact()
     development_usage = {
         "metadata_complete": True,
         "provider_requests": 64,
+        "observed_elapsed_ms": 360_000,
+        "input_audio_duration_ms": 180_000,
+        "output_audio_bytes": 60 * 48_000,
         "wall_clock_seconds": 360,
         "input_audio_seconds": 180,
         "output_audio_seconds": 60,
@@ -670,6 +674,9 @@ def _custody_bundle(
     holdout_usage = {
         "metadata_complete": True,
         "provider_requests": holdout_provider_requests,
+        "observed_elapsed_ms": 240_000,
+        "input_audio_duration_ms": 120_000,
+        "output_audio_bytes": 40 * 48_000,
         "wall_clock_seconds": 240,
         "input_audio_seconds": 120,
         "output_audio_seconds": 40,
@@ -679,7 +686,10 @@ def _custody_bundle(
         "output_text_tokens": 200,
     }
     development_cost = evaluator_module._cost_microusd_from_usage(development_usage)
-    final_usage = evaluator_module._combine_usage(development_usage, holdout_usage)
+    final_usage = evaluator_module._combine_usage(
+        evaluator_module._public_capsule_usage(development_usage),
+        evaluator_module._public_capsule_usage(holdout_usage),
+    )
     final_cost = evaluator_module._cost_microusd_from_usage(final_usage)
     activity_records = tuple(
         ActivityPrimitiveRecord.from_dict(value) for value in artifact["activity_records"]
@@ -911,7 +921,7 @@ def _custody_bundle(
         "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
     }
     ledger = {
-        "schema_id": "gate_0b_custodian_ledger_export_v1",
+        "schema_id": "gate_0b_custodian_ledger_export_v2",
         "ledger_instance_id": "ledger_instance_1",
         "ledger_key_id": "ledger_custodian_1",
         "campaign_id": "campaign_1",
@@ -975,6 +985,13 @@ def _custody_bundle(
             ),
             "actual_provider_requests": 64,
             "actual_cost_microusd": development_cost,
+            "input_audio_duration_ms": (
+                development_usage["input_audio_duration_ms"]
+                if development_input_audio_ms is None
+                else development_input_audio_ms
+            ),
+            "output_audio_bytes": development_usage["output_audio_bytes"],
+            "elapsed_ms": development_usage["observed_elapsed_ms"],
         },
         at="2026-07-15T15:10:00Z",
     )
@@ -1625,6 +1642,134 @@ def test_custody_bundle_rejects_capsule_accounting_that_disagrees_with_signed_le
     assert report["status"] == "no_go"
     assert report["failures"] == {"custody_bundle_invalid": 1}
     assert opened == ["development", "holdout"]
+
+
+def test_custody_bundle_rejects_signed_development_resource_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle(development_input_audio_ms=180_001)
+    opened: list[str] = []
+
+    def open_capsule(envelope, **_kwargs):
+        opened.append(envelope["kind"])
+        return _opened_capsule(envelope)
+
+    monkeypatch.setattr(evaluator_module, "open_audit_capsule", open_capsule)
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+
+    assert report["status"] == "no_go"
+    assert report["failures"] == {"custody_bundle_invalid": 1}
+    assert opened == ["development"]
+
+
+@pytest.mark.parametrize(
+    ("exact_field", "rounded_field", "maximum", "rounding_unit"),
+    (
+        ("input_audio_duration_ms", "input_audio_seconds", 3_600_000, 1_000),
+        ("output_audio_bytes", "output_audio_seconds", 1_800 * 48_000, 48_000),
+        ("observed_elapsed_ms", "wall_clock_seconds", 3_600_000, 1_000),
+    ),
+)
+def test_evaluator_combined_resource_caps_accept_exact_and_reject_one_over(
+    monkeypatch: pytest.MonkeyPatch,
+    exact_field: str,
+    rounded_field: str,
+    maximum: int,
+    rounding_unit: int,
+) -> None:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: _opened_capsule(envelope),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+    development_usage = derived["accounting"]["development"][0]
+    holdout_usage = derived["accounting"]["holdout"][0]
+    exact_holdout_value = maximum - development_usage[exact_field]
+    holdout_usage[exact_field] = exact_holdout_value
+    holdout_usage[rounded_field] = (
+        exact_holdout_value + rounding_unit - 1
+    ) // rounding_unit
+
+    exact_report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+    assert exact_report["status"] == "pass"
+
+    holdout_usage[exact_field] += 1
+    holdout_usage[rounded_field] = (
+        holdout_usage[exact_field] + rounding_unit - 1
+    ) // rounding_unit
+    one_over_report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+    assert one_over_report["status"] == "no_go"
+    assert one_over_report["failures"] == {"custody_bundle_invalid": 1}
 
 
 def test_custody_bundle_rejects_prebuilt_primitives_and_gates_holdout_decryption(

@@ -79,7 +79,7 @@ def _record(
     records = snapshot["records"]
     assert isinstance(records, list)
     payload = {
-        "schema_id": "gate_0b_custodian_ledger_record_v1",
+        "schema_id": "gate_0b_custodian_ledger_record_v2",
         "ledger_instance_id": LEDGER_INSTANCE_ID,
         "campaign_id": CAMPAIGN_ID,
         "authorization_id": AUTHORIZATION_ID,
@@ -110,7 +110,7 @@ def _snapshot(
     genesis_at: datetime = NOW,
 ) -> dict[str, object]:
     value: dict[str, object] = {
-        "schema_id": "gate_0b_custodian_ledger_export_v1",
+        "schema_id": "gate_0b_custodian_ledger_export_v2",
         "ledger_instance_id": LEDGER_INSTANCE_ID,
         "ledger_key_id": KEY_ID,
         "campaign_id": CAMPAIGN_ID,
@@ -174,6 +174,9 @@ def _append_development_checkpoint(
     snapshot: dict[str, object],
     *,
     attempt_id: str = "attempt_1",
+    input_audio_ms: int = 1_800_000,
+    output_audio_bytes: int = 43_200_000,
+    elapsed_ms: int = 1_500_000,
 ) -> str:
     _record(
         private,
@@ -187,6 +190,9 @@ def _append_development_checkpoint(
             "usage_evidence_sha256": "2" * 64,
             "actual_provider_requests": 64,
             "actual_cost_microusd": 1_000_000,
+            "input_audio_duration_ms": input_audio_ms,
+            "output_audio_bytes": output_audio_bytes,
+            "elapsed_ms": elapsed_ms,
         },
         at=NOW + timedelta(seconds=2),
     )
@@ -308,12 +314,80 @@ def test_signed_custody_ledger_replays_one_attempt_across_both_splits() -> None:
     assert state.selected_policy_ms == 100
     assert state.development_ledger_head_sha256 is not None
     assert state.development_usage_evidence_sha256 == "2" * 64
+    assert state.development_input_audio_ms == 1_800_000
+    assert state.development_output_audio_bytes == 43_200_000
+    assert state.development_elapsed_ms == 1_500_000
     assert state.final_usage_evidence_sha256 == "6" * 64
     assert state.holdout_execution_claimed is True
     assert state.holdout_execution_claimed_at == NOW + timedelta(seconds=5)
     assert state.actual_provider_requests == 120
     assert state.actual_cost_microusd == 2_000_000
     assert state.final_ledger_head_sha256 == snapshot["head_hash"]
+
+
+@pytest.mark.parametrize("target", ("export", "record"))
+def test_legacy_ledger_schema_is_rejected(target: str) -> None:
+    private, public = _key_pair()
+    snapshot = _snapshot(private)
+    if target == "export":
+        snapshot["schema_id"] = "gate_0b_custodian_ledger_export_v1"
+    else:
+        records = snapshot["records"]
+        assert isinstance(records, list)
+        records[0]["payload"]["schema_id"] = "gate_0b_custodian_ledger_record_v1"
+
+    with pytest.raises(CustodyLedgerError, match="schema|signature"):
+        validate_custody_ledger_snapshot(
+            snapshot,
+            public_key=public,
+            expected_key_id=KEY_ID,
+            expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "maximum"),
+    (
+        ("input_audio_ms", 3_600_000),
+        ("output_audio_bytes", 1_800 * 24_000 * 2),
+        ("elapsed_ms", 3_600_000),
+    ),
+)
+def test_development_checkpoint_resource_caps_accept_exact_and_reject_one_over(
+    field: str,
+    maximum: int,
+) -> None:
+    private, public = _key_pair()
+    exact = _snapshot(private)
+    _append_claim(private, exact)
+    _append_development_checkpoint(private, exact, **{field: maximum})
+
+    state = validate_custody_ledger_snapshot(
+        exact,
+        public_key=public,
+        expected_key_id=KEY_ID,
+        expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+    )
+    assert getattr(
+        state,
+        {
+            "input_audio_ms": "development_input_audio_ms",
+            "output_audio_bytes": "development_output_audio_bytes",
+            "elapsed_ms": "development_elapsed_ms",
+        }[field],
+    ) == maximum
+
+    one_over = _snapshot(private)
+    _append_claim(private, one_over)
+    _append_development_checkpoint(private, one_over, **{field: maximum + 1})
+
+    with pytest.raises(CustodyLedgerError):
+        validate_custody_ledger_snapshot(
+            one_over,
+            public_key=public,
+            expected_key_id=KEY_ID,
+            expected_ledger_instance_id=LEDGER_INSTANCE_ID,
+        )
 
 
 @pytest.mark.parametrize(

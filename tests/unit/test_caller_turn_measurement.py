@@ -587,6 +587,9 @@ def test_custodian_capsule_derives_all_development_policies_and_no_speech_record
     assert usage == {
         "metadata_complete": True,
         "provider_requests": 2,
+        "observed_elapsed_ms": 400,
+        "input_audio_duration_ms": 40,
+        "output_audio_bytes": 48_000,
         "wall_clock_seconds": 1,
         "input_audio_seconds": 1,
         "output_audio_seconds": 1,
@@ -898,6 +901,72 @@ def test_literal_capsule_wire_mutations_derive_failing_primitives(
     assert getattr(records[0], field) == 1
     if mutation == "premature":
         assert records[0].first_audio_ms == 0
+
+
+@pytest.mark.parametrize(
+    ("boundary_first", "expected_premature_count"),
+    ((False, 1), (True, 0)),
+)
+def test_same_millisecond_activity_end_order_controls_premature_audio(
+    boundary_first: bool,
+    expected_premature_count: int,
+) -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    activity_end = next(
+        fact for fact in facts if fact["kind"] == "caller_activity_end"
+    )
+    response_open = next(fact for fact in facts if fact["kind"] == "response_open")
+    response_audio = next(fact for fact in facts if fact["kind"] == "audio_received")
+    activity_end.update({"at_ms": 100, "sequence": 3 if boundary_first else 6})
+    response_open.update({"at_ms": 100, "sequence": 4})
+    response_audio.update({"at_ms": 100, "sequence": 5})
+    _normalize_wire_sequences(capsule)
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert records[0].premature_current_audio_count == expected_premature_count
+
+
+@pytest.mark.parametrize(
+    ("terminal_first", "expected_after_terminal_count"),
+    ((True, 1), (False, 0)),
+)
+def test_same_millisecond_terminal_order_controls_audio_after_terminal(
+    terminal_first: bool,
+    expected_after_terminal_count: int,
+) -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    response_audio = next(fact for fact in facts if fact["kind"] == "audio_received")
+    response_terminal = next(
+        fact for fact in facts if fact["kind"] == "response_terminal"
+    )
+    response_terminal.update(
+        {"at_ms": 230, "sequence": 7 if terminal_first else 9}
+    )
+    facts.append(
+        {
+            **response_audio,
+            "at_ms": 230,
+            "sequence": 8,
+        }
+    )
+    _normalize_wire_sequences(capsule)
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert records[0].audio_after_terminal_count == expected_after_terminal_count
 
 
 def test_capsule_first_audio_latency_uses_labeled_speech_end() -> None:

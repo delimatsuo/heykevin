@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
@@ -114,6 +115,7 @@ VALID_SPLITS = frozenset({"development", "holdout"})
 VALID_LANGUAGES = frozenset({"ar", "en", "es", "fr", "hi", "ht", "pt", "zh"})
 VALID_POLICIES_MS = frozenset({100, 250, 500, 750})
 MAX_OUTPUT_AUDIO_BYTES = 120 * 24_000 * 2
+MAX_INPUT_AUDIO_PER_RUN_MS = 3_600_000
 MAX_OUTPUT_AUDIO_PER_RUN_BYTES = 1_800 * 24_000 * 2
 MAX_COST_PER_SESSION_MICROUSD = 250_000
 MAX_WHOLE_RUN_SECONDS = 3_600
@@ -863,6 +865,7 @@ async def execute_injected_session(
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult] | None = None,
     request_reserver: Callable[[], None] | None = None,
+    output_audio_limit_bytes: int = MAX_OUTPUT_AUDIO_BYTES,
 ) -> SessionExecutionResult:
     """Execute one bounded fake-or-approved injected session with no default transport."""
     if not isinstance(plan, SessionPlan):
@@ -873,6 +876,7 @@ async def execute_injected_session(
         raise TypeError("credential must be a SecretCredential")
     if not callable(measurement_clock_factory):
         raise TypeError("measurement clock factory must be callable")
+    _validate_output_audio_limit(output_audio_limit_bytes)
     reducer = secondary_reducer or independent_reduce_message
     measurement_clock_ms = _monotonic_measurement_clock(
         measurement_clock_factory(plan)
@@ -891,6 +895,7 @@ async def execute_injected_session(
                 sleep_ms=sleep_ms,
                 secondary_reducer=reducer,
                 request_reserver=request_reserver,
+                output_audio_limit_bytes=output_audio_limit_bytes,
                 progress=progress,
             ),
             timeout=config.session_timeout_seconds,
@@ -934,6 +939,7 @@ async def _execute_session_flow(
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult],
     request_reserver: Callable[[], None] | None,
+    output_audio_limit_bytes: int,
     progress: _SessionProgress,
 ) -> SessionExecutionResult:
     audit_events: list[CallerTurnEvent] = []
@@ -1499,7 +1505,7 @@ async def _execute_session_flow(
                     break
                 if audio_bytes:
                     output_audio_bytes += audio_bytes
-                    if output_audio_bytes > MAX_OUTPUT_AUDIO_BYTES:
+                    if output_audio_bytes > output_audio_limit_bytes:
                         error_code = "runaway_output"
                         _increment_wire_counter(
                             wires,
@@ -1744,6 +1750,7 @@ async def execute_injected_no_speech_window(
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult] | None = None,
     request_reserver: Callable[[], None] | None = None,
+    output_audio_limit_bytes: int = MAX_OUTPUT_AUDIO_BYTES,
 ) -> NoSpeechExecutionResult:
     """Execute one separately scheduled noise window and retain only wire facts."""
     if not isinstance(plan, NoSpeechWindowPlan):
@@ -1754,6 +1761,7 @@ async def execute_injected_no_speech_window(
         raise TypeError("credential must be a SecretCredential")
     if not callable(measurement_clock_factory):
         raise TypeError("measurement clock factory must be callable")
+    _validate_output_audio_limit(output_audio_limit_bytes)
     measurement_clock_ms = _monotonic_measurement_clock(
         measurement_clock_factory(plan)
     )
@@ -1768,6 +1776,7 @@ async def execute_injected_no_speech_window(
                 sleep_ms=sleep_ms,
                 secondary_reducer=secondary_reducer or independent_reduce_message,
                 request_reserver=request_reserver,
+                output_audio_limit_bytes=output_audio_limit_bytes,
             ),
             timeout=config.session_timeout_seconds,
         )
@@ -1791,6 +1800,7 @@ async def _execute_no_speech_flow(
     sleep_ms: Callable[[int], Awaitable[None]],
     secondary_reducer: Callable[..., ReductionResult],
     request_reserver: Callable[[], None] | None,
+    output_audio_limit_bytes: int,
 ) -> NoSpeechExecutionResult:
     if request_reserver is not None:
         request_reserver()
@@ -2072,7 +2082,7 @@ async def _execute_no_speech_flow(
                         )
                         for index, chunk_size in enumerate(chunk_sizes)
                     )
-                    if output_audio_bytes > MAX_OUTPUT_AUDIO_BYTES:
+                    if output_audio_bytes > output_audio_limit_bytes:
                         error_code = "runaway_output"
                         break
 
@@ -2586,6 +2596,9 @@ async def execute_authorized_attempt(
     capsule_handed_off = False
     capsule_sha256: str | None = None
     usage = UsageCounts()
+    input_audio_duration_ms = _scheduled_input_audio_ms(plans, no_speech_plans)
+    output_audio_bytes = 0
+    elapsed_ms = 0
     session_results: list[tuple[SessionPlan, SessionExecutionResult]] = []
     no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
 
@@ -2618,21 +2631,30 @@ async def execute_authorized_attempt(
                 ),
             )
             try:
-                session_results, no_speech_results = await asyncio.wait_for(
-                    _execute_attempt_work(
-                        plans,
-                        no_speech_plans=no_speech_plans,
-                        config=session_config,
-                        connector=connector,
-                        credential=credential,
-                        measurement_clock_factory=measurement_clock_factory,
-                        sleep_ms=sleep_ms,
-                        pricing=pricing,
-                        run_cost_limit_microusd=claim.cost_reserved_microusd,
-                    ),
-                    timeout=config.whole_run_timeout_seconds,
-                )
+                work_started_ns = _elapsed_clock_ns()
+                try:
+                    session_results, no_speech_results = await asyncio.wait_for(
+                        _execute_attempt_work(
+                            plans,
+                            no_speech_plans=no_speech_plans,
+                            config=session_config,
+                            connector=connector,
+                            credential=credential,
+                            measurement_clock_factory=measurement_clock_factory,
+                            sleep_ms=sleep_ms,
+                            pricing=pricing,
+                            run_cost_limit_microusd=claim.cost_reserved_microusd,
+                        ),
+                        timeout=config.whole_run_timeout_seconds,
+                    )
+                finally:
+                    elapsed_ms = _elapsed_milliseconds(
+                        work_started_ns,
+                        _elapsed_clock_ns(),
+                    )
             except TimeoutError:
+                error_code = "whole_run_timeout"
+            if elapsed_ms > config.whole_run_timeout_seconds * 1_000:
                 error_code = "whole_run_timeout"
 
         if error_code is None:
@@ -2656,6 +2678,10 @@ async def execute_authorized_attempt(
             usage = _add_usage(usage, result.usage)
         for _, result in no_speech_results:
             usage = _add_usage(usage, result.usage)
+        output_audio_bytes = sum(
+            result.output_audio_bytes
+            for _, result in (*session_results, *no_speech_results)
+        )
         cost_microusd = _cost_microusd(pricing, usage)
         if cost_microusd > claim.cost_reserved_microusd:
             error_code = "cost_reservation_exhausted"
@@ -2699,6 +2725,16 @@ async def execute_authorized_attempt(
                 if (
                     capsule_failures
                     or not capsule_usage["metadata_complete"]
+                    or sum(
+                        unit["input_audio_duration_ms"]
+                        for unit in capsule["accounting"]["units"]
+                    )
+                    != input_audio_duration_ms
+                    or sum(
+                        unit["output_audio_bytes"]
+                        for unit in capsule["accounting"]["units"]
+                    )
+                    != output_audio_bytes
                     or any(
                         capsule_usage[field] != value
                         for field, value in expected_capsule_usage.items()
@@ -2751,6 +2787,9 @@ async def execute_authorized_attempt(
                 usage_evidence_sha256=usage_evidence_digest,
                 actual_provider_requests=budget.consumed,
                 actual_cost_microusd=cost_microusd,
+                input_audio_duration_ms=input_audio_duration_ms,
+                output_audio_bytes=output_audio_bytes,
+                elapsed_ms=elapsed_ms,
                 now=now,
             )
             final_state = _replay_bound_ledger_snapshot(
@@ -2769,6 +2808,9 @@ async def execute_authorized_attempt(
                 != usage_evidence_digest
                 or final_state.development_provider_requests != budget.consumed
                 or final_state.development_cost_microusd != cost_microusd
+                or final_state.development_input_audio_ms != input_audio_duration_ms
+                or final_state.development_output_audio_bytes != output_audio_bytes
+                or final_state.development_elapsed_ms != elapsed_ms
             ):
                 raise RunnerError("signed development checkpoint is not durable")
             _require_single_signed_append(
@@ -2974,6 +3016,10 @@ async def execute_authorized_holdout(
     remaining_cost_microusd = (
         authorization.cost_reservation_microusd - state.development_cost_microusd
     )
+    holdout_input_audio_ms = _scheduled_input_audio_ms(plans, no_speech_plans)
+    remaining_elapsed_ms = (
+        config.whole_run_timeout_seconds * 1_000 - state.development_elapsed_ms
+    )
     if (
         remaining_requests < required_requests
         or remaining_cost_microusd < 0
@@ -2981,6 +3027,16 @@ async def execute_authorized_holdout(
         or state.development_cost_microusd < 0
     ):
         raise RunnerError("holdout remaining reservation is insufficient")
+    if (
+        state.development_input_audio_ms < 0
+        or state.development_output_audio_bytes < 0
+        or state.development_elapsed_ms < 0
+        or state.development_input_audio_ms + holdout_input_audio_ms
+        > MAX_INPUT_AUDIO_PER_RUN_MS
+        or state.development_output_audio_bytes >= MAX_OUTPUT_AUDIO_PER_RUN_BYTES
+        or remaining_elapsed_ms <= 0
+    ):
+        raise RunnerError("holdout remaining resource budget is insufficient")
     _require_preregistered_attempt_liability(authorization, preregistration)
     claim = _require_exact_claim(
         ledger.resume_holdout(
@@ -3020,6 +3076,11 @@ async def execute_authorized_holdout(
         != authorization.cost_reservation_microusd
         or resumed_state.development_usage_evidence_sha256
         != state.development_usage_evidence_sha256
+        or resumed_state.development_input_audio_ms
+        != state.development_input_audio_ms
+        or resumed_state.development_output_audio_bytes
+        != state.development_output_audio_bytes
+        or resumed_state.development_elapsed_ms != state.development_elapsed_ms
         or resumed_state.lease_id_sha256 != state.lease_id_sha256
     ):
         raise RunnerError("signed ledger did not durably consume the holdout claim")
@@ -3078,8 +3139,11 @@ async def execute_authorized_holdout(
                         sleep_ms=sleep_ms,
                         pricing=pricing,
                         run_cost_limit_microusd=remaining_cost_microusd,
+                        initial_output_audio_bytes=(
+                            state.development_output_audio_bytes
+                        ),
                     ),
-                    timeout=config.whole_run_timeout_seconds,
+                    timeout=remaining_elapsed_ms / 1_000,
                 )
             except TimeoutError:
                 error_code = "whole_run_timeout"
@@ -3242,13 +3306,14 @@ async def _execute_attempt_work(
     sleep_ms: Callable[[int], Awaitable[None]],
     pricing: PricingSchedule,
     run_cost_limit_microusd: int,
+    initial_output_audio_bytes: int = 0,
 ) -> tuple[
     list[tuple[SessionPlan, SessionExecutionResult]],
     list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]],
 ]:
     results: list[tuple[SessionPlan, SessionExecutionResult]] = []
     running_usage = UsageCounts()
-    output_audio_bytes = 0
+    output_audio_bytes = initial_output_audio_bytes
     for plan in plans:
         result = await execute_injected_session(
             plan,
@@ -3257,6 +3322,10 @@ async def _execute_attempt_work(
             credential=credential,
             measurement_clock_factory=measurement_clock_factory,
             sleep_ms=sleep_ms,
+            output_audio_limit_bytes=min(
+                MAX_OUTPUT_AUDIO_BYTES,
+                max(0, MAX_OUTPUT_AUDIO_PER_RUN_BYTES - output_audio_bytes),
+            ),
         )
         running_usage = _add_usage(running_usage, result.usage)
         output_audio_bytes += result.output_audio_bytes
@@ -3279,6 +3348,10 @@ async def _execute_attempt_work(
             credential=credential,
             measurement_clock_factory=measurement_clock_factory,
             sleep_ms=sleep_ms,
+            output_audio_limit_bytes=min(
+                MAX_OUTPUT_AUDIO_BYTES,
+                max(0, MAX_OUTPUT_AUDIO_PER_RUN_BYTES - output_audio_bytes),
+            ),
         )
         running_usage = _add_usage(running_usage, result.usage)
         output_audio_bytes += result.output_audio_bytes
@@ -3293,6 +3366,44 @@ async def _execute_attempt_work(
         if not result.complete:
             break
     return results, window_results
+
+
+def _scheduled_input_audio_ms(
+    plans: Sequence[SessionPlan | NoSpeechWindowPlan],
+    no_speech_plans: Sequence[NoSpeechWindowPlan] = (),
+) -> int:
+    return sum(
+        replay_input.duration_ms
+        for plan in (*plans, *no_speech_plans)
+        for replay_input in plan.replay_inputs
+        if replay_input.kind == "audio"
+    )
+
+
+def _validate_output_audio_limit(value: int) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_OUTPUT_AUDIO_BYTES
+    ):
+        raise RunnerError("output audio limit is invalid")
+
+
+def _elapsed_milliseconds(start_ns: int, end_ns: int) -> int:
+    if (
+        isinstance(start_ns, bool)
+        or not isinstance(start_ns, int)
+        or isinstance(end_ns, bool)
+        or not isinstance(end_ns, int)
+        or start_ns < 0
+        or end_ns < start_ns
+    ):
+        raise RunnerError("elapsed clock is invalid")
+    return (end_ns - start_ns + 999_999) // 1_000_000
+
+
+def _elapsed_clock_ns() -> int:
+    return time.monotonic_ns()
 
 
 def _validate_attempt_inputs(
@@ -3341,15 +3452,7 @@ def _validate_attempt_inputs(
     ]
     if len(set(activity_ordinals)) != len(activity_ordinals):
         raise RunnerError("attempt activity ordinals must be unique")
-    if (
-        sum(
-            replay_input.duration_ms
-            for plan in (*plans, *no_speech_plans)
-            for replay_input in plan.replay_inputs
-            if replay_input.kind == "audio"
-        )
-        > 3_600_000
-    ):
+    if _scheduled_input_audio_ms(plans, no_speech_plans) > MAX_INPUT_AUDIO_PER_RUN_MS:
         raise RunnerError("attempt input audio duration exceeds the fixed cap")
     if sum(len(_connection_segments(plan)) for plan in plans) + len(no_speech_plans) > 128:
         raise RunnerError("attempt provider request count exceeds the fixed cap")

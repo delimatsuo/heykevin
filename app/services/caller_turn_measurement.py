@@ -1143,6 +1143,9 @@ def derive_audit_capsule_accounting(
     usage: dict[str, int | bool] = {
         "metadata_complete": all(unit["metadata_complete"] for unit in units),
         "provider_requests": sum(unit["provider_request_count"] for unit in units),
+        "observed_elapsed_ms": total_elapsed_ms,
+        "input_audio_duration_ms": total_input_audio_ms,
+        "output_audio_bytes": total_output_audio_bytes,
         "wall_clock_seconds": (total_elapsed_ms + 999) // 1_000,
         "input_audio_seconds": (total_input_audio_ms + 999) // 1_000,
         "output_audio_seconds": (total_output_audio_bytes + 47_999) // 48_000,
@@ -1834,28 +1837,35 @@ def _capsule_wire_observation(
 ) -> tuple[WireObservation, int]:
     ordered = sorted(facts, key=lambda value: (value["at_ms"], value["sequence"]))
     starts = [
-        value["at_ms"]
+        value
         for value in ordered
         if value["kind"] == "caller_activity_start"
         and value["activity_ordinal"] == activity_ordinal
     ]
     ends = [
-        value["at_ms"]
+        value
         for value in ordered
         if value["kind"] == "caller_activity_end"
         and value["activity_ordinal"] == activity_ordinal
     ]
     speech_ends = [
-        value["at_ms"]
+        value
         for value in ordered
         if value["kind"] == "caller_speech_end"
         and value["activity_ordinal"] == activity_ordinal
     ]
-    if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
+    if (
+        len(starts) != 1
+        or len(ends) != 1
+        or _wire_position(ends[0]) <= _wire_position(starts[0])
+    ):
         raise MeasurementError("capsule activity boundaries are invalid")
     if (
-        speech_ends != [speech_end_at_ms]
-        or not starts[0] < speech_end_at_ms <= ends[0]
+        len(speech_ends) != 1
+        or speech_ends[0]["at_ms"] != speech_end_at_ms
+        or not _wire_position(starts[0])
+        < _wire_position(speech_ends[0])
+        <= _wire_position(ends[0])
     ):
         raise MeasurementError("capsule speech boundary is invalid")
     response_opens = [
@@ -1882,7 +1892,9 @@ def _capsule_wire_observation(
     first_audio_ms = min((value["at_ms"] for value in target_audio), default=None)
     if first_audio_ms is not None:
         first_audio_ms = max(0, first_audio_ms - speech_end_at_ms)
-    premature_count = sum(value["at_ms"] < ends[0] for value in target_audio)
+    premature_count = sum(
+        _wire_position(value) < _wire_position(ends[0]) for value in target_audio
+    )
     terminal_facts = [
         value for value in ordered if value["kind"] == "response_terminal"
     ]
@@ -1890,11 +1902,11 @@ def _capsule_wire_observation(
     if any(count != 1 for count in terminal_counts.values()):
         raise MeasurementError("capsule response-terminal facts are invalid")
     terminals = {
-        value["response_ordinal"]: value["at_ms"] for value in terminal_facts
+        value["response_ordinal"]: _wire_position(value) for value in terminal_facts
     }
     audio_after_terminal_count = sum(
         value["response_ordinal"] in terminals
-        and value["at_ms"] > terminals[value["response_ordinal"]]
+        and _wire_position(value) > terminals[value["response_ordinal"]]
         for value in target_audio
     )
     response_gap_count = 0
@@ -2013,8 +2025,12 @@ def _capsule_wire_observation(
             teardown_violation_count=teardown_violation_count,
             error_code=_wire_error_code(applicable),
         ),
-        ends[0],
+        ends[0]["at_ms"],
     )
+
+
+def _wire_position(fact: Mapping[str, Any]) -> tuple[int, int]:
+    return fact["at_ms"], fact["sequence"]
 
 
 def _fact_count(facts: list[Mapping[str, Any]], kind: str) -> int:

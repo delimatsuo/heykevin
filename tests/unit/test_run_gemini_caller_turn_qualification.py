@@ -578,6 +578,9 @@ class FakeCustodyLedger:
                 final_usage_evidence_sha256=None,
                 development_provider_requests=0,
                 development_cost_microusd=0,
+                development_input_audio_ms=0,
+                development_output_audio_bytes=0,
+                development_elapsed_ms=0,
                 actual_provider_requests=0,
                 actual_cost_microusd=0,
                 campaign_max_attempts=payload["max_attempts"],
@@ -634,6 +637,9 @@ class FakeCustodyLedger:
             final_usage_evidence_sha256=None,
             development_provider_requests=0,
             development_cost_microusd=0,
+            development_input_audio_ms=0,
+            development_output_audio_bytes=0,
+            development_elapsed_ms=0,
             actual_provider_requests=0,
             actual_cost_microusd=0,
             campaign_max_attempts=prior_state.campaign_max_attempts,
@@ -654,6 +660,9 @@ class FakeCustodyLedger:
             development_usage_evidence_sha256=values["usage_evidence_sha256"],
             development_provider_requests=values["actual_provider_requests"],
             development_cost_microusd=values["actual_cost_microusd"],
+            development_input_audio_ms=values["input_audio_duration_ms"],
+            development_output_audio_bytes=values["output_audio_bytes"],
+            development_elapsed_ms=values["elapsed_ms"],
             record_sha256s=(*self._state.record_sha256s, "3" * 64),
             record_events=(*self._state.record_events, "development_checkpoint"),
             final_ledger_head_sha256="3" * 64,
@@ -1515,6 +1524,93 @@ def test_injected_session_paces_audio_reduces_one_combined_event_and_discards_ou
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
     assert base64.b64encode(b"\x01\x02\x03\x04").decode("ascii") not in json.dumps(
         result.redacted_report_dict()
+    )
+
+
+@pytest.mark.parametrize(
+    ("initial_output_audio_bytes", "expected_complete", "expected_error"),
+    (
+        (runner_module.MAX_OUTPUT_AUDIO_PER_RUN_BYTES - 4, True, None),
+        (
+            runner_module.MAX_OUTPUT_AUDIO_PER_RUN_BYTES - 3,
+            False,
+            "run_output_audio_cap_exceeded",
+        ),
+    ),
+)
+def test_attempt_work_carries_prior_split_output_into_the_run_cap(
+    initial_output_audio_bytes: int,
+    expected_complete: bool,
+    expected_error: str | None,
+) -> None:
+    session = CausallySequencedFakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(),
+            _usage_message(),
+            None,
+        ],
+        response_audio_counts=(1,),
+    )
+
+    session_results, no_speech_results = asyncio.run(
+        runner_module._execute_attempt_work(
+            (_plan(),),
+            no_speech_plans=(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=_measurement_clock_factory([0, 150, 160, 170]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+            pricing=load_pricing(PRICING_PATH),
+            run_cost_limit_microusd=10_000_000,
+            initial_output_audio_bytes=initial_output_audio_bytes,
+        )
+    )
+
+    assert no_speech_results == []
+    assert session_results[0][1].complete is expected_complete
+    assert session_results[0][1].error_code == expected_error
+    if expected_error is not None:
+        assert any(
+            isinstance(message, dict) and "usageMetadata" in message
+            for message in session.messages
+        )
+
+
+def test_attempt_work_enforces_carried_output_inside_no_speech_window() -> None:
+    session = FakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(),
+            _usage_message(),
+            None,
+        ]
+    )
+
+    session_results, no_speech_results = asyncio.run(
+        runner_module._execute_attempt_work(
+            (),
+            no_speech_plans=(_no_speech_plan(),),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+            pricing=load_pricing(PRICING_PATH),
+            run_cost_limit_microusd=10_000_000,
+            initial_output_audio_bytes=(
+                runner_module.MAX_OUTPUT_AUDIO_PER_RUN_BYTES - 3
+            ),
+        )
+    )
+
+    assert session_results == []
+    assert no_speech_results[0][1].complete is False
+    assert no_speech_results[0][1].error_code == "run_output_audio_cap_exceeded"
+    assert any(
+        isinstance(message, dict) and "usageMetadata" in message
+        for message in session.messages
     )
 
 
@@ -2781,6 +2877,11 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         order.append("connector")
         return connector
 
+    monkeypatch.setattr(
+        runner_module,
+        "_elapsed_clock_ns",
+        ReceiptClock([0, 1_500_000_000]),
+    )
     result = asyncio.run(
         execute_authorized_attempt(
             _asset_release(
@@ -2875,6 +2976,16 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     ]
     checkpoint = ledger.calls[-2][1]
     assert checkpoint["actual_cost_microusd"] == 4_992
+    assert checkpoint["input_audio_duration_ms"] == sum(
+        replay_input.duration_ms
+        for plan in (*plans, *no_speech_plans)
+        for replay_input in plan.replay_inputs
+        if replay_input.kind == "audio"
+    )
+    assert checkpoint["output_audio_bytes"] == sum(
+        unit["output_audio_bytes"] for unit in opened["accounting"]["units"]
+    )
+    assert checkpoint["elapsed_ms"] == 1_500
     assert checkpoint["usage_evidence_sha256"] == usage_evidence_sha256(
         usage,
         provider_requests=64,
@@ -3073,6 +3184,11 @@ def test_postclaim_identity_drift_blocks_before_secret_or_connector(
         "substituted_lease",
         "wrong_claim_time",
         "stale_privacy",
+        "input_exact",
+        "input_one_over",
+        "output_exhausted",
+        "output_one_over",
+        "elapsed_exhausted",
     ),
 )
 def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
@@ -3140,6 +3256,9 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         final_usage_evidence_sha256=None,
         development_provider_requests=64,
         development_cost_microusd=4_992,
+        development_input_audio_ms=2_560,
+        development_output_audio_bytes=256,
+        development_elapsed_ms=1_000,
         actual_provider_requests=0,
         actual_cost_microusd=0,
         campaign_max_attempts=3,
@@ -3155,6 +3274,36 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         ),
         final_ledger_head_sha256="5" * 64,
     )
+    holdout_input_audio_ms = sum(
+        replay_input.duration_ms
+        for plan in (*plans, *no_speech_plans)
+        for replay_input in plan.replay_inputs
+        if replay_input.kind == "audio"
+    )
+    if resume_mode == "input_exact":
+        state = replace(
+            state,
+            development_input_audio_ms=(
+                runner_module.MAX_INPUT_AUDIO_PER_RUN_MS - holdout_input_audio_ms
+            ),
+        )
+    elif resume_mode == "input_one_over":
+        state = replace(
+            state,
+            development_input_audio_ms=(
+                runner_module.MAX_INPUT_AUDIO_PER_RUN_MS - holdout_input_audio_ms + 1
+            ),
+        )
+    elif resume_mode in {"output_exhausted", "output_one_over"}:
+        state = replace(
+            state,
+            development_output_audio_bytes=(
+                runner_module.MAX_OUTPUT_AUDIO_PER_RUN_BYTES
+                + (resume_mode == "output_one_over")
+            ),
+        )
+    elif resume_mode == "elapsed_exhausted":
+        state = replace(state, development_elapsed_ms=30_000)
     monkeypatch.setattr(
         runner_module,
         "_load_pinned_approval_public_key",
@@ -3252,7 +3401,7 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         capsule_path=capsule_path,
         capsule_sink=PrivateFileCapsuleSink(),
     )
-    if resume_mode != "durable":
+    if resume_mode not in {"durable", "input_exact"}:
         error = (
             "durably consume the holdout claim"
             if resume_mode == "stale_snapshot"
@@ -3261,14 +3410,23 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
             else "durably consume the holdout claim"
             if resume_mode == "wrong_claim_time"
             else "fresh"
+            if resume_mode == "stale_privacy"
+            else "remaining resource budget"
         )
         with pytest.raises(ValueError, match=error):
             asyncio.run(execution)
-        expected_order = (
-            ["export_snapshot"]
-            if resume_mode == "stale_privacy"
-            else ["export_snapshot", "asset", "resume_holdout"]
-        )
+        expected_order = ["export_snapshot"] if resume_mode == "stale_privacy" else [
+            "export_snapshot",
+            "asset",
+            "resume_holdout",
+        ]
+        if resume_mode in {
+            "input_one_over",
+            "output_exhausted",
+            "output_one_over",
+            "elapsed_exhausted",
+        }:
+            expected_order = ["export_snapshot", "asset"]
         if resume_mode in {"stale_snapshot", "wrong_claim_time"}:
             expected_order.append("export_snapshot")
         assert order == expected_order

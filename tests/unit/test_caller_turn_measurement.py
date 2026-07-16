@@ -1137,6 +1137,154 @@ def test_measurement_detects_foreign_subphrase_inside_one_large_fragment() -> No
     assert record.contamination_count == 1
 
 
+def test_measurement_detects_unique_foreign_word_inside_one_large_fragment() -> None:
+    current = ActivityReference(
+        3,
+        "en",
+        "please schedule the annual heating system inspection for next Tuesday morning",
+    )
+    foreign = ActivityReference(
+        4,
+        "en",
+        "the caller reported a blue leak beneath the kitchen sink yesterday",
+    )
+    measurement = replace(
+        _activity_input(),
+        activity_ordinal=3,
+        references=(current, foreign),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                (
+                    "please schedule the annual heating system inspection blue "
+                    "for next Tuesday morning"
+                ),
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 2, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.assignment_status == "matched"
+    assert record.contamination_count == 1
+
+
+def test_measurement_detects_unique_foreign_chinese_character() -> None:
+    current = ActivityReference(3, "zh", "请安排下周二上午检查供暖系统")
+    foreign = ActivityReference(4, "zh", "厨房水槽下面发现漏水问题")
+    measurement = replace(
+        _activity_input(),
+        activity_ordinal=3,
+        language="zh",
+        references=(current, foreign),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                "请安排下周二上午检查供暖漏系统",
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 2, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.assignment_status == "matched"
+    assert record.contamination_count == 1
+
+
+def test_measurement_ignores_single_token_shared_by_foreign_references() -> None:
+    current = ActivityReference(
+        3,
+        "en",
+        "please schedule the annual heating system inspection for next Tuesday morning",
+    )
+    measurement = replace(
+        _activity_input(),
+        activity_ordinal=3,
+        references=(
+            current,
+            ActivityReference(4, "en", "the caller reported a blue kitchen leak"),
+            ActivityReference(5, "en", "the customer requested a blue bathroom repair"),
+        ),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                (
+                    "please schedule the annual heating system inspection blue "
+                    "for next Tuesday morning"
+                ),
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 2, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.assignment_status == "matched"
+    assert record.contamination_count == 0
+
+
+def test_measurement_does_not_apply_chinese_character_units_to_english_reference() -> None:
+    current = ActivityReference(
+        3,
+        "en",
+        "please schedule the annual heating system inspection for next Tuesday morning",
+    )
+    measurement = replace(
+        _activity_input(),
+        activity_ordinal=3,
+        references=(
+            current,
+            ActivityReference(4, "en", "the caller reported a blue kitchen leak"),
+            ActivityReference(5, "zh", "厨房水槽下面发现漏水问题"),
+        ),
+        events=(
+            CallerTurnEvent(
+                CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT,
+                10,
+                1,
+                1,
+                (
+                    "please schedule the annual heating system inspection b "
+                    "for next Tuesday morning"
+                ),
+            ),
+            CallerTurnEvent(CallerTurnEventKind.TURN_COMPLETE, 20, 2, 1),
+        ),
+    )
+
+    record = measure_activity(
+        measurement,
+        alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert record.assignment_status == "matched"
+    assert record.contamination_count == 0
+
+
 def test_compensating_missing_and_extra_turns_follow_causal_activity_ownership() -> None:
     capsule = _literal_wire_capsule()
     capsule["schema_id"] = "gate_0b_audit_capsule_v5"

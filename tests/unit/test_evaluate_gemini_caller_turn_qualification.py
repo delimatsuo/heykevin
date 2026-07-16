@@ -1429,6 +1429,28 @@ def test_evaluator_recomputes_complete_gate_and_publishes_only_aggregates() -> N
     assert "commitment" not in serialized
 
 
+def test_evaluator_vetoes_contamination_even_when_fidelity_metrics_pass() -> None:
+    records = tuple(
+        _activity_record(
+            policy_ms=100,
+            ordinal=ordinal,
+            split="development",
+        )
+        for ordinal in range(128)
+    )
+    records = (replace(records[0], contamination_count=1), *records[1:])
+
+    sample = evaluator_module._evaluate_sample(
+        records,
+        no_speech_records=tuple(_no_speech_record(ordinal) for ordinal in range(32)),
+    )
+
+    assert sample["fidelity_passed"] is True
+    assert sample["interaction_passed"] is True
+    assert sample["assembly_passed"] is False
+    assert sample["passed"] is False
+
+
 def test_policy_selection_uses_lowest_passing_development_policy_only() -> None:
     artifact, public_key = _artifact(
         selected_policy_ms=250,

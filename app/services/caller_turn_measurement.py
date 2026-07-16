@@ -623,7 +623,7 @@ def _fragment_is_foreign(
         for reference in references
         if reference.activity_ordinal == activity_ordinal
     )
-    return any(
+    if any(
         reference.activity_ordinal != activity_ordinal
         and _fragment_contains_unique_foreign_sequence(
             fragment,
@@ -631,6 +631,12 @@ def _fragment_is_foreign(
             foreign_reference=reference,
         )
         for reference in references
+    ):
+        return True
+    return _fragment_contains_unique_foreign_token(
+        fragment,
+        activity_ordinal=activity_ordinal,
+        references=references,
     )
 
 
@@ -682,6 +688,51 @@ def _fragment_contains_unique_foreign_sequence(
             for index in range(len(foreign_tokens) - 1)
         )
     )
+
+
+def _fragment_contains_unique_foreign_token(
+    fragment: str,
+    *,
+    activity_ordinal: int,
+    references: tuple[ActivityReference, ...],
+) -> bool:
+    expected_reference = next(
+        reference
+        for reference in references
+        if reference.activity_ordinal == activity_ordinal
+    )
+    foreign_references = tuple(
+        reference
+        for reference in references
+        if reference.activity_ordinal != activity_ordinal
+    )
+    for language in sorted({reference.language for reference in foreign_references}):
+        fragment_tokens = set(_normalized_tokens(fragment, language))
+        expected_tokens = set(_normalized_tokens(expected_reference.text, language))
+        candidate_tokens = {
+            token
+            for reference in foreign_references
+            if reference.language == language
+            for token in _normalized_tokens(reference.text, language)
+        }
+        foreign_owner_counts = Counter(
+            token
+            for reference in foreign_references
+            for token in set(_normalized_tokens(reference.text, language))
+        )
+        if any(
+            token in candidate_tokens
+            and token not in expected_tokens
+            and foreign_owner_counts[token] == 1
+            for token in fragment_tokens
+        ):
+            return True
+    return False
+
+
+def _normalized_tokens(text: str, language: str) -> tuple[str, ...]:
+    normalized = normalize_text(text, language)
+    return normalized.characters if normalized.words is None else normalized.words
 
 
 def _contains_tokens(container: tuple[str, ...], target: tuple[str, ...]) -> bool:

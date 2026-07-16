@@ -8,8 +8,6 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-# Subprocess use is limited to fixed git argv with shell execution disabled.
-import subprocess  # nosec B404
 import sys
 import tempfile
 from typing import Sequence
@@ -42,24 +40,10 @@ from app.services.qualification_environment import (  # noqa: E402
 )
 
 
-GIT_BINARY = "/usr/bin/git"
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", choices=("before", "after"), required=True)
     return parser
-
-
-def _head() -> str:
-    completed = subprocess.run(
-        [GIT_BINARY, "rev-parse", "HEAD"],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )  # nosec B603
-    return completed.stdout.strip()
 
 
 def _snapshot_path(source_sha: str) -> Path:
@@ -95,8 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             REPO_ROOT,
             expected_target="verify-environment",
         )
-        source_sha = _head()
         startup_policy = startup.policy_report_dict()
+        source_sha = startup_policy["source_preflight"]["source_sha"]
         report = _identity_report(source_sha, trusted_startup=startup_policy)
         snapshot = _snapshot_path(source_sha)
         if args.phase == "before":
@@ -111,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if expected != report:
                 raise IdentityError("before and after environment identity differ")
             snapshot.unlink()
-    except (IdentityError, OSError, subprocess.SubprocessError):
+    except (IdentityError, OSError):
         print('{"error_code":"identity_verification_failed","status":"fail"}')
         return 1
     print(

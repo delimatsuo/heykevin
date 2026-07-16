@@ -36,6 +36,8 @@ jobs:
     # depth). Push and workflow_dispatch are always allowed.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -53,10 +55,37 @@ jobs:
       - name: Sync locked dependencies
         run: uv sync --locked --extra dev --python 3.12.13
 
+      - name: Capture clean qualification startup identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          probe_path="$RUNNER_TEMP/gate0b-startup-probe.json"
+          uv run --locked --no-sync --extra dev --python 3.12.13 \
+            python -I -S scripts/launch_qualification.py probe > "$probe_path"
+          python -I -S - "$probe_path" >> "$GITHUB_ENV" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          print(
+              "QUALIFICATION_EXPECTED_SOURCE_SHA="
+              + report["source_preflight"]["source_sha"]
+          )
+          print(
+              "QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256="
+              + report["runtime_site_packages_manifest"]["manifest_sha256"]
+          )
+          PY
+
       - name: Capture qualification environment before tests
         run: >-
           uv run --locked --no-sync --extra dev --python 3.12.13
-          python -I -S scripts/launch_qualification.py verify-environment --phase before
+          python -I -S scripts/launch_qualification.py verify-environment
+          --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA"
+          --expected-runtime-site-packages-sha256 "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256"
+          --phase before
 
       - name: Run tests
         run: uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest --tb=short -q
@@ -107,7 +136,10 @@ jobs:
       - name: Verify qualification environment after tests
         run: >-
           uv run --locked --no-sync --extra dev --python 3.12.13
-          python -I -S scripts/launch_qualification.py verify-environment --phase after
+          python -I -S scripts/launch_qualification.py verify-environment
+          --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA"
+          --expected-runtime-site-packages-sha256 "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256"
+          --phase after
 
   deploy-staging:
     name: Deploy to Staging

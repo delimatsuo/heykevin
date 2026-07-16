@@ -3,6 +3,7 @@
 import base64
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 import json
 
 from cryptography.hazmat.primitives import serialization
@@ -35,12 +36,63 @@ from app.services.caller_turn_measurement import (
     verify_signed_record_root,
 )
 from app.services.caller_turns import CallerTurnEvent, CallerTurnEventKind
-from app.services.qualification_environment import execution_identity_report_sha256
+from app.services.qualification_environment import (
+    EXECUTION_IDENTITY_SCHEMA_ID,
+    execution_identity_report_sha256,
+)
+from app.services.qualification_identity import (
+    EXECUTION_DEPENDENCY_PATHS as STARTUP_DEPENDENCY_PATHS,
+    RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+    TRUSTED_STARTUP_POLICY_SCHEMA_ID,
+    canonical_json_bytes,
+)
 
 
 CAMPAIGN_KEY = b"c" * 32
+_INTERPRETER_INSTALLATION_UNSIGNED = {
+    "schema_id": "gate_0b_interpreter_installation_v1",
+    "python_executable_sha256": "3" * 64,
+    "stdlib_source_bytecode_sha256": "4" * 64,
+    "stdlib_source_bytecode_count": 1,
+    "stdlib_archive_sha256": "5" * 64,
+    "stdlib_archive_count": 0,
+    "native_extension_sha256": "6" * 64,
+    "native_extension_count": 1,
+}
+INTERPRETER_INSTALLATION = {
+    **_INTERPRETER_INSTALLATION_UNSIGNED,
+    "installation_sha256": sha256(
+        canonical_json_bytes(_INTERPRETER_INSTALLATION_UNSIGNED)
+    ).hexdigest(),
+}
+_RUNTIME_SITE_PACKAGES_UNSIGNED = {
+    "schema_id": RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+    "source_count": 1,
+    "bytecode_count": 0,
+    "native_extension_count": 0,
+    "metadata_data_count": 0,
+    "file_count": 1,
+    "files_sha256": "7" * 64,
+}
+RUNTIME_SITE_PACKAGES_MANIFEST = {
+    **_RUNTIME_SITE_PACKAGES_UNSIGNED,
+    "manifest_sha256": sha256(
+        canonical_json_bytes(_RUNTIME_SITE_PACKAGES_UNSIGNED)
+    ).hexdigest(),
+}
+SOURCE_PREFLIGHT = {
+    "source_sha": "a" * 40,
+    "clean": True,
+    "dependencies": {
+        sha256(path.encode("utf-8")).hexdigest(): {
+            "worktree_sha256": "1" * 64,
+            "git_blob_id": "2" * 40,
+        }
+        for path in STARTUP_DEPENDENCY_PATHS
+    },
+}
 TRUSTED_STARTUP_REPORT = {
-    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "schema_id": TRUSTED_STARTUP_POLICY_SCHEMA_ID,
     "startup_flags": {
         "bytes_warning": 0,
         "debug": 0,
@@ -71,42 +123,37 @@ TRUSTED_STARTUP_REPORT = {
     "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
     "runtime_pth_files_sha256": {},
     "ignored_startup_hook_files_sha256": {},
+    "source_preflight": SOURCE_PREFLIGHT,
+    "interpreter_installation": INTERPRETER_INSTALLATION,
+    "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
+}
+RUNTIME_ENVIRONMENT_IDENTITY = {
+    "python_version": "3.12.13",
+    "uv_version": "0.11.7",
+    "python_executable_sha256": "3" * 64,
+    "uv_executable_sha256": "4" * 64,
+    "python_executable_location_sha256": "5" * 64,
+    "uv_executable_location_sha256": "6" * 64,
+    "platform_id": "darwin-test",
+    "architecture": "arm64",
+    "unicode_version": "15.0.0",
+    "monotonic_clock_implementation": "mach_absolute_time",
+    "monotonic_clock_resolution_ns": 1,
+    "bytecode_write_disabled": True,
+    "openssl_version": "OpenSSL 3.0.0",
+    "ca_bundle_sha256": "7" * 64,
+    "lock_sha256": "8" * 64,
+    "codec_golden_sha256": "9" * 64,
+    "import_sha256": {"app.services.example": "a" * 64},
+    "distributions": {"test-package": "1.0.0"},
+    "distribution_files_sha256": {"test-package": "b" * 64},
+    "interpreter_installation": INTERPRETER_INSTALLATION,
+    "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
 }
 RUNTIME_IDENTITY_REPORT = {
-    "schema_id": "gate_0b_environment_identity_v3",
-    "source": {
-        "source_sha": "a" * 40,
-        "clean": True,
-        "dependencies": {
-            "0" * 64: {
-                "worktree_sha256": "1" * 64,
-                "git_blob_id": "2" * 40,
-            }
-        },
-    },
-    "environment": {
-        "python_version": "3.12.13",
-        "uv_version": "0.11.7",
-        "python_executable_sha256": "3" * 64,
-        "uv_executable_sha256": "4" * 64,
-        "python_executable_location_sha256": "5" * 64,
-        "uv_executable_location_sha256": "6" * 64,
-        "runtime_image_kind": "interpreter",
-        "runtime_image_sha256": "3" * 64,
-        "platform_id": "darwin-test",
-        "architecture": "arm64",
-        "unicode_version": "15.0.0",
-        "monotonic_clock_implementation": "mach_absolute_time",
-        "monotonic_clock_resolution_ns": 1,
-        "bytecode_write_disabled": True,
-        "openssl_version": "OpenSSL 3.0.0",
-        "ca_bundle_sha256": "7" * 64,
-        "lock_sha256": "8" * 64,
-        "codec_golden_sha256": "9" * 64,
-        "import_sha256": {"app.services.example": "a" * 64},
-        "distributions": {"test-package": "1.0.0"},
-        "distribution_files_sha256": {"test-package": "b" * 64},
-    },
+    "schema_id": EXECUTION_IDENTITY_SCHEMA_ID,
+    "source": SOURCE_PREFLIGHT,
+    "environment": RUNTIME_ENVIRONMENT_IDENTITY,
     "trusted_startup": TRUSTED_STARTUP_REPORT,
 }
 RUNTIME_IDENTITY_SHA256 = execution_identity_report_sha256(RUNTIME_IDENTITY_REPORT)
@@ -211,11 +258,20 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
                 "event_activity_ordinals": [3],
                 "wire_facts": [
                     {
+                        "kind": "connection_open",
+                        "at_ms": 0,
+                        "response_ordinal": None,
+                        "activity_ordinal": None,
+                        "sequence": 0,
+                        "epoch": 1,
+                        "audio_bytes": 0,
+                    },
+                    {
                         "kind": "caller_audio_sent",
                         "at_ms": 5,
                         "response_ordinal": None,
                         "activity_ordinal": 3,
-                        "sequence": 0,
+                        "sequence": 1,
                         "epoch": 1,
                         "audio_bytes": 640,
                     }
@@ -601,23 +657,24 @@ def _literal_wire_capsule() -> dict[str, object]:
                 ],
                 "event_activity_ordinals": [3, 3],
                 "wire_facts": [
-                    fact("caller_activity_start", 0, 0),
-                    fact("caller_audio_sent", 20, 1, audio_bytes=640),
-                    fact("caller_speech_end", 80, 2),
-                    fact("caller_activity_end", 100, 3),
-                    fact("response_open", 220, 4, response_ordinal=1),
+                    fact("connection_open", 0, 0, activity_ordinal=None),
+                    fact("caller_activity_start", 0, 1),
+                    fact("caller_audio_sent", 20, 2, audio_bytes=640),
+                    fact("caller_speech_end", 80, 3),
+                    fact("caller_activity_end", 100, 4),
+                    fact("response_open", 220, 5, response_ordinal=1),
                     fact(
                         "audio_received",
                         220,
-                        5,
+                        6,
                         response_ordinal=1,
                         audio_bytes=640,
                     ),
-                    fact("response_terminal", 230, 6, response_ordinal=1),
+                    fact("response_terminal", 230, 7, response_ordinal=1),
                     fact(
                         "teardown_complete",
                         240,
-                        7,
+                        8,
                         activity_ordinal=None,
                     ),
                 ],
@@ -649,21 +706,61 @@ def _normalize_wire_sequences(capsule: dict[str, object]) -> None:
     session = sessions[0]
     facts = session["wire_facts"]
     assert isinstance(facts, list)
+    if not any(fact["kind"] == "connection_open" for fact in facts):
+        facts.append(
+            {
+                "kind": "connection_open",
+                "at_ms": 0,
+                "response_ordinal": None,
+                "activity_ordinal": None,
+                "sequence": -1,
+                "epoch": 1,
+                "audio_bytes": 0,
+            }
+        )
     facts.sort(key=lambda value: (value["at_ms"], value["sequence"]))
     for sequence, fact in enumerate(facts):
         fact["sequence"] = sequence
     sent_audio = [fact for fact in facts if fact["kind"] == "caller_audio_sent"]
     session["event_activity_ordinals"] = [
-        max(
-            (
-                fact
-                for fact in sent_audio
-                if fact["epoch"] == event["epoch"] and fact["at_ms"] <= event["at_ms"]
-            ),
-            key=lambda fact: (fact["at_ms"], fact["sequence"]),
+        (
+            min(
+                (fact for fact in sent_audio if fact["epoch"] == event["epoch"]),
+                key=lambda fact: (fact["at_ms"], fact["sequence"]),
+            )
+            if event["kind"] == "reconnect_started"
+            else max(
+                (
+                    fact
+                    for fact in sent_audio
+                    if fact["epoch"] == event["epoch"]
+                    and fact["at_ms"] <= event["at_ms"]
+                ),
+                key=lambda fact: (fact["at_ms"], fact["sequence"]),
+            )
         )["activity_ordinal"]
         for event in session["events"]
     ]
+    windows = capsule["no_speech_windows"]
+    assert isinstance(windows, list)
+    for window in windows:
+        window_facts = window["wire_facts"]
+        assert isinstance(window_facts, list)
+        if not any(fact["kind"] == "connection_open" for fact in window_facts):
+            window_facts.append(
+                {
+                    "kind": "connection_open",
+                    "at_ms": 0,
+                    "response_ordinal": None,
+                    "activity_ordinal": None,
+                    "sequence": 0,
+                    "epoch": 1,
+                    "audio_bytes": 0,
+                }
+            )
+        window_facts.sort(key=lambda value: (value["at_ms"], value["sequence"]))
+        for sequence, fact in enumerate(window_facts):
+            fact["sequence"] = sequence
 
 
 @pytest.mark.parametrize(
@@ -903,13 +1000,12 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
         if fact["kind"] == "tool_call_open"
     )
     open_fact["epoch"] = 2
-    records, _ = derive_primitive_records_from_capsule(
-        wrong_epoch,
-        policies_ms=(250,),
-        commitment_key=CAMPAIGN_KEY,
-    )
-    cancellation = next(record for record in records if record.activity_ordinal == 3)
-    assert cancellation.interruption_tail_ms is None
+    with pytest.raises(MeasurementError, match="topology"):
+        derive_primitive_records_from_capsule(
+            wrong_epoch,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
 
 
 def _two_activity_assembly_capsule(
@@ -953,28 +1049,33 @@ def _two_activity_assembly_capsule(
 
     if restarted:
         session["wire_facts"] = [
-            fact("caller_activity_start", 0, 0, activity=2, epoch=1),
-            fact("caller_audio_sent", 20, 1, activity=2, epoch=1, audio_bytes=640),
-            fact("caller_speech_end", 60, 2, activity=2, epoch=1),
-            fact("caller_activity_end", 70, 3, activity=2, epoch=1),
-            fact("caller_activity_start", 80, 4, activity=3, epoch=2),
-            fact("caller_audio_sent", 90, 5, activity=3, epoch=2, audio_bytes=640),
-            fact("caller_speech_end", 150, 6, activity=3, epoch=2),
-            fact("caller_activity_end", 160, 7, activity=3, epoch=2),
-            fact("teardown_complete", 800, 8, activity=None, epoch=2),
+            fact("connection_open", 0, 0, activity=None, epoch=1),
+            fact("caller_activity_start", 0, 1, activity=2, epoch=1),
+            fact("caller_audio_sent", 20, 2, activity=2, epoch=1, audio_bytes=640),
+            fact("caller_speech_end", 60, 3, activity=2, epoch=1),
+            fact("caller_activity_end", 70, 4, activity=2, epoch=1),
+            fact("teardown_complete", 75, 5, activity=None, epoch=1),
+            fact("connection_open", 80, 6, activity=None, epoch=2),
+            fact("caller_activity_start", 80, 7, activity=3, epoch=2),
+            fact("caller_audio_sent", 90, 8, activity=3, epoch=2, audio_bytes=640),
+            fact("caller_speech_end", 150, 9, activity=3, epoch=2),
+            fact("caller_activity_end", 160, 10, activity=3, epoch=2),
+            fact("teardown_complete", 800, 11, activity=None, epoch=2),
         ]
+        capsule["accounting"]["units"][0]["provider_request_count"] = 2  # type: ignore[index]
         activity_bounds = ((60, 70, 1), (150, 160, 2))
     else:
         session["wire_facts"] = [
-            fact("caller_activity_start", 0, 0, activity=2, epoch=1),
-            fact("caller_audio_sent", 20, 1, activity=2, epoch=1, audio_bytes=640),
-            fact("caller_speech_end", 80, 2, activity=2, epoch=1),
-            fact("caller_activity_end", 100, 3, activity=2, epoch=1),
-            fact("caller_activity_start", 150, 4, activity=3, epoch=1),
-            fact("caller_audio_sent", 180, 5, activity=3, epoch=1, audio_bytes=640),
-            fact("caller_speech_end", 260, 6, activity=3, epoch=1),
-            fact("caller_activity_end", 280, 7, activity=3, epoch=1),
-            fact("teardown_complete", 800, 8, activity=None, epoch=1),
+            fact("connection_open", 0, 0, activity=None, epoch=1),
+            fact("caller_activity_start", 0, 1, activity=2, epoch=1),
+            fact("caller_audio_sent", 20, 2, activity=2, epoch=1, audio_bytes=640),
+            fact("caller_speech_end", 80, 3, activity=2, epoch=1),
+            fact("caller_activity_end", 100, 4, activity=2, epoch=1),
+            fact("caller_activity_start", 150, 5, activity=3, epoch=1),
+            fact("caller_audio_sent", 180, 6, activity=3, epoch=1, audio_bytes=640),
+            fact("caller_speech_end", 260, 7, activity=3, epoch=1),
+            fact("caller_activity_end", 280, 8, activity=3, epoch=1),
+            fact("teardown_complete", 800, 9, activity=None, epoch=1),
         ]
         activity_bounds = ((80, 100, 1), (260, 280, 1))
 
@@ -1077,12 +1178,11 @@ def test_session_replay_marks_foreign_late_fragment_on_all_merged_owners() -> No
     assert by_activity[3].late_fragment_mutation_count == 0
 
 
-def test_session_replay_attributes_restart_finalization_and_stale_epoch() -> None:
+def test_session_replay_attributes_restart_finalization_without_staling_new_epoch() -> None:
     capsule = _two_activity_assembly_capsule(
         (
             ("input_transcript_fragment", 50, 1, "first phrase"),
-            ("reconnect_started", 100, 2, ""),
-            ("input_transcript_fragment", 110, 1, "stale fragment"),
+            ("reconnect_started", 80, 2, ""),
             ("input_transcript_fragment", 120, 2, "second phrase"),
             ("turn_complete", 130, 2, ""),
         ),
@@ -1099,11 +1199,94 @@ def test_session_replay_attributes_restart_finalization_and_stale_epoch() -> Non
     by_activity = {record.activity_ordinal: record for record in records}
     assert by_activity[2].assembled_turn_count == 1
     assert by_activity[2].observed_lifecycle_status == "partial"
-    assert by_activity[2].stale_count == 1
+    assert by_activity[2].stale_count == 0
     assert by_activity[2].cross_epoch_acceptance_count == 0
     assert by_activity[3].assembled_turn_count == 1
     assert by_activity[3].observed_lifecycle_status == "retrospective_complete"
     assert by_activity[3].stale_count == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "omitted_reconnect",
+        "duplicate_reconnect",
+        "duplicate_connection_open",
+        "inflated_provider_request_count",
+        "stale_old_epoch_event",
+        "inconsistent_activity_epoch",
+    ),
+)
+def test_capsule_rejects_inconsistent_restart_and_request_topology(
+    mutation: str,
+) -> None:
+    capsule = _two_activity_assembly_capsule(
+        (
+            ("input_transcript_fragment", 50, 1, "first phrase"),
+            ("reconnect_started", 80, 2, ""),
+            ("input_transcript_fragment", 120, 2, "second phrase"),
+            ("turn_complete", 130, 2, ""),
+        ),
+        restarted=True,
+        first_lifecycle="partial",
+    )
+    session = capsule["sessions"][0]  # type: ignore[index]
+    events = session["events"]
+    owners = session["event_activity_ordinals"]
+    facts = session["wire_facts"]
+    assert isinstance(events, list)
+    assert isinstance(owners, list)
+    assert isinstance(facts, list)
+
+    if mutation == "omitted_reconnect":
+        marker_index = next(
+            index for index, event in enumerate(events) if event["kind"] == "reconnect_started"
+        )
+        events.pop(marker_index)
+        owners.pop(marker_index)
+    elif mutation == "duplicate_reconnect":
+        marker_index = next(
+            index for index, event in enumerate(events) if event["kind"] == "reconnect_started"
+        )
+        events.insert(marker_index + 1, dict(events[marker_index]))
+        owners.insert(marker_index + 1, owners[marker_index])
+    elif mutation == "duplicate_connection_open":
+        second_open = next(
+            fact
+            for fact in facts
+            if fact["kind"] == "connection_open" and fact["epoch"] == 2
+        )
+        facts.append(dict(second_open))
+        _normalize_wire_sequences(capsule)
+    elif mutation == "inflated_provider_request_count":
+        capsule["accounting"]["units"][0]["provider_request_count"] = 3  # type: ignore[index]
+    elif mutation == "stale_old_epoch_event":
+        marker_index = next(
+            index for index, event in enumerate(events) if event["kind"] == "reconnect_started"
+        )
+        events.insert(
+            marker_index + 1,
+            {
+                "kind": "input_transcript_fragment",
+                "at_ms": 90,
+                "sequence": 0,
+                "epoch": 1,
+                "text": "stale fragment",
+            },
+        )
+        owners.insert(marker_index + 1, 2)
+    else:
+        capsule["activities"][1]["expected_epoch"] = 3  # type: ignore[index]
+
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+
+    with pytest.raises(MeasurementError, match="topology"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
 
 
 def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> None:

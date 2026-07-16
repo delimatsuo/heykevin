@@ -4,15 +4,55 @@ from copy import deepcopy
 from hashlib import sha256
 
 import app.services.qualification_environment as environment_module
-from app.services.qualification_identity import IdentityError, canonical_json_bytes
+from app.services.qualification_identity import (
+    EXECUTION_DEPENDENCY_PATHS,
+    IdentityError,
+    canonical_json_bytes,
+)
 import pytest
 import scripts.run_gemini_caller_turn_qualification as runner_module
 import scripts.verify_qualification_environment as verifier_module
 
 
 SOURCE_SHA = "b" * 40
+INTERPRETER_INSTALLATION = {
+    "schema_id": "gate_0b_interpreter_installation_v1",
+    "python_executable_sha256": "3" * 64,
+    "stdlib_source_bytecode_sha256": "4" * 64,
+    "stdlib_source_bytecode_count": 1,
+    "stdlib_archive_sha256": "5" * 64,
+    "stdlib_archive_count": 0,
+    "native_extension_sha256": "6" * 64,
+    "native_extension_count": 1,
+}
+INTERPRETER_INSTALLATION["installation_sha256"] = sha256(
+    canonical_json_bytes(INTERPRETER_INSTALLATION)
+).hexdigest()
+RUNTIME_SITE_PACKAGES_MANIFEST = {
+    "schema_id": "gate_0b_runtime_site_packages_v1",
+    "source_count": 1,
+    "bytecode_count": 0,
+    "native_extension_count": 1,
+    "metadata_data_count": 1,
+    "file_count": 3,
+    "files_sha256": "8" * 64,
+}
+RUNTIME_SITE_PACKAGES_MANIFEST["manifest_sha256"] = sha256(
+    canonical_json_bytes(RUNTIME_SITE_PACKAGES_MANIFEST)
+).hexdigest()
+SOURCE_PREFLIGHT = {
+    "source_sha": SOURCE_SHA,
+    "clean": True,
+    "dependencies": {
+        sha256(path.encode("utf-8")).hexdigest(): {
+            "worktree_sha256": "1" * 64,
+            "git_blob_id": "2" * 40,
+        }
+        for path in EXECUTION_DEPENDENCY_PATHS
+    },
+}
 STARTUP_POLICY = {
-    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "schema_id": "gate_0b_trusted_startup_policy_v3",
     "startup_flags": {
         "bytes_warning": 0,
         "debug": 0,
@@ -43,6 +83,9 @@ STARTUP_POLICY = {
     "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
     "runtime_pth_files_sha256": {},
     "ignored_startup_hook_files_sha256": {},
+    "source_preflight": SOURCE_PREFLIGHT,
+    "interpreter_installation": INTERPRETER_INSTALLATION,
+    "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
 }
 
 
@@ -72,7 +115,7 @@ def test_verifier_requires_trusted_startup_before_building_an_identity_claim(
         "capture_trusted_startup_identity",
         reject_startup,
     )
-    monkeypatch.setattr(verifier_module, "_head", identity_must_not_run)
+    monkeypatch.setattr(verifier_module, "_identity_report", identity_must_not_run)
 
     assert verifier_module.main(["--phase", "before"]) == 1
     assert capsys.readouterr().out.strip() == (
@@ -92,12 +135,11 @@ def test_verifier_binds_trusted_startup_to_before_and_after_snapshot(
         "capture_trusted_startup_identity",
         lambda *_args, **_kwargs: _Identity(startup_report),
     )
-    monkeypatch.setattr(verifier_module, "_head", lambda: SOURCE_SHA)
     monkeypatch.setattr(
         verifier_module,
         "_identity_report",
         lambda _source_sha, *, trusted_startup: {
-            "schema_id": "gate_0b_environment_identity_v3",
+            "schema_id": "gate_0b_environment_identity_v5",
             "trusted_startup": deepcopy(trusted_startup),
         },
     )
@@ -116,7 +158,16 @@ def test_verifier_binds_trusted_startup_to_before_and_after_snapshot(
 
 def test_verifier_and_runtime_use_the_same_environment_identity_contract(monkeypatch) -> None:
     source_calls: list[tuple[object, str, tuple[str, ...]]] = []
-    environment_calls: list[tuple[object, str, str, tuple[str, ...]]] = []
+    environment_calls: list[
+        tuple[
+            object,
+            str,
+            str,
+            tuple[str, ...],
+            dict[str, object],
+            dict[str, object],
+        ]
+    ] = []
 
     def capture_source(repo_root, *, expected_source_sha, dependency_paths):
         source_calls.append((repo_root, expected_source_sha, tuple(dependency_paths)))
@@ -125,17 +176,33 @@ def test_verifier_and_runtime_use_the_same_environment_identity_contract(monkeyp
                 "source_sha": SOURCE_SHA,
                 "clean": True,
                 "dependencies": {
-                    "0" * 64: {
+                    sha256(path.encode("utf-8")).hexdigest(): {
                         "worktree_sha256": "1" * 64,
                         "git_blob_id": "2" * 40,
                     }
+                    for path in EXECUTION_DEPENDENCY_PATHS
                 },
             }
         )
 
-    def capture_environment(*, repo_root, expected_python, expected_uv, import_names):
+    def capture_environment(
+        *,
+        repo_root,
+        expected_python,
+        expected_uv,
+        import_names,
+        expected_interpreter_installation,
+        expected_runtime_site_packages_manifest,
+    ):
         environment_calls.append(
-            (repo_root, expected_python, expected_uv, tuple(import_names))
+            (
+                repo_root,
+                expected_python,
+                expected_uv,
+                tuple(import_names),
+                expected_interpreter_installation,
+                expected_runtime_site_packages_manifest,
+            )
         )
         return _Identity(
             {
@@ -145,8 +212,10 @@ def test_verifier_and_runtime_use_the_same_environment_identity_contract(monkeyp
                 "uv_executable_sha256": "4" * 64,
                 "python_executable_location_sha256": "5" * 64,
                 "uv_executable_location_sha256": "6" * 64,
-                "runtime_image_kind": "interpreter",
-                "runtime_image_sha256": "3" * 64,
+                "interpreter_installation": deepcopy(INTERPRETER_INSTALLATION),
+                "runtime_site_packages_manifest": deepcopy(
+                    RUNTIME_SITE_PACKAGES_MANIFEST
+                ),
                 "platform_id": "darwin-test",
                 "architecture": "arm64",
                 "unicode_version": "15.0.0",
@@ -188,6 +257,8 @@ def test_verifier_and_runtime_use_the_same_environment_identity_contract(monkeyp
     assert runtime_identity.report == verifier_report
     assert source_calls[0] == source_calls[1]
     assert environment_calls[0] == environment_calls[1]
+    assert environment_calls[0][4] == INTERPRETER_INSTALLATION
+    assert environment_calls[0][5] == RUNTIME_SITE_PACKAGES_MANIFEST
     assert "app/services/qualification_ledger.py" in source_calls[0][2]
     assert "app/services/qualification_allocation.py" in source_calls[0][2]
     assert "app/services/qualification_privacy.py" in source_calls[0][2]
@@ -209,3 +280,28 @@ def test_verifier_and_runtime_use_the_same_environment_identity_contract(monkeyp
     }
     with pytest.raises(ValueError, match="distribution identities"):
         environment_module.validate_execution_identity_report(inconsistent_distribution)
+
+
+def test_execution_identity_rejects_copied_preregistration_source_before_recapture(
+    monkeypatch,
+) -> None:
+    def identity_must_not_run(*_args, **_kwargs):
+        raise AssertionError("identity recapture ran before startup source validation")
+
+    monkeypatch.setattr(
+        environment_module,
+        "capture_source_identity",
+        identity_must_not_run,
+    )
+    monkeypatch.setattr(
+        environment_module,
+        "capture_environment_identity",
+        identity_must_not_run,
+    )
+
+    with pytest.raises(IdentityError, match="startup source SHA mismatch"):
+        environment_module.build_execution_identity_report(
+            ".",
+            expected_source_sha="c" * 40,
+            trusted_startup=deepcopy(STARTUP_POLICY),
+        )

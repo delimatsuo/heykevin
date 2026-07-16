@@ -1547,6 +1547,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise MeasurementError("audit capsule no-speech windows are invalid")
     accounting = _validate_capsule_accounting(data["accounting"])
     session_index: dict[int, Mapping[str, Any]] = {}
+    session_events: dict[int, tuple[CallerTurnEvent, ...]] = {}
     for raw_session in sessions:
         session = _strict_mapping(
             raw_session,
@@ -1577,6 +1578,7 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
             wire_facts=session["wire_facts"],
         )
         session_index[session_ordinal] = session
+        session_events[session_ordinal] = typed_events
     activity_ordinals: set[int] = set()
     for raw_activity in activities:
         activity = _strict_mapping(
@@ -1672,6 +1674,31 @@ def _validate_audit_capsule(raw: Mapping[str, Any]) -> dict[str, Any]:
         or evidence_splits != {accounting["split"]}
     ):
         raise MeasurementError("audit capsule accounting identity is invalid")
+    accounting_index = {
+        (unit["kind"], unit["ordinal"]): unit for unit in accounting["units"]
+    }
+    for session_ordinal, session in session_index.items():
+        session_activities = tuple(
+            activity
+            for activity in activities
+            if activity["session_ordinal"] == session_ordinal
+        )
+        _validate_session_connection_topology(
+            events=session_events[session_ordinal],
+            event_activity_ordinals=session["event_activity_ordinals"],
+            wire_facts=session["wire_facts"],
+            activities=session_activities,
+            provider_request_count=accounting_index[
+                ("session", session_ordinal)
+            ]["provider_request_count"],
+        )
+    for window in windows:
+        _validate_connection_open_topology(
+            window["wire_facts"],
+            provider_request_count=accounting_index[
+                ("no_speech_window", window["window_ordinal"])
+            ]["provider_request_count"],
+        )
     return json.loads(canonical_json_bytes(data))
 
 
@@ -2069,6 +2096,8 @@ def _validate_event_activity_ordinals(
             label="event activity ordinal",
             maximum=255,
         )
+        if event.kind is CallerTurnEventKind.RECONNECT_STARTED:
+            continue
         eligible = tuple(
             fact
             for fact in sent_audio
@@ -2079,6 +2108,86 @@ def _validate_event_activity_ordinals(
         latest = max(eligible, key=lambda fact: (fact["at_ms"], fact["sequence"]))
         if latest["activity_ordinal"] != activity_ordinal:
             raise MeasurementError("session event ownership is not causal")
+
+
+def _validate_session_connection_topology(
+    *,
+    events: tuple[CallerTurnEvent, ...],
+    event_activity_ordinals: list[int],
+    wire_facts: list[Mapping[str, Any]],
+    activities: tuple[Mapping[str, Any], ...],
+    provider_request_count: int,
+) -> None:
+    opens = _validate_connection_open_topology(
+        wire_facts,
+        provider_request_count=provider_request_count,
+    )
+    opened_epochs = tuple(fact["epoch"] for fact in opens)
+    expected_epochs = {activity["expected_epoch"] for activity in activities}
+    if expected_epochs != set(opened_epochs):
+        raise MeasurementError("audit capsule session connection topology is invalid")
+
+    activity_epochs = {
+        activity["activity_ordinal"]: activity["expected_epoch"]
+        for activity in activities
+    }
+    first_audio_by_epoch: dict[int, Mapping[str, Any]] = {}
+    for fact in wire_facts:
+        if fact["kind"] == "caller_audio_sent":
+            first_audio_by_epoch.setdefault(fact["epoch"], fact)
+    if set(first_audio_by_epoch) != set(opened_epochs):
+        raise MeasurementError("audit capsule session connection topology is invalid")
+
+    current_epoch = opened_epochs[0]
+    open_by_epoch = {fact["epoch"]: fact for fact in opens}
+    for event, owner in zip(events, event_activity_ordinals, strict=True):
+        if event.kind is CallerTurnEventKind.RECONNECT_STARTED:
+            if event.epoch != current_epoch + 1:
+                raise MeasurementError(
+                    "audit capsule session connection topology is invalid"
+                )
+            opened = open_by_epoch.get(event.epoch)
+            first_audio = first_audio_by_epoch.get(event.epoch)
+            if (
+                opened is None
+                or first_audio is None
+                or event.at_ms != opened["at_ms"]
+                or owner != first_audio["activity_ordinal"]
+                or activity_epochs.get(owner) != event.epoch
+            ):
+                raise MeasurementError(
+                    "audit capsule session connection topology is invalid"
+                )
+            current_epoch = event.epoch
+        elif event.epoch != current_epoch or activity_epochs.get(owner) != event.epoch:
+            raise MeasurementError("audit capsule session connection topology is invalid")
+    if current_epoch != opened_epochs[-1]:
+        raise MeasurementError("audit capsule session connection topology is invalid")
+
+
+def _validate_connection_open_topology(
+    wire_facts: list[Mapping[str, Any]],
+    *,
+    provider_request_count: int,
+) -> tuple[Mapping[str, Any], ...]:
+    opens = tuple(fact for fact in wire_facts if fact["kind"] == "connection_open")
+    if len(opens) != provider_request_count or provider_request_count < 1:
+        raise MeasurementError("audit capsule provider request topology is invalid")
+    expected_epochs = tuple(range(1, provider_request_count + 1))
+    if tuple(fact["epoch"] for fact in opens) != expected_epochs:
+        raise MeasurementError("audit capsule connection-open topology is invalid")
+
+    current_epoch = 0
+    for fact in wire_facts:
+        if fact["kind"] == "connection_open":
+            if fact["epoch"] != current_epoch + 1:
+                raise MeasurementError("audit capsule connection-open topology is invalid")
+            current_epoch = fact["epoch"]
+        elif fact["epoch"] != current_epoch:
+            raise MeasurementError("audit capsule connection-open topology is invalid")
+    if current_epoch != provider_request_count:
+        raise MeasurementError("audit capsule connection-open topology is invalid")
+    return opens
 
 
 def _validate_response_wire_state(raw: list[Mapping[str, Any]]) -> None:

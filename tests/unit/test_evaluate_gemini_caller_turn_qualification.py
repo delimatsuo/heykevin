@@ -24,8 +24,20 @@ from app.services.caller_turn_measurement import (
     combined_usage_evidence_sha256,
     usage_evidence_sha256,
 )
-from app.services.qualification_environment import execution_identity_report_sha256
-from app.services.qualification_identity import canonical_json_bytes
+from app.services.qualification_environment import (
+    EXECUTION_IDENTITY_SCHEMA_ID,
+    EXPECTED_PYTHON,
+    EXPECTED_UV,
+    execution_identity_report_sha256,
+)
+from app.services.qualification_identity import (
+    AMBIENT_PYTHON_PATH_ENV,
+    EXECUTION_DEPENDENCY_PATHS,
+    INTERPRETER_INSTALLATION_SCHEMA_ID,
+    RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+    TRUSTED_STARTUP_POLICY_SCHEMA_ID,
+    canonical_json_bytes,
+)
 from scripts.evaluate_gemini_caller_turn_qualification import (
     compute_evidence_context_commitment,
     compute_policy_lock_sha256,
@@ -60,8 +72,55 @@ STRESS_TAGS = (
 )
 POLICIES = (100, 250, 500, 750)
 ROOT_KEY_ID = "evidence_custodian_1"
+RUNNER_SOURCE_PATH = "scripts/run_gemini_caller_turn_qualification.py"
+EVALUATOR_SOURCE_PATH = "scripts/evaluate_gemini_caller_turn_qualification.py"
+SOURCE_SHA = "b" * 40
+INTERPRETER_INSTALLATION = {
+    "schema_id": INTERPRETER_INSTALLATION_SCHEMA_ID,
+    "python_executable_sha256": "3" * 64,
+    "stdlib_source_bytecode_sha256": "4" * 64,
+    "stdlib_source_bytecode_count": 1,
+    "stdlib_archive_sha256": "5" * 64,
+    "stdlib_archive_count": 0,
+    "native_extension_sha256": "6" * 64,
+    "native_extension_count": 1,
+}
+INTERPRETER_INSTALLATION["installation_sha256"] = sha256(
+    canonical_json_bytes(INTERPRETER_INSTALLATION)
+).hexdigest()
+RUNTIME_SITE_PACKAGES_MANIFEST = {
+    "schema_id": RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+    "source_count": 1,
+    "bytecode_count": 0,
+    "native_extension_count": 0,
+    "metadata_data_count": 0,
+    "file_count": 1,
+    "files_sha256": "7" * 64,
+}
+RUNTIME_SITE_PACKAGES_MANIFEST["manifest_sha256"] = sha256(
+    canonical_json_bytes(RUNTIME_SITE_PACKAGES_MANIFEST)
+).hexdigest()
+
+
+def _fixture_dependency_sha256(path: str) -> str:
+    if path in {RUNNER_SOURCE_PATH, EVALUATOR_SOURCE_PATH}:
+        return sha256(Path(path).read_bytes()).hexdigest()
+    return sha256(f"fixture:{path}".encode("utf-8")).hexdigest()
+
+
+SOURCE_PREFLIGHT = {
+    "source_sha": SOURCE_SHA,
+    "clean": True,
+    "dependencies": {
+        sha256(path.encode("utf-8")).hexdigest(): {
+            "worktree_sha256": _fixture_dependency_sha256(path),
+            "git_blob_id": "2" * 40,
+        }
+        for path in EXECUTION_DEPENDENCY_PATHS
+    },
+}
 TRUSTED_STARTUP_REPORT = {
-    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "schema_id": TRUSTED_STARTUP_POLICY_SCHEMA_ID,
     "startup_flags": {
         "bytes_warning": 0,
         "debug": 0,
@@ -89,31 +148,25 @@ TRUSTED_STARTUP_REPORT = {
     "runtime_site_packages_location_sha256": "e" * 64,
     "effective_sys_path_sha256": "f" * 64,
     "effective_sys_path_entry_sha256": ["0" * 64, "1" * 64],
-    "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
+    "neutralized_environment": list(AMBIENT_PYTHON_PATH_ENV),
     "runtime_pth_files_sha256": {},
     "ignored_startup_hook_files_sha256": {},
+    "source_preflight": SOURCE_PREFLIGHT,
+    "interpreter_installation": INTERPRETER_INSTALLATION,
+    "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
 }
 RUNTIME_IDENTITY_REPORT = {
-    "schema_id": "gate_0b_environment_identity_v3",
-    "source": {
-        "source_sha": "b" * 40,
-        "clean": True,
-        "dependencies": {
-            "0" * 64: {
-                "worktree_sha256": "1" * 64,
-                "git_blob_id": "2" * 40,
-            }
-        },
-    },
+    "schema_id": EXECUTION_IDENTITY_SCHEMA_ID,
+    "source": SOURCE_PREFLIGHT,
     "environment": {
-        "python_version": "3.12.13",
-        "uv_version": "0.11.7",
+        "python_version": EXPECTED_PYTHON,
+        "uv_version": EXPECTED_UV,
         "python_executable_sha256": "3" * 64,
         "uv_executable_sha256": "4" * 64,
         "python_executable_location_sha256": "5" * 64,
         "uv_executable_location_sha256": "6" * 64,
-        "runtime_image_kind": "interpreter",
-        "runtime_image_sha256": "3" * 64,
+        "interpreter_installation": INTERPRETER_INSTALLATION,
+        "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
         "platform_id": "darwin-test",
         "architecture": "arm64",
         "unicode_version": "15.0.0",
@@ -136,7 +189,7 @@ RUNTIME_IDENTITY_REPORT = {
 }
 RUNTIME_IDENTITY_SHA256 = execution_identity_report_sha256(RUNTIME_IDENTITY_REPORT)
 IDENTITIES = {
-    "source_sha256": sha256(("b" * 40).encode("ascii")).hexdigest(),
+    "source_sha256": sha256(SOURCE_SHA.encode("ascii")).hexdigest(),
     "source_fact_bundle_sha256": "7" * 64,
     "environment_sha256": RUNTIME_IDENTITY_SHA256,
     "evaluator_sha256": "c" * 64,
@@ -400,16 +453,55 @@ def _opened_capsule(envelope: dict[str, str]) -> dict[str, object]:
     else:
         started_at = "2026-07-15T15:12:00Z"
         completed_at = "2026-07-15T15:20:00Z"
-    session_units = [
+    sessions = []
+    activities = []
+    session_units = []
+    activity_ordinal = 0 if kind == "development" else 128
+    for session_ordinal in range(24):
+        epochs = (1, 2) if session_ordinal < 8 else (1,)
+        sessions.append(
+            {
+                "session_ordinal": session_ordinal,
+                "events": [
+                    {"kind": "input_transcript_fragment", "epoch": epoch}
+                    for epoch in epochs
+                ],
+                "wire_facts": [
+                    {"kind": "connection_open", "epoch": epoch}
+                    for epoch in epochs
+                ],
+            }
+        )
+        activities.extend(
+            {
+                "activity_ordinal": activity_ordinal + offset,
+                "session_ordinal": session_ordinal,
+                "expected_epoch": epoch,
+            }
+            for offset, epoch in enumerate(epochs)
+        )
+        activity_ordinal += len(epochs)
+        session_units.append(
+            {
+                "kind": "session",
+                "ordinal": session_ordinal,
+                "provider_request_count": len(epochs),
+            }
+        )
+    no_speech_windows = [
         {
-            "kind": "session",
-            "provider_request_count": 2 if ordinal < 8 else 1,
+            "window_ordinal": ordinal,
+            "wire_facts": [{"kind": "connection_open", "epoch": 1}],
         }
-        for ordinal in range(24)
+        for ordinal in range(32)
     ]
     no_speech_units = [
-        {"kind": "no_speech_window", "provider_request_count": 1}
-        for _ordinal in range(32)
+        {
+            "kind": "no_speech_window",
+            "ordinal": ordinal,
+            "provider_request_count": 1,
+        }
+        for ordinal in range(32)
     ]
     return {
         "campaign_id": "campaign_1",
@@ -422,7 +514,9 @@ def _opened_capsule(envelope: dict[str, str]) -> dict[str, object]:
         "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
         "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
         "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
-        "sessions": [{"session_ordinal": ordinal} for ordinal in range(24)],
+        "sessions": sessions,
+        "activities": activities,
+        "no_speech_windows": no_speech_windows,
         "accounting": {"units": [*session_units, *no_speech_units]},
     }
 
@@ -1093,6 +1187,61 @@ def test_published_report_is_complete_canonical_and_detached_verifiable(
     assert verified == report
 
 
+@pytest.mark.parametrize(
+    ("digest_field", "source_path"),
+    (
+        ("runner_sha256", RUNNER_SOURCE_PATH),
+        ("evaluator_sha256", EVALUATOR_SOURCE_PATH),
+    ),
+)
+def test_component_digests_reject_preregistration_source_digest_substitution(
+    digest_field: str,
+    source_path: str,
+) -> None:
+    bundle, *_remainder = _custody_bundle()
+    preregistration = deepcopy(bundle["preregistration"])
+    dependency_key = sha256(source_path.encode("utf-8")).hexdigest()
+    source_digest = RUNTIME_IDENTITY_REPORT["source"]["dependencies"][dependency_key][
+        "worktree_sha256"
+    ]
+    assert preregistration["immutable_values"][digest_field] == source_digest
+    preregistration["immutable_values"][digest_field] = "0" * 64
+
+    with pytest.raises(evaluator_module.EvaluationError, match="source component"):
+        evaluator_module._component_digests(
+            preregistration,
+            execution={"runtime_identity_before": RUNTIME_IDENTITY_REPORT},
+        )
+
+
+@pytest.mark.parametrize(
+    ("digest_field", "source_path"),
+    (
+        ("runner_sha256", RUNNER_SOURCE_PATH),
+        ("evaluator_sha256", EVALUATOR_SOURCE_PATH),
+    ),
+)
+def test_component_digests_reject_execution_source_dependency_substitution(
+    digest_field: str,
+    source_path: str,
+) -> None:
+    bundle, *_remainder = _custody_bundle()
+    preregistration = bundle["preregistration"]
+    runtime_identity = deepcopy(RUNTIME_IDENTITY_REPORT)
+    dependency_key = sha256(source_path.encode("utf-8")).hexdigest()
+    source_dependency = runtime_identity["source"]["dependencies"][dependency_key]
+    assert source_dependency["worktree_sha256"] == preregistration["immutable_values"][
+        digest_field
+    ]
+    source_dependency["worktree_sha256"] = "0" * 64
+
+    with pytest.raises(evaluator_module.EvaluationError, match="source component"):
+        evaluator_module._component_digests(
+            preregistration,
+            execution={"runtime_identity_before": runtime_identity},
+        )
+
+
 def test_published_report_limits_timing_and_lifecycle_claims_to_scheduled_cases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1118,6 +1267,38 @@ def test_published_report_limits_timing_and_lifecycle_claims_to_scheduled_cases(
         assert lifecycle["zero_denominator"] is False
         assert sum(lifecycle["expected_counts"].values()) == sample["activity_count"]
         assert sum(lifecycle["observed_counts"].values()) == sample["activity_count"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "counter_wire_mismatch",
+        "connection_omitted",
+        "connection_duplicated",
+        "event_epoch_inconsistent",
+        "restart_count_fabricated",
+    ),
+)
+def test_execution_topology_rejects_adversarial_capsule_mutations(mutation: str) -> None:
+    development = _opened_capsule({"kind": "development"})
+    holdout = _opened_capsule({"kind": "holdout"})
+    sessions = development["sessions"]
+    accounting_units = development["accounting"]["units"]
+
+    if mutation == "counter_wire_mismatch":
+        accounting_units[-1]["provider_request_count"] = 2
+    elif mutation == "connection_omitted":
+        sessions[-1]["wire_facts"].clear()
+    elif mutation == "connection_duplicated":
+        sessions[-1]["wire_facts"].append({"kind": "connection_open", "epoch": 1})
+    elif mutation == "event_epoch_inconsistent":
+        sessions[0]["events"][-1]["epoch"] = 3
+    else:
+        sessions[-1]["wire_facts"].append({"kind": "connection_open", "epoch": 2})
+        accounting_units[23]["provider_request_count"] = 2
+
+    with pytest.raises(evaluator_module.EvaluationError, match="execution topology"):
+        evaluator_module._capsule_execution_cardinalities((development, holdout))
 
 
 @pytest.mark.parametrize(
@@ -1882,6 +2063,41 @@ def test_evaluator_vetoes_contamination_even_when_fidelity_metrics_pass() -> Non
 
     assert sample["fidelity_passed"] is True
     assert sample["interaction_passed"] is True
+    assert sample["assembly_passed"] is False
+    assert sample["passed"] is False
+
+
+@pytest.mark.parametrize("lifecycle_status", ("partial", "cancelled", "dropped"))
+def test_noncomplete_exact_lifecycle_cannot_count_as_assembly_success(
+    lifecycle_status: str,
+) -> None:
+    base_records = tuple(
+        _activity_record(policy_ms=100, ordinal=ordinal, split="development")
+        for ordinal in range(128)
+    )
+    records = tuple(record for record in base_records for _repeat in range(7))
+    records = (
+        replace(
+            records[0],
+            expected_lifecycle_status=lifecycle_status,
+            observed_lifecycle_status=lifecycle_status,
+        ),
+        *records[1:],
+    )
+
+    sample = evaluator_module._evaluate_sample(
+        records,
+        no_speech_records=tuple(_no_speech_record(ordinal) for ordinal in range(32)),
+    )
+    lifecycle = sample["published"]["structural_outcomes"]["lifecycle_status"]
+
+    assert sample["fidelity_passed"] is True
+    assert sample["interaction_passed"] is True
+    assert sample["published"]["assembly_rate"]["numerator"] == 895
+    assert sample["published"]["assembly_rate"]["rate_micros"] > 990_000
+    assert lifecycle["exact_match_count"] == 896
+    assert lifecycle["expected_counts"][lifecycle_status] == 1
+    assert lifecycle["observed_counts"][lifecycle_status] == 1
     assert sample["assembly_passed"] is False
     assert sample["passed"] is False
 

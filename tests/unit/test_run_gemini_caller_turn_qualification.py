@@ -5,7 +5,7 @@ import base64
 from copy import copy, deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
+from hashlib import sha1, sha256
 from inspect import signature
 import json
 from pathlib import Path
@@ -24,17 +24,24 @@ from app.services.caller_turn_alignment import (
 )
 from app.services.caller_turn_measurement import (
     derive_audit_capsule_accounting,
+    derive_primitive_records_from_capsule,
     open_audit_capsule,
     usage_evidence_sha256,
 )
 from app.services.caller_turn_qualification import load_pricing
 from app.services.caller_turns import CallerTurnEventKind
+from app.services.qualification_environment import (
+    EXECUTION_IDENTITY_SCHEMA_ID,
+    execution_identity_report_sha256,
+)
 from app.services.qualification_identity import (
+    EXECUTION_DEPENDENCY_PATHS as STARTUP_DEPENDENCY_PATHS,
+    RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+    TRUSTED_STARTUP_POLICY_SCHEMA_ID,
     AttemptClaim,
     canonical_json_bytes,
     ledger_location_sha256,
 )
-from app.services.qualification_environment import execution_identity_report_sha256
 from app.services.qualification_ledger import (
     CustodyLedgerState,
     LedgerCustodyIdentity,
@@ -78,8 +85,60 @@ CANARY_SECRET = "qualification-canary-secret-must-not-escape"
 NOW = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
 PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
+APPROVAL_ROOT_RELATIVE_PATH = "config/qualification/gate_0b_approval_root.ed25519.pub"
+APPROVAL_ROOT_PATH_SHA256 = sha256(APPROVAL_ROOT_RELATIVE_PATH.encode("utf-8")).hexdigest()
+_INTERPRETER_INSTALLATION_UNSIGNED = {
+    "schema_id": "gate_0b_interpreter_installation_v1",
+    "python_executable_sha256": "3" * 64,
+    "stdlib_source_bytecode_sha256": "4" * 64,
+    "stdlib_source_bytecode_count": 1,
+    "stdlib_archive_sha256": "5" * 64,
+    "stdlib_archive_count": 0,
+    "native_extension_sha256": "6" * 64,
+    "native_extension_count": 1,
+}
+INTERPRETER_INSTALLATION = {
+    **_INTERPRETER_INSTALLATION_UNSIGNED,
+    "installation_sha256": sha256(
+        canonical_json_bytes(_INTERPRETER_INSTALLATION_UNSIGNED)
+    ).hexdigest(),
+}
+_RUNTIME_SITE_PACKAGES_UNSIGNED = {
+    "schema_id": RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+    "source_count": 1,
+    "bytecode_count": 0,
+    "native_extension_count": 0,
+    "metadata_data_count": 0,
+    "file_count": 1,
+    "files_sha256": "7" * 64,
+}
+RUNTIME_SITE_PACKAGES_MANIFEST = {
+    **_RUNTIME_SITE_PACKAGES_UNSIGNED,
+    "manifest_sha256": sha256(
+        canonical_json_bytes(_RUNTIME_SITE_PACKAGES_UNSIGNED)
+    ).hexdigest(),
+}
+SOURCE_PREFLIGHT = {
+    "source_sha": SOURCE_SHA,
+    "clean": True,
+    "dependencies": {
+        sha256(path.encode("utf-8")).hexdigest(): {
+            "worktree_sha256": (
+                "7127478ff105944064f7e2d0d6f028f0ce6587ac8e3412ae1e379f89a2802b4f"
+                if path == APPROVAL_ROOT_RELATIVE_PATH
+                else "1" * 64
+            ),
+            "git_blob_id": (
+                "248b7f7f150fcbd7de0c8733120cd1c642c3014e"
+                if path == APPROVAL_ROOT_RELATIVE_PATH
+                else "2" * 40
+            ),
+        }
+        for path in STARTUP_DEPENDENCY_PATHS
+    },
+}
 TRUSTED_STARTUP_REPORT = {
-    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "schema_id": TRUSTED_STARTUP_POLICY_SCHEMA_ID,
     "startup_flags": {
         "bytes_warning": 0,
         "debug": 0,
@@ -110,42 +169,37 @@ TRUSTED_STARTUP_REPORT = {
     "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
     "runtime_pth_files_sha256": {},
     "ignored_startup_hook_files_sha256": {},
+    "source_preflight": SOURCE_PREFLIGHT,
+    "interpreter_installation": INTERPRETER_INSTALLATION,
+    "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
+}
+TEST_ENVIRONMENT_IDENTITY = {
+    "python_version": "3.12.13",
+    "uv_version": "0.11.7",
+    "python_executable_sha256": "3" * 64,
+    "uv_executable_sha256": "4" * 64,
+    "python_executable_location_sha256": "5" * 64,
+    "uv_executable_location_sha256": "6" * 64,
+    "platform_id": "test-platform",
+    "architecture": "test-architecture",
+    "unicode_version": "15.1.0",
+    "monotonic_clock_implementation": "test-monotonic",
+    "monotonic_clock_resolution_ns": 1,
+    "bytecode_write_disabled": True,
+    "openssl_version": "OpenSSL test",
+    "ca_bundle_sha256": "7" * 64,
+    "lock_sha256": "8" * 64,
+    "codec_golden_sha256": "9" * 64,
+    "import_sha256": {"app.test": "a" * 64},
+    "distributions": {"test-package": "1.0.0"},
+    "distribution_files_sha256": {"test-package": "b" * 64},
+    "interpreter_installation": INTERPRETER_INSTALLATION,
+    "runtime_site_packages_manifest": RUNTIME_SITE_PACKAGES_MANIFEST,
 }
 TEST_EXECUTION_IDENTITY_REPORT = {
-    "schema_id": "gate_0b_environment_identity_v3",
-    "source": {
-        "source_sha": SOURCE_SHA,
-        "clean": True,
-        "dependencies": {
-            "0" * 64: {
-                "worktree_sha256": "1" * 64,
-                "git_blob_id": "2" * 40,
-            }
-        },
-    },
-    "environment": {
-        "python_version": "3.12.13",
-        "uv_version": "0.11.7",
-        "python_executable_sha256": "3" * 64,
-        "uv_executable_sha256": "4" * 64,
-        "python_executable_location_sha256": "5" * 64,
-        "uv_executable_location_sha256": "6" * 64,
-        "runtime_image_kind": "interpreter",
-        "runtime_image_sha256": "3" * 64,
-        "platform_id": "test-platform",
-        "architecture": "test-architecture",
-        "unicode_version": "15.1.0",
-        "monotonic_clock_implementation": "test-monotonic",
-        "monotonic_clock_resolution_ns": 1,
-        "bytecode_write_disabled": True,
-        "openssl_version": "OpenSSL test",
-        "ca_bundle_sha256": "7" * 64,
-        "lock_sha256": "8" * 64,
-        "codec_golden_sha256": "9" * 64,
-        "import_sha256": {"app.test": "a" * 64},
-        "distributions": {"test-package": "1.0.0"},
-        "distribution_files_sha256": {"test-package": "b" * 64},
-    },
+    "schema_id": EXECUTION_IDENTITY_SCHEMA_ID,
+    "source": SOURCE_PREFLIGHT,
+    "environment": TEST_ENVIRONMENT_IDENTITY,
     "trusted_startup": TRUSTED_STARTUP_REPORT,
 }
 TEST_EXECUTION_IDENTITY_SHA256 = execution_identity_report_sha256(
@@ -402,6 +456,21 @@ def _measurement_clock_factory(
         return ReceiptClock(sorted([*receipt_values, *_outbound_clock_values(plan)]))
 
     return build
+
+
+def _identity_for_approval_root(data: bytes) -> CapturedExecutionIdentity:
+    report = deepcopy(TEST_EXECUTION_IDENTITY_REPORT)
+    blob_payload = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+    dependency = {
+        "worktree_sha256": sha256(data).hexdigest(),
+        "git_blob_id": sha1(blob_payload, usedforsecurity=False).hexdigest(),
+    }
+    report["source"]["dependencies"][APPROVAL_ROOT_PATH_SHA256] = dependency  # type: ignore[index]
+    report["trusted_startup"]["source_preflight"] = deepcopy(report["source"])  # type: ignore[index]
+    return CapturedExecutionIdentity(
+        report=report,
+        sha256=execution_identity_report_sha256(report),
+    )
 
 
 def _default_measurement_clock_factory(
@@ -1124,6 +1193,7 @@ def _preregistration(
     custodian_public_key: bytes,
     *,
     ledger_custodian_public_key_sha256: str = LEDGER_PUBLIC_KEY_SHA256,
+    environment_identity_sha256: str = TEST_EXECUTION_IDENTITY_SHA256,
 ) -> dict[str, object]:
     setup_sha256 = sha256(canonical_json_bytes(build_gate0b_setup_identity(_config()))).hexdigest()
     plans, no_speech_plans = _development_schedule()
@@ -1155,7 +1225,7 @@ def _preregistration(
             "ledger_custodian_public_key_sha256": ledger_custodian_public_key_sha256,
             "source_sha": SOURCE_SHA,
             "source_fact_bundle_sha256": "5" * 64,
-            "environment_identity_sha256": TEST_EXECUTION_IDENTITY_SHA256,
+            "environment_identity_sha256": environment_identity_sha256,
             "manifest_sha256": "3" * 64,
             "corpus_sha256": "4" * 64,
             "development_schedule_sha256": compute_development_schedule_sha256(
@@ -2089,8 +2159,52 @@ def test_fresh_restart_uses_new_connection_and_epoch_without_context_restoration
     assert result.epoch_count == 2
     assert [request.epoch for request in connector.requests] == [1, 2]
     assert {event.epoch for event in result.audit_events} == {1, 2}
+    assert [event.kind for event in result.audit_events].count(
+        CallerTurnEventKind.RECONNECT_STARTED
+    ) == 1
+    reconnect = next(
+        event
+        for event in result.audit_events
+        if event.kind is CallerTurnEventKind.RECONNECT_STARTED
+    )
+    second_open = next(
+        fact
+        for fact in result.wire_facts
+        if fact.kind == "connection_open" and fact.epoch == 2
+    )
+    assert (reconnect.at_ms, reconnect.epoch) == (second_open.at_ms, 2)
     assert first.sent[0] == second.sent[0] == build_gate0b_setup_message(_config())
     assert all("sessionResumption" not in json.dumps(message) for message in second.sent)
+    assert "reconnect_started" not in json.dumps(second.sent)
+
+    capsule = runner_module._build_audit_capsule(
+        campaign_id="campaign_001",
+        policy_ms=250,
+        source_fact_bundle_sha256="5" * 64,
+        execution_started_at=NOW,
+        execution_completed_at=NOW + timedelta(seconds=1),
+        provider_revision=None,
+        runtime_identity_before_sha256=TEST_EXECUTION_IDENTITY_SHA256,
+        runtime_identity_after_sha256=TEST_EXECUTION_IDENTITY_SHA256,
+        runtime_identity_before=TEST_EXECUTION_IDENTITY_REPORT,
+        runtime_identity_after=TEST_EXECUTION_IDENTITY_REPORT,
+        session_results=((_restart_plan(), result),),
+        no_speech_results=(),
+    )
+    records, no_speech_records = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=b"c" * 32,
+    )
+
+    assert no_speech_records == ()
+    assert [record.activity_ordinal for record in records] == [1, 2]
+    assert all(record.assembled_turn_count == 1 for record in records)
+    assert all(record.stale_count == 0 for record in records)
+    assert [record.observed_lifecycle_status for record in records] == [
+        "partial",
+        "retrospective_complete",
+    ]
 
 
 def test_generation_complete_does_not_close_the_response_before_turn_complete() -> None:
@@ -2342,7 +2456,9 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     ledger_path = tmp_path / "attempt-ledger.json"
     custodian, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -2574,7 +2690,11 @@ def test_holdout_resumes_only_after_signed_one_shot_claim_is_durable(
         ),
         final_ledger_head_sha256="5" * 64,
     )
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: approval_public)
+    monkeypatch.setattr(
+        runner_module,
+        "_load_pinned_approval_public_key",
+        lambda _identity: approval_public,
+    )
     order: list[str] = []
     ledger = FakeCustodyLedger(
         ledger_path,
@@ -2781,7 +2901,9 @@ def test_development_claim_boundary_fails_closed_before_secret_lookup(
             )
         return claim
 
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     monkeypatch.setattr(ledger, "claim_attempt", mutate_claim)
     touched: list[str] = []
 
@@ -2835,7 +2957,9 @@ def test_environment_identity_mismatch_blocks_before_claim_or_secret_lookup(
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
     plans, no_speech_plans = _development_schedule()
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     monkeypatch.setattr(
         runner_module,
         "_capture_current_execution_identity",
@@ -2902,7 +3026,9 @@ def test_substituted_capsule_destination_blocks_before_ledger_or_secret(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -2969,7 +3095,9 @@ def test_capsule_destination_created_after_preregistration_blocks_before_ledger(
         target = tmp_path / "outside-capsule.json"
         target.write_text("occupied")
         capsule_path.symlink_to(target)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3025,7 +3153,9 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3111,7 +3241,9 @@ def test_stale_privacy_receipt_blocks_asset_ledger_secret_and_connector(
     assert isinstance(loader, FakeAssetLoader)
     ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
     touched: list[str] = []
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
 
     with pytest.raises(ValueError, match="fresh"):
         asyncio.run(
@@ -3250,6 +3382,131 @@ def test_unprovisioned_source_owned_trust_root_blocks_before_ledger_or_secret(
     assert not ledger_path.exists()
 
 
+def test_approval_root_swap_after_identity_capture_blocks_before_secret_or_connector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _key_pair()
+    replacement_public = _key_pair()[1]
+    repo_root = tmp_path / "repo"
+    approval_root = repo_root / APPROVAL_ROOT_RELATIVE_PATH
+    approval_root.parent.mkdir(parents=True)
+    approval_root.write_bytes(public)
+    replacement_path = tmp_path / "replacement.pub"
+    replacement_path.write_bytes(replacement_public)
+    identity = _identity_for_approval_root(public)
+    ledger_path = tmp_path / "attempt-ledger.json"
+    _, custodian_public = _custodian_key_pair()
+    preregistration = _preregistration(
+        public,
+        ledger_path,
+        custodian_public,
+        environment_identity_sha256=identity.sha256,
+    )
+    campaign, attempt = _approval_envelopes(
+        private,
+        ledger_path,
+        preregistration_sha256=preregistration["preregistration_sha256"],
+    )
+    touched: list[str] = []
+
+    def capture_identity(*, expected_source_sha: str) -> CapturedExecutionIdentity:
+        assert expected_source_sha == SOURCE_SHA
+        replacement_path.replace(approval_root)
+        return identity
+
+    monkeypatch.setattr(runner_module, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(runner_module, "PINNED_APPROVAL_ROOT_PATH", approval_root)
+    monkeypatch.setattr(
+        runner_module,
+        "_capture_current_execution_identity",
+        capture_identity,
+    )
+
+    with pytest.raises(ValueError, match="trust root.*source identity"):
+        asyncio.run(
+            execute_authorized_attempt(
+                _asset_release(
+                    (_plan(),),
+                    (),
+                    preregistration,
+                    campaign,
+                    attempt,
+                    split="development",
+                ),
+                preregistration=preregistration,
+                config=AuthorizedAttemptConfig(
+                    preregistration_sha256=preregistration["preregistration_sha256"],
+                    source_sha=SOURCE_SHA,
+                    approval_key_id=KEY_ID,
+                    credential_reference="qualification_secret_v1",
+                    policy_ms=250,
+                    whole_run_timeout_seconds=30,
+                ),
+                session_config=_config(),
+                campaign_envelope=campaign,
+                attempt_envelope=attempt,
+                ledger=FakeCustodyLedger(ledger_path, campaign_envelope=campaign),
+                ledger_custodian_public_key=LEDGER_PUBLIC_KEY,
+                now=NOW,
+                credential_loader=lambda _reference: touched.append("credential"),
+                connector_factory=lambda _credential: touched.append("connector"),
+                measurement_clock_factory=lambda _plan: ReceiptClock([]),
+                sleep_ms=lambda _value: asyncio.sleep(0),
+                pricing=load_pricing(PRICING_PATH),
+                custodian_public_key=custodian_public,
+                custodian_key_id="audit_custodian_1",
+                capsule_path=_capsule_path(ledger_path),
+                capsule_sink=PrivateFileCapsuleSink(),
+            )
+        )
+
+    assert touched == []
+    assert not ledger_path.exists()
+
+
+def test_approval_root_loader_rejects_final_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = _key_pair()[1]
+    repo_root = tmp_path / "repo"
+    approval_root = repo_root / APPROVAL_ROOT_RELATIVE_PATH
+    approval_root.parent.mkdir(parents=True)
+    target = tmp_path / "approval.pub"
+    target.write_bytes(public)
+    approval_root.symlink_to(target)
+    monkeypatch.setattr(runner_module, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(runner_module, "PINNED_APPROVAL_ROOT_PATH", approval_root)
+
+    with pytest.raises(ValueError, match="trust root.*unavailable"):
+        runner_module._load_pinned_approval_public_key(
+            _identity_for_approval_root(public)
+        )
+
+
+def test_approval_root_loader_rejects_ancestor_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = _key_pair()[1]
+    repo_root = tmp_path / "repo"
+    config_dir = repo_root / "config"
+    config_dir.mkdir(parents=True)
+    external_qualification = tmp_path / "qualification"
+    external_qualification.mkdir()
+    (external_qualification / "gate_0b_approval_root.ed25519.pub").write_bytes(public)
+    (config_dir / "qualification").symlink_to(external_qualification)
+    approval_root = repo_root / APPROVAL_ROOT_RELATIVE_PATH
+    monkeypatch.setattr(runner_module, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(runner_module, "PINNED_APPROVAL_ROOT_PATH", approval_root)
+
+    with pytest.raises(ValueError, match="trust root.*unavailable"):
+        runner_module._load_pinned_approval_public_key(
+            _identity_for_approval_root(public)
+        )
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
@@ -3311,7 +3568,7 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
     monkeypatch.setattr(
         runner_module,
         "_load_pinned_approval_public_key",
-        lambda: supplied_public,
+        lambda _identity: supplied_public,
     )
 
     touched: list[str] = []
@@ -3365,7 +3622,9 @@ def test_development_claim_rejects_holdout_plans_before_ledger_or_secret(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3427,7 +3686,9 @@ def test_declared_audio_duration_must_match_pcm_bytes_before_ledger(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3500,7 +3761,9 @@ def test_insufficient_signed_liability_blocks_before_ledger_and_secret(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3580,7 +3843,9 @@ def test_nonexact_campaign_ceiling_blocks_before_assets_ledger_and_secret(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3655,7 +3920,9 @@ def test_ledger_genesis_ceiling_mismatch_blocks_before_claim_and_secret(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3717,7 +3984,9 @@ def test_toy_development_schedule_is_rejected_before_ledger_and_secret(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3821,7 +4090,9 @@ def test_per_session_cost_cap_stops_before_the_next_provider_request(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3897,7 +4168,9 @@ def test_connector_failure_consumes_request_records_outcome_and_never_retries(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,
@@ -3972,7 +4245,9 @@ def test_whole_run_deadline_records_failed_consumed_attempt(
     ledger_path = tmp_path / "attempt-ledger.json"
     _, custodian_public = _custodian_key_pair()
     preregistration = _preregistration(public, ledger_path, custodian_public)
-    monkeypatch.setattr(runner_module, "_load_pinned_approval_public_key", lambda: public)
+    monkeypatch.setattr(
+        runner_module, "_load_pinned_approval_public_key", lambda _identity: public
+    )
     campaign, attempt = _approval_envelopes(
         private,
         ledger_path,

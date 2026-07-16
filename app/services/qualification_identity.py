@@ -43,8 +43,10 @@ OUTAGE_ENUMS = {
     "qualification_host_failure",
 }
 GIT_BINARY = "/usr/bin/git"
-TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v1"
-TRUSTED_STARTUP_POLICY_SCHEMA_ID = "gate_0b_trusted_startup_policy_v1"
+TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v3"
+TRUSTED_STARTUP_POLICY_SCHEMA_ID = "gate_0b_trusted_startup_policy_v3"
+INTERPRETER_INSTALLATION_SCHEMA_ID = "gate_0b_interpreter_installation_v1"
+RUNTIME_SITE_PACKAGES_SCHEMA_ID = "gate_0b_runtime_site_packages_v1"
 STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
 STARTUP_FLAG_NAMES = (
     "bytes_warning",
@@ -68,7 +70,39 @@ STARTUP_FLAG_NAMES = (
 )
 AMBIENT_PYTHON_PATH_ENV = ("PYTHONHOME", "PYTHONPATH")
 AUTOMATIC_STARTUP_MODULES = ("site", "sitecustomize", "usercustomize")
+SELF_ASSERTED_RUNTIME_ENV = "QUALIFICATION_CONTAINER_IMAGE_DIGEST"
 MAX_STARTUP_ARTIFACT_BYTES = 1024 * 1024
+EXECUTION_DEPENDENCY_PATHS = (
+    "config/qualification/gate_0b_approval_root.ed25519.pub",
+    "app/__init__.py",
+    "app/services/__init__.py",
+    "app/utils/__init__.py",
+    "app/services/caller_turn_qualification.py",
+    "app/services/qualification_environment.py",
+    "app/services/qualification_identity.py",
+    "app/services/qualification_ledger.py",
+    "app/services/qualification_allocation.py",
+    "app/services/qualification_privacy.py",
+    "app/services/qualification_private_paths.py",
+    "app/services/caller_turn_alignment.py",
+    "app/services/caller_turn_measurement.py",
+    "app/services/caller_turns.py",
+    "app/services/gemini_turn_events.py",
+    "app/services/voice_turn_replay.py",
+    "app/utils/audio.py",
+    "scripts/run_gemini_caller_turn_qualification.py",
+    "scripts/evaluate_gemini_caller_turn_qualification.py",
+    "scripts/launch_qualification.py",
+    "scripts/verify_qualification_environment.py",
+    "app/services/gemini_pipeline.py",
+    "app/services/voice_pipeline.py",
+    "app/config.py",
+    "tests/fixtures/caller_turn_qualification/pricing.json",
+    "uv.lock",
+)
+STDLIB_BYTECODE_SUFFIXES = (".pyc", ".pyo")
+STDLIB_SOURCE_BYTECODE_SUFFIXES = (".py", *STDLIB_BYTECODE_SUFFIXES)
+NATIVE_EXTENSION_SUFFIXES = (".dll", ".dylib", ".pyd", ".so")
 
 
 class IdentityError(ValueError):
@@ -109,8 +143,8 @@ class EnvironmentIdentity:
     uv_executable_sha256: str
     python_executable_location_sha256: str
     uv_executable_location_sha256: str
-    runtime_image_kind: str
-    runtime_image_sha256: str
+    interpreter_installation: dict[str, Any]
+    runtime_site_packages_manifest: dict[str, Any]
     platform_id: str
     architecture: str
     unicode_version: str
@@ -133,8 +167,10 @@ class EnvironmentIdentity:
             "uv_executable_sha256": self.uv_executable_sha256,
             "python_executable_location_sha256": self.python_executable_location_sha256,
             "uv_executable_location_sha256": self.uv_executable_location_sha256,
-            "runtime_image_kind": self.runtime_image_kind,
-            "runtime_image_sha256": self.runtime_image_sha256,
+            "interpreter_installation": dict(self.interpreter_installation),
+            "runtime_site_packages_manifest": dict(
+                self.runtime_site_packages_manifest
+            ),
             "platform_id": self.platform_id,
             "architecture": self.architecture,
             "unicode_version": self.unicode_version,
@@ -167,6 +203,9 @@ class TrustedStartupIdentity:
     neutralized_environment: tuple[str, ...]
     runtime_pth_files_sha256: dict[str, str]
     ignored_startup_hook_files_sha256: dict[str, str]
+    source_preflight: dict[str, Any]
+    interpreter_installation: dict[str, Any]
+    runtime_site_packages_manifest: dict[str, Any]
     marker_sha256: str
 
     def redacted_report_dict(self) -> dict[str, Any]:
@@ -192,6 +231,9 @@ class TrustedStartupIdentity:
             "ignored_startup_hook_files_sha256": dict(
                 sorted(self.ignored_startup_hook_files_sha256.items())
             ),
+            "source_preflight": self.source_preflight,
+            "interpreter_installation": self.interpreter_installation,
+            "runtime_site_packages_manifest": self.runtime_site_packages_manifest,
             "marker_sha256": self.marker_sha256,
         }
 
@@ -218,6 +260,9 @@ class TrustedStartupIdentity:
             "ignored_startup_hook_files_sha256": dict(
                 sorted(self.ignored_startup_hook_files_sha256.items())
             ),
+            "source_preflight": self.source_preflight,
+            "interpreter_installation": self.interpreter_installation,
+            "runtime_site_packages_manifest": self.runtime_site_packages_manifest,
         }
 
 
@@ -294,6 +339,8 @@ def capture_trusted_startup_identity(
     encoded = os.environ.get(STARTUP_MARKER_ENV)
     if encoded is None:
         raise IdentityError("trusted qualification startup is unavailable")
+    if SELF_ASSERTED_RUNTIME_ENV in os.environ:
+        raise IdentityError("self-asserted runtime image identity is forbidden")
     try:
         raw = json.loads(encoded)
     except json.JSONDecodeError as exc:
@@ -311,6 +358,9 @@ def capture_trusted_startup_identity(
         "neutralized_environment",
         "runtime_pth_files_sha256",
         "ignored_startup_hook_files_sha256",
+        "source_preflight",
+        "interpreter_installation",
+        "runtime_site_packages_manifest",
     }
     marker = _strict_object(raw, allowed=fields, label="trusted startup marker")
     if marker["schema_id"] != TRUSTED_STARTUP_SCHEMA_ID:
@@ -384,6 +434,31 @@ def capture_trusted_startup_identity(
         raise IdentityError("runtime .pth identity changed after trusted startup")
     if ignored_hooks != _ignored_startup_hook_identities(runtime_site):
         raise IdentityError("startup hook identity changed after trusted startup")
+    runtime_site_packages_manifest = validate_runtime_site_packages_identity(
+        marker["runtime_site_packages_manifest"]
+    )
+    current_runtime_site_packages = capture_runtime_site_packages_identity(
+        runtime_site
+    )
+    if runtime_site_packages_manifest != current_runtime_site_packages:
+        raise IdentityError("runtime site-packages changed after trusted startup")
+
+    source_preflight = _validated_source_preflight_marker(
+        marker["source_preflight"]
+    )
+    current_source = capture_source_identity(
+        expected_root,
+        expected_source_sha=source_preflight["source_sha"],
+        dependency_paths=EXECUTION_DEPENDENCY_PATHS,
+    )
+    if source_preflight != _source_identity_marker_dict(current_source):
+        raise IdentityError("source identity changed after trusted startup")
+    interpreter_installation = validate_interpreter_installation_identity(
+        marker["interpreter_installation"]
+    )
+    current_interpreter = capture_interpreter_installation_identity()
+    if interpreter_installation != current_interpreter:
+        raise IdentityError("interpreter installation changed after trusted startup")
 
     return TrustedStartupIdentity(
         target=expected_target,
@@ -408,6 +483,9 @@ def capture_trusted_startup_identity(
         neutralized_environment=tuple(neutralized_environment),
         runtime_pth_files_sha256=_redacted_path_map(runtime_pth),
         ignored_startup_hook_files_sha256=_redacted_path_map(ignored_hooks),
+        source_preflight=current_source.redacted_report_dict(),
+        interpreter_installation=interpreter_installation,
+        runtime_site_packages_manifest=runtime_site_packages_manifest,
         marker_sha256=sha256(canonical_json_bytes(marker)).hexdigest(),
     )
 
@@ -427,6 +505,9 @@ def validate_trusted_startup_policy_report(raw: object) -> dict[str, Any]:
         "neutralized_environment",
         "runtime_pth_files_sha256",
         "ignored_startup_hook_files_sha256",
+        "source_preflight",
+        "interpreter_installation",
+        "runtime_site_packages_manifest",
     }
     report = _strict_object(raw, allowed=fields, label="trusted startup policy")
     if report["schema_id"] != TRUSTED_STARTUP_POLICY_SCHEMA_ID:
@@ -476,6 +557,11 @@ def validate_trusted_startup_policy_report(raw: object) -> dict[str, Any]:
             for name, digest in values.items()
         ):
             raise IdentityError("trusted qualification startup artifact policy is invalid")
+    _validated_redacted_source_preflight(report["source_preflight"])
+    validate_interpreter_installation_identity(report["interpreter_installation"])
+    validate_runtime_site_packages_identity(
+        report["runtime_site_packages_manifest"]
+    )
     return json.loads(canonical_json_bytes(report))
 
 
@@ -501,7 +587,13 @@ def capture_source_identity(
     source_sha = _git(root, "rev-parse", "HEAD")
     if source_sha != expected_source_sha:
         raise IdentityError("source SHA mismatch")
-    status = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    status = _git(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
     if status:
         raise IdentityError("worktree is not clean")
     dependencies: dict[str, DependencyIdentity] = {}
@@ -518,15 +610,312 @@ def capture_source_identity(
             raise IdentityError("dependency path escapes repository") from exc
         if not resolved.is_file():
             raise IdentityError("dependency path is unavailable")
+        worktree_bytes = resolved.read_bytes()
         blob_id = _git(root, "rev-parse", f"HEAD:{relative}")
-        worktree_blob_id = _git(root, "hash-object", relative)
-        if blob_id != worktree_blob_id:
+        committed_bytes = _git_bytes(root, "cat-file", "blob", f"HEAD:{relative}")
+        if worktree_bytes != committed_bytes:
             raise IdentityError("Git blob mismatch")
         dependencies[relative] = DependencyIdentity(
-            worktree_sha256=sha256(resolved.read_bytes()).hexdigest(),
+            worktree_sha256=sha256(worktree_bytes).hexdigest(),
             git_blob_id=blob_id,
         )
     return SourceIdentity(source_sha=source_sha, clean=True, dependencies=dependencies)
+
+
+def _base_stdlib_paths() -> tuple[str, ...]:
+    base_prefix = _canonical_path(sys.base_prefix)
+    paths: list[str] = []
+    for entry in sys.path:
+        if not isinstance(entry, str) or not entry:
+            continue
+        canonical = _canonical_path(entry)
+        if not _is_relative_to(Path(canonical), Path(base_prefix)):
+            continue
+        if "site-packages" in Path(canonical).parts:
+            continue
+        if canonical not in paths:
+            paths.append(canonical)
+    if not paths:
+        raise IdentityError("base standard-library paths are unavailable")
+    return tuple(paths)
+
+
+def _interpreter_manifest_record(path: Path, *, name: str) -> dict[str, str]:
+    if path.is_symlink() or not path.is_file():
+        raise IdentityError("interpreter installation file is invalid")
+    return {"name": name, "sha256": sha256(path.read_bytes()).hexdigest()}
+
+
+def _interpreter_manifest_sha256(records: Sequence[Mapping[str, str]]) -> str:
+    return sha256(canonical_json_bytes(list(records))).hexdigest()
+
+
+def _runtime_bytecode_source(path: Path) -> Path:
+    if path.parent.name == "__pycache__":
+        source_name = path.name.split(".", 1)[0] + ".py"
+        return path.parent.parent / source_name
+    return path.with_suffix(".py")
+
+
+def capture_interpreter_installation_identity(
+    *,
+    stdlib_paths: Sequence[str] | None = None,
+    python_executable: str | None = None,
+) -> dict[str, Any]:
+    """Hash all executable, stdlib, and native-extension bytes without paths."""
+    paths = tuple(_base_stdlib_paths() if stdlib_paths is None else stdlib_paths)
+    executable = Path(
+        _canonical_path(sys.executable if python_executable is None else python_executable)
+    )
+    if not executable.is_file():
+        raise IdentityError("Python executable identity is unavailable")
+
+    source_bytecode: list[dict[str, str]] = []
+    archives: list[dict[str, str]] = []
+    native_extensions: list[dict[str, str]] = []
+    seen_files: set[str] = set()
+    for root_index, raw_root in enumerate(paths):
+        root = Path(_canonical_path(raw_root))
+        if root.is_file():
+            if root.suffix.lower() == ".zip":
+                archives.append(
+                    _interpreter_manifest_record(
+                        root,
+                        name=f"archive/{root_index}/{root.name}",
+                    )
+                )
+            continue
+        if not root.is_dir():
+            continue
+        if root.name == "lib-dynload":
+            for candidate in sorted(root.rglob("*")):
+                if candidate.suffix.lower() not in NATIVE_EXTENSION_SUFFIXES:
+                    continue
+                canonical = _canonical_path(candidate)
+                if canonical in seen_files:
+                    continue
+                seen_files.add(canonical)
+                native_extensions.append(
+                    _interpreter_manifest_record(
+                        candidate,
+                        name=f"native/{candidate.relative_to(root).as_posix()}",
+                    )
+                )
+            continue
+        for candidate in sorted(root.rglob("*")):
+            relative = candidate.relative_to(root)
+            if "site-packages" in relative.parts or relative.parts[:1] == (
+                "lib-dynload",
+            ):
+                continue
+            suffix = candidate.suffix.lower()
+            if suffix not in STDLIB_SOURCE_BYTECODE_SUFFIXES:
+                continue
+            canonical = _canonical_path(candidate)
+            if canonical in seen_files:
+                continue
+            if suffix in STDLIB_BYTECODE_SUFFIXES:
+                source = _runtime_bytecode_source(candidate)
+                if source.is_symlink() or not source.is_file():
+                    raise IdentityError(
+                        "sourceless standard-library bytecode is forbidden"
+                    )
+            seen_files.add(canonical)
+            source_bytecode.append(
+                _interpreter_manifest_record(
+                    candidate,
+                    name=f"stdlib/{relative.as_posix()}",
+                )
+            )
+
+    if not source_bytecode or not native_extensions:
+        raise IdentityError("interpreter installation identity is incomplete")
+    identity: dict[str, Any] = {
+        "schema_id": INTERPRETER_INSTALLATION_SCHEMA_ID,
+        "python_executable_sha256": sha256(executable.read_bytes()).hexdigest(),
+        "stdlib_source_bytecode_sha256": _interpreter_manifest_sha256(
+            source_bytecode
+        ),
+        "stdlib_source_bytecode_count": len(source_bytecode),
+        "stdlib_archive_sha256": _interpreter_manifest_sha256(archives),
+        "stdlib_archive_count": len(archives),
+        "native_extension_sha256": _interpreter_manifest_sha256(native_extensions),
+        "native_extension_count": len(native_extensions),
+    }
+    identity["installation_sha256"] = sha256(
+        canonical_json_bytes(identity)
+    ).hexdigest()
+    return identity
+
+
+def validate_interpreter_installation_identity(raw: object) -> dict[str, Any]:
+    fields = {
+        "schema_id",
+        "python_executable_sha256",
+        "stdlib_source_bytecode_sha256",
+        "stdlib_source_bytecode_count",
+        "stdlib_archive_sha256",
+        "stdlib_archive_count",
+        "native_extension_sha256",
+        "native_extension_count",
+        "installation_sha256",
+    }
+    identity = _strict_object(
+        raw,
+        allowed=fields,
+        label="interpreter installation identity",
+    )
+    if identity["schema_id"] != INTERPRETER_INSTALLATION_SCHEMA_ID:
+        raise IdentityError("interpreter installation schema is invalid")
+    for field in (
+        "python_executable_sha256",
+        "stdlib_source_bytecode_sha256",
+        "stdlib_archive_sha256",
+        "native_extension_sha256",
+        "installation_sha256",
+    ):
+        if not isinstance(identity[field], str) or not SHA256_PATTERN.fullmatch(
+            identity[field]
+        ):
+            raise IdentityError("interpreter installation digest is invalid")
+    for field, minimum in (
+        ("stdlib_source_bytecode_count", 1),
+        ("stdlib_archive_count", 0),
+        ("native_extension_count", 1),
+    ):
+        value = identity[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise IdentityError("interpreter installation count is invalid")
+    unsigned = dict(identity)
+    claimed = unsigned.pop("installation_sha256")
+    if sha256(canonical_json_bytes(unsigned)).hexdigest() != claimed:
+        raise IdentityError("interpreter installation aggregate is invalid")
+    return json.loads(canonical_json_bytes(identity))
+
+
+def _runtime_site_file_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return "source"
+    if suffix in STDLIB_BYTECODE_SUFFIXES:
+        return "bytecode"
+    if suffix in NATIVE_EXTENSION_SUFFIXES:
+        return "native_extension"
+    return "metadata_data"
+
+
+def _current_runtime_site_packages() -> Path:
+    executable = Path(os.path.abspath(sys.executable))
+    runtime_root = executable.parent.parent
+    runtime_config = runtime_root / "pyvenv.cfg"
+    if runtime_config.is_symlink() or not runtime_config.is_file():
+        raise IdentityError("qualification runtime is not a virtual environment")
+    site_packages = (
+        runtime_root
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    if site_packages.is_symlink() or not site_packages.is_dir():
+        raise IdentityError("runtime site-packages is unavailable")
+    return Path(_canonical_path(site_packages))
+
+
+def capture_runtime_site_packages_identity(
+    runtime_site: str | Path | None = None,
+) -> dict[str, Any]:
+    """Hash every runtime site-packages file without exposing file paths."""
+    root = (
+        _current_runtime_site_packages()
+        if runtime_site is None
+        else Path(runtime_site)
+    )
+    if root.is_symlink() or not root.is_dir():
+        raise IdentityError("runtime site-packages identity is unavailable")
+    records: list[dict[str, str]] = []
+    counts = {
+        "source": 0,
+        "bytecode": 0,
+        "native_extension": 0,
+        "metadata_data": 0,
+    }
+    try:
+        for candidate in sorted(root.rglob("*")):
+            if candidate.is_symlink():
+                raise IdentityError("runtime site-packages symlink is forbidden")
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(root).as_posix()
+            kind = _runtime_site_file_kind(candidate)
+            counts[kind] += 1
+            records.append(
+                {
+                    "kind": kind,
+                    "path_sha256": sha256(relative.encode("utf-8")).hexdigest(),
+                    "sha256": sha256(candidate.read_bytes()).hexdigest(),
+                }
+            )
+    except OSError as exc:
+        raise IdentityError("runtime site-packages identity failed") from exc
+    if not records:
+        raise IdentityError("runtime site-packages identity is empty")
+    identity: dict[str, Any] = {
+        "schema_id": RUNTIME_SITE_PACKAGES_SCHEMA_ID,
+        "source_count": counts["source"],
+        "bytecode_count": counts["bytecode"],
+        "native_extension_count": counts["native_extension"],
+        "metadata_data_count": counts["metadata_data"],
+        "file_count": len(records),
+        "files_sha256": sha256(canonical_json_bytes(records)).hexdigest(),
+    }
+    identity["manifest_sha256"] = sha256(
+        canonical_json_bytes(identity)
+    ).hexdigest()
+    return identity
+
+
+def validate_runtime_site_packages_identity(raw: object) -> dict[str, Any]:
+    fields = {
+        "schema_id",
+        "source_count",
+        "bytecode_count",
+        "native_extension_count",
+        "metadata_data_count",
+        "file_count",
+        "files_sha256",
+        "manifest_sha256",
+    }
+    identity = _strict_object(
+        raw,
+        allowed=fields,
+        label="runtime site-packages identity",
+    )
+    if identity["schema_id"] != RUNTIME_SITE_PACKAGES_SCHEMA_ID:
+        raise IdentityError("runtime site-packages schema is invalid")
+    for field in ("files_sha256", "manifest_sha256"):
+        if not isinstance(identity[field], str) or not SHA256_PATTERN.fullmatch(
+            identity[field]
+        ):
+            raise IdentityError("runtime site-packages digest is invalid")
+    count_fields = (
+        "source_count",
+        "bytecode_count",
+        "native_extension_count",
+        "metadata_data_count",
+    )
+    for field in (*count_fields, "file_count"):
+        value = identity[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise IdentityError("runtime site-packages count is invalid")
+    if identity["file_count"] < 1 or sum(
+        identity[field] for field in count_fields
+    ) != identity["file_count"]:
+        raise IdentityError("runtime site-packages counts are inconsistent")
+    unsigned = dict(identity)
+    claimed = unsigned.pop("manifest_sha256")
+    if sha256(canonical_json_bytes(unsigned)).hexdigest() != claimed:
+        raise IdentityError("runtime site-packages aggregate is invalid")
+    return json.loads(canonical_json_bytes(identity))
 
 
 def capture_environment_identity(
@@ -535,7 +924,11 @@ def capture_environment_identity(
     expected_python: str,
     expected_uv: str,
     import_names: Sequence[str],
+    expected_interpreter_installation: Mapping[str, Any] | None = None,
+    expected_runtime_site_packages_manifest: Mapping[str, Any] | None = None,
 ) -> EnvironmentIdentity:
+    if SELF_ASSERTED_RUNTIME_ENV in os.environ:
+        raise IdentityError("self-asserted runtime image identity is forbidden")
     root = Path(repo_root).resolve()
     python_version = platform.python_version()
     if python_version != expected_python:
@@ -551,18 +944,17 @@ def capture_environment_identity(
     uv_executable = Path(uv_location).resolve()
     if not uv_executable.is_file():
         raise IdentityError("runtime executable identity is unavailable")
-    python_executable_sha256 = sha256(python_executable.read_bytes()).hexdigest()
+    interpreter_installation = capture_interpreter_installation_identity(
+        python_executable=str(python_executable)
+    )
+    if expected_interpreter_installation is not None:
+        expected_installation = validate_interpreter_installation_identity(
+            expected_interpreter_installation
+        )
+        if interpreter_installation != expected_installation:
+            raise IdentityError("interpreter installation identity mismatch")
+    python_executable_sha256 = interpreter_installation["python_executable_sha256"]
     uv_executable_sha256 = sha256(uv_executable.read_bytes()).hexdigest()
-    container_digest = os.environ.get("QUALIFICATION_CONTAINER_IMAGE_DIGEST")
-    if container_digest is None:
-        runtime_image_kind = "interpreter"
-        runtime_image_sha256 = python_executable_sha256
-    else:
-        match = re.fullmatch(r"sha256:([0-9a-f]{64})", container_digest)
-        if match is None:
-            raise IdentityError("container image identity is invalid")
-        runtime_image_kind = "container"
-        runtime_image_sha256 = match.group(1)
     lock_path = root / "uv.lock"
     if not lock_path.is_file() or lock_path.is_symlink():
         raise IdentityError("uv.lock is unavailable")
@@ -606,6 +998,13 @@ def capture_environment_identity(
         sample.to_bytes(2, "little", signed=True)
         for sample in range(-16_000, 16_000, 1_000)
     )
+    runtime_site_packages_manifest = capture_runtime_site_packages_identity()
+    if expected_runtime_site_packages_manifest is not None:
+        expected_site_manifest = validate_runtime_site_packages_identity(
+            expected_runtime_site_packages_manifest
+        )
+        if runtime_site_packages_manifest != expected_site_manifest:
+            raise IdentityError("runtime site-packages identity mismatch")
 
     return EnvironmentIdentity(
         python_version=python_version,
@@ -616,8 +1015,8 @@ def capture_environment_identity(
             str(python_executable).encode("utf-8")
         ).hexdigest(),
         uv_executable_location_sha256=sha256(str(uv_executable).encode("utf-8")).hexdigest(),
-        runtime_image_kind=runtime_image_kind,
-        runtime_image_sha256=runtime_image_sha256,
+        interpreter_installation=interpreter_installation,
+        runtime_site_packages_manifest=runtime_site_packages_manifest,
         platform_id=platform.system().lower() + "-" + platform.release(),
         architecture=platform.machine().lower(),
         unicode_version=unicodedata.unidata_version,
@@ -976,6 +1375,96 @@ def _redacted_path_map(values: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _source_identity_marker_dict(source: SourceIdentity) -> dict[str, Any]:
+    return {
+        "source_sha": source.source_sha,
+        "clean": source.clean,
+        "dependencies": {
+            name: {
+                "worktree_sha256": identity.worktree_sha256,
+                "git_blob_id": identity.git_blob_id,
+            }
+            for name, identity in sorted(source.dependencies.items())
+        },
+    }
+
+
+def _validate_dependency_identity(raw: object, *, label: str) -> dict[str, str]:
+    identity = _strict_object(
+        raw,
+        allowed={"worktree_sha256", "git_blob_id"},
+        label=label,
+    )
+    if not isinstance(identity["worktree_sha256"], str) or not SHA256_PATTERN.fullmatch(
+        identity["worktree_sha256"]
+    ):
+        raise IdentityError("source dependency worktree digest is invalid")
+    if not isinstance(identity["git_blob_id"], str) or not re.fullmatch(
+        r"[0-9a-f]{40,64}",
+        identity["git_blob_id"],
+    ):
+        raise IdentityError("source dependency Git blob is invalid")
+    return identity
+
+
+def _validated_source_preflight_marker(raw: object) -> dict[str, Any]:
+    report = _strict_object(
+        raw,
+        allowed={"source_sha", "clean", "dependencies"},
+        label="source preflight",
+    )
+    if (
+        not isinstance(report["source_sha"], str)
+        or not SOURCE_SHA_PATTERN.fullmatch(report["source_sha"])
+        or report["clean"] is not True
+    ):
+        raise IdentityError("source preflight identity is invalid")
+    dependencies = report["dependencies"]
+    if not isinstance(dependencies, Mapping) or set(dependencies) != set(
+        EXECUTION_DEPENDENCY_PATHS
+    ):
+        raise IdentityError("source preflight dependencies are incomplete")
+    validated = {
+        name: _validate_dependency_identity(
+            dependencies[name],
+            label="source preflight dependency",
+        )
+        for name in EXECUTION_DEPENDENCY_PATHS
+    }
+    return {
+        "source_sha": report["source_sha"],
+        "clean": True,
+        "dependencies": validated,
+    }
+
+
+def _validated_redacted_source_preflight(raw: object) -> dict[str, Any]:
+    report = _strict_object(
+        raw,
+        allowed={"source_sha", "clean", "dependencies"},
+        label="redacted source preflight",
+    )
+    if (
+        not isinstance(report["source_sha"], str)
+        or not SOURCE_SHA_PATTERN.fullmatch(report["source_sha"])
+        or report["clean"] is not True
+    ):
+        raise IdentityError("redacted source preflight identity is invalid")
+    dependencies = report["dependencies"]
+    expected_names = {
+        sha256(path.encode("utf-8")).hexdigest()
+        for path in EXECUTION_DEPENDENCY_PATHS
+    }
+    if not isinstance(dependencies, Mapping) or set(dependencies) != expected_names:
+        raise IdentityError("redacted source preflight dependencies are incomplete")
+    for identity in dependencies.values():
+        _validate_dependency_identity(
+            identity,
+            label="redacted source preflight dependency",
+        )
+    return json.loads(canonical_json_bytes(report))
+
+
 def _strict_object(
     raw: object,
     *,
@@ -1020,7 +1509,14 @@ def _bounded_int(value: object, label: str, minimum: int, maximum: int) -> int:
 def _git(root: Path, *args: str) -> str:
     try:
         completed = subprocess.run(
-            [GIT_BINARY, *args],
+            [
+                GIT_BINARY,
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                *args,
+            ],
             cwd=root,
             check=True,
             capture_output=True,
@@ -1029,6 +1525,26 @@ def _git(root: Path, *args: str) -> str:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise IdentityError("Git identity command failed") from exc
     return completed.stdout.strip()
+
+
+def _git_bytes(root: Path, *args: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            [
+                GIT_BINARY,
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                *args,
+            ],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )  # nosec B603
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise IdentityError("Git identity command failed") from exc
+    return completed.stdout
 
 
 def _command(*args: str) -> str:

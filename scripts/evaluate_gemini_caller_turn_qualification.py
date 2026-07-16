@@ -1020,6 +1020,21 @@ def _component_digests(
     standard_setup = setup_identity["standard"]["setup"]
     synthetic_tool_setup = setup_identity["synthetic_tool"]["setup"]
     imports = execution["runtime_identity_before"]["environment"]["import_sha256"]
+    source_component_digests = {
+        "runner_sha256": _execution_source_dependency_sha256(
+            execution,
+            relative_path="scripts/run_gemini_caller_turn_qualification.py",
+        ),
+        "evaluator_sha256": _execution_source_dependency_sha256(
+            execution,
+            relative_path="scripts/evaluate_gemini_caller_turn_qualification.py",
+        ),
+    }
+    if any(
+        source_component_digests[field] != immutable[field]
+        for field in source_component_digests
+    ):
+        raise EvaluationError("published source component identities disagree")
     try:
         result = {
             "manifest_sha256": immutable["manifest_sha256"],
@@ -1032,11 +1047,11 @@ def _component_digests(
             "tool_sha256": hashlib.sha256(
                 canonical_json_bytes(synthetic_tool_setup["tools"])
             ).hexdigest(),
-            "runner_sha256": immutable["runner_sha256"],
+            "runner_sha256": source_component_digests["runner_sha256"],
             "adapter_sha256": imports["app.services.gemini_turn_events"],
             "assembler_sha256": imports["app.services.caller_turns"],
             "renderer_sha256": imports["app.utils.audio"],
-            "evaluator_sha256": immutable["evaluator_sha256"],
+            "evaluator_sha256": source_component_digests["evaluator_sha256"],
         }
     except (KeyError, TypeError) as exc:
         raise EvaluationError("published component identities are incomplete") from exc
@@ -1045,6 +1060,24 @@ def _component_digests(
     ):
         raise EvaluationError("published component identities are invalid")
     return dict(sorted(result.items()))
+
+
+def _execution_source_dependency_sha256(
+    execution: Mapping[str, Any],
+    *,
+    relative_path: str,
+) -> str:
+    dependency_key = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
+    try:
+        identity = execution["runtime_identity_before"]["source"]["dependencies"][
+            dependency_key
+        ]
+        value = identity["worktree_sha256"]
+    except (KeyError, TypeError) as exc:
+        raise EvaluationError("published source component identity is incomplete") from exc
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
+        raise EvaluationError("published source component identity is invalid")
+    return value
 
 
 def _recomputed_cardinalities(
@@ -1097,36 +1130,161 @@ def _capsule_execution_cardinalities(
     logical_session_count = 0
     connection_count = 0
     epoch_count = 0
+    fresh_restart_count = 0
     for capsule in capsules:
         sessions = capsule.get("sessions")
+        activities = capsule.get("activities")
+        no_speech_windows = capsule.get("no_speech_windows")
         accounting = capsule.get("accounting")
-        if not isinstance(sessions, list) or not isinstance(accounting, Mapping):
-            raise EvaluationError("published execution cardinalities are unavailable")
+        if (
+            not isinstance(sessions, list)
+            or not isinstance(activities, list)
+            or not isinstance(no_speech_windows, list)
+            or not isinstance(accounting, Mapping)
+        ):
+            raise EvaluationError("published execution topology is unavailable")
         units = accounting.get("units")
         if not isinstance(units, list):
-            raise EvaluationError("published execution cardinalities are unavailable")
-        logical_session_count += len(sessions)
+            raise EvaluationError("published execution topology is unavailable")
+
+        accounting_counts: dict[tuple[str, int], int] = {}
         for unit in units:
             if (
                 not isinstance(unit, Mapping)
                 or unit.get("kind") not in {"session", "no_speech_window"}
+                or isinstance(unit.get("ordinal"), bool)
+                or not isinstance(unit.get("ordinal"), int)
+                or unit["ordinal"] < 0
                 or isinstance(unit.get("provider_request_count"), bool)
                 or not isinstance(unit.get("provider_request_count"), int)
                 or unit["provider_request_count"] < 0
             ):
-                raise EvaluationError("published execution cardinalities are invalid")
-            request_count = unit["provider_request_count"]
-            connection_count += request_count
-            if unit["kind"] == "session":
-                epoch_count += request_count
-    if epoch_count < logical_session_count:
-        raise EvaluationError("published restart cardinality is invalid")
-    return {
+                raise EvaluationError("published execution topology is invalid")
+            identity = (unit["kind"], unit["ordinal"])
+            if identity in accounting_counts:
+                raise EvaluationError("published execution topology is invalid")
+            accounting_counts[identity] = unit["provider_request_count"]
+
+        session_index = _execution_topology_index(
+            sessions,
+            kind="session",
+            ordinal_field="session_ordinal",
+        )
+        window_index = _execution_topology_index(
+            no_speech_windows,
+            kind="no-speech window",
+            ordinal_field="window_ordinal",
+        )
+        expected_accounting_units = {
+            *(("session", ordinal) for ordinal in session_index),
+            *(("no_speech_window", ordinal) for ordinal in window_index),
+        }
+        if set(accounting_counts) != expected_accounting_units:
+            raise EvaluationError("published execution topology is invalid")
+
+        activity_epochs: dict[int, set[int]] = defaultdict(set)
+        activity_ordinals: set[int] = set()
+        for activity in activities:
+            if not isinstance(activity, Mapping):
+                raise EvaluationError("published execution topology is invalid")
+            activity_ordinal = _execution_topology_int(activity.get("activity_ordinal"))
+            session_ordinal = _execution_topology_int(activity.get("session_ordinal"))
+            expected_epoch = _execution_topology_int(activity.get("expected_epoch"), positive=True)
+            if activity_ordinal in activity_ordinals or session_ordinal not in session_index:
+                raise EvaluationError("published execution topology is invalid")
+            activity_ordinals.add(activity_ordinal)
+            activity_epochs[session_ordinal].add(expected_epoch)
+        if set(activity_epochs) != set(session_index):
+            raise EvaluationError("published execution topology is invalid")
+
+        for session_ordinal, session in session_index.items():
+            connection_epochs, wire_epochs = _execution_wire_epochs(session.get("wire_facts"))
+            event_epochs = _execution_event_epochs(session.get("events"))
+            expected_epochs = activity_epochs[session_ordinal]
+            canonical_epochs = tuple(range(1, len(connection_epochs) + 1))
+            if (
+                connection_epochs != canonical_epochs
+                or wire_epochs != set(connection_epochs)
+                or set(event_epochs) != expected_epochs
+                or expected_epochs != set(connection_epochs)
+                or any(left > right for left, right in zip(event_epochs, event_epochs[1:]))
+                or accounting_counts[("session", session_ordinal)] != len(connection_epochs)
+            ):
+                raise EvaluationError("published execution topology is invalid")
+            logical_session_count += 1
+            connection_count += len(connection_epochs)
+            epoch_count += len(connection_epochs)
+            fresh_restart_count += len(connection_epochs) - 1
+
+        for window_ordinal, window in window_index.items():
+            connection_epochs, wire_epochs = _execution_wire_epochs(window.get("wire_facts"))
+            if (
+                connection_epochs != (1,)
+                or wire_epochs != {1}
+                or accounting_counts[("no_speech_window", window_ordinal)] != 1
+            ):
+                raise EvaluationError("published execution topology is invalid")
+            connection_count += 1
+
+    observed = {
         "logical_session_count": logical_session_count,
         "connection_count": connection_count,
         "epoch_count": epoch_count,
-        "fresh_restart_count": epoch_count - logical_session_count,
+        "fresh_restart_count": fresh_restart_count,
     }
+    if any(observed[name] != CARDINALITY_REQUIREMENTS[name] for name in observed):
+        raise EvaluationError("published execution topology cardinality is invalid")
+    return observed
+
+
+def _execution_topology_index(
+    raw_items: list[object],
+    *,
+    kind: str,
+    ordinal_field: str,
+) -> dict[int, Mapping[str, Any]]:
+    result: dict[int, Mapping[str, Any]] = {}
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            raise EvaluationError(f"published {kind} execution topology is invalid")
+        ordinal = _execution_topology_int(item.get(ordinal_field))
+        if ordinal in result:
+            raise EvaluationError(f"published {kind} execution topology is invalid")
+        result[ordinal] = item
+    return result
+
+
+def _execution_topology_int(value: object, *, positive: bool = False) -> int:
+    minimum = 1 if positive else 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise EvaluationError("published execution topology is invalid")
+    return value
+
+
+def _execution_wire_epochs(raw_facts: object) -> tuple[tuple[int, ...], set[int]]:
+    if not isinstance(raw_facts, list):
+        raise EvaluationError("published execution topology is invalid")
+    connection_epochs = []
+    wire_epochs = set()
+    for fact in raw_facts:
+        if not isinstance(fact, Mapping) or not isinstance(fact.get("kind"), str):
+            raise EvaluationError("published execution topology is invalid")
+        epoch = _execution_topology_int(fact.get("epoch"), positive=True)
+        wire_epochs.add(epoch)
+        if fact["kind"] == "connection_open":
+            connection_epochs.append(epoch)
+    return tuple(connection_epochs), wire_epochs
+
+
+def _execution_event_epochs(raw_events: object) -> tuple[int, ...]:
+    if not isinstance(raw_events, list):
+        raise EvaluationError("published execution topology is invalid")
+    result = []
+    for event in raw_events:
+        if not isinstance(event, Mapping):
+            raise EvaluationError("published execution topology is invalid")
+        result.append(_execution_topology_int(event.get("epoch"), positive=True))
+    return tuple(result)
 
 
 def _cardinality_report(
@@ -1287,7 +1445,7 @@ def _validate_published_report(
             set(samples["development"]["languages"]) | set(samples["holdout"]["languages"])
         ),
         "logical_session_count": CARDINALITY_REQUIREMENTS["logical_session_count"],
-        "connection_count": usage["provider_requests"],
+        "connection_count": CARDINALITY_REQUIREMENTS["connection_count"],
         "epoch_count": CARDINALITY_REQUIREMENTS["epoch_count"],
         "fresh_restart_count": CARDINALITY_REQUIREMENTS["fresh_restart_count"],
         "development_scheduled_activity_count": samples["development"]["activity_count"],
@@ -1788,14 +1946,12 @@ def _evaluate_sample(
         "malformed_count",
         "teardown_violation_count",
     )
-    lifecycle_exact = all(
-        record.expected_lifecycle_status == record.observed_lifecycle_status for record in records
-    )
+    lifecycle_complete = all(_lifecycle_is_assembly_success(record) for record in records)
     structural_zero = all(
         getattr(record, field) == 0 for record in records for field in exact_zero_fields
     )
     assembly_passed = (
-        assembly_overall and assembly_languages and lifecycle_exact and structural_zero
+        assembly_overall and assembly_languages and lifecycle_complete and structural_zero
     )
 
     fidelity_passed = (
@@ -1939,9 +2095,17 @@ def _assembly_success(record: ActivityPrimitiveRecord) -> bool:
     return (
         record.assembled_turn_count == 1
         and record.assignment_status == "matched"
-        and record.expected_lifecycle_status == record.observed_lifecycle_status
+        and _lifecycle_is_assembly_success(record)
         and record.error_code is None
         and _record_fidelity_passes(record)
+    )
+
+
+def _lifecycle_is_assembly_success(record: ActivityPrimitiveRecord) -> bool:
+    return (
+        record.expected_lifecycle_status
+        == record.observed_lifecycle_status
+        == "retrospective_complete"
     )
 
 

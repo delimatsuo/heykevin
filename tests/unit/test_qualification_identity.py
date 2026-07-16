@@ -12,9 +12,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 import app.services.qualification_identity as identity_module
+import scripts.launch_qualification as launcher_module
 
 from app.services.qualification_identity import (
+    EXECUTION_DEPENDENCY_PATHS,
+    DependencyIdentity,
     IdentityError,
+    SourceIdentity,
     STARTUP_FLAG_NAMES,
     STARTUP_MARKER_ENV,
     TRUSTED_STARTUP_SCHEMA_ID,
@@ -57,6 +61,35 @@ def _trusted_startup_flags() -> dict[str, int | bool]:
     }
 
 
+def _interpreter_report() -> dict[str, object]:
+    report: dict[str, object] = {
+        "schema_id": "gate_0b_interpreter_installation_v1",
+        "python_executable_sha256": sha256(b"python").hexdigest(),
+        "stdlib_source_bytecode_sha256": "1" * 64,
+        "stdlib_source_bytecode_count": 1,
+        "stdlib_archive_sha256": "2" * 64,
+        "stdlib_archive_count": 0,
+        "native_extension_sha256": "3" * 64,
+        "native_extension_count": 1,
+    }
+    report["installation_sha256"] = sha256(canonical_json_bytes(report)).hexdigest()
+    return report
+
+
+def _runtime_site_report() -> dict[str, object]:
+    report: dict[str, object] = {
+        "schema_id": "gate_0b_runtime_site_packages_v1",
+        "source_count": 1,
+        "bytecode_count": 0,
+        "native_extension_count": 1,
+        "metadata_data_count": 1,
+        "file_count": 3,
+        "files_sha256": "4" * 64,
+    }
+    report["manifest_sha256"] = sha256(canonical_json_bytes(report)).hexdigest()
+    return report
+
+
 def _git(repo: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -78,6 +111,58 @@ def _git_repo(tmp_path: Path) -> Path:
     _git(repo, "add", "tracked.py")
     _git(repo, "commit", "-m", "fixture")
     return repo
+
+
+def _interpreter_fixture(
+    tmp_path: Path,
+) -> tuple[Path, tuple[str, ...], dict[str, Path]]:
+    executable = tmp_path / "runtime" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"python-executable")
+    stdlib = tmp_path / "runtime" / "lib" / "python3.12"
+    cache = stdlib / "package" / "__pycache__"
+    cache.mkdir(parents=True)
+    source = stdlib / "package" / "module.py"
+    source.write_bytes(b"VALUE = 1\n")
+    bytecode = cache / "module.cpython-312.pyc"
+    bytecode.write_bytes(b"bytecode")
+    native = stdlib / "lib-dynload"
+    native.mkdir()
+    extension = native / "_runtime.cpython-312-darwin.so"
+    extension.write_bytes(b"native-extension")
+    archive = tmp_path / "runtime" / "lib" / "python312.zip"
+    archive.write_bytes(b"stdlib-archive")
+    return executable, (str(archive), str(stdlib), str(native)), {
+        "bytecode": bytecode,
+        "executable": executable,
+        "native": extension,
+        "source": source,
+    }
+
+
+def _runtime_site_fixture(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
+    site_packages = tmp_path / "runtime" / "site-packages"
+    package = site_packages / "approved_package"
+    cache = package / "__pycache__"
+    cache.mkdir(parents=True)
+    source = package / "__init__.py"
+    source.write_bytes(b"VALUE = 1\n")
+    bytecode = cache / "__init__.cpython-312.pyc"
+    bytecode.write_bytes(b"bytecode")
+    native = package / "approved_native.so"
+    native.write_bytes(b"native")
+    metadata = site_packages / "approved_package-1.0.0.dist-info" / "METADATA"
+    metadata.parent.mkdir()
+    metadata.write_bytes(b"Name: approved-package\nVersion: 1.0.0\n")
+    data = site_packages / "approved_package-1.0.0.dist-info" / "entry_points.txt"
+    data.write_bytes(b"[approved]\nfixture = approved_package:VALUE\n")
+    return site_packages, {
+        "bytecode": bytecode,
+        "data": data,
+        "metadata": metadata,
+        "native": native,
+        "source": source,
+    }
 
 
 def _key_pair() -> tuple[Ed25519PrivateKey, bytes]:
@@ -225,8 +310,8 @@ def test_environment_identity_binds_exact_runtime_and_imports() -> None:
     assert identity.uv_executable_sha256
     assert identity.python_executable_location_sha256
     assert identity.uv_executable_location_sha256
-    assert identity.runtime_image_kind in {"container", "interpreter"}
-    assert identity.runtime_image_sha256
+    assert identity.interpreter_installation["installation_sha256"]
+    assert identity.runtime_site_packages_manifest["manifest_sha256"]
     assert identity.monotonic_clock_implementation
     assert identity.monotonic_clock_resolution_ns > 0
     assert isinstance(identity.bytecode_write_disabled, bool)
@@ -235,6 +320,105 @@ def test_environment_identity_binds_exact_runtime_and_imports() -> None:
     assert set(identity.import_sha256) == {"websockets", "app.utils.audio"}
     assert identity.distribution_files_sha256["websockets"]
     assert all("/" not in value for value in identity.redacted_report_dict().values() if isinstance(value, str))
+
+
+def test_launcher_and_runtime_capture_the_same_complete_path_redacted_interpreter_identity(
+    tmp_path: Path,
+) -> None:
+    executable, stdlib_paths, _files = _interpreter_fixture(tmp_path)
+
+    launcher = launcher_module._capture_interpreter_installation_identity(
+        stdlib_paths=stdlib_paths,
+        python_executable=str(executable),
+    )
+    runtime = identity_module.capture_interpreter_installation_identity(
+        stdlib_paths=stdlib_paths,
+        python_executable=str(executable),
+    )
+
+    assert launcher == runtime
+    assert launcher["schema_id"] == "gate_0b_interpreter_installation_v1"
+    assert launcher["stdlib_source_bytecode_count"] == 2
+    assert launcher["stdlib_archive_count"] == 1
+    assert launcher["native_extension_count"] == 1
+    assert launcher["installation_sha256"]
+    assert str(tmp_path) not in canonical_json_bytes(launcher).decode("ascii")
+
+
+@pytest.mark.parametrize("component", ["executable", "source", "bytecode", "native"])
+def test_interpreter_installation_identity_detects_every_runtime_byte_drift(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    executable, stdlib_paths, files = _interpreter_fixture(tmp_path)
+    before = launcher_module._capture_interpreter_installation_identity(
+        stdlib_paths=stdlib_paths,
+        python_executable=str(executable),
+    )
+    files[component].write_bytes(files[component].read_bytes() + b"-drift")
+
+    after = launcher_module._capture_interpreter_installation_identity(
+        stdlib_paths=stdlib_paths,
+        python_executable=str(executable),
+    )
+
+    assert after["installation_sha256"] != before["installation_sha256"]
+
+
+def test_launcher_and_runtime_capture_the_same_complete_path_redacted_site_manifest(
+    tmp_path: Path,
+) -> None:
+    site_packages, _files = _runtime_site_fixture(tmp_path)
+
+    launcher = launcher_module._capture_runtime_site_packages_identity(
+        str(site_packages)
+    )
+    runtime = identity_module.capture_runtime_site_packages_identity(site_packages)
+
+    assert launcher == runtime
+    assert launcher["schema_id"] == "gate_0b_runtime_site_packages_v1"
+    assert launcher["source_count"] == 1
+    assert launcher["bytecode_count"] == 1
+    assert launcher["native_extension_count"] == 1
+    assert launcher["metadata_data_count"] == 2
+    assert launcher["file_count"] == 5
+    assert launcher["manifest_sha256"]
+    assert str(tmp_path) not in canonical_json_bytes(launcher).decode("ascii")
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["source", "bytecode", "native", "metadata", "data"],
+)
+def test_runtime_site_manifest_detects_every_executable_dependency_byte_drift(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    site_packages, files = _runtime_site_fixture(tmp_path)
+    before = launcher_module._capture_runtime_site_packages_identity(
+        str(site_packages)
+    )
+    files[component].write_bytes(files[component].read_bytes() + b"-drift")
+
+    after = launcher_module._capture_runtime_site_packages_identity(
+        str(site_packages)
+    )
+
+    assert after["manifest_sha256"] != before["manifest_sha256"]
+
+
+def test_environment_identity_rejects_self_asserted_container_image_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("QUALIFICATION_CONTAINER_IMAGE_DIGEST", "sha256:" + "a" * 64)
+
+    with pytest.raises(IdentityError, match="self-asserted runtime image"):
+        capture_environment_identity(
+            repo_root=Path.cwd(),
+            expected_python="3.12.13",
+            expected_uv="0.11.7",
+            import_names=("websockets", "app.utils.audio"),
+        )
 
 
 def test_trusted_startup_identity_revalidates_live_flags_paths_and_bounded_artifacts(
@@ -255,6 +439,31 @@ def test_trusted_startup_identity_revalidates_live_flags_paths_and_bounded_artif
     effective_sys_path = [str(repo_root.resolve()), str(runtime_site.resolve())]
     pycache_prefix = tmp_path / "disabled-pycache"
     flags = _trusted_startup_flags()
+    dependencies = {
+        path: DependencyIdentity(
+            worktree_sha256="1" * 64,
+            git_blob_id="2" * 40,
+        )
+        for path in EXECUTION_DEPENDENCY_PATHS
+    }
+    source = SourceIdentity(
+        source_sha="b" * 40,
+        clean=True,
+        dependencies=dependencies,
+    )
+    source_marker = {
+        "source_sha": source.source_sha,
+        "clean": True,
+        "dependencies": {
+            path: {
+                "worktree_sha256": dependency.worktree_sha256,
+                "git_blob_id": dependency.git_blob_id,
+            }
+            for path, dependency in dependencies.items()
+        },
+    }
+    interpreter = _interpreter_report()
+    runtime_site_manifest = _runtime_site_report()
     marker = {
         "schema_id": TRUSTED_STARTUP_SCHEMA_ID,
         "target": "verify-environment",
@@ -272,6 +481,9 @@ def test_trusted_startup_identity_revalidates_live_flags_paths_and_bounded_artif
         "ignored_startup_hook_files_sha256": {
             str(hook_path.resolve()): sha256(hook_path.read_bytes()).hexdigest()
         },
+        "source_preflight": source_marker,
+        "interpreter_installation": interpreter,
+        "runtime_site_packages_manifest": runtime_site_manifest,
     }
     monkeypatch.setattr(identity_module.sys, "flags", SimpleNamespace(**flags))
     monkeypatch.setattr(identity_module.sys, "path", effective_sys_path.copy())
@@ -286,6 +498,22 @@ def test_trusted_startup_identity_revalidates_live_flags_paths_and_bounded_artif
         monkeypatch.delitem(identity_module.sys.modules, module_name, raising=False)
     monkeypatch.delenv("PYTHONHOME", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("QUALIFICATION_CONTAINER_IMAGE_DIGEST", raising=False)
+    monkeypatch.setattr(
+        identity_module,
+        "capture_source_identity",
+        lambda *_args, **_kwargs: source,
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "capture_interpreter_installation_identity",
+        lambda **_kwargs: interpreter,
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "capture_runtime_site_packages_identity",
+        lambda *_args, **_kwargs: runtime_site_manifest,
+    )
     monkeypatch.setenv(
         STARTUP_MARKER_ENV,
         json.dumps(marker, sort_keys=True, separators=(",", ":")),

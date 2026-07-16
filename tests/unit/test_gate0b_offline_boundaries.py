@@ -6,11 +6,14 @@ import json
 import os
 from pathlib import Path
 import py_compile
+import shutil
 import subprocess
 import stat
 import sys
+from types import SimpleNamespace
 
 import pytest
+from app.services.qualification_environment import EXECUTION_DEPENDENCY_PATHS
 import scripts.launch_qualification as launcher_module
 
 
@@ -67,9 +70,10 @@ def _startup_probe(
     python: str | Path,
     *,
     environment: dict[str, str] | None = None,
+    launcher: Path = TRUSTED_STARTUP,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(python), "-I", "-S", str(TRUSTED_STARTUP), "probe"],
+        [str(python), "-I", "-S", str(launcher), "probe"],
         cwd=Path.cwd(),
         env=environment,
         check=False,
@@ -77,6 +81,115 @@ def _startup_probe(
         text=True,
         timeout=30,
     )
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _qualification_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "qualification-repo"
+    repo.mkdir()
+    for relative in EXECUTION_DEPENDENCY_PATHS:
+        source = Path.cwd() / relative
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "qualification@example.invalid")
+    _git(repo, "config", "user.name", "Qualification Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "qualification fixture")
+    return repo
+
+
+def _install_sentinel_target(repo: Path, target: Path, sentinel: Path) -> None:
+    destination = repo / target
+    destination.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('imported', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", str(target))
+    _git(repo, "commit", "-m", "install target sentinel")
+
+
+def _runtime_site_packages(runtime: Path) -> Path:
+    return (
+        runtime
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+
+
+def _create_runtime(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
+    runtime = tmp_path / "qualification-runtime"
+    created = subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(runtime)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert created.returncode == 0, created.stderr
+    site_packages = _runtime_site_packages(runtime)
+    package = site_packages / "approved_package"
+    package.mkdir()
+    source = package / "__init__.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    bytecode = package / "__pycache__" / "__init__.cpython-312.pyc"
+    bytecode.parent.mkdir()
+    py_compile.compile(str(source), cfile=str(bytecode), doraise=True)
+    native = package / "approved_native.so"
+    native.write_bytes(b"native-extension")
+    metadata = site_packages / "approved_package-1.0.0.dist-info" / "METADATA"
+    metadata.parent.mkdir()
+    metadata.write_text("Name: approved-package\nVersion: 1.0.0\n", encoding="utf-8")
+    data = site_packages / "approved_package-1.0.0.dist-info" / "entry_points.txt"
+    data.write_text("[approved]\nfixture = approved_package:VALUE\n", encoding="utf-8")
+    return runtime / "bin" / "python", {
+        "bytecode": bytecode,
+        "data": data,
+        "metadata": metadata,
+        "native": native,
+        "source": source,
+    }
+
+
+def _approved_target_command(
+    python: str | Path,
+    repo: Path,
+    *,
+    target: str,
+    source_sha: str,
+    site_manifest_sha256: str,
+    target_args: tuple[str, ...] = (),
+) -> list[str]:
+    return [
+        str(python),
+        "-I",
+        "-S",
+        str(repo / TRUSTED_STARTUP),
+        target,
+        "--expected-source-sha",
+        source_sha,
+        "--expected-runtime-site-packages-sha256",
+        site_manifest_sha256,
+        *target_args,
+    ]
+
+
+@pytest.fixture
+def qualification_repo(tmp_path: Path) -> Path:
+    return _qualification_repo(tmp_path)
 
 
 def _hook_source(sentinel: Path) -> str:
@@ -103,6 +216,7 @@ def test_trusted_startup_launcher_is_stdlib_only_and_target_allowlisted() -> Non
         "os",
         "pathlib",
         "runpy",
+        "subprocess",
         "sys",
         "typing",
     }
@@ -119,6 +233,214 @@ def test_trusted_startup_launcher_is_stdlib_only_and_target_allowlisted() -> Non
     }
 
 
+def test_trusted_startup_preflight_binds_current_committed_component_bytes(
+    qualification_repo: Path,
+) -> None:
+    completed = _startup_probe(
+        sys.executable,
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    source = report["source_preflight"]
+    assert source["source_sha"] == _git(qualification_repo, "rev-parse", "HEAD")
+    assert source["clean"] is True
+    dependencies = source["dependencies"]
+    for relative in (
+        "scripts/launch_qualification.py",
+        "scripts/run_gemini_caller_turn_qualification.py",
+        "scripts/evaluate_gemini_caller_turn_qualification.py",
+        "scripts/verify_qualification_environment.py",
+        "app/services/qualification_environment.py",
+        "app/services/qualification_identity.py",
+    ):
+        path_key = sha256(relative.encode("utf-8")).hexdigest()
+        assert dependencies[path_key]["worktree_sha256"] == sha256(
+            (qualification_repo / relative).read_bytes()
+        ).hexdigest()
+        assert dependencies[path_key]["git_blob_id"] == _git(
+            qualification_repo,
+            "rev-parse",
+            f"HEAD:{relative}",
+        )
+    assert str(qualification_repo) not in completed.stdout
+    assert report["interpreter_installation"]["installation_sha256"]
+    site_manifest = report["runtime_site_packages_manifest"]
+    assert site_manifest["manifest_sha256"]
+    assert site_manifest["source_count"] > 0
+    assert site_manifest["native_extension_count"] > 0
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("evaluate-qualification", "run-qualification", "verify-environment"),
+)
+def test_executable_targets_require_external_source_and_site_approvals(
+    qualification_repo: Path,
+    target: str,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            str(qualification_repo / TRUSTED_STARTUP),
+            target,
+        ],
+        cwd=qualification_repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
+
+
+def test_trusted_startup_rejects_clean_wrong_head_before_target_import(
+    tmp_path: Path,
+) -> None:
+    repo = _qualification_repo(tmp_path)
+    approved_source_sha = _git(repo, "rev-parse", "HEAD")
+    sentinel = tmp_path / "wrong-head-imported"
+    _install_sentinel_target(repo, ENVIRONMENT_VERIFIER, sentinel)
+    probe = _startup_probe(
+        sys.executable,
+        launcher=repo / TRUSTED_STARTUP,
+    )
+    assert probe.returncode == 0, probe.stderr
+    probe_report = json.loads(probe.stdout)
+
+    completed = subprocess.run(
+        _approved_target_command(
+            sys.executable,
+            repo,
+            target="verify-environment",
+            source_sha=approved_source_sha,
+            site_manifest_sha256=probe_report["runtime_site_packages_manifest"][
+                "manifest_sha256"
+            ],
+        ),
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
+    assert sentinel.exists() is False
+
+
+def test_trusted_startup_rejects_third_party_byte_drift_before_target_import(
+    tmp_path: Path,
+) -> None:
+    repo = _qualification_repo(tmp_path)
+    sentinel = tmp_path / "site-drift-imported"
+    _install_sentinel_target(repo, ENVIRONMENT_VERIFIER, sentinel)
+    runtime_python, runtime_files = _create_runtime(tmp_path)
+    probe = _startup_probe(
+        runtime_python,
+        launcher=repo / TRUSTED_STARTUP,
+    )
+    assert probe.returncode == 0, probe.stderr
+    probe_report = json.loads(probe.stdout)
+    runtime_files["source"].write_text("VALUE = 2\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        _approved_target_command(
+            runtime_python,
+            repo,
+            target="verify-environment",
+            source_sha=_git(repo, "rev-parse", "HEAD"),
+            site_manifest_sha256=probe_report["runtime_site_packages_manifest"][
+                "manifest_sha256"
+            ],
+        ),
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
+    assert sentinel.exists() is False
+
+
+def test_trusted_startup_rejects_dirty_dependency_before_import_sentinel(
+    tmp_path: Path,
+) -> None:
+    repo = _qualification_repo(tmp_path)
+    probe = _startup_probe(
+        sys.executable,
+        launcher=repo / TRUSTED_STARTUP,
+    )
+    assert probe.returncode == 0, probe.stderr
+    probe_report = json.loads(probe.stdout)
+    sentinel = tmp_path / "project-imported"
+    dependency = repo / "app/services/qualification_environment.py"
+    dependency.write_text(
+        dependency.read_text(encoding="utf-8")
+        + "\nPath("
+        + repr(str(sentinel))
+        + ").write_text('imported', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        _approved_target_command(
+            sys.executable,
+            repo,
+            target="verify-environment",
+            source_sha=probe_report["source_preflight"]["source_sha"],
+            site_manifest_sha256=probe_report["runtime_site_packages_manifest"][
+                "manifest_sha256"
+            ],
+            target_args=("--phase", "before"),
+        ),
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
+    assert sentinel.exists() is False
+
+
+def test_trusted_startup_rejects_preloaded_executable_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable_path = Path.cwd() / "app/services/qualification_environment.py"
+    monkeypatch.setitem(
+        sys.modules,
+        "qualification_preloaded_alias",
+        SimpleNamespace(__file__=str(executable_path)),
+    )
+
+    with pytest.raises(launcher_module.BootstrapError, match="preloaded executable"):
+        launcher_module._reject_preloaded_executable_modules(str(Path.cwd()))
+
+
 def test_trusted_startup_rejects_sourceless_bytecode_in_repository_import_roots(
     tmp_path: Path,
 ) -> None:
@@ -131,6 +453,58 @@ def test_trusted_startup_rejects_sourceless_bytecode_in_repository_import_roots(
         match="sourceless repository bytecode",
     ):
         launcher_module._reject_sourceless_repository_bytecode(str(tmp_path))
+
+
+def test_trusted_startup_rejects_sourceless_runtime_bytecode(
+    tmp_path: Path,
+    qualification_repo: Path,
+) -> None:
+    runtime = tmp_path / "qualification-runtime"
+    created = subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(runtime)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert created.returncode == 0, created.stderr
+    site_packages = (
+        runtime
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    (site_packages / "ambient_only.pyc").write_bytes(b"untrusted")
+
+    completed = _startup_probe(
+        runtime / "bin" / "python",
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
+
+
+def test_trusted_startup_rejects_ambient_container_digest_claim(
+    qualification_repo: Path,
+) -> None:
+    environment = os.environ.copy()
+    environment["QUALIFICATION_CONTAINER_IMAGE_DIGEST"] = "sha256:" + "a" * 64
+
+    completed = _startup_probe(
+        sys.executable,
+        environment=environment,
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
 
 
 def test_every_gate0b_module_is_absent_from_live_pipeline_imports_and_source() -> None:
@@ -230,6 +604,7 @@ def test_gate0b_targets_reject_forged_marker_under_normal_python(target: Path) -
 
 def test_trusted_startup_neutralizes_ambient_python_paths_and_customize_hooks(
     tmp_path: Path,
+    qualification_repo: Path,
 ) -> None:
     injection_root = tmp_path / "external-python-path"
     injection_root.mkdir()
@@ -262,7 +637,11 @@ def test_trusted_startup_neutralizes_ambient_python_paths_and_customize_hooks(
     )
     environment["PYTHONHOME"] = str(tmp_path / "untrusted-python-home")
 
-    completed = _startup_probe(sys.executable, environment=environment)
+    completed = _startup_probe(
+        sys.executable,
+        environment=environment,
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
 
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
@@ -284,6 +663,7 @@ def test_trusted_startup_neutralizes_ambient_python_paths_and_customize_hooks(
 
 def test_trusted_startup_recognizes_but_never_executes_runtime_hook_artifacts(
     tmp_path: Path,
+    qualification_repo: Path,
 ) -> None:
     runtime = tmp_path / "qualification-runtime"
     created = subprocess.run(
@@ -328,7 +708,10 @@ def test_trusted_startup_recognizes_but_never_executes_runtime_hook_artifacts(
         source_path.write_text(_hook_source(source_sentinel), encoding="utf-8")
         hook_sentinels.append(bytecode_sentinel)
 
-    completed = _startup_probe(runtime_python)
+    completed = _startup_probe(
+        runtime_python,
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
 
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
@@ -346,6 +729,7 @@ def test_trusted_startup_recognizes_but_never_executes_runtime_hook_artifacts(
 
 def test_documented_runner_entrypoint_is_offline_and_execute_stays_blocked(
     tmp_path: Path,
+    qualification_repo: Path,
 ) -> None:
     guard_root = tmp_path / "network-denial"
     guard_root.mkdir()
@@ -374,17 +758,28 @@ socket.getaddrinfo = deny
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         environment.pop(key, None)
+    probe = _startup_probe(
+        sys.executable,
+        environment=environment,
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
+    assert probe.returncode == 0, probe.stderr
+    probe_report = json.loads(probe.stdout)
+    approved_source_sha = probe_report["source_preflight"]["source_sha"]
+    approved_site_sha = probe_report["runtime_site_packages_manifest"][
+        "manifest_sha256"
+    ]
 
     dry_run = subprocess.run(
-        [
+        _approved_target_command(
             sys.executable,
-            "-I",
-            "-S",
-            str(TRUSTED_STARTUP),
-            "run-qualification",
-            "--dry-run",
-        ],
-        cwd=Path.cwd(),
+            qualification_repo,
+            target="run-qualification",
+            source_sha=approved_source_sha,
+            site_manifest_sha256=approved_site_sha,
+            target_args=("--dry-run",),
+        ),
+        cwd=qualification_repo,
         env=environment,
         check=False,
         capture_output=True,
@@ -392,15 +787,15 @@ socket.getaddrinfo = deny
         timeout=30,
     )
     execute = subprocess.run(
-        [
+        _approved_target_command(
             sys.executable,
-            "-I",
-            "-S",
-            str(TRUSTED_STARTUP),
-            "run-qualification",
-            "--execute",
-        ],
-        cwd=Path.cwd(),
+            qualification_repo,
+            target="run-qualification",
+            source_sha=approved_source_sha,
+            site_manifest_sha256=approved_site_sha,
+            target_args=("--execute",),
+        ),
+        cwd=qualification_repo,
         env=environment,
         check=False,
         capture_output=True,
@@ -459,6 +854,10 @@ def test_runbook_creates_operator_owned_private_directories(tmp_path: Path) -> N
         metadata = path.stat()
         assert metadata.st_uid == os.getuid()
         assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert "gate0b-startup-probe.json" in source
+    assert "REVIEWED_GATE0B_SOURCE_SHA" in source
+    assert "REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256" in source
+    assert "must not be rediscovered" in source
 
 
 def test_ci_uses_exact_locked_qualification_environment() -> None:
@@ -474,14 +873,14 @@ def test_ci_uses_exact_locked_qualification_environment() -> None:
         "run: uv run --locked --no-sync --extra dev --python 3.12.13 "
         "python -m pytest --tb=short -q"
     ) in normalized
-    assert (
-        "python -I -S scripts/launch_qualification.py verify-environment --phase before"
-        in normalized
-    )
-    assert (
-        "python -I -S scripts/launch_qualification.py verify-environment --phase after"
-        in normalized
-    )
+    assert "scripts/launch_qualification.py probe" in normalized
+    assert "QUALIFICATION_EXPECTED_SOURCE_SHA" in source
+    assert "QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" in source
+    assert normalized.count("--expected-source-sha") == 2
+    assert normalized.count("--expected-runtime-site-packages-sha256") == 2
+    assert "verify-environment --expected-source-sha" in normalized
+    assert "--phase before" in normalized
+    assert "--phase after" in normalized
     assert "python -m compileall -q app/services scripts" in normalized
     assert "ruff check" in source
     assert "bandit -q -lll" in normalized

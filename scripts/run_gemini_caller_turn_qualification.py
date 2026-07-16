@@ -10,11 +10,12 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING
-from hashlib import sha256
+from hashlib import sha1, sha256
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
@@ -118,6 +119,10 @@ MAX_WHOLE_RUN_SECONDS = 3_600
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
+PINNED_APPROVAL_ROOT_RELATIVE_PATH = Path(
+    "config/qualification/gate_0b_approval_root.ed25519.pub"
+)
+APPROVAL_ROOT_BYTES = 32
 PREREGISTRATION_EXTERNAL_FIELDS = frozenset(
     {
         "project",
@@ -1007,6 +1012,28 @@ async def _execute_session_flow(
             if setup_response != {"setupComplete": {}}:
                 error_code = "setup_rejected"
                 raise _AbortConnection
+            if epoch_count > 1:
+                reconnect_owner = next(
+                    (
+                        replay_input.activity_ordinal
+                        for replay_input in replay_inputs
+                        if replay_input.kind == "caller_activity_start"
+                        and replay_input.activity_ordinal is not None
+                    ),
+                    None,
+                )
+                if reconnect_owner is None:
+                    raise RunnerError("fresh restart activity identity is missing")
+                audit_events.append(
+                    CallerTurnEvent(
+                        kind=CallerTurnEventKind.RECONNECT_STARTED,
+                        at_ms=setup_at_ms,
+                        sequence=sequence,
+                        epoch=epoch,
+                    )
+                )
+                event_activity_ordinals.append(reconnect_owner)
+                sequence += 1
 
             async def send_replay_inputs() -> None:
                 nonlocal sender_error
@@ -2302,7 +2329,7 @@ async def execute_authorized_attempt(
         session_config=session_config,
         pricing=pricing,
     )
-    approval_public_key = _load_pinned_approval_public_key()
+    approval_public_key = _load_pinned_approval_public_key(environment_identity)
     _verify_execution_preregistration(
         preregistration,
         config=config,
@@ -2706,7 +2733,7 @@ async def execute_authorized_holdout(
         session_config=session_config,
         pricing=pricing,
     )
-    approval_public_key = _load_pinned_approval_public_key()
+    approval_public_key = _load_pinned_approval_public_key(environment_identity)
     _verify_execution_preregistration(
         preregistration,
         config=config,
@@ -3487,17 +3514,152 @@ def _verify_execution_preregistration(
 
 
 
-def _load_pinned_approval_public_key() -> bytes:
-    path = PINNED_APPROVAL_ROOT_PATH
-    if path.is_symlink() or not path.is_file() or path.parent.is_symlink():
-        raise RunnerError("pinned approval trust root is unavailable")
+def _load_pinned_approval_public_key(
+    environment_identity: CapturedExecutionIdentity,
+) -> bytes:
+    expected_worktree_sha256, expected_git_blob_id = (
+        _approval_root_dependency_identity(environment_identity)
+    )
     try:
-        data = path.read_bytes()
+        relative = PINNED_APPROVAL_ROOT_PATH.relative_to(REPO_ROOT)
+    except ValueError as exc:
+        raise RunnerError("pinned approval trust root is unavailable") from exc
+    if relative != PINNED_APPROVAL_ROOT_RELATIVE_PATH:
+        raise RunnerError("pinned approval trust root is unavailable")
+
+    descriptors: list[int] = []
+    opened_entries: list[tuple[int, str, os.stat_result]] = []
+    try:
+        directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(REPO_ROOT, directory_flags)
+        descriptors.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise RunnerError("pinned approval trust root is unavailable")
+
+        parent_fd = root_fd
+        for component in relative.parts[:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            descriptors.append(child_fd)
+            child_metadata = os.fstat(child_fd)
+            if not stat.S_ISDIR(child_metadata.st_mode):
+                raise RunnerError("pinned approval trust root is unavailable")
+            opened_entries.append((parent_fd, component, child_metadata))
+            parent_fd = child_fd
+
+        file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        file_fd = os.open(relative.name, file_flags, dir_fd=parent_fd)
+        descriptors.append(file_fd)
+        file_metadata_before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(file_metadata_before.st_mode)
+            or file_metadata_before.st_nlink != 1
+        ):
+            raise RunnerError("pinned approval trust root is unavailable")
+        opened_entries.append((parent_fd, relative.name, file_metadata_before))
+        data = _read_bounded_descriptor(file_fd, maximum=APPROVAL_ROOT_BYTES)
+        file_metadata_after = os.fstat(file_fd)
+        if _stable_metadata(file_metadata_before) != _stable_metadata(
+            file_metadata_after
+        ):
+            raise RunnerError("pinned approval trust root is unavailable")
+
+        current_root = os.stat(REPO_ROOT, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(current_root.st_mode)
+            or _entry_identity(current_root) != _entry_identity(root_metadata)
+        ):
+            raise RunnerError("pinned approval trust root is unavailable")
+        for entry_parent_fd, component, opened_metadata in opened_entries:
+            current = os.stat(
+                component,
+                dir_fd=entry_parent_fd,
+                follow_symlinks=False,
+            )
+            if _entry_identity(current) != _entry_identity(opened_metadata):
+                raise RunnerError("pinned approval trust root is unavailable")
     except OSError as exc:
         raise RunnerError("pinned approval trust root is unavailable") from exc
-    if len(data) != 32:
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    if len(data) != APPROVAL_ROOT_BYTES:
         raise RunnerError("pinned approval trust root is unprovisioned")
+    if (
+        sha256(data).hexdigest() != expected_worktree_sha256
+        or _git_blob_id(data, expected=expected_git_blob_id) != expected_git_blob_id
+    ):
+        raise RunnerError("pinned approval trust root source identity mismatch")
     return data
+
+
+def _approval_root_dependency_identity(
+    environment_identity: CapturedExecutionIdentity,
+) -> tuple[str, str]:
+    if not isinstance(environment_identity, CapturedExecutionIdentity):
+        raise TypeError("environment_identity must be a CapturedExecutionIdentity")
+    try:
+        source = environment_identity.report["source"]
+        dependencies = source["dependencies"]
+        path_sha256 = sha256(
+            PINNED_APPROVAL_ROOT_RELATIVE_PATH.as_posix().encode("utf-8")
+        ).hexdigest()
+        dependency = dependencies[path_sha256]
+        worktree_sha256 = dependency["worktree_sha256"]
+        git_blob_id = dependency["git_blob_id"]
+    except (KeyError, TypeError) as exc:
+        raise RunnerError("pinned approval trust root source identity mismatch") from exc
+    if (
+        not isinstance(worktree_sha256, str)
+        or not SHA256.fullmatch(worktree_sha256)
+        or not isinstance(git_blob_id, str)
+        or not SOURCE_SHA.fullmatch(git_blob_id)
+    ):
+        raise RunnerError("pinned approval trust root source identity mismatch")
+    return worktree_sha256, git_blob_id
+
+
+def _read_bounded_descriptor(file_fd: int, *, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = maximum + 1
+    while remaining:
+        chunk = os.read(file_fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _stable_metadata(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _entry_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode)
+
+
+def _git_blob_id(data: bytes, *, expected: str) -> str:
+    payload = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+    if len(expected) == 40:
+        return sha1(payload, usedforsecurity=False).hexdigest()
+    if len(expected) == 64:
+        return sha256(payload).hexdigest()
+    raise RunnerError("pinned approval trust root source identity mismatch")
 
 
 def _capture_current_execution_identity(

@@ -19,9 +19,12 @@ Every executable Gate 0B entry point is allowlisted behind
 runner, evaluator, and environment-verifier execution fails before project or
 third-party imports. The launcher ignores ambient Python path configuration,
 does not process `.pth` files or customization modules, and binds its canonical
-startup policy into environment identity v3. It redirects bytecode-cache lookup
-to a bound nonexistent path and rejects sourceless bytecode in repository import
-roots, so ignored `__pycache__` content cannot replace reviewed source.
+startup policy into environment identity v5. Before adding either import root, it
+checks the externally approved source SHA and a complete, path-redacted manifest
+of runtime site-packages source, bytecode, native extensions, distribution
+metadata, and data. It redirects bytecode-cache lookup to a bound nonexistent path
+and rejects sourceless bytecode in repository import roots, so ignored
+`__pycache__` content cannot replace reviewed source.
 
 ## Fixed Boundary
 
@@ -113,12 +116,33 @@ install -d -m 0700 \
   "$QUALIFICATION_ROOT/ledger"
 ```
 
-Emit the implementation-only template:
+For CI and an implementation-only dry run, capture the clean discovery report once
+and retain it with the resulting values. The executable command consumes those
+retained values rather than probing implicitly:
 
 ```bash
 QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
+STARTUP_PROBE="$QUALIFICATION_ROOT/preregistration/gate0b-startup-probe.json"
+umask 077
+uv run --locked --no-sync --extra dev --python 3.12.13 \
+  python -I -S scripts/launch_qualification.py probe > "$STARTUP_PROBE"
+QUALIFICATION_EXPECTED_SOURCE_SHA="$(
+  python -I -S -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["source_preflight"]["source_sha"])' \
+    "$STARTUP_PROBE"
+)"
+QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256="$(
+  python -I -S -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["runtime_site_packages_manifest"]["manifest_sha256"])' \
+    "$STARTUP_PROBE"
+)"
+readonly QUALIFICATION_EXPECTED_SOURCE_SHA
+readonly QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   python -I -S scripts/launch_qualification.py run-qualification \
+  --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA" \
+  --expected-runtime-site-packages-sha256 \
+    "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" \
   --dry-run \
   --output "$QUALIFICATION_ROOT/preregistration/gate0b-template.json"
 ```
@@ -188,8 +212,22 @@ Generate the canonical artifact outside the repository:
 
 ```bash
 QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
+STARTUP_PROBE="$QUALIFICATION_ROOT/preregistration/gate0b-startup-probe.json"
+QUALIFICATION_EXPECTED_SOURCE_SHA="$(
+  python -I -S -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["source_preflight"]["source_sha"])' \
+    "$STARTUP_PROBE"
+)"
+QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256="$(
+  python -I -S -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["runtime_site_packages_manifest"]["manifest_sha256"])' \
+    "$STARTUP_PROBE"
+)"
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   python -I -S scripts/launch_qualification.py run-qualification \
+  --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA" \
+  --expected-runtime-site-packages-sha256 \
+    "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" \
   --dry-run \
   --values "$QUALIFICATION_ROOT/preregistration/gate0b-values.json" \
   --output "$QUALIFICATION_ROOT/preregistration/gate0b-preregistration.json"
@@ -204,6 +242,25 @@ field is attached.
 The values themselves still require independent source, environment, corpus,
 consent, retention, pricing, setup, custody-location, and trust-root verification.
 The builder validates shape and binding; it does not prove those external facts.
+
+The probe-derived values above are limited to CI and offline dry-run discovery. Any
+actual qualification or evaluation must receive the exact values from the reviewed
+setup identity, for example as `REVIEWED_GATE0B_SOURCE_SHA` and
+`REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256`. They must not be rediscovered at
+execution time or replaced with values from the current machine. Pass them to the
+launcher as follows for every executable target:
+
+```bash
+test -n "$REVIEWED_GATE0B_SOURCE_SHA"
+test -n "$REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256"
+readonly REVIEWED_GATE0B_SOURCE_SHA
+readonly REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256
+# Add the target-specific approved arguments after these launcher approvals.
+python -I -S scripts/launch_qualification.py run-qualification \
+  --expected-source-sha "$REVIEWED_GATE0B_SOURCE_SHA" \
+  --expected-runtime-site-packages-sha256 \
+    "$REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256"
+```
 
 ## Approval Sequence
 
@@ -292,9 +349,12 @@ Each sealed capsule retains the complete payload-safe runtime identity report be
 and after its provider split, together with both report hashes. The evaluator binds
 those reports to preregistration, rejects intra-split or cross-split drift, and
 publishes the campaign's complete before/after reports and hashes in the final report.
-Environment identity v3 includes the target-independent trusted-startup policy:
-isolated/no-site flags, bytecode policy, canonical effective-path hashes, and bound
-identities for inert runtime `.pth` and customization artifacts.
+Environment identity v5 includes the target-independent trusted-startup policy:
+isolated/no-site flags, bytecode policy, canonical effective-path hashes, bound
+identities for inert runtime `.pth` and customization artifacts, the verified
+source preflight, the complete interpreter installation, and the complete runtime
+site-packages manifest. The runtime recaptures those identities after imports and
+rejects drift.
 Repository-relative dependency names and executable locations appear only as
 SHA-256 identifiers; the report contains no cleartext file path.
 
@@ -351,8 +411,9 @@ staging, deployment, production, or release authorization.
 
 Stop before any credential lookup or provider request if any approved value,
 signature, source byte, dependency, import origin, lockfile, interpreter, CA bundle,
-clock, codec digest, corpus asset, consent record, retention setting, custody path,
-request reservation, cost reservation, or ledger record is missing or mismatched.
+runtime site-package byte, clock, codec digest, corpus asset, consent record,
+retention setting, custody path, request reservation, cost reservation, or ledger
+record is missing or mismatched.
 
 Also stop if the model or official API behavior changes, the transport can expose a
 credential, either reducer disagrees, a payload escapes the encrypted capsule, a

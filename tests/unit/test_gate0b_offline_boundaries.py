@@ -26,6 +26,8 @@ LIVE_PIPELINES = (
     Path("app/services/gemini_pipeline.py"),
     Path("app/services/voice_pipeline.py"),
 )
+DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
+APPROVED_UV_INSTALL = 'run: python -m pip install "uv==0.11.7"'
 
 
 def test_every_gate0b_module_is_absent_from_live_pipeline_imports_and_source() -> None:
@@ -77,3 +79,10 @@ assert main(["--dry-run"]) == 0
 
     assert completed.returncode == 0, completed.stderr
     assert "provider_execution_authorized" in completed.stdout
+
+
+def test_ci_installs_approved_uv_runtime_before_running_tests() -> None:
+    source = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+
+    assert source.count(APPROVED_UV_INSTALL) == 1
+    assert source.index(APPROVED_UV_INSTALL) < source.index("- name: Run tests")

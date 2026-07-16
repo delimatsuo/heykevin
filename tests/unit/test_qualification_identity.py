@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -13,9 +15,13 @@ import app.services.qualification_identity as identity_module
 
 from app.services.qualification_identity import (
     IdentityError,
+    STARTUP_FLAG_NAMES,
+    STARTUP_MARKER_ENV,
+    TRUSTED_STARTUP_SCHEMA_ID,
     canonical_json_bytes,
     capture_environment_identity,
     capture_source_identity,
+    capture_trusted_startup_identity,
     ledger_location_sha256,
     verify_attempt_authorization,
     verify_campaign_approval,
@@ -26,6 +32,29 @@ NOW = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
 PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
 KEY_ID = "qualification-reviewer-v1"
+
+
+def _trusted_startup_flags() -> dict[str, int | bool]:
+    return {
+        "bytes_warning": 0,
+        "debug": 0,
+        "dev_mode": False,
+        "dont_write_bytecode": 0,
+        "hash_randomization": 1,
+        "ignore_environment": 1,
+        "inspect": 0,
+        "int_max_str_digits": 4300,
+        "interactive": 0,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+        "optimize": 0,
+        "quiet": 0,
+        "safe_path": True,
+        "utf8_mode": 0,
+        "verbose": 0,
+        "warn_default_encoding": 0,
+    }
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -206,6 +235,85 @@ def test_environment_identity_binds_exact_runtime_and_imports() -> None:
     assert set(identity.import_sha256) == {"websockets", "app.utils.audio"}
     assert identity.distribution_files_sha256["websockets"]
     assert all("/" not in value for value in identity.redacted_report_dict().values() if isinstance(value, str))
+
+
+def test_trusted_startup_identity_revalidates_live_flags_paths_and_bounded_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    runtime_site = tmp_path / "runtime" / "site-packages"
+    repo_root.mkdir()
+    runtime_site.mkdir(parents=True)
+    executable = tmp_path / "runtime" / "bin" / "python"
+    executable.parent.mkdir()
+    executable.write_bytes(b"python")
+    pth_path = runtime_site / "recognized.pth"
+    pth_path.write_text("import should_never_execute\n", encoding="utf-8")
+    hook_path = runtime_site / "sitecustomize.py"
+    hook_path.write_text("raise AssertionError('never execute')\n", encoding="utf-8")
+    effective_sys_path = [str(repo_root.resolve()), str(runtime_site.resolve())]
+    pycache_prefix = tmp_path / "disabled-pycache"
+    flags = _trusted_startup_flags()
+    marker = {
+        "schema_id": TRUSTED_STARTUP_SCHEMA_ID,
+        "target": "verify-environment",
+        "startup_flags": flags,
+        "bytecode_write_disabled": True,
+        "pycache_prefix": str(pycache_prefix.resolve()),
+        "repo_root": str(repo_root.resolve()),
+        "python_executable": str(executable.resolve()),
+        "runtime_site_packages": str(runtime_site.resolve()),
+        "effective_sys_path": effective_sys_path,
+        "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
+        "runtime_pth_files_sha256": {
+            str(pth_path.resolve()): sha256(pth_path.read_bytes()).hexdigest()
+        },
+        "ignored_startup_hook_files_sha256": {
+            str(hook_path.resolve()): sha256(hook_path.read_bytes()).hexdigest()
+        },
+    }
+    monkeypatch.setattr(identity_module.sys, "flags", SimpleNamespace(**flags))
+    monkeypatch.setattr(identity_module.sys, "path", effective_sys_path.copy())
+    monkeypatch.setattr(identity_module.sys, "executable", str(executable))
+    monkeypatch.setattr(identity_module.sys, "dont_write_bytecode", True)
+    monkeypatch.setattr(
+        identity_module.sys,
+        "pycache_prefix",
+        str(pycache_prefix.resolve()),
+    )
+    for module_name in ("site", "sitecustomize", "usercustomize"):
+        monkeypatch.delitem(identity_module.sys.modules, module_name, raising=False)
+    monkeypatch.delenv("PYTHONHOME", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv(
+        STARTUP_MARKER_ENV,
+        json.dumps(marker, sort_keys=True, separators=(",", ":")),
+    )
+
+    startup = capture_trusted_startup_identity(
+        repo_root,
+        expected_target="verify-environment",
+    )
+
+    report = startup.redacted_report_dict()
+    assert set(startup.startup_flags) == set(STARTUP_FLAG_NAMES)
+    assert report["effective_sys_path_sha256"] == sha256(
+        canonical_json_bytes(effective_sys_path)
+    ).hexdigest()
+    assert report["runtime_pth_files_sha256"] == {
+        sha256(str(pth_path.resolve()).encode("utf-8")).hexdigest(): sha256(
+            pth_path.read_bytes()
+        ).hexdigest()
+    }
+    assert str(repo_root) not in canonical_json_bytes(report).decode("ascii")
+
+    identity_module.sys.path.append(str(tmp_path / "injected"))
+    with pytest.raises(IdentityError, match="effective sys.path"):
+        capture_trusted_startup_identity(
+            repo_root,
+            expected_target="verify-environment",
+        )
 
 
 def test_signed_campaign_and_attempt_are_exact_short_lived_and_non_authorizing() -> None:

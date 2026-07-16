@@ -46,11 +46,12 @@ from app.services.caller_turns import (
     CallerTurnAssembler,
     CallerTurnEvent,
     CallerTurnEventKind,
+    RetrospectiveCallerTurn,
 )
 from app.services.qualification_identity import canonical_json_bytes
 
 
-ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v1"
+ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v2"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
 AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v6"
 CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
@@ -277,6 +278,14 @@ class ActivityMeasurementInput:
             raise MeasurementError("advance time precedes the final event")
         if not isinstance(self.wire, WireObservation):
             raise MeasurementError("wire observation is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivityAssemblyObservation:
+    turns: tuple[RetrospectiveCallerTurn, ...]
+    cross_activity_merge_count: int
+    late_fragment_mutation_count: int
+    stale_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -753,6 +762,30 @@ def measure_activity(
         raise TypeError("measurement must be an ActivityMeasurementInput")
     if not isinstance(alignment_policy, AlignmentPolicy):
         raise TypeError("alignment_policy must be an AlignmentPolicy")
+    assembly = _assemble_session_events(
+        measurement.events,
+        event_activity_ordinals=(measurement.activity_ordinal,) * len(measurement.events),
+        activity_expected_epochs={
+            measurement.activity_ordinal: measurement.expected_epoch
+        },
+        policy_ms=measurement.policy_ms,
+        advance_to_ms=measurement.advance_to_ms,
+    )[measurement.activity_ordinal]
+    return _measure_activity(
+        measurement,
+        alignment_policy=alignment_policy,
+        commitment_key=commitment_key,
+        assembly=assembly,
+    )
+
+
+def _measure_activity(
+    measurement: ActivityMeasurementInput,
+    *,
+    alignment_policy: AlignmentPolicy,
+    commitment_key: bytes,
+    assembly: _ActivityAssemblyObservation,
+) -> ActivityPrimitiveRecord:
     expected_reference = next(
         value
         for value in measurement.references
@@ -786,18 +819,7 @@ def measure_activity(
     normalized_reference = normalize_text(expected_reference.text, measurement.language)
     normalized_hypothesis = normalize_text(reconstructed, measurement.language)
 
-    assembler = CallerTurnAssembler(
-        active_epoch=measurement.expected_epoch,
-        quiescence_ms=measurement.policy_ms,
-    )
-    turns = []
-    late_fragment_count = 0
-    for event in measurement.events:
-        emitted = assembler.ingest(event)
-        if emitted and event.kind is CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT:
-            late_fragment_count += 1
-        turns.extend(emitted)
-    turns.extend(assembler.advance_time(measurement.advance_to_ms))
+    turns = assembly.turns
     if not turns:
         lifecycle = "missing"
     elif len(turns) > 1:
@@ -857,6 +879,7 @@ def measure_activity(
         ),
         contamination_count=max(
             foreign_fragment_count,
+            assembly.cross_activity_merge_count,
             int(
                 alignment.activity_ordinal is not None
                 and alignment.activity_ordinal != measurement.activity_ordinal
@@ -866,8 +889,8 @@ def measure_activity(
         cross_epoch_acceptance_count=sum(
             turn.epoch != measurement.expected_epoch for turn in turns
         ),
-        late_fragment_mutation_count=late_fragment_count,
-        stale_count=assembler.stale_event_count,
+        late_fragment_mutation_count=assembly.late_fragment_mutation_count,
+        stale_count=assembly.stale_count,
         timing_covered=wire.timing_covered,
         first_audio_ms=wire.first_audio_ms,
         interruption_tail_ms=wire.interruption_tail_ms,
@@ -883,6 +906,126 @@ def measure_activity(
         commitment="",
     )
     return ActivityPrimitiveRecord.with_commitment(record, commitment_key=commitment_key)
+
+
+def _assemble_session_events(
+    events: tuple[CallerTurnEvent, ...],
+    *,
+    event_activity_ordinals: tuple[int, ...],
+    activity_expected_epochs: Mapping[int, int],
+    policy_ms: int,
+    advance_to_ms: int,
+) -> dict[int, _ActivityAssemblyObservation]:
+    if len(events) != len(event_activity_ordinals):
+        raise MeasurementError("session event ownership cardinality is invalid")
+    if not activity_expected_epochs:
+        raise MeasurementError("session activity epochs are missing")
+    activity_ordinals = tuple(activity_expected_epochs)
+    if set(event_activity_ordinals) - set(activity_ordinals):
+        raise MeasurementError("session event lacks causal activity ownership")
+    _validate_policy(policy_ms)
+    _bounded_int(advance_to_ms, label="advance time", maximum=7_200_000)
+    if events and advance_to_ms < events[-1].at_ms:
+        raise MeasurementError("advance time precedes the final event")
+    for epoch in activity_expected_epochs.values():
+        _bounded_int(epoch, label="expected epoch", maximum=1_000)
+
+    assembler = CallerTurnAssembler(
+        active_epoch=min(activity_expected_epochs.values()),
+        quiescence_ms=policy_ms,
+    )
+    turns_by_activity: dict[int, list[RetrospectiveCallerTurn]] = {
+        ordinal: [] for ordinal in activity_ordinals
+    }
+    merge_counts: Counter[int] = Counter()
+    late_fragment_counts: Counter[int] = Counter()
+    stale_counts: Counter[int] = Counter()
+    pending_owners: list[int] = []
+
+    def attribute_turn(
+        turn: RetrospectiveCallerTurn,
+        owners: tuple[int, ...],
+    ) -> frozenset[int]:
+        unique_owners = frozenset(owners)
+        if not unique_owners:
+            raise MeasurementError("assembled turn lacks causal activity ownership")
+        for owner in unique_owners:
+            turns_by_activity[owner].append(turn)
+        if len(unique_owners) > 1:
+            merge_counts.update(unique_owners)
+        return unique_owners
+
+    for event, owner in zip(events, event_activity_ordinals, strict=True):
+        pending_before = tuple(pending_owners)
+        deadline_before = assembler.next_deadline_ms
+        stale_before = assembler.stale_event_count
+        duplicates_before = assembler.duplicate_event_count
+        emitted = assembler.ingest(event)
+        stale_delta = assembler.stale_event_count - stale_before
+        duplicate_delta = assembler.duplicate_event_count - duplicates_before
+        ignored = bool(stale_delta or duplicate_delta)
+        current_was_emitted = False
+        emitted_owner_sets: list[frozenset[int]] = []
+
+        for turn in emitted:
+            if turn.event_count == len(pending_before):
+                turn_owners = pending_before
+            elif not ignored and turn.event_count == len(pending_before) + 1:
+                turn_owners = (*pending_before, owner)
+                current_was_emitted = True
+            else:
+                raise MeasurementError("assembled turn ownership is inconsistent")
+            emitted_owner_sets.append(attribute_turn(turn, turn_owners))
+
+        if stale_delta:
+            stale_counts[owner] += stale_delta
+            continue
+
+        expired_before_event = (
+            deadline_before is not None and event.at_ms >= deadline_before
+        )
+        if expired_before_event or emitted:
+            pending_owners.clear()
+
+        if ignored:
+            continue
+
+        if event.kind is CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT:
+            same_owner_late_turn = any(
+                owner in emitted_owners for emitted_owners in emitted_owner_sets
+            )
+            if same_owner_late_turn:
+                late_fragment_counts[owner] += 1
+
+        if event.kind is CallerTurnEventKind.RECONNECT_STARTED:
+            pending_owners.clear()
+        elif event.kind in {
+            CallerTurnEventKind.TOOL_CALL_CANCELLED,
+            CallerTurnEventKind.CONNECTION_CLOSED,
+            CallerTurnEventKind.PIPELINE_STOPPED,
+        }:
+            pending_owners.clear()
+        elif current_was_emitted:
+            pending_owners.clear()
+        else:
+            pending_owners.append(owner)
+
+    for turn in assembler.advance_time(advance_to_ms):
+        if turn.event_count != len(pending_owners):
+            raise MeasurementError("assembled turn ownership is inconsistent")
+        attribute_turn(turn, tuple(pending_owners))
+
+    if assembler.stale_event_count != sum(stale_counts.values()):
+        raise MeasurementError("session stale-event attribution is inconsistent")
+    return {
+        ordinal: _ActivityAssemblyObservation(
+            turns=tuple(turns_by_activity[ordinal]),
+            cross_activity_merge_count=merge_counts[ordinal],
+            late_fragment_mutation_count=late_fragment_counts[ordinal],
+            stale_count=stale_counts[ordinal],
+        )
+        for ordinal in activity_ordinals
+    }
 
 
 def verify_record_commitment(
@@ -1124,6 +1267,21 @@ def derive_primitive_records_from_capsule(
             event_activity_ordinals=session["event_activity_ordinals"],
             references=references,
         )
+        assembly_by_policy = {
+            policy_ms: _assemble_session_events(
+                events,
+                event_activity_ordinals=tuple(session["event_activity_ordinals"]),
+                activity_expected_epochs={
+                    activity["activity_ordinal"]: activity["expected_epoch"]
+                    for activity in session_activities
+                },
+                policy_ms=policy_ms,
+                advance_to_ms=max(
+                    activity["advance_to_ms"] for activity in session_activities
+                ),
+            )
+            for policy_ms in policies_ms
+        }
         for activity in session_activities:
             wire, activity_end_ms = _capsule_wire_observation(
                 session["wire_facts"],
@@ -1135,7 +1293,7 @@ def derive_primitive_records_from_capsule(
                 raise MeasurementError("capsule observation window is shorter than policy set")
             for policy_ms in policies_ms:
                 activity_records.append(
-                    measure_activity(
+                    _measure_activity(
                         ActivityMeasurementInput(
                             policy_ms=policy_ms,
                             activity_ordinal=activity["activity_ordinal"],
@@ -1152,6 +1310,9 @@ def derive_primitive_records_from_capsule(
                         ),
                         alignment_policy=AlignmentPolicy(fragment_mode=FragmentMode.DELTA),
                         commitment_key=commitment_key,
+                        assembly=assembly_by_policy[policy_ms][
+                            activity["activity_ordinal"]
+                        ],
                     )
                 )
 

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -19,6 +20,19 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
+_TRUSTED_STARTUP_FLAGS = (
+    sys.flags.isolated == 1
+    and sys.flags.no_site == 1
+    and sys.flags.ignore_environment == 1
+    and sys.flags.no_user_site == 1
+    and sys.flags.safe_path is True
+)
+if __name__ == "__main__" and (
+    _STARTUP_MARKER_ENV not in os.environ or not _TRUSTED_STARTUP_FLAGS
+):
+    print('{"error_code":"qualification_startup_required","status":"blocked"}')
+    raise SystemExit(2)
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -60,7 +74,9 @@ from app.services.qualification_identity import (  # noqa: E402
     AttemptAuthorization,
     AttemptClaim,
     CampaignApproval,
+    IdentityError,
     canonical_json_bytes,
+    capture_trusted_startup_identity,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -2268,6 +2284,17 @@ async def execute_authorized_attempt(
     capsule_sink: CapsuleSink,
 ) -> AttemptExecutionResult:
     """Execute one consumed attempt using only injected secret, transport, and sinks."""
+    environment_identity = _capture_current_execution_identity(
+        expected_source_sha=config.source_sha
+    )
+    try:
+        expected_environment_sha256 = preregistration["immutable_values"][
+            "environment_identity_sha256"
+        ]
+    except (KeyError, TypeError) as exc:
+        raise RunnerError("execution environment identity is not preregistered") from exc
+    if environment_identity.sha256 != expected_environment_sha256:
+        raise RunnerError("execution environment identity mismatch")
     _require_capsule_sink(capsule_sink)
     _validate_asset_release(asset_release)
     _validate_attempt_configuration(
@@ -2412,7 +2439,6 @@ async def execute_authorized_attempt(
 
     budget = _RequestBudget(claim.provider_requests_reserved)
     execution_started_at = datetime.now(timezone.utc)
-    environment_identity: CapturedExecutionIdentity | None = None
     cost_microusd = 0
     error_code: str | None = None
     capsule_handed_off = False
@@ -2422,18 +2448,6 @@ async def execute_authorized_attempt(
     no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
 
     try:
-        try:
-            environment_identity = _capture_current_execution_identity(
-                expected_source_sha=config.source_sha
-            )
-            if (
-                environment_identity.sha256
-                != preregistration["immutable_values"]["environment_identity_sha256"]
-            ):
-                raise RunnerError("execution environment identity mismatch")
-        except Exception:
-            error_code = "source_identity_failed"
-
         credential: SecretCredential | None = None
         if error_code is None:
             try:
@@ -2674,6 +2688,17 @@ async def execute_authorized_holdout(
     capsule_sink: CapsuleSink,
 ) -> AttemptExecutionResult:
     """Resume one active post-lock attempt and execute its released holdout once."""
+    environment_identity = _capture_current_execution_identity(
+        expected_source_sha=config.source_sha
+    )
+    try:
+        expected_environment_sha256 = preregistration["immutable_values"][
+            "environment_identity_sha256"
+        ]
+    except (KeyError, TypeError) as exc:
+        raise RunnerError("execution environment identity is not preregistered") from exc
+    if environment_identity.sha256 != expected_environment_sha256:
+        raise RunnerError("execution environment identity mismatch")
     _require_capsule_sink(capsule_sink)
     _validate_asset_release(asset_release)
     _validate_attempt_configuration(
@@ -2851,7 +2876,6 @@ async def execute_authorized_holdout(
 
     budget = _RequestBudget(remaining_requests)
     execution_started_at = datetime.now(timezone.utc)
-    environment_identity: CapturedExecutionIdentity | None = None
     holdout_cost_microusd = 0
     error_code: str | None = None
     capsule_handed_off = False
@@ -2860,18 +2884,6 @@ async def execute_authorized_holdout(
     session_results: list[tuple[SessionPlan, SessionExecutionResult]] = []
     no_speech_results: list[tuple[NoSpeechWindowPlan, NoSpeechExecutionResult]] = []
     try:
-        try:
-            environment_identity = _capture_current_execution_identity(
-                expected_source_sha=config.source_sha
-            )
-            if (
-                environment_identity.sha256
-                != preregistration["immutable_values"]["environment_identity_sha256"]
-            ):
-                raise RunnerError("execution environment identity mismatch")
-        except Exception:
-            error_code = "source_identity_failed"
-
         credential: SecretCredential | None = None
         if error_code is None:
             try:
@@ -3491,9 +3503,14 @@ def _load_pinned_approval_public_key() -> bytes:
 def _capture_current_execution_identity(
     *, expected_source_sha: str
 ) -> CapturedExecutionIdentity:
+    startup = capture_trusted_startup_identity(
+        REPO_ROOT,
+        expected_target="run-qualification",
+    )
     report = build_execution_identity_report(
         REPO_ROOT,
         expected_source_sha=expected_source_sha,
+        trusted_startup=startup.policy_report_dict(),
     )
     return CapturedExecutionIdentity(
         report=report,
@@ -4843,6 +4860,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if argv is None:
+        try:
+            capture_trusted_startup_identity(
+                REPO_ROOT,
+                expected_target="run-qualification",
+            )
+        except (IdentityError, OSError):
+            print('{"error_code":"qualification_startup_invalid","status":"blocked"}')
+            return 2
     args = build_parser().parse_args(argv)
     if args.execute:
         print('{"error_code":"provider_execution_not_authorized","status":"blocked"}')

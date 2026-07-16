@@ -53,6 +53,7 @@ from scripts.run_gemini_caller_turn_qualification import (
     ProviderSessionClosed,
     PrivateFileCapsuleSink,
     ReductionResult,
+    RunnerError,
     SecretCredential,
     SessionActivityPlan,
     SessionExecutionConfig,
@@ -77,8 +78,41 @@ CANARY_SECRET = "qualification-canary-secret-must-not-escape"
 NOW = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
 PREREGISTRATION_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
+TRUSTED_STARTUP_REPORT = {
+    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "startup_flags": {
+        "bytes_warning": 0,
+        "debug": 0,
+        "dev_mode": False,
+        "dont_write_bytecode": 0,
+        "hash_randomization": 1,
+        "ignore_environment": 1,
+        "inspect": 0,
+        "int_max_str_digits": 4300,
+        "interactive": 0,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+        "optimize": 0,
+        "quiet": 0,
+        "safe_path": True,
+        "utf8_mode": 0,
+        "verbose": 0,
+        "warn_default_encoding": 0,
+    },
+    "bytecode_write_disabled": True,
+    "pycache_prefix_location_sha256": "2" * 64,
+    "repo_root_location_sha256": "c" * 64,
+    "python_executable_location_sha256": "d" * 64,
+    "runtime_site_packages_location_sha256": "e" * 64,
+    "effective_sys_path_sha256": "f" * 64,
+    "effective_sys_path_entry_sha256": ["0" * 64, "1" * 64],
+    "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
+    "runtime_pth_files_sha256": {},
+    "ignored_startup_hook_files_sha256": {},
+}
 TEST_EXECUTION_IDENTITY_REPORT = {
-    "schema_id": "gate_0b_environment_identity_v2",
+    "schema_id": "gate_0b_environment_identity_v3",
     "source": {
         "source_sha": SOURCE_SHA,
         "clean": True,
@@ -103,7 +137,7 @@ TEST_EXECUTION_IDENTITY_REPORT = {
         "unicode_version": "15.1.0",
         "monotonic_clock_implementation": "test-monotonic",
         "monotonic_clock_resolution_ns": 1,
-        "bytecode_write_disabled": False,
+        "bytecode_write_disabled": True,
         "openssl_version": "OpenSSL test",
         "ca_bundle_sha256": "7" * 64,
         "lock_sha256": "8" * 64,
@@ -112,6 +146,7 @@ TEST_EXECUTION_IDENTITY_REPORT = {
         "distributions": {"test-package": "1.0.0"},
         "distribution_files_sha256": {"test-package": "b" * 64},
     },
+    "trusted_startup": TRUSTED_STARTUP_REPORT,
 }
 TEST_EXECUTION_IDENTITY_SHA256 = execution_identity_report_sha256(
     TEST_EXECUTION_IDENTITY_REPORT
@@ -2395,11 +2430,11 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert result.cost_microusd == 4_992
     assert stat.S_IMODE(capsule_path.stat().st_mode) == 0o600
     assert order[:6] == [
+        "source",
         "asset",
         "export_snapshot",
         "claim",
         "export_snapshot",
-        "source",
         "credential:qualification_secret_v1",
     ]
     assert order[6:-2] == ["connector"] * 64 + ["source"]
@@ -2791,7 +2826,7 @@ def test_development_claim_boundary_fails_closed_before_secret_lookup(
     assert touched == []
 
 
-def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
+def test_environment_identity_mismatch_blocks_before_claim_or_secret_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2817,8 +2852,9 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
     touched: list[str] = []
     ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
 
-    result = asyncio.run(
-        execute_authorized_attempt(
+    with pytest.raises(RunnerError, match="environment identity mismatch"):
+        asyncio.run(
+            execute_authorized_attempt(
             _asset_release(
                 plans,
                 no_speech_plans,
@@ -2851,20 +2887,11 @@ def test_environment_identity_mismatch_consumes_attempt_before_secret_lookup(
             custodian_key_id="audit_custodian_1",
             capsule_path=_capsule_path(ledger_path),
             capsule_sink=PrivateFileCapsuleSink(),
+            )
         )
-    )
 
-    assert result.complete is False
-    assert result.error_code == "source_identity_failed"
     assert touched == []
-    assert [name for name, _ in ledger.calls] == [
-        "export_snapshot",
-        "claim",
-        "export_snapshot",
-        "terminal_outcome",
-        "export_snapshot",
-    ]
-    assert ledger.calls[-2][1]["outcome"] == "failed"
+    assert ledger.calls == []
 
 
 def test_substituted_capsule_destination_blocks_before_ledger_or_secret(

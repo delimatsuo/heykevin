@@ -33,7 +33,12 @@ from scripts.evaluate_gemini_caller_turn_qualification import (
     evaluate_evidence_artifact,
     main,
 )
-from scripts.run_gemini_caller_turn_qualification import build_preregistration
+from scripts.run_gemini_caller_turn_qualification import (
+    OFFICIAL_ENDPOINT,
+    SessionExecutionConfig,
+    build_gate0b_setup_identity,
+    build_preregistration,
+)
 
 
 CAMPAIGN_KEY = b"k" * 32
@@ -55,8 +60,41 @@ STRESS_TAGS = (
 )
 POLICIES = (100, 250, 500, 750)
 ROOT_KEY_ID = "evidence_custodian_1"
+TRUSTED_STARTUP_REPORT = {
+    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "startup_flags": {
+        "bytes_warning": 0,
+        "debug": 0,
+        "dev_mode": False,
+        "dont_write_bytecode": 0,
+        "hash_randomization": 1,
+        "ignore_environment": 1,
+        "inspect": 0,
+        "int_max_str_digits": 4300,
+        "interactive": 0,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+        "optimize": 0,
+        "quiet": 0,
+        "safe_path": True,
+        "utf8_mode": 0,
+        "verbose": 0,
+        "warn_default_encoding": 0,
+    },
+    "bytecode_write_disabled": True,
+    "pycache_prefix_location_sha256": "2" * 64,
+    "repo_root_location_sha256": "c" * 64,
+    "python_executable_location_sha256": "d" * 64,
+    "runtime_site_packages_location_sha256": "e" * 64,
+    "effective_sys_path_sha256": "f" * 64,
+    "effective_sys_path_entry_sha256": ["0" * 64, "1" * 64],
+    "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
+    "runtime_pth_files_sha256": {},
+    "ignored_startup_hook_files_sha256": {},
+}
 RUNTIME_IDENTITY_REPORT = {
-    "schema_id": "gate_0b_environment_identity_v2",
+    "schema_id": "gate_0b_environment_identity_v3",
     "source": {
         "source_sha": "b" * 40,
         "clean": True,
@@ -86,10 +124,15 @@ RUNTIME_IDENTITY_REPORT = {
         "ca_bundle_sha256": "7" * 64,
         "lock_sha256": "8" * 64,
         "codec_golden_sha256": "9" * 64,
-        "import_sha256": {"app.services.example": "a" * 64},
+        "import_sha256": {
+            "app.services.caller_turns": "a" * 64,
+            "app.services.gemini_turn_events": "b" * 64,
+            "app.utils.audio": "c" * 64,
+        },
         "distributions": {"test-package": "1.0.0"},
         "distribution_files_sha256": {"test-package": "b" * 64},
     },
+    "trusted_startup": TRUSTED_STARTUP_REPORT,
 }
 RUNTIME_IDENTITY_SHA256 = execution_identity_report_sha256(RUNTIME_IDENTITY_REPORT)
 IDENTITIES = {
@@ -110,6 +153,18 @@ IDENTITIES = {
     "custodian_public_key_sha256": "5" * 64,
     "record_root_public_key_sha256": "6" * 64,
 }
+
+
+def _setup_sha256(project: str) -> str:
+    config = SessionExecutionConfig(
+        endpoint=OFFICIAL_ENDPOINT,
+        model="models/gemini-3.1-flash-live-preview",
+        project=project,
+        max_message_bytes=1_024,
+        session_timeout_seconds=120,
+        response_gap_limit_ms=500,
+    )
+    return sha256(canonical_json_bytes(build_gate0b_setup_identity(config))).hexdigest()
 
 
 def _activity_record(
@@ -151,9 +206,7 @@ def _activity_record(
         "code_switch_language_to_english": "language_to_english",
     }
     critical_kinds = {kinds[within_language % len(kinds)]}
-    critical_kinds.update(
-        applicable_kinds[tag] for tag in scenario_tags if tag in applicable_kinds
-    )
+    critical_kinds.update(applicable_kinds[tag] for tag in scenario_tags if tag in applicable_kinds)
     word_values = (None, None, None, None, None) if language == "zh" else (3, 3, 0, 0, 0)
     record = ActivityPrimitiveRecord(
         schema_id=ACTIVITY_PRIMITIVE_SCHEMA_ID,
@@ -181,8 +234,7 @@ def _activity_record(
         word_deletions=word_values[4],
         ambiguity_margin_micros=500_000,
         critical_spans=tuple(
-            CriticalSpanFact(kind=kind, exact=not rare_failure)
-            for kind in sorted(critical_kinds)
+            CriticalSpanFact(kind=kind, exact=not rare_failure) for kind in sorted(critical_kinds)
         ),
         contamination_count=0,
         duplicate_count=0,
@@ -348,6 +400,17 @@ def _opened_capsule(envelope: dict[str, str]) -> dict[str, object]:
     else:
         started_at = "2026-07-15T15:12:00Z"
         completed_at = "2026-07-15T15:20:00Z"
+    session_units = [
+        {
+            "kind": "session",
+            "provider_request_count": 2 if ordinal < 8 else 1,
+        }
+        for ordinal in range(24)
+    ]
+    no_speech_units = [
+        {"kind": "no_speech_window", "provider_request_count": 1}
+        for _ordinal in range(32)
+    ]
     return {
         "campaign_id": "campaign_1",
         "kind": kind,
@@ -359,6 +422,8 @@ def _opened_capsule(envelope: dict[str, str]) -> dict[str, object]:
         "runtime_identity_after_sha256": RUNTIME_IDENTITY_SHA256,
         "runtime_identity_before": RUNTIME_IDENTITY_REPORT,
         "runtime_identity_after": RUNTIME_IDENTITY_REPORT,
+        "sessions": [{"session_ordinal": ordinal} for ordinal in range(24)],
+        "accounting": {"units": [*session_units, *no_speech_units]},
     }
 
 
@@ -571,9 +636,7 @@ def _custody_bundle(
             "custodian_key_id": "audit_custodian_1",
             "custodian_public_key_sha256": sha256(custodian_public_key).hexdigest(),
             "privacy_custodian_key_id": "privacy_custodian_1",
-            "privacy_custodian_public_key_sha256": sha256(
-                privacy_public_key
-            ).hexdigest(),
+            "privacy_custodian_public_key_sha256": sha256(privacy_public_key).hexdigest(),
             "record_root_key_id": ROOT_KEY_ID,
             "record_root_public_key_sha256": sha256(root_public_key).hexdigest(),
             "ledger_instance_id": "ledger_instance_1",
@@ -585,7 +648,7 @@ def _custody_bundle(
             "manifest_sha256": "c" * 64,
             "corpus_sha256": "d" * 64,
             "development_schedule_sha256": "e" * 64,
-            "setup_sha256": "f" * 64,
+            "setup_sha256": _setup_sha256("kevin-qualification-test"),
             "pricing_sha256": sha256(
                 Path("tests/fixtures/caller_turn_qualification/pricing.json").read_bytes()
             ).hexdigest(),
@@ -684,9 +747,9 @@ def _custody_bundle(
                 "retention_attestation_sha256"
             ],
             "provider_retention_decision": "zdr_verified",
-            "residual_retention_acceptance_sha256": preregistration[
-                "immutable_values"
-            ]["zdr_or_residual_retention_acceptance_sha256"],
+            "residual_retention_acceptance_sha256": preregistration["immutable_values"][
+                "zdr_or_residual_retention_acceptance_sha256"
+            ],
             "consent_active": True,
             "withdrawal_clear": True,
             "purpose_limited": True,
@@ -705,9 +768,7 @@ def _custody_bundle(
 
     development_privacy_envelope = privacy_envelope(
         split="development",
-        schedule_sha256=preregistration["immutable_values"][
-            "development_schedule_sha256"
-        ],
+        schedule_sha256=preregistration["immutable_values"]["development_schedule_sha256"],
         issued_at="2026-07-15T14:59:00+00:00",
         expires_at="2026-07-15T15:14:00+00:00",
         deletion_deadline="2026-08-13T14:59:00+00:00",
@@ -903,9 +964,7 @@ def _custody_bundle(
         "holdout_capsule": holdout_envelope,
         "development_privacy_envelope": development_privacy_envelope,
         "holdout_privacy_envelope": holdout_privacy_envelope,
-        "privacy_custodian_public_key": base64.b64encode(
-            privacy_public_key
-        ).decode("ascii"),
+        "privacy_custodian_public_key": base64.b64encode(privacy_public_key).decode("ascii"),
         "ledger": ledger,
         "preregistration": preregistration,
         "campaign_envelope": campaign_envelope,
@@ -920,6 +979,207 @@ def _custody_bundle(
         },
     }
     return bundle, custodian_key, root_key, approval_public_key, ledger_public_key, derived
+
+
+def _published_custody_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], dict[str, object], Ed25519PrivateKey, bytes]:
+    (
+        bundle,
+        custodian_key,
+        root_key,
+        approval_public_key,
+        ledger_public_key,
+        derived,
+    ) = _custody_bundle()
+    monkeypatch.setattr(
+        evaluator_module,
+        "open_audit_capsule",
+        lambda envelope, **_kwargs: _opened_capsule(envelope),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_primitive_records_from_capsule",
+        lambda capsule, **_kwargs: derived[capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "derive_audit_capsule_accounting",
+        lambda capsule: derived["accounting"][capsule["kind"]],
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_load_pinned_approval_public_key",
+        lambda: approval_public_key,
+    )
+    report = evaluate_custody_bundle(
+        bundle,
+        commitment_key=CAMPAIGN_KEY,
+        custodian_private_key=custodian_key,
+        expected_custodian_key_id="audit_custodian_1",
+        ledger_custodian_public_key=ledger_public_key,
+        record_root_signing_key=root_key,
+        record_root_key_id=ROOT_KEY_ID,
+    )
+    root_public_key = root_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    return report, bundle, root_key, root_public_key
+
+
+def _resign_publication(
+    report: dict[str, object],
+    signing_key: Ed25519PrivateKey,
+) -> None:
+    payload = {key: value for key, value in report.items() if key != "publication_signature"}
+    signature = report["publication_signature"]
+    assert isinstance(signature, dict)
+    signature["signature"] = base64.b64encode(
+        signing_key.sign(
+            evaluator_module.PUBLICATION_SIGNATURE_DOMAIN + canonical_json_bytes(payload)
+        )
+    ).decode("ascii")
+
+
+def test_published_report_is_complete_canonical_and_detached_verifiable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, bundle, _root_key, root_public_key = _published_custody_report(monkeypatch)
+
+    assert report["schema_id"] == "gate_0b_evaluation_report_v3"
+    assert report["status"] == "pass"
+    assert report["preregistration"] == bundle["preregistration"]
+    assert set(report["component_digests"]) == {
+        "adapter_sha256",
+        "assembler_sha256",
+        "corpus_sha256",
+        "evaluator_sha256",
+        "manifest_sha256",
+        "pricing_sha256",
+        "prompt_sha256",
+        "renderer_sha256",
+        "runner_sha256",
+        "setup_sha256",
+        "tool_sha256",
+    }
+    assert report["signed_record_root"]["payload"]["leaf_count"] == 704
+    assert report["cardinalities"]["scheduled_activity_count"] == {
+        "required": 256,
+        "observed": 256,
+        "matches": True,
+    }
+    for name, expected in (
+        ("logical_session_count", 48),
+        ("connection_count", 128),
+        ("epoch_count", 64),
+        ("fresh_restart_count", 16),
+    ):
+        assert report["cardinalities"][name] == {
+            "required": expected,
+            "observed": expected,
+            "matches": True,
+        }
+    serialized = json.dumps(report, sort_keys=True)
+    assert "activity_records" not in serialized
+    assert "no_speech_records" not in serialized
+    assert "reference_text" not in serialized
+    verified = evaluator_module.verify_published_report(
+        report,
+        root_public_key=root_public_key,
+        expected_root_key_id=ROOT_KEY_ID,
+    )
+    assert verified["status"] == "pass"
+    assert verified == report
+
+
+def test_published_report_limits_timing_and_lifecycle_claims_to_scheduled_cases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, _bundle, _root_key, _root_public_key = _published_custody_report(monkeypatch)
+
+    for sample in report["samples"].values():
+        assert sample["timing_scope"] == {
+            "basis": "provider_receipt_time_proxy",
+            "population": "scheduled_cases_only",
+            "caller_heard_slo_validated": False,
+        }
+        first_audio = sample["first_audio_ms"]
+        assert first_audio["scheduled_case_count"] == sample["activity_count"]
+        assert first_audio["observed_count"] == first_audio["count"]
+        assert first_audio["zero_denominator"] is False
+        interruption = sample["interruption_tail_ms"]
+        interruption_cases = sample["scenarios"]["tool_cancellation_interruption"]["count"]
+        assert interruption["scheduled_case_count"] == interruption_cases
+        assert interruption["observed_count"] == interruption["count"]
+        assert interruption["zero_denominator"] is (interruption_cases == 0)
+        lifecycle = sample["structural_outcomes"]["lifecycle_status"]
+        assert lifecycle["scheduled_case_count"] == sample["activity_count"]
+        assert lifecycle["zero_denominator"] is False
+        assert sum(lifecycle["expected_counts"].values()) == sample["activity_count"]
+        assert sum(lifecycle["observed_counts"].values()) == sample["activity_count"]
+
+
+@pytest.mark.parametrize(
+    "tampering",
+    (
+        "omission",
+        "preregistration_mismatch",
+        "component_mismatch",
+        "count_tampering",
+        "record_root_signature_tampering",
+        "publication_signature_tampering",
+    ),
+)
+def test_detached_verifier_rejects_incomplete_or_tampered_publications(
+    tampering: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, _bundle, root_key, root_public_key = _published_custody_report(monkeypatch)
+
+    if tampering == "omission":
+        report["component_digests"].pop("renderer_sha256")
+        _resign_publication(report, root_key)
+    elif tampering == "preregistration_mismatch":
+        report["preregistration"]["immutable_values"]["setup_sha256"] = "0" * 64
+        _resign_publication(report, root_key)
+    elif tampering == "component_mismatch":
+        report["component_digests"]["adapter_sha256"] = "0" * 64
+        _resign_publication(report, root_key)
+    elif tampering == "count_tampering":
+        report["cardinalities"]["scheduled_activity_count"]["observed"] = 255
+        _resign_publication(report, root_key)
+    elif tampering == "record_root_signature_tampering":
+        report["signed_record_root"]["signature"] = base64.b64encode(b"\x00" * 64).decode("ascii")
+        _resign_publication(report, root_key)
+    else:
+        report["publication_signature"]["signature"] = base64.b64encode(b"\x00" * 64).decode(
+            "ascii"
+        )
+
+    rejected = evaluator_module.verify_published_report(
+        report,
+        root_public_key=root_public_key,
+        expected_root_key_id=ROOT_KEY_ID,
+    )
+    assert rejected["status"] == "no_go"
+    assert rejected["failures"] == {"published_report_invalid": 1}
+
+
+def test_detached_verifier_rejects_old_report_schema_even_if_resigned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, _bundle, root_key, root_public_key = _published_custody_report(monkeypatch)
+    report["schema_id"] = "gate_0b_evaluation_report_v2"
+    _resign_publication(report, root_key)
+
+    rejected = evaluator_module.verify_published_report(
+        report,
+        root_public_key=root_public_key,
+        expected_root_key_id=ROOT_KEY_ID,
+    )
+    assert rejected["status"] == "no_go"
+    assert rejected["failures"] == {"published_report_invalid": 1}
 
 
 def test_custody_bundle_derives_records_and_phase_from_capsules_and_ledger(
@@ -1526,8 +1786,8 @@ def test_evidence_requires_bound_execution_metadata() -> None:
 
     assert report["status"] == "pass"
     assert report["execution"]["provider_revision"] is None
-    assert report["execution"]["runtime_identity_before_sha256"] == (
-        IDENTITIES["environment_sha256"]
+    assert (
+        report["execution"]["runtime_identity_before_sha256"] == (IDENTITIES["environment_sha256"])
     )
 
 
@@ -1626,15 +1886,25 @@ def test_evaluator_vetoes_contamination_even_when_fidelity_metrics_pass() -> Non
     assert sample["passed"] is False
 
 
-def test_evaluator_rejects_missing_scenario_critical_span() -> None:
+@pytest.mark.parametrize(
+    ("scenario", "required_kind"),
+    (
+        ("number_dictation", "digits"),
+        ("correction", "correction"),
+        ("code_switch_english_to_language", "english_to_language"),
+        ("code_switch_language_to_english", "language_to_english"),
+    ),
+)
+def test_evaluator_rejects_missing_scenario_critical_span(
+    scenario: str,
+    required_kind: str,
+) -> None:
     records = tuple(
         _activity_record(policy_ms=100, ordinal=ordinal, split="development")
         for ordinal in range(128)
     )
     target_index = next(
-        index
-        for index, record in enumerate(records)
-        if "number_dictation" in record.scenario_tags
+        index for index, record in enumerate(records) if scenario in record.scenario_tags
     )
     target = records[target_index]
     records = (
@@ -1642,7 +1912,7 @@ def test_evaluator_rejects_missing_scenario_critical_span() -> None:
         replace(
             target,
             critical_spans=tuple(
-                fact for fact in target.critical_spans if fact.kind != "digits"
+                fact for fact in target.critical_spans if fact.kind != required_kind
             ),
         ),
         *records[target_index + 1 :],
@@ -1798,6 +2068,11 @@ def test_cli_requires_custody_bundle_and_writes_only_a_private_aggregate_report(
         evaluator_module,
         "_load_pinned_approval_public_key",
         lambda: approval_public_key,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "capture_trusted_startup_identity",
+        lambda *_args, **_kwargs: object(),
     )
 
     exit_code = main(

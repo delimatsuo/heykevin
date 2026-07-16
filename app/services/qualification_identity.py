@@ -43,6 +43,32 @@ OUTAGE_ENUMS = {
     "qualification_host_failure",
 }
 GIT_BINARY = "/usr/bin/git"
+TRUSTED_STARTUP_SCHEMA_ID = "gate_0b_trusted_startup_v1"
+TRUSTED_STARTUP_POLICY_SCHEMA_ID = "gate_0b_trusted_startup_policy_v1"
+STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
+STARTUP_FLAG_NAMES = (
+    "bytes_warning",
+    "debug",
+    "dev_mode",
+    "dont_write_bytecode",
+    "hash_randomization",
+    "ignore_environment",
+    "inspect",
+    "int_max_str_digits",
+    "interactive",
+    "isolated",
+    "no_site",
+    "no_user_site",
+    "optimize",
+    "quiet",
+    "safe_path",
+    "utf8_mode",
+    "verbose",
+    "warn_default_encoding",
+)
+AMBIENT_PYTHON_PATH_ENV = ("PYTHONHOME", "PYTHONPATH")
+AUTOMATIC_STARTUP_MODULES = ("site", "sitecustomize", "usercustomize")
+MAX_STARTUP_ARTIFACT_BYTES = 1024 * 1024
 
 
 class IdentityError(ValueError):
@@ -128,6 +154,74 @@ class EnvironmentIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class TrustedStartupIdentity:
+    target: str
+    startup_flags: dict[str, int | bool]
+    bytecode_write_disabled: bool
+    pycache_prefix_location_sha256: str
+    repo_root_location_sha256: str
+    python_executable_location_sha256: str
+    runtime_site_packages_location_sha256: str
+    effective_sys_path_sha256: str
+    effective_sys_path_entry_sha256: tuple[str, ...]
+    neutralized_environment: tuple[str, ...]
+    runtime_pth_files_sha256: dict[str, str]
+    ignored_startup_hook_files_sha256: dict[str, str]
+    marker_sha256: str
+
+    def redacted_report_dict(self) -> dict[str, Any]:
+        return {
+            "schema_id": TRUSTED_STARTUP_SCHEMA_ID,
+            "target": self.target,
+            "startup_flags": dict(self.startup_flags),
+            "bytecode_write_disabled": self.bytecode_write_disabled,
+            "pycache_prefix_location_sha256": self.pycache_prefix_location_sha256,
+            "repo_root_location_sha256": self.repo_root_location_sha256,
+            "python_executable_location_sha256": self.python_executable_location_sha256,
+            "runtime_site_packages_location_sha256": (
+                self.runtime_site_packages_location_sha256
+            ),
+            "effective_sys_path_sha256": self.effective_sys_path_sha256,
+            "effective_sys_path_entry_sha256": list(
+                self.effective_sys_path_entry_sha256
+            ),
+            "neutralized_environment": list(self.neutralized_environment),
+            "runtime_pth_files_sha256": dict(
+                sorted(self.runtime_pth_files_sha256.items())
+            ),
+            "ignored_startup_hook_files_sha256": dict(
+                sorted(self.ignored_startup_hook_files_sha256.items())
+            ),
+            "marker_sha256": self.marker_sha256,
+        }
+
+    def policy_report_dict(self) -> dict[str, Any]:
+        """Return the target-independent startup policy bound to execution identity."""
+        return {
+            "schema_id": TRUSTED_STARTUP_POLICY_SCHEMA_ID,
+            "startup_flags": dict(self.startup_flags),
+            "bytecode_write_disabled": self.bytecode_write_disabled,
+            "pycache_prefix_location_sha256": self.pycache_prefix_location_sha256,
+            "repo_root_location_sha256": self.repo_root_location_sha256,
+            "python_executable_location_sha256": self.python_executable_location_sha256,
+            "runtime_site_packages_location_sha256": (
+                self.runtime_site_packages_location_sha256
+            ),
+            "effective_sys_path_sha256": self.effective_sys_path_sha256,
+            "effective_sys_path_entry_sha256": list(
+                self.effective_sys_path_entry_sha256
+            ),
+            "neutralized_environment": list(self.neutralized_environment),
+            "runtime_pth_files_sha256": dict(
+                sorted(self.runtime_pth_files_sha256.items())
+            ),
+            "ignored_startup_hook_files_sha256": dict(
+                sorted(self.ignored_startup_hook_files_sha256.items())
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CampaignApproval:
     campaign_id: str
     authorization_id: str
@@ -189,6 +283,200 @@ def canonical_json_bytes(value: object) -> bytes:
         ).encode("ascii")
     except (TypeError, ValueError) as exc:
         raise IdentityError("value is not canonical JSON") from exc
+
+
+def capture_trusted_startup_identity(
+    repo_root: str | Path,
+    *,
+    expected_target: str,
+) -> TrustedStartupIdentity:
+    """Revalidate the stdlib bootstrap marker against the live interpreter state."""
+    encoded = os.environ.get(STARTUP_MARKER_ENV)
+    if encoded is None:
+        raise IdentityError("trusted qualification startup is unavailable")
+    try:
+        raw = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise IdentityError("trusted qualification startup marker is invalid") from exc
+    fields = {
+        "schema_id",
+        "target",
+        "startup_flags",
+        "bytecode_write_disabled",
+        "pycache_prefix",
+        "repo_root",
+        "python_executable",
+        "runtime_site_packages",
+        "effective_sys_path",
+        "neutralized_environment",
+        "runtime_pth_files_sha256",
+        "ignored_startup_hook_files_sha256",
+    }
+    marker = _strict_object(raw, allowed=fields, label="trusted startup marker")
+    if marker["schema_id"] != TRUSTED_STARTUP_SCHEMA_ID:
+        raise IdentityError("trusted qualification startup schema is invalid")
+    if marker["target"] != expected_target:
+        raise IdentityError("trusted qualification startup target is invalid")
+
+    startup_flags = _validated_startup_flags(marker["startup_flags"])
+    if (
+        startup_flags["isolated"] != 1
+        or startup_flags["no_site"] != 1
+        or startup_flags["ignore_environment"] != 1
+        or startup_flags["no_user_site"] != 1
+        or startup_flags["safe_path"] is not True
+    ):
+        raise IdentityError("trusted qualification startup flags are unsafe")
+    if any(name in sys.modules for name in AUTOMATIC_STARTUP_MODULES):
+        raise IdentityError("automatic startup module loaded after trusted startup")
+    if marker["bytecode_write_disabled"] is not True or sys.dont_write_bytecode is not True:
+        raise IdentityError("trusted qualification startup permits bytecode writes")
+
+    expected_root = str(Path(repo_root).resolve())
+    marker_root = _canonical_marker_path(marker["repo_root"], "repository root")
+    if marker_root != expected_root:
+        raise IdentityError("trusted qualification repository root mismatch")
+    pycache_prefix = _canonical_marker_path(
+        marker["pycache_prefix"],
+        "bytecode cache prefix",
+    )
+    if (
+        sys.pycache_prefix != pycache_prefix
+        or Path(pycache_prefix).exists()
+        or Path(pycache_prefix).is_symlink()
+    ):
+        raise IdentityError("trusted qualification bytecode cache policy changed")
+    python_executable = _canonical_marker_path(
+        marker["python_executable"],
+        "Python executable",
+    )
+    if python_executable != _canonical_path(sys.executable):
+        raise IdentityError("trusted qualification Python executable mismatch")
+    runtime_site = _canonical_marker_path(
+        marker["runtime_site_packages"],
+        "runtime site-packages",
+    )
+
+    effective_sys_path = _validated_effective_sys_path(marker["effective_sys_path"])
+    live_sys_path = tuple(_canonical_path(entry) for entry in sys.path)
+    if effective_sys_path != live_sys_path:
+        raise IdentityError("trusted qualification effective sys.path mismatch")
+    if marker_root not in effective_sys_path or runtime_site not in effective_sys_path:
+        raise IdentityError("trusted qualification allowlisted paths are incomplete")
+
+    neutralized_environment = marker["neutralized_environment"]
+    if (
+        not isinstance(neutralized_environment, list)
+        or neutralized_environment != list(AMBIENT_PYTHON_PATH_ENV)
+        or any(name in os.environ for name in AMBIENT_PYTHON_PATH_ENV)
+    ):
+        raise IdentityError("ambient Python path environment was not neutralized")
+
+    runtime_pth = _validated_startup_artifact_map(
+        marker["runtime_pth_files_sha256"],
+        label="runtime .pth",
+    )
+    ignored_hooks = _validated_startup_artifact_map(
+        marker["ignored_startup_hook_files_sha256"],
+        label="ignored startup hook",
+    )
+    if runtime_pth != _runtime_pth_identities(runtime_site):
+        raise IdentityError("runtime .pth identity changed after trusted startup")
+    if ignored_hooks != _ignored_startup_hook_identities(runtime_site):
+        raise IdentityError("startup hook identity changed after trusted startup")
+
+    return TrustedStartupIdentity(
+        target=expected_target,
+        startup_flags=startup_flags,
+        bytecode_write_disabled=True,
+        pycache_prefix_location_sha256=sha256(
+            pycache_prefix.encode("utf-8")
+        ).hexdigest(),
+        repo_root_location_sha256=sha256(marker_root.encode("utf-8")).hexdigest(),
+        python_executable_location_sha256=sha256(
+            python_executable.encode("utf-8")
+        ).hexdigest(),
+        runtime_site_packages_location_sha256=sha256(
+            runtime_site.encode("utf-8")
+        ).hexdigest(),
+        effective_sys_path_sha256=sha256(
+            canonical_json_bytes(list(effective_sys_path))
+        ).hexdigest(),
+        effective_sys_path_entry_sha256=tuple(
+            sha256(path.encode("utf-8")).hexdigest() for path in effective_sys_path
+        ),
+        neutralized_environment=tuple(neutralized_environment),
+        runtime_pth_files_sha256=_redacted_path_map(runtime_pth),
+        ignored_startup_hook_files_sha256=_redacted_path_map(ignored_hooks),
+        marker_sha256=sha256(canonical_json_bytes(marker)).hexdigest(),
+    )
+
+
+def validate_trusted_startup_policy_report(raw: object) -> dict[str, Any]:
+    """Validate a path-redacted, target-independent startup policy report."""
+    fields = {
+        "schema_id",
+        "startup_flags",
+        "bytecode_write_disabled",
+        "pycache_prefix_location_sha256",
+        "repo_root_location_sha256",
+        "python_executable_location_sha256",
+        "runtime_site_packages_location_sha256",
+        "effective_sys_path_sha256",
+        "effective_sys_path_entry_sha256",
+        "neutralized_environment",
+        "runtime_pth_files_sha256",
+        "ignored_startup_hook_files_sha256",
+    }
+    report = _strict_object(raw, allowed=fields, label="trusted startup policy")
+    if report["schema_id"] != TRUSTED_STARTUP_POLICY_SCHEMA_ID:
+        raise IdentityError("trusted qualification startup policy schema is invalid")
+    flags = report["startup_flags"]
+    if (
+        not isinstance(flags, Mapping)
+        or set(flags) != set(STARTUP_FLAG_NAMES)
+        or flags["isolated"] != 1
+        or flags["no_site"] != 1
+        or flags["ignore_environment"] != 1
+        or flags["no_user_site"] != 1
+        or flags["safe_path"] is not True
+    ):
+        raise IdentityError("trusted qualification startup policy flags are invalid")
+    if report["bytecode_write_disabled"] is not True:
+        raise IdentityError("trusted qualification startup policy permits bytecode writes")
+    for field in (
+        "pycache_prefix_location_sha256",
+        "repo_root_location_sha256",
+        "python_executable_location_sha256",
+        "runtime_site_packages_location_sha256",
+        "effective_sys_path_sha256",
+    ):
+        if not isinstance(report[field], str) or not SHA256_PATTERN.fullmatch(report[field]):
+            raise IdentityError("trusted qualification startup policy digest is invalid")
+    path_entries = report["effective_sys_path_entry_sha256"]
+    if (
+        not isinstance(path_entries, list)
+        or not path_entries
+        or len(path_entries) != len(set(path_entries))
+        or any(not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value) for value in path_entries)
+    ):
+        raise IdentityError("trusted qualification startup path policy is invalid")
+    if report["neutralized_environment"] != list(AMBIENT_PYTHON_PATH_ENV):
+        raise IdentityError("trusted qualification ambient environment policy is invalid")
+    for field in (
+        "runtime_pth_files_sha256",
+        "ignored_startup_hook_files_sha256",
+    ):
+        values = report[field]
+        if not isinstance(values, Mapping) or any(
+            not isinstance(name, str)
+            or not SHA256_PATTERN.fullmatch(name)
+            or not isinstance(digest, str)
+            or not SHA256_PATTERN.fullmatch(digest)
+            for name, digest in values.items()
+        ):
+            raise IdentityError("trusted qualification startup artifact policy is invalid")
+    return json.loads(canonical_json_bytes(report))
 
 
 def ledger_location_sha256(path: str | Path) -> str:
@@ -588,6 +876,104 @@ def _utc(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise IdentityError("timestamp must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _canonical_path(value: str | os.PathLike[str]) -> str:
+    return os.path.realpath(os.path.abspath(os.fspath(value)))
+
+
+def _canonical_marker_path(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise IdentityError(f"trusted qualification {label} is invalid")
+    canonical = _canonical_path(value)
+    if value != canonical:
+        raise IdentityError(f"trusted qualification {label} is not canonical")
+    return canonical
+
+
+def _validated_startup_flags(raw: object) -> dict[str, int | bool]:
+    if not isinstance(raw, Mapping) or set(raw) != set(STARTUP_FLAG_NAMES):
+        raise IdentityError("trusted qualification startup flags are invalid")
+    current = {name: getattr(sys.flags, name) for name in STARTUP_FLAG_NAMES}
+    for name, value in raw.items():
+        if type(value) is not type(current[name]) or value != current[name]:
+            raise IdentityError("trusted qualification startup flags changed")
+    return dict(raw)
+
+
+def _validated_effective_sys_path(raw: object) -> tuple[str, ...]:
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(entry, str) or not entry for entry in raw)
+    ):
+        raise IdentityError("trusted qualification effective sys.path is invalid")
+    canonical = tuple(_canonical_path(entry) for entry in raw)
+    if tuple(raw) != canonical or len(canonical) != len(set(canonical)):
+        raise IdentityError("trusted qualification effective sys.path is not canonical")
+    return canonical
+
+
+def _validated_startup_artifact_map(raw: object, *, label: str) -> dict[str, str]:
+    if not isinstance(raw, Mapping):
+        raise IdentityError(f"trusted qualification {label} identities are invalid")
+    identities: dict[str, str] = {}
+    for path, digest in raw.items():
+        if (
+            not isinstance(path, str)
+            or not path
+            or path != _canonical_path(path)
+            or not isinstance(digest, str)
+            or not SHA256_PATTERN.fullmatch(digest)
+        ):
+            raise IdentityError(f"trusted qualification {label} identities are invalid")
+        identities[path] = digest
+    return identities
+
+
+def _hash_startup_artifact(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise IdentityError("startup artifact is not a regular file")
+    if path.stat().st_size > MAX_STARTUP_ARTIFACT_BYTES:
+        raise IdentityError("startup artifact exceeds its size bound")
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def _runtime_pth_identities(runtime_site: str) -> dict[str, str]:
+    root = Path(runtime_site)
+    if root.is_symlink() or not root.is_dir():
+        raise IdentityError("runtime site-packages is unavailable")
+    return {
+        _canonical_path(path): _hash_startup_artifact(path)
+        for path in sorted(root.glob("*.pth"))
+    }
+
+
+def _ignored_startup_hook_identities(runtime_site: str) -> dict[str, str]:
+    root = Path(runtime_site)
+    if root.is_symlink() or not root.is_dir():
+        raise IdentityError("runtime site-packages is unavailable")
+    candidates = [
+        root / f"{module_name}{suffix}"
+        for module_name in ("sitecustomize", "usercustomize")
+        for suffix in (".py", ".pyc")
+    ]
+    cache = root / "__pycache__"
+    if cache.is_dir() and not cache.is_symlink():
+        for module_name in ("sitecustomize", "usercustomize"):
+            candidates.extend(sorted(cache.glob(f"{module_name}.*.pyc")))
+    return {
+        _canonical_path(path): _hash_startup_artifact(path)
+        for path in candidates
+        if path.exists() or path.is_symlink()
+    }
+
+
+def _redacted_path_map(values: Mapping[str, str]) -> dict[str, str]:
+    return {
+        sha256(path.encode("utf-8")).hexdigest(): digest
+        for path, digest in sorted(values.items())
+    }
 
 
 def _strict_object(

@@ -39,8 +39,41 @@ from app.services.qualification_environment import execution_identity_report_sha
 
 
 CAMPAIGN_KEY = b"c" * 32
+TRUSTED_STARTUP_REPORT = {
+    "schema_id": "gate_0b_trusted_startup_policy_v1",
+    "startup_flags": {
+        "bytes_warning": 0,
+        "debug": 0,
+        "dev_mode": False,
+        "dont_write_bytecode": 0,
+        "hash_randomization": 1,
+        "ignore_environment": 1,
+        "inspect": 0,
+        "int_max_str_digits": 4300,
+        "interactive": 0,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+        "optimize": 0,
+        "quiet": 0,
+        "safe_path": True,
+        "utf8_mode": 0,
+        "verbose": 0,
+        "warn_default_encoding": 0,
+    },
+    "bytecode_write_disabled": True,
+    "pycache_prefix_location_sha256": "2" * 64,
+    "repo_root_location_sha256": "c" * 64,
+    "python_executable_location_sha256": "d" * 64,
+    "runtime_site_packages_location_sha256": "e" * 64,
+    "effective_sys_path_sha256": "f" * 64,
+    "effective_sys_path_entry_sha256": ["0" * 64, "1" * 64],
+    "neutralized_environment": ["PYTHONHOME", "PYTHONPATH"],
+    "runtime_pth_files_sha256": {},
+    "ignored_startup_hook_files_sha256": {},
+}
 RUNTIME_IDENTITY_REPORT = {
-    "schema_id": "gate_0b_environment_identity_v2",
+    "schema_id": "gate_0b_environment_identity_v3",
     "source": {
         "source_sha": "a" * 40,
         "clean": True,
@@ -74,6 +107,7 @@ RUNTIME_IDENTITY_REPORT = {
         "distributions": {"test-package": "1.0.0"},
         "distribution_files_sha256": {"test-package": "b" * 64},
     },
+    "trusted_startup": TRUSTED_STARTUP_REPORT,
 }
 RUNTIME_IDENTITY_SHA256 = execution_identity_report_sha256(RUNTIME_IDENTITY_REPORT)
 
@@ -876,6 +910,200 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
     )
     cancellation = next(record for record in records if record.activity_ordinal == 3)
     assert cancellation.interruption_tail_ms is None
+
+
+def _two_activity_assembly_capsule(
+    event_specs: tuple[tuple[str, int, int, str], ...],
+    *,
+    restarted: bool = False,
+    first_lifecycle: str = "retrospective_complete",
+) -> dict[str, object]:
+    capsule = _literal_wire_capsule()
+    session = capsule["sessions"][0]  # type: ignore[index]
+
+    session["events"] = [
+        {
+            "kind": kind,
+            "at_ms": at_ms,
+            "sequence": sequence,
+            "epoch": epoch,
+            "text": text,
+        }
+        for sequence, (kind, at_ms, epoch, text) in enumerate(event_specs, start=1)
+    ]
+
+    def fact(
+        kind: str,
+        at_ms: int,
+        sequence: int,
+        *,
+        activity: int | None,
+        epoch: int,
+        audio_bytes: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "kind": kind,
+            "at_ms": at_ms,
+            "response_ordinal": None,
+            "activity_ordinal": activity,
+            "sequence": sequence,
+            "epoch": epoch,
+            "audio_bytes": audio_bytes,
+        }
+
+    if restarted:
+        session["wire_facts"] = [
+            fact("caller_activity_start", 0, 0, activity=2, epoch=1),
+            fact("caller_audio_sent", 20, 1, activity=2, epoch=1, audio_bytes=640),
+            fact("caller_speech_end", 60, 2, activity=2, epoch=1),
+            fact("caller_activity_end", 70, 3, activity=2, epoch=1),
+            fact("caller_activity_start", 80, 4, activity=3, epoch=2),
+            fact("caller_audio_sent", 90, 5, activity=3, epoch=2, audio_bytes=640),
+            fact("caller_speech_end", 150, 6, activity=3, epoch=2),
+            fact("caller_activity_end", 160, 7, activity=3, epoch=2),
+            fact("teardown_complete", 800, 8, activity=None, epoch=2),
+        ]
+        activity_bounds = ((60, 70, 1), (150, 160, 2))
+    else:
+        session["wire_facts"] = [
+            fact("caller_activity_start", 0, 0, activity=2, epoch=1),
+            fact("caller_audio_sent", 20, 1, activity=2, epoch=1, audio_bytes=640),
+            fact("caller_speech_end", 80, 2, activity=2, epoch=1),
+            fact("caller_activity_end", 100, 3, activity=2, epoch=1),
+            fact("caller_activity_start", 150, 4, activity=3, epoch=1),
+            fact("caller_audio_sent", 180, 5, activity=3, epoch=1, audio_bytes=640),
+            fact("caller_speech_end", 260, 6, activity=3, epoch=1),
+            fact("caller_activity_end", 280, 7, activity=3, epoch=1),
+            fact("teardown_complete", 800, 8, activity=None, epoch=1),
+        ]
+        activity_bounds = ((80, 100, 1), (260, 280, 1))
+
+    capsule["activities"] = [
+        {
+            "activity_ordinal": ordinal,
+            "session_ordinal": 1,
+            "split": "development",
+            "language": "en",
+            "condition": "clean",
+            "scenario_tags": ["standard"],
+            "reference_text": reference,
+            "critical_spans": [],
+            "expected_lifecycle_status": lifecycle,
+            "expected_epoch": epoch,
+            "speech_end_at_ms": speech_end_at_ms,
+            "advance_to_ms": 900,
+        }
+        for ordinal, reference, lifecycle, (
+            speech_end_at_ms,
+            _activity_end_at_ms,
+            epoch,
+        ) in (
+            (2, "first phrase", first_lifecycle, activity_bounds[0]),
+            (3, "second phrase", "retrospective_complete", activity_bounds[1]),
+        )
+    ]
+    _normalize_wire_sequences(capsule)
+    return capsule
+
+
+def test_session_replay_marks_cross_activity_merge_inside_quiescence() -> None:
+    capsule = _two_activity_assembly_capsule(
+        (
+            ("input_transcript_fragment", 50, 1, "first phrase"),
+            ("turn_complete", 100, 1, ""),
+            ("input_transcript_fragment", 200, 1, "second phrase"),
+            ("turn_complete", 220, 1, ""),
+        )
+    )
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    by_activity = {record.activity_ordinal: record for record in records}
+    assert all(record.assembled_turn_count == 1 for record in records)
+    assert all(record.observed_lifecycle_status == "retrospective_complete" for record in records)
+    assert all(record.contamination_count == 1 for record in records)
+    assert all(record.duplicate_count == 0 for record in records)
+    assert by_activity[2].hypothesis_characters == len("firstphrase")
+    assert by_activity[3].hypothesis_characters == len("secondphrase")
+
+
+def test_session_replay_preserves_clean_terminal_separation() -> None:
+    capsule = _two_activity_assembly_capsule(
+        (
+            ("input_transcript_fragment", 50, 1, "first phrase"),
+            ("turn_complete", 100, 1, ""),
+            ("input_transcript_fragment", 400, 1, "second phrase"),
+            ("turn_complete", 420, 1, ""),
+        )
+    )
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    assert all(record.assembled_turn_count == 1 for record in records)
+    assert all(record.observed_lifecycle_status == "retrospective_complete" for record in records)
+    assert all(record.contamination_count == 0 for record in records)
+    assert all(record.duplicate_count == 0 for record in records)
+    assert all(record.late_fragment_mutation_count == 0 for record in records)
+
+
+def test_session_replay_marks_foreign_late_fragment_on_all_merged_owners() -> None:
+    capsule = _two_activity_assembly_capsule(
+        (
+            ("input_transcript_fragment", 50, 1, "first phrase"),
+            ("turn_complete", 100, 1, ""),
+            ("input_transcript_fragment", 200, 1, "second phrase"),
+            ("turn_complete", 500, 1, ""),
+        )
+    )
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    by_activity = {record.activity_ordinal: record for record in records}
+    assert all(record.assembled_turn_count == 1 for record in records)
+    assert all(record.contamination_count == 1 for record in records)
+    assert by_activity[2].late_fragment_mutation_count == 0
+    assert by_activity[3].late_fragment_mutation_count == 0
+
+
+def test_session_replay_attributes_restart_finalization_and_stale_epoch() -> None:
+    capsule = _two_activity_assembly_capsule(
+        (
+            ("input_transcript_fragment", 50, 1, "first phrase"),
+            ("reconnect_started", 100, 2, ""),
+            ("input_transcript_fragment", 110, 1, "stale fragment"),
+            ("input_transcript_fragment", 120, 2, "second phrase"),
+            ("turn_complete", 130, 2, ""),
+        ),
+        restarted=True,
+        first_lifecycle="partial",
+    )
+
+    records, _ = derive_primitive_records_from_capsule(
+        capsule,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+
+    by_activity = {record.activity_ordinal: record for record in records}
+    assert by_activity[2].assembled_turn_count == 1
+    assert by_activity[2].observed_lifecycle_status == "partial"
+    assert by_activity[2].stale_count == 1
+    assert by_activity[2].cross_epoch_acceptance_count == 0
+    assert by_activity[3].assembled_turn_count == 1
+    assert by_activity[3].observed_lifecycle_status == "retrospective_complete"
+    assert by_activity[3].stale_count == 0
 
 
 def test_multi_activity_capsule_attributes_one_assembled_turn_per_activity() -> None:

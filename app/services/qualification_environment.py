@@ -9,15 +9,17 @@ import re
 from typing import Any, Mapping
 
 from app.services.qualification_identity import (
+    IdentityError,
     canonical_json_bytes,
     capture_environment_identity,
     capture_source_identity,
+    validate_trusted_startup_policy_report,
 )
 
 
 EXPECTED_PYTHON = "3.12.13"
 EXPECTED_UV = "0.11.7"
-EXECUTION_IDENTITY_SCHEMA_ID = "gate_0b_environment_identity_v2"
+EXECUTION_IDENTITY_SCHEMA_ID = "gate_0b_environment_identity_v3"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 EXECUTION_DEPENDENCY_PATHS = (
@@ -37,6 +39,7 @@ EXECUTION_DEPENDENCY_PATHS = (
     "app/utils/audio.py",
     "scripts/run_gemini_caller_turn_qualification.py",
     "scripts/evaluate_gemini_caller_turn_qualification.py",
+    "scripts/launch_qualification.py",
     "scripts/verify_qualification_environment.py",
     "app/services/gemini_pipeline.py",
     "app/services/voice_pipeline.py",
@@ -67,6 +70,7 @@ def build_execution_identity_report(
     repo_root: str | Path,
     *,
     expected_source_sha: str,
+    trusted_startup: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Capture the one identity report used by preregistration and execution."""
     source = capture_source_identity(
@@ -80,15 +84,22 @@ def build_execution_identity_report(
         expected_uv=EXPECTED_UV,
         import_names=EXECUTION_IMPORT_NAMES,
     )
+    startup = validate_trusted_startup_policy_report(trusted_startup)
     return {
         "schema_id": EXECUTION_IDENTITY_SCHEMA_ID,
         "source": source.redacted_report_dict(),
         "environment": environment.redacted_report_dict(),
+        "trusted_startup": startup,
     }
 
 
 def validate_execution_identity_report(raw: object) -> dict[str, Any]:
-    if not isinstance(raw, Mapping) or set(raw) != {"schema_id", "source", "environment"}:
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "schema_id",
+        "source",
+        "environment",
+        "trusted_startup",
+    }:
         raise ValueError("execution identity report fields are invalid")
     if raw["schema_id"] != EXECUTION_IDENTITY_SCHEMA_ID:
         raise ValueError("execution identity report schema is invalid")
@@ -181,7 +192,7 @@ def validate_execution_identity_report(raw: object) -> dict[str, Any]:
         or isinstance(environment["monotonic_clock_resolution_ns"], bool)
         or not isinstance(environment["monotonic_clock_resolution_ns"], int)
         or not 1 <= environment["monotonic_clock_resolution_ns"] <= 1_000_000_000
-        or not isinstance(environment["bytecode_write_disabled"], bool)
+        or environment["bytecode_write_disabled"] is not True
     ):
         raise ValueError("execution runtime policy is invalid")
     _validate_digest_map(environment["import_sha256"], label="import")
@@ -201,6 +212,10 @@ def validate_execution_identity_report(raw: object) -> dict[str, Any]:
         raise ValueError("execution distribution versions are invalid")
     if set(distributions) != set(environment["distribution_files_sha256"]):
         raise ValueError("execution distribution identities are inconsistent")
+    try:
+        validate_trusted_startup_policy_report(raw["trusted_startup"])
+    except IdentityError as exc:
+        raise ValueError("execution trusted startup identity is invalid") from exc
     return json.loads(canonical_json_bytes(raw))
 
 
@@ -223,9 +238,11 @@ def execution_identity_sha256(
     repo_root: str | Path,
     *,
     expected_source_sha: str,
+    trusted_startup: Mapping[str, Any],
 ) -> str:
     report = build_execution_identity_report(
         repo_root,
         expected_source_sha=expected_source_sha,
+        trusted_startup=trusted_startup,
     )
     return sha256(canonical_json_bytes(report)).hexdigest()

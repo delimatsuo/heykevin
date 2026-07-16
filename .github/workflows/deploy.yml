@@ -56,7 +56,7 @@ jobs:
       - name: Capture qualification environment before tests
         run: >-
           uv run --locked --no-sync --extra dev --python 3.12.13
-          python scripts/verify_qualification_environment.py --phase before
+          python -I -S scripts/launch_qualification.py verify-environment --phase before
 
       - name: Run tests
         run: uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest --tb=short -q
@@ -74,6 +74,7 @@ jobs:
             app/services/qualification_privacy.py \
             app/services/qualification_private_paths.py \
             app/services/voice_turn_replay.py \
+            scripts/launch_qualification.py \
             scripts/evaluate_gemini_caller_turn_qualification.py \
             scripts/run_gemini_caller_turn_qualification.py \
             scripts/verify_qualification_environment.py \
@@ -92,17 +93,21 @@ jobs:
             tests/unit/test_voice_turn_replay.py
           uv run --locked --no-sync --extra dev --python 3.12.13 \
             bandit -q -lll app/services/qualification_identity.py \
+            app/services/qualification_environment.py \
             app/services/qualification_ledger.py \
+            app/services/caller_turn_alignment.py \
             app/services/caller_turn_measurement.py \
+            scripts/launch_qualification.py \
             scripts/run_gemini_caller_turn_qualification.py \
-            scripts/evaluate_gemini_caller_turn_qualification.py
+            scripts/evaluate_gemini_caller_turn_qualification.py \
+            scripts/verify_qualification_environment.py
           uv run --locked --no-sync --extra dev --python 3.12.13 \
             python -m compileall -q app/services scripts
 
       - name: Verify qualification environment after tests
         run: >-
           uv run --locked --no-sync --extra dev --python 3.12.13
-          python scripts/verify_qualification_environment.py --phase after
+          python -I -S scripts/launch_qualification.py verify-environment --phase after
 
   deploy-staging:
     name: Deploy to Staging

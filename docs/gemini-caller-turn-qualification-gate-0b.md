@@ -14,6 +14,15 @@ preregistration assembled from reviewed external identity values. The `--execute
 path is intentionally blocked. The checked-in approval root contains exactly
 `UNPROVISIONED`, so campaign approval verification cannot succeed.
 
+Every executable Gate 0B entry point is allowlisted behind
+`scripts/launch_qualification.py` and must start with `python -I -S`. Direct
+runner, evaluator, and environment-verifier execution fails before project or
+third-party imports. The launcher ignores ambient Python path configuration,
+does not process `.pth` files or customization modules, and binds its canonical
+startup policy into environment identity v3. It redirects bytecode-cache lookup
+to a bound nonexistent path and rejects sourceless bytecode in repository import
+roots, so ignored `__pycache__` content cannot replace reviewed source.
+
 ## Fixed Boundary
 
 Gate 0B evaluates retrospective caller-turn assembly for purpose-recorded,
@@ -60,10 +69,14 @@ uv run --locked --no-sync --extra dev --python 3.12.13 \
   tests/unit/test_gate0b_offline_boundaries.py -q
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   ruff check app/services/qualification_identity.py \
+  app/services/qualification_environment.py \
   app/services/qualification_ledger.py \
+  app/services/caller_turn_alignment.py \
   app/services/caller_turn_measurement.py \
+  scripts/launch_qualification.py \
   scripts/run_gemini_caller_turn_qualification.py \
   scripts/evaluate_gemini_caller_turn_qualification.py \
+  scripts/verify_qualification_environment.py \
   tests/unit/test_qualification_identity.py \
   tests/unit/test_qualification_ledger.py \
   tests/unit/test_caller_turn_measurement.py \
@@ -71,10 +84,14 @@ uv run --locked --no-sync --extra dev --python 3.12.13 \
   tests/unit/test_evaluate_gemini_caller_turn_qualification.py
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   bandit -q -lll app/services/qualification_identity.py \
+  app/services/qualification_environment.py \
   app/services/qualification_ledger.py \
+  app/services/caller_turn_alignment.py \
   app/services/caller_turn_measurement.py \
+  scripts/launch_qualification.py \
   scripts/run_gemini_caller_turn_qualification.py \
-  scripts/evaluate_gemini_caller_turn_qualification.py
+  scripts/evaluate_gemini_caller_turn_qualification.py \
+  scripts/verify_qualification_environment.py
 ```
 
 These commands perform no DNS lookup, socket connection, provider request, secret
@@ -101,7 +118,7 @@ Emit the implementation-only template:
 ```bash
 QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python scripts/run_gemini_caller_turn_qualification.py \
+  python -I -S scripts/launch_qualification.py run-qualification \
   --dry-run \
   --output "$QUALIFICATION_ROOT/preregistration/gate0b-template.json"
 ```
@@ -172,7 +189,7 @@ Generate the canonical artifact outside the repository:
 ```bash
 QUALIFICATION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hey-kevin-qualification"
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python scripts/run_gemini_caller_turn_qualification.py \
+  python -I -S scripts/launch_qualification.py run-qualification \
   --dry-run \
   --values "$QUALIFICATION_ROOT/preregistration/gate0b-values.json" \
   --output "$QUALIFICATION_ROOT/preregistration/gate0b-preregistration.json"
@@ -255,18 +272,29 @@ cancellation/interruption, close, malformed-message, runaway-output, and teardow
 facts from that session evidence. The storage sink must return a digest-matched
 handoff receipt before an attempt can be marked complete.
 
-Critical spans qualify only when one unique token sequence (or character sequence
-for unsegmented languages) is preserved by an optimal reference-to-hypothesis
-alignment. Moved or duplicated spans fail, and every scenario-specific required span
-kind must be present. Contamination includes a foreign token absent from the current
-reference even when several foreign activities share it. Interruption tail includes
-all causally prior response audio emitted after the new caller-audio trigger,
-including audio that continues after cancellation is observed.
+For every candidate policy, the evaluator replays each logical session's original
+receipt-ordered event stream through one `CallerTurnAssembler`. Activity ownership
+is applied only after turns are emitted. Any turn spanning multiple activity owners
+is a contamination failure; reconnect events are the only assembler epoch reset.
+
+Critical spans qualify only when one unique token sequence, or character sequence
+when any compared value is unsegmented, is preserved at its anchored reference
+interval across every minimum-edit alignment. Adjacent or distant movement,
+duplication, ambiguity, and edits crossing a span boundary fail. The selected unit
+system also supplies the total edit distance, including mixed Chinese/English cases.
+Every scenario-specific required span kind must be present. Contamination includes a
+foreign token absent from the current reference even when several foreign activities
+share it. Interruption tail includes all causally prior response audio emitted after
+the new caller-audio trigger, including audio that continues after cancellation is
+observed.
 
 Each sealed capsule retains the complete payload-safe runtime identity report before
 and after its provider split, together with both report hashes. The evaluator binds
 those reports to preregistration, rejects intra-split or cross-split drift, and
 publishes the campaign's complete before/after reports and hashes in the final report.
+Environment identity v3 includes the target-independent trusted-startup policy:
+isolated/no-site flags, bytecode policy, canonical effective-path hashes, and bound
+identities for inert runtime `.pth` and customization artifacts.
 Repository-relative dependency names and executable locations appear only as
 SHA-256 identifiers; the report contains no cleartext file path.
 
@@ -284,6 +312,15 @@ actual totals, and signed reservation before producing a report.
 The evaluator also requires both the authorization and replay-derived reservation to
 equal the exact preregistered per-run liability; lower signed values are invalid even
 when they cover actual usage.
+
+Published report schema v3 is one canonical, payload-safe Ed25519-signed package. It
+contains the complete preregistration, component digests, full signed record-root
+envelope, and recomputed campaign, attempt, phase-transition, logical-session,
+connection, epoch, activity, no-speech-window, fresh-restart, and provider-request
+counts. Detached verification rejects any omitted, substituted, or tampered field.
+Timing is labeled as a provider-receipt proxy, not a caller-heard SLO. Lifecycle
+counts publish exact scheduled denominators, including zero-count classes, and make
+no claim for unscheduled failure classes.
 
 Primitive records and published reports contain no text, audio, prompt, tool
 arguments, credential, path, subject identifier, caller identifier, provider ID, or

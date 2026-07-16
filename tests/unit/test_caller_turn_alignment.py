@@ -176,6 +176,41 @@ def test_corrupted_but_nearest_transcript_fails_critical_span_fidelity() -> None
     }
 
 
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        (
+            "please confirm with the customer that the scheduled technician not does "
+            "need emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning"
+        ),
+        (
+            "please confirm with the customer that the scheduled technician does need "
+            "not emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning"
+        ),
+    ),
+)
+def test_adjacent_relocated_critical_span_does_not_pass_as_exact(candidate: str) -> None:
+    reference = ActivityReference(
+        8,
+        "en",
+        (
+            "please confirm with the customer that the scheduled technician does not "
+            "need emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning"
+        ),
+        critical_spans=(CriticalSpan(CriticalSpanKind.NEGATION, "not"),),
+    )
+
+    result = align_fragments((candidate,), references=(reference,), policy=_policy())
+
+    assert result.cer <= Fraction(1, 10)
+    assert result.wer is not None and result.wer <= Fraction(3, 20)
+    assert result.critical_spans[0].exact is False
+    assert result.fidelity_passed is False
+
+
 def test_moved_critical_span_does_not_pass_as_exact() -> None:
     reference = ActivityReference(
         8,
@@ -230,6 +265,66 @@ def test_duplicated_critical_span_does_not_pass_as_exact() -> None:
     assert result.wer is not None and result.wer <= Fraction(1, 10)
     assert result.critical_spans[0].exact is False
     assert result.fidelity_passed is False
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        "alpha alpha beta",
+        "alpha beta beta",
+    ),
+)
+def test_edit_crossing_critical_span_boundary_does_not_pass_as_exact(
+    candidate: str,
+) -> None:
+    reference = ActivityReference(
+        9,
+        "en",
+        "alpha beta",
+        critical_spans=(
+            CriticalSpan(CriticalSpanKind.CORRECTION, "alpha beta"),
+        ),
+    )
+
+    result = align_fragments(
+        (candidate,),
+        references=(reference,),
+        policy=_policy(assignment_cer=Fraction(1, 2)),
+    )
+
+    assert result.critical_spans[0].exact is False
+    assert result.fidelity_passed is False
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_exact"),
+    (
+        ("请确认 order 123 today 谢谢", True),
+        ("请确认 order 124 today 谢谢", False),
+    ),
+)
+def test_mixed_chinese_english_critical_span_exactness(
+    candidate: str,
+    expected_exact: bool,
+) -> None:
+    reference = ActivityReference(
+        10,
+        "zh",
+        "请确认 order 123 today 谢谢",
+        critical_spans=(
+            CriticalSpan(
+                CriticalSpanKind.ENGLISH_TO_LANGUAGE,
+                "order 123",
+                language="en",
+            ),
+        ),
+    )
+
+    result = align_fragments((candidate,), references=(reference,), policy=_policy())
+
+    assert result.schema_id == "gate_0b_alignment_v2"
+    assert result.critical_spans[0].exact is expected_exact
+    assert result.fidelity_passed is expected_exact
 
 
 @pytest.mark.parametrize(

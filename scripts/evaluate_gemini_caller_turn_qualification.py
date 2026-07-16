@@ -12,25 +12,45 @@ import hashlib
 import hmac
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
 from typing import Any, Mapping, Sequence
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
+_TRUSTED_STARTUP_FLAGS = (
+    sys.flags.isolated == 1
+    and sys.flags.no_site == 1
+    and sys.flags.ignore_environment == 1
+    and sys.flags.no_user_site == 1
+    and sys.flags.safe_path is True
+)
+if __name__ == "__main__" and (
+    _STARTUP_MARKER_ENV not in os.environ or not _TRUSTED_STARTUP_FLAGS
+):
+    print('{"error_code":"qualification_startup_required","status":"blocked"}')
+    raise SystemExit(2)
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from cryptography.exceptions import InvalidSignature  # noqa: E402
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.asymmetric.x25519 import (  # noqa: E402
+    X25519PrivateKey,
+)
 
 from app.services.caller_turn_measurement import (  # noqa: E402
     POLICIES_MS,
     ActivityPrimitiveRecord,
     MeasurementError,
     NoSpeechPrimitiveRecord,
+    SIGNED_ROOT_SCHEMA_ID,
     build_signed_record_root,
     combined_usage_evidence_sha256,
     compute_record_merkle_root,
@@ -53,7 +73,9 @@ from app.services.qualification_allocation import (  # noqa: E402
     validate_gate0b_allocation,
 )
 from app.services.qualification_identity import (  # noqa: E402
+    IdentityError,
     canonical_json_bytes,
+    capture_trusted_startup_identity,
     verify_attempt_authorization,
     verify_campaign_approval,
 )
@@ -72,13 +94,18 @@ from app.services.qualification_private_paths import (  # noqa: E402
 )
 from scripts.run_gemini_caller_turn_qualification import (  # noqa: E402
     PREREGISTRATION_EXTERNAL_FIELDS,
+    SessionExecutionConfig,
+    build_gate0b_setup_identity,
     build_preregistration,
 )
 
 
 EVIDENCE_SCHEMA_ID = "gate_0b_evidence_v3"
 CUSTODY_BUNDLE_SCHEMA_ID = "gate_0b_custody_bundle_v2"
-REPORT_SCHEMA_ID = "gate_0b_evaluation_report_v2"
+EVALUATION_RESULT_SCHEMA_ID = "gate_0b_evaluation_result_v1"
+REPORT_SCHEMA_ID = "gate_0b_evaluation_report_v3"
+PUBLICATION_SIGNATURE_SCHEMA_ID = "gate_0b_publication_signature_v1"
+PUBLICATION_SIGNATURE_DOMAIN = b"gate-0b-canonical-publication-v1\x00"
 EXPECTED_POLICIES = (100, 250, 500, 750)
 EXPECTED_PHASE_HISTORY = (
     "preregistered",
@@ -153,6 +180,59 @@ CODE_SWITCH_TAGS = frozenset(
         "code_switch_language_to_english",
     }
 )
+LIFECYCLE_STATUSES = (
+    "retrospective_complete",
+    "partial",
+    "cancelled",
+    "dropped",
+    "missing",
+    "duplicate",
+)
+TIMING_SCOPE = {
+    "basis": "provider_receipt_time_proxy",
+    "population": "scheduled_cases_only",
+    "caller_heard_slo_validated": False,
+}
+COMPONENT_DIGEST_FIELDS = frozenset(
+    {
+        "adapter_sha256",
+        "assembler_sha256",
+        "corpus_sha256",
+        "evaluator_sha256",
+        "manifest_sha256",
+        "pricing_sha256",
+        "prompt_sha256",
+        "renderer_sha256",
+        "runner_sha256",
+        "setup_sha256",
+        "tool_sha256",
+    }
+)
+CARDINALITY_REQUIREMENTS = {
+    "campaign_count": 1,
+    "attempt_count": 1,
+    "phase_count": len(EXPECTED_PHASE_HISTORY),
+    "phase_transition_count": len(EXPECTED_PHASE_HISTORY) - 1,
+    "candidate_policy_count": len(EXPECTED_POLICIES),
+    "language_count": 8,
+    "logical_session_count": 48,
+    "connection_count": 128,
+    "epoch_count": 64,
+    "fresh_restart_count": 16,
+    "development_scheduled_activity_count": EXPECTED_DEVELOPMENT_ACTIVITIES,
+    "development_policy_record_count": EXPECTED_DEVELOPMENT_ACTIVITIES * len(EXPECTED_POLICIES),
+    "holdout_scheduled_activity_count": EXPECTED_HOLDOUT_ACTIVITIES,
+    "scheduled_activity_count": EXPECTED_DEVELOPMENT_ACTIVITIES + EXPECTED_HOLDOUT_ACTIVITIES,
+    "development_no_speech_window_count": EXPECTED_NO_SPEECH_WINDOWS // 2,
+    "holdout_no_speech_window_count": EXPECTED_NO_SPEECH_WINDOWS // 2,
+    "no_speech_window_count": EXPECTED_NO_SPEECH_WINDOWS,
+    "primitive_record_count": (
+        EXPECTED_DEVELOPMENT_ACTIVITIES * len(EXPECTED_POLICIES)
+        + EXPECTED_HOLDOUT_ACTIVITIES
+        + EXPECTED_NO_SPEECH_WINDOWS
+    ),
+    "provider_request_count": 128,
+}
 
 
 class EvaluationError(ValueError):
@@ -239,6 +319,26 @@ def compute_evidence_context_commitment(
         EVIDENCE_CONTEXT_HMAC_DOMAIN + canonical_json_bytes(context),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _validated_preregistration(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise EvaluationError("custody preregistration is invalid")
+    immutable = raw.get("immutable_values")
+    if not isinstance(immutable, Mapping):
+        raise EvaluationError("custody preregistration is invalid")
+    try:
+        expected = build_preregistration(
+            {
+                "schema_id": "gate_0b_preregistration_values_v2",
+                **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
+            }
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvaluationError("custody preregistration is invalid") from exc
+    if dict(raw) != expected:
+        raise EvaluationError("custody preregistration digest is invalid")
+    return json.loads(canonical_json_bytes(expected))
 
 
 def evaluate_evidence_artifact(
@@ -400,9 +500,10 @@ def evaluate_evidence_artifact(
     )
     signed_payload = parsed["signed_record_root"]["payload"]
     report = {
-        "schema_id": REPORT_SCHEMA_ID,
+        "schema_id": EVALUATION_RESULT_SCHEMA_ID,
         "status": "pass" if gate_passed else "no_go",
         "campaign_id": parsed["campaign_id"],
+        "phase_history": list(parsed["phase_history"]),
         "selected_policy_ms": parsed["selected_policy_ms"],
         "candidate_policy_results": candidate_results,
         "record_root": {
@@ -415,9 +516,7 @@ def evaluate_evidence_artifact(
             "started_at": parsed["execution_started_at"],
             "completed_at": parsed["execution_completed_at"],
             "provider_revision": parsed["provider_revision"],
-            "runtime_identity_before_sha256": parsed[
-                "runtime_identity_before_sha256"
-            ],
+            "runtime_identity_before_sha256": parsed["runtime_identity_before_sha256"],
             "runtime_identity_after_sha256": parsed["runtime_identity_after_sha256"],
             "runtime_identity_before": parsed["runtime_identity_before"],
             "runtime_identity_after": parsed["runtime_identity_after"],
@@ -491,23 +590,8 @@ def _evaluate_custody_bundle(
     if not isinstance(ledger, Mapping) or ledger.get("campaign_id") != campaign_id:
         raise EvaluationError("custody ledger campaign is invalid")
 
-    preregistration = bundle["preregistration"]
-    if not isinstance(preregistration, Mapping):
-        raise EvaluationError("custody preregistration is invalid")
-    immutable = preregistration.get("immutable_values")
-    if not isinstance(immutable, Mapping):
-        raise EvaluationError("custody preregistration is invalid")
-    try:
-        expected_preregistration = build_preregistration(
-            {
-                "schema_id": "gate_0b_preregistration_values_v2",
-                **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
-            }
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise EvaluationError("custody preregistration is invalid") from exc
-    if dict(preregistration) != expected_preregistration:
-        raise EvaluationError("custody preregistration digest is invalid")
+    preregistration = _validated_preregistration(bundle["preregistration"])
+    immutable = preregistration["immutable_values"]
     if (
         not isinstance(ledger_custodian_public_key, bytes)
         or hashlib.sha256(ledger_custodian_public_key).hexdigest()
@@ -652,21 +736,18 @@ def _evaluate_custody_bundle(
         or state.campaign_approval_sha256 != campaign.signed_payload_sha256
         or state.attempt_authorization_sha256 != authorization.signed_payload_sha256
         or authorization.attempt_id != state.completed_attempt_id
-        or state.provider_requests_reserved
-        != authorization.provider_request_reservation
+        or state.provider_requests_reserved != authorization.provider_request_reservation
         or state.cost_reserved_microusd != authorization.cost_reservation_microusd
         or campaign.max_attempts != immutable["attempt_caps"]["whole_run_attempts"]
         or campaign.max_provider_requests
         != immutable["usage_caps"]["provider_requests_per_campaign"]
-        or campaign.max_cost_microusd
-        != immutable["cost_caps_microusd"]["per_campaign"]
+        or campaign.max_cost_microusd != immutable["cost_caps_microusd"]["per_campaign"]
         or state.campaign_max_attempts != campaign.max_attempts
         or state.campaign_max_provider_requests != campaign.max_provider_requests
         or state.campaign_max_cost_microusd != campaign.max_cost_microusd
         or authorization.provider_request_reservation
         != immutable["usage_caps"]["provider_requests_per_run"]
-        or authorization.cost_reservation_microusd
-        != immutable["cost_caps_microusd"]["per_run"]
+        or authorization.cost_reservation_microusd != immutable["cost_caps_microusd"]["per_run"]
         or campaign.ledger_instance_id != immutable["ledger_instance_id"]
         or campaign.ledger_custodian_key_id != immutable["ledger_custodian_key_id"]
         or campaign.ledger_custodian_public_key_sha256
@@ -717,9 +798,7 @@ def _evaluate_custody_bundle(
         policies_ms=EXPECTED_POLICIES,
         commitment_key=commitment_key,
     )
-    development_usage, development_failures = derive_audit_capsule_accounting(
-        development_capsule
-    )
+    development_usage, development_failures = derive_audit_capsule_accounting(development_capsule)
     development_cost_microusd = _cost_microusd_from_usage(development_usage)
     development_usage_digest = usage_evidence_sha256(
         development_usage,
@@ -834,12 +913,587 @@ def _evaluate_custody_bundle(
         artifact,
         commitment_key=commitment_key,
     )
-    return evaluate_evidence_artifact(
+    evaluation = evaluate_evidence_artifact(
         artifact,
         commitment_key=commitment_key,
         root_public_key=record_root_public_key,
         expected_root_key_id=record_root_key_id,
     )
+    if evaluation["campaign_id"] is None:
+        return evaluation
+    return _build_published_report(
+        evaluation,
+        preregistration=preregistration,
+        signed_record_root=signed_root,
+        activity_records=activity_records,
+        no_speech_records=no_speech_records,
+        opened_capsules=(development_capsule, holdout_capsule),
+        signing_key=record_root_signing_key,
+        key_id=record_root_key_id,
+    )
+
+
+def _build_published_report(
+    evaluation: Mapping[str, Any],
+    *,
+    preregistration: Mapping[str, Any],
+    signed_record_root: Mapping[str, Any],
+    activity_records: tuple[ActivityPrimitiveRecord, ...],
+    no_speech_records: tuple[NoSpeechPrimitiveRecord, ...],
+    opened_capsules: tuple[Mapping[str, Any], Mapping[str, Any]],
+    signing_key: Ed25519PrivateKey,
+    key_id: str,
+) -> dict[str, Any]:
+    if (
+        not isinstance(evaluation, Mapping)
+        or evaluation.get("schema_id") != EVALUATION_RESULT_SCHEMA_ID
+        or evaluation.get("campaign_id") is None
+        or not isinstance(signing_key, Ed25519PrivateKey)
+    ):
+        raise EvaluationError("publication inputs are invalid")
+    canonical_preregistration = _validated_preregistration(preregistration)
+    immutable = canonical_preregistration["immutable_values"]
+    public_key = signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    if (
+        key_id != immutable["record_root_key_id"]
+        or hashlib.sha256(public_key).hexdigest() != immutable["record_root_public_key_sha256"]
+    ):
+        raise EvaluationError("publication signing identity is not preregistered")
+
+    payload = json.loads(canonical_json_bytes(evaluation))
+    payload["schema_id"] = REPORT_SCHEMA_ID
+    payload.pop("record_root", None)
+    payload.update(
+        {
+            "preregistration": canonical_preregistration,
+            "component_digests": _component_digests(
+                canonical_preregistration,
+                execution=payload["execution"],
+            ),
+            "cardinalities": _recomputed_cardinalities(
+                activity_records,
+                no_speech_records,
+                opened_capsules=opened_capsules,
+                phase_history=tuple(payload["phase_history"]),
+                candidate_policy_count=len(payload["candidate_policy_results"]),
+                provider_request_count=payload["usage"]["provider_requests"],
+            ),
+            "signed_record_root": json.loads(canonical_json_bytes(signed_record_root)),
+        }
+    )
+    assert_payload_safe(payload)
+    report = {
+        **payload,
+        "publication_signature": {
+            "schema_id": PUBLICATION_SIGNATURE_SCHEMA_ID,
+            "key_id": key_id,
+            "signature": base64.b64encode(
+                signing_key.sign(PUBLICATION_SIGNATURE_DOMAIN + canonical_json_bytes(payload))
+            ).decode("ascii"),
+        },
+    }
+    assert_payload_safe(report)
+    return json.loads(canonical_json_bytes(report))
+
+
+def _component_digests(
+    preregistration: Mapping[str, Any],
+    *,
+    execution: Mapping[str, Any],
+) -> dict[str, str]:
+    immutable = preregistration["immutable_values"]
+    config = SessionExecutionConfig(
+        endpoint=immutable["endpoint"],
+        model=immutable["model"],
+        project=immutable["project"],
+        max_message_bytes=1_024,
+        session_timeout_seconds=immutable["usage_caps"]["session_timeout_seconds"],
+        response_gap_limit_ms=500,
+    )
+    setup_identity = build_gate0b_setup_identity(config)
+    setup_sha256 = hashlib.sha256(canonical_json_bytes(setup_identity)).hexdigest()
+    if setup_sha256 != immutable["setup_sha256"]:
+        raise EvaluationError("published setup digest is invalid")
+    standard_setup = setup_identity["standard"]["setup"]
+    synthetic_tool_setup = setup_identity["synthetic_tool"]["setup"]
+    imports = execution["runtime_identity_before"]["environment"]["import_sha256"]
+    try:
+        result = {
+            "manifest_sha256": immutable["manifest_sha256"],
+            "corpus_sha256": immutable["corpus_sha256"],
+            "setup_sha256": setup_sha256,
+            "pricing_sha256": immutable["pricing_sha256"],
+            "prompt_sha256": hashlib.sha256(
+                canonical_json_bytes(standard_setup["systemInstruction"])
+            ).hexdigest(),
+            "tool_sha256": hashlib.sha256(
+                canonical_json_bytes(synthetic_tool_setup["tools"])
+            ).hexdigest(),
+            "runner_sha256": immutable["runner_sha256"],
+            "adapter_sha256": imports["app.services.gemini_turn_events"],
+            "assembler_sha256": imports["app.services.caller_turns"],
+            "renderer_sha256": imports["app.utils.audio"],
+            "evaluator_sha256": immutable["evaluator_sha256"],
+        }
+    except (KeyError, TypeError) as exc:
+        raise EvaluationError("published component identities are incomplete") from exc
+    if set(result) != COMPONENT_DIGEST_FIELDS or any(
+        not isinstance(value, str) or not SHA256.fullmatch(value) for value in result.values()
+    ):
+        raise EvaluationError("published component identities are invalid")
+    return dict(sorted(result.items()))
+
+
+def _recomputed_cardinalities(
+    activity_records: Sequence[ActivityPrimitiveRecord],
+    no_speech_records: Sequence[NoSpeechPrimitiveRecord],
+    *,
+    opened_capsules: tuple[Mapping[str, Any], Mapping[str, Any]],
+    phase_history: tuple[str, ...],
+    candidate_policy_count: int,
+    provider_request_count: int,
+) -> dict[str, dict[str, int | bool]]:
+    development = tuple(record for record in activity_records if record.split == "development")
+    holdout = tuple(record for record in activity_records if record.split == "holdout")
+    selected_development_ordinals = {record.activity_ordinal for record in development}
+    holdout_ordinals = {record.activity_ordinal for record in holdout}
+    languages = {
+        record.language
+        for record in activity_records
+        if record.split == "holdout" or record.policy_ms == min(EXPECTED_POLICIES)
+    }
+    execution_counts = _capsule_execution_cardinalities(opened_capsules)
+    observed = {
+        "campaign_count": 1,
+        "attempt_count": 1,
+        "phase_count": len(phase_history),
+        "phase_transition_count": max(0, len(phase_history) - 1),
+        "candidate_policy_count": candidate_policy_count,
+        "language_count": len(languages),
+        **execution_counts,
+        "development_scheduled_activity_count": len(selected_development_ordinals),
+        "development_policy_record_count": len(development),
+        "holdout_scheduled_activity_count": len(holdout_ordinals),
+        "scheduled_activity_count": len(selected_development_ordinals | holdout_ordinals),
+        "development_no_speech_window_count": sum(
+            record.split == "development" for record in no_speech_records
+        ),
+        "holdout_no_speech_window_count": sum(
+            record.split == "holdout" for record in no_speech_records
+        ),
+        "no_speech_window_count": len(no_speech_records),
+        "primitive_record_count": len(activity_records) + len(no_speech_records),
+        "provider_request_count": provider_request_count,
+    }
+    return _cardinality_report(observed)
+
+
+def _capsule_execution_cardinalities(
+    capsules: tuple[Mapping[str, Any], Mapping[str, Any]],
+) -> dict[str, int]:
+    logical_session_count = 0
+    connection_count = 0
+    epoch_count = 0
+    for capsule in capsules:
+        sessions = capsule.get("sessions")
+        accounting = capsule.get("accounting")
+        if not isinstance(sessions, list) or not isinstance(accounting, Mapping):
+            raise EvaluationError("published execution cardinalities are unavailable")
+        units = accounting.get("units")
+        if not isinstance(units, list):
+            raise EvaluationError("published execution cardinalities are unavailable")
+        logical_session_count += len(sessions)
+        for unit in units:
+            if (
+                not isinstance(unit, Mapping)
+                or unit.get("kind") not in {"session", "no_speech_window"}
+                or isinstance(unit.get("provider_request_count"), bool)
+                or not isinstance(unit.get("provider_request_count"), int)
+                or unit["provider_request_count"] < 0
+            ):
+                raise EvaluationError("published execution cardinalities are invalid")
+            request_count = unit["provider_request_count"]
+            connection_count += request_count
+            if unit["kind"] == "session":
+                epoch_count += request_count
+    if epoch_count < logical_session_count:
+        raise EvaluationError("published restart cardinality is invalid")
+    return {
+        "logical_session_count": logical_session_count,
+        "connection_count": connection_count,
+        "epoch_count": epoch_count,
+        "fresh_restart_count": epoch_count - logical_session_count,
+    }
+
+
+def _cardinality_report(
+    observed: Mapping[str, int],
+) -> dict[str, dict[str, int | bool]]:
+    if set(observed) != set(CARDINALITY_REQUIREMENTS):
+        raise EvaluationError("published cardinalities are incomplete")
+    return {
+        name: {
+            "required": required,
+            "observed": observed[name],
+            "matches": observed[name] == required,
+        }
+        for name, required in sorted(CARDINALITY_REQUIREMENTS.items())
+    }
+
+
+def verify_published_report(
+    report: Mapping[str, Any],
+    *,
+    root_public_key: bytes,
+    expected_root_key_id: str,
+) -> dict[str, Any]:
+    """Verify one canonical aggregate package without primitive or corpus access."""
+    try:
+        return _validate_published_report(
+            report,
+            root_public_key=root_public_key,
+            expected_root_key_id=expected_root_key_id,
+        )
+    except (EvaluationError, InvalidSignature, KeyError, TypeError, ValueError):
+        return _failure_report({"published_report_invalid": 1})
+
+
+def _validate_published_report(
+    report: Mapping[str, Any],
+    *,
+    root_public_key: bytes,
+    expected_root_key_id: str,
+) -> dict[str, Any]:
+    evidence_fields = set(empty_evidence_flags())
+    fields = {
+        "schema_id",
+        "status",
+        "campaign_id",
+        "phase_history",
+        "selected_policy_ms",
+        "candidate_policy_results",
+        "signed_record_root",
+        "identities",
+        "execution",
+        "samples",
+        "usage",
+        "failures",
+        "preregistration",
+        "component_digests",
+        "cardinalities",
+        "publication_signature",
+        *evidence_fields,
+    }
+    if not isinstance(report, Mapping) or set(report) != fields:
+        raise EvaluationError("published report fields are invalid")
+    if report["schema_id"] != REPORT_SCHEMA_ID or report["status"] not in {
+        "pass",
+        "no_go",
+    }:
+        raise EvaluationError("published report schema or status is invalid")
+    assert_payload_safe(report)
+    campaign_id = _safe_id(report["campaign_id"], label="campaign ID")
+    if tuple(report["phase_history"]) != EXPECTED_PHASE_HISTORY:
+        raise EvaluationError("published phase history is invalid")
+    _validate_policy_configuration(EXPECTED_POLICIES, report["selected_policy_ms"])
+    candidate_results = report["candidate_policy_results"]
+    if (
+        not isinstance(candidate_results, Mapping)
+        or set(candidate_results) != {str(policy) for policy in EXPECTED_POLICIES}
+        or any(
+            not isinstance(value, Mapping)
+            or set(value) != {"assembly_passed", "fidelity_passed", "interaction_passed", "passed"}
+            or any(not isinstance(flag, bool) for flag in value.values())
+            for value in candidate_results.values()
+        )
+    ):
+        raise EvaluationError("published candidate policy results are invalid")
+
+    canonical_preregistration = _validated_preregistration(report["preregistration"])
+    immutable = canonical_preregistration["immutable_values"]
+    if (
+        not isinstance(root_public_key, bytes)
+        or len(root_public_key) != 32
+        or expected_root_key_id != immutable["record_root_key_id"]
+        or hashlib.sha256(root_public_key).hexdigest() != immutable["record_root_public_key_sha256"]
+    ):
+        raise EvaluationError("published root identity is invalid")
+
+    signature_envelope = report["publication_signature"]
+    if not isinstance(signature_envelope, Mapping) or set(signature_envelope) != {
+        "schema_id",
+        "key_id",
+        "signature",
+    }:
+        raise EvaluationError("publication signature envelope is invalid")
+    if (
+        signature_envelope["schema_id"] != PUBLICATION_SIGNATURE_SCHEMA_ID
+        or signature_envelope["key_id"] != expected_root_key_id
+    ):
+        raise EvaluationError("publication signature identity is invalid")
+    publication_signature = _decode_signature(signature_envelope["signature"])
+    publication_payload = {
+        key: value for key, value in report.items() if key != "publication_signature"
+    }
+    Ed25519PublicKey.from_public_bytes(root_public_key).verify(
+        publication_signature,
+        PUBLICATION_SIGNATURE_DOMAIN + canonical_json_bytes(publication_payload),
+    )
+    _verify_detached_record_root(
+        report["signed_record_root"],
+        campaign_id=campaign_id,
+        public_key=root_public_key,
+        expected_key_id=expected_root_key_id,
+    )
+
+    execution = report["execution"]
+    if not isinstance(execution, Mapping):
+        raise EvaluationError("published execution evidence is invalid")
+    if report["component_digests"] != _component_digests(
+        canonical_preregistration,
+        execution=execution,
+    ):
+        raise EvaluationError("published component identities disagree")
+    identities = _validate_identities(report["identities"])
+    identity_bindings = {
+        "source_sha256": hashlib.sha256(immutable["source_sha"].encode("ascii")).hexdigest(),
+        "source_fact_bundle_sha256": immutable["source_fact_bundle_sha256"],
+        "environment_sha256": immutable["environment_identity_sha256"],
+        "evaluator_sha256": immutable["evaluator_sha256"],
+        "corpus_sha256": immutable["corpus_sha256"],
+        "pricing_sha256": immutable["pricing_sha256"],
+        "preregistration_sha256": canonical_preregistration["preregistration_sha256"],
+        "record_root_public_key_sha256": immutable["record_root_public_key_sha256"],
+    }
+    if any(identities[field] != value for field, value in identity_bindings.items()):
+        raise EvaluationError("published identities disagree with preregistration")
+    usage = _validate_usage(report["usage"])
+    samples = report["samples"]
+    if not isinstance(samples, Mapping) or set(samples) != {"development", "holdout"}:
+        raise EvaluationError("published samples are invalid")
+    _validate_published_sample(samples["development"])
+    _validate_published_sample(samples["holdout"])
+    root_payload = report["signed_record_root"]["payload"]
+    detached_observed = {
+        "campaign_count": 1,
+        "attempt_count": 1,
+        "phase_count": len(report["phase_history"]),
+        "phase_transition_count": len(report["phase_history"]) - 1,
+        "candidate_policy_count": len(candidate_results),
+        "language_count": len(
+            set(samples["development"]["languages"]) | set(samples["holdout"]["languages"])
+        ),
+        "logical_session_count": CARDINALITY_REQUIREMENTS["logical_session_count"],
+        "connection_count": usage["provider_requests"],
+        "epoch_count": CARDINALITY_REQUIREMENTS["epoch_count"],
+        "fresh_restart_count": CARDINALITY_REQUIREMENTS["fresh_restart_count"],
+        "development_scheduled_activity_count": samples["development"]["activity_count"],
+        "development_policy_record_count": samples["development"]["activity_count"]
+        * len(candidate_results),
+        "holdout_scheduled_activity_count": samples["holdout"]["activity_count"],
+        "scheduled_activity_count": samples["development"]["activity_count"]
+        + samples["holdout"]["activity_count"],
+        "development_no_speech_window_count": samples["development"]["no_speech_window_count"],
+        "holdout_no_speech_window_count": samples["holdout"]["no_speech_window_count"],
+        "no_speech_window_count": samples["development"]["no_speech_window_count"]
+        + samples["holdout"]["no_speech_window_count"],
+        "primitive_record_count": root_payload["leaf_count"],
+        "provider_request_count": usage["provider_requests"],
+    }
+    expected_cardinalities = _cardinality_report(detached_observed)
+    if report["cardinalities"] != expected_cardinalities or any(
+        not value["matches"] for value in expected_cardinalities.values()
+    ):
+        raise EvaluationError("published cardinalities are invalid")
+    if root_payload["leaf_count"] != (
+        detached_observed["development_policy_record_count"]
+        + detached_observed["holdout_scheduled_activity_count"]
+        + detached_observed["no_speech_window_count"]
+    ):
+        raise EvaluationError("published record-root cardinality is invalid")
+    if any(not isinstance(report[field], bool) for field in evidence_fields):
+        raise EvaluationError("published evidence flags are invalid")
+    if (report["status"] == "pass") != report["gate_0b_sample_passed"]:
+        raise EvaluationError("published status and gate result disagree")
+    if report["status"] == "pass" and report["failures"]:
+        raise EvaluationError("passing publication contains failures")
+    return json.loads(canonical_json_bytes(report))
+
+
+def _verify_detached_record_root(
+    envelope: object,
+    *,
+    campaign_id: str,
+    public_key: bytes,
+    expected_key_id: str,
+) -> None:
+    if not isinstance(envelope, Mapping) or set(envelope) != {
+        "key_id",
+        "payload",
+        "signature",
+    }:
+        raise EvaluationError("published record-root envelope is invalid")
+    payload = envelope["payload"]
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "schema_id",
+        "campaign_id",
+        "leaf_count",
+        "merkle_root_sha256",
+    }:
+        raise EvaluationError("published record-root payload is invalid")
+    if (
+        envelope["key_id"] != expected_key_id
+        or payload["schema_id"] != SIGNED_ROOT_SCHEMA_ID
+        or payload["campaign_id"] != campaign_id
+        or isinstance(payload["leaf_count"], bool)
+        or not isinstance(payload["leaf_count"], int)
+        or payload["leaf_count"] <= 0
+        or not isinstance(payload["merkle_root_sha256"], str)
+        or not SHA256.fullmatch(payload["merkle_root_sha256"])
+    ):
+        raise EvaluationError("published record-root identity is invalid")
+    Ed25519PublicKey.from_public_bytes(public_key).verify(
+        _decode_signature(envelope["signature"]),
+        canonical_json_bytes(payload),
+    )
+
+
+def _decode_signature(value: object) -> bytes:
+    if not isinstance(value, str):
+        raise EvaluationError("publication signature is invalid")
+    try:
+        signature = base64.b64decode(value, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise EvaluationError("publication signature is invalid") from exc
+    if len(signature) != 64:
+        raise EvaluationError("publication signature is invalid")
+    return signature
+
+
+def _validate_published_sample(sample: object) -> None:
+    fields = {
+        "activity_count",
+        "no_speech_window_count",
+        "assembly_rate",
+        "cer_micros",
+        "wer_micros",
+        "cer",
+        "wer",
+        "critical_span_rate",
+        "no_speech_response_free_rate",
+        "first_audio_ms",
+        "interruption_tail_ms",
+        "languages",
+        "conditions",
+        "scenarios",
+        "structural_outcomes",
+        "timing_scope",
+    }
+    if not isinstance(sample, Mapping) or set(sample) != fields:
+        raise EvaluationError("published sample fields are invalid")
+    if sample["timing_scope"] != TIMING_SCOPE:
+        raise EvaluationError("published timing scope is invalid")
+    activity_count = sample["activity_count"]
+    no_speech_count = sample["no_speech_window_count"]
+    if (
+        isinstance(activity_count, bool)
+        or not isinstance(activity_count, int)
+        or activity_count < 0
+        or isinstance(no_speech_count, bool)
+        or not isinstance(no_speech_count, int)
+        or no_speech_count < 0
+    ):
+        raise EvaluationError("published sample counts are invalid")
+    _validate_timing_summary(
+        sample["first_audio_ms"],
+        scheduled_case_count=activity_count,
+    )
+    scenarios = sample["scenarios"]
+    if not isinstance(scenarios, Mapping):
+        raise EvaluationError("published scenario groups are invalid")
+    interruption_group = scenarios.get("tool_cancellation_interruption")
+    if not isinstance(interruption_group, Mapping):
+        raise EvaluationError("published interruption population is missing")
+    interruption_count = interruption_group.get("count")
+    if isinstance(interruption_count, bool) or not isinstance(interruption_count, int):
+        raise EvaluationError("published interruption population is invalid")
+    _validate_timing_summary(
+        sample["interruption_tail_ms"],
+        scheduled_case_count=interruption_count,
+    )
+    structural = sample["structural_outcomes"]
+    if not isinstance(structural, Mapping):
+        raise EvaluationError("published structural outcomes are invalid")
+    lifecycle = structural.get("lifecycle_status")
+    if not isinstance(lifecycle, Mapping) or set(lifecycle) != {
+        "scheduled_case_count",
+        "zero_denominator",
+        "exact_match_count",
+        "expected_counts",
+        "observed_counts",
+    }:
+        raise EvaluationError("published lifecycle outcomes are invalid")
+    expected_counts = lifecycle["expected_counts"]
+    observed_counts = lifecycle["observed_counts"]
+    if (
+        lifecycle["scheduled_case_count"] != activity_count
+        or lifecycle["zero_denominator"] is not (activity_count == 0)
+        or not isinstance(expected_counts, Mapping)
+        or set(expected_counts) != set(LIFECYCLE_STATUSES)
+        or not isinstance(observed_counts, Mapping)
+        or set(observed_counts) != set(LIFECYCLE_STATUSES)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (*expected_counts.values(), *observed_counts.values())
+        )
+        or sum(expected_counts.values()) != activity_count
+        or sum(observed_counts.values()) != activity_count
+        or isinstance(lifecycle["exact_match_count"], bool)
+        or not isinstance(lifecycle["exact_match_count"], int)
+        or not 0 <= lifecycle["exact_match_count"] <= activity_count
+    ):
+        raise EvaluationError("published lifecycle counts are invalid")
+
+
+def _validate_timing_summary(
+    summary: object,
+    *,
+    scheduled_case_count: int,
+) -> None:
+    fields = {
+        "count",
+        "observed_count",
+        "scheduled_case_count",
+        "zero_denominator",
+        "p50",
+        "p95",
+        "max",
+        "histogram",
+    }
+    if not isinstance(summary, Mapping) or set(summary) != fields:
+        raise EvaluationError("published timing summary is invalid")
+    count = summary["count"]
+    histogram = summary["histogram"]
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        or summary["observed_count"] != count
+        or summary["scheduled_case_count"] != scheduled_case_count
+        or summary["zero_denominator"] is not (scheduled_case_count == 0)
+        or count > scheduled_case_count
+        or not isinstance(histogram, Mapping)
+        or set(histogram) != {"le_250", "251_500", "501_1000", "1001_1500", "1501_2500", "gt_2500"}
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in histogram.values()
+        )
+        or sum(histogram.values()) != count
+    ):
+        raise EvaluationError("published timing counts are invalid")
 
 
 def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -918,8 +1572,7 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise EvaluationError("execution timestamps are invalid")
     provider_revision = raw["provider_revision"]
     if provider_revision is not None and (
-        not isinstance(provider_revision, str)
-        or not PROVIDER_REVISION.fullmatch(provider_revision)
+        not isinstance(provider_revision, str) or not PROVIDER_REVISION.fullmatch(provider_revision)
     ):
         raise EvaluationError("provider revision is invalid")
     runtime_before = raw["runtime_identity_before_sha256"]
@@ -934,21 +1587,15 @@ def _parse_artifact(raw: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise EvaluationError("runtime identity evidence is invalid")
     try:
-        runtime_before_report = validate_execution_identity_report(
-            raw["runtime_identity_before"]
-        )
-        runtime_after_report = validate_execution_identity_report(
-            raw["runtime_identity_after"]
-        )
+        runtime_before_report = validate_execution_identity_report(raw["runtime_identity_before"])
+        runtime_after_report = validate_execution_identity_report(raw["runtime_identity_after"])
     except ValueError as exc:
         raise EvaluationError("runtime identity report is invalid") from exc
     if (
         runtime_before_report != runtime_after_report
         or execution_identity_report_sha256(runtime_before_report) != runtime_before
         or execution_identity_report_sha256(runtime_after_report) != runtime_after
-        or hashlib.sha256(
-            runtime_before_report["source"]["source_sha"].encode("ascii")
-        ).hexdigest()
+        or hashlib.sha256(runtime_before_report["source"]["source_sha"].encode("ascii")).hexdigest()
         != identities["source_sha256"]
     ):
         raise EvaluationError("runtime identity report drifted")
@@ -1000,21 +1647,14 @@ def _capsule_execution_metadata(
         raise EvaluationError("capsule execution metadata is incomplete")
     for capsule in (development, holdout):
         try:
-            runtime_before = validate_execution_identity_report(
-                capsule["runtime_identity_before"]
-            )
-            runtime_after = validate_execution_identity_report(
-                capsule["runtime_identity_after"]
-            )
+            runtime_before = validate_execution_identity_report(capsule["runtime_identity_before"])
+            runtime_after = validate_execution_identity_report(capsule["runtime_identity_after"])
         except ValueError as exc:
             raise EvaluationError("capsule runtime identity report is invalid") from exc
         if (
-            capsule["source_fact_bundle_sha256"]
-            != immutable["source_fact_bundle_sha256"]
-            or capsule["runtime_identity_before_sha256"]
-            != immutable["environment_identity_sha256"]
-            or capsule["runtime_identity_after_sha256"]
-            != immutable["environment_identity_sha256"]
+            capsule["source_fact_bundle_sha256"] != immutable["source_fact_bundle_sha256"]
+            or capsule["runtime_identity_before_sha256"] != immutable["environment_identity_sha256"]
+            or capsule["runtime_identity_after_sha256"] != immutable["environment_identity_sha256"]
             or execution_identity_report_sha256(runtime_before)
             != capsule["runtime_identity_before_sha256"]
             or execution_identity_report_sha256(runtime_after)
@@ -1027,12 +1667,7 @@ def _capsule_execution_metadata(
     development_completed = _parse_utc_time(development["execution_completed_at"])
     holdout_started = _parse_utc_time(holdout["execution_started_at"])
     holdout_completed = _parse_utc_time(holdout["execution_completed_at"])
-    if not (
-        development_started
-        <= development_completed
-        <= holdout_started
-        <= holdout_completed
-    ):
+    if not (development_started <= development_completed <= holdout_started <= holdout_completed):
         raise EvaluationError("capsule execution timestamps are invalid")
     provider_revision = development["provider_revision"]
     if provider_revision != holdout["provider_revision"] or (
@@ -1047,12 +1682,8 @@ def _capsule_execution_metadata(
         "execution_started_at": development["execution_started_at"],
         "execution_completed_at": holdout["execution_completed_at"],
         "provider_revision": provider_revision,
-        "runtime_identity_before_sha256": development[
-            "runtime_identity_before_sha256"
-        ],
-        "runtime_identity_after_sha256": holdout[
-            "runtime_identity_after_sha256"
-        ],
+        "runtime_identity_before_sha256": development["runtime_identity_before_sha256"],
+        "runtime_identity_after_sha256": holdout["runtime_identity_after_sha256"],
         "runtime_identity_before": development["runtime_identity_before"],
         "runtime_identity_after": holdout["runtime_identity_after"],
     }
@@ -1268,9 +1899,14 @@ def _evaluate_sample(
             ),
             len(no_speech_records),
         ),
-        "first_audio_ms": _timing_summary(first_audio),
+        "timing_scope": dict(TIMING_SCOPE),
+        "first_audio_ms": _timing_summary(
+            first_audio,
+            scheduled_case_count=len(records),
+        ),
         "interruption_tail_ms": _timing_summary(
-            [value for value in interruption if value is not None]
+            [value for value in interruption if value is not None],
+            scheduled_case_count=len(interruption),
         ),
         "languages": _published_groups(records, key="language"),
         "conditions": _published_groups(records, key="condition"),
@@ -1387,9 +2023,7 @@ def _edit_rate_passes(
 
 
 def _code_switch_rates_pass(records: tuple[ActivityPrimitiveRecord, ...]) -> bool:
-    tagged: defaultdict[tuple[str, str], list[ActivityPrimitiveRecord]] = defaultdict(
-        list
-    )
+    tagged: defaultdict[tuple[str, str], list[ActivityPrimitiveRecord]] = defaultdict(list)
     for record in records:
         directions = CODE_SWITCH_TAGS.intersection(record.scenario_tags)
         if not directions:
@@ -1398,11 +2032,7 @@ def _code_switch_rates_pass(records: tuple[ActivityPrimitiveRecord, ...]) -> boo
             return False
         tagged[(record.language, next(iter(directions)))].append(record)
     languages = {language for language, _direction in tagged}
-    expected = {
-        (language, direction)
-        for language in languages
-        for direction in CODE_SWITCH_TAGS
-    }
+    expected = {(language, direction) for language in languages for direction in CODE_SWITCH_TAGS}
     return set(tagged) == expected and all(
         _edit_rate_passes(
             group,
@@ -1532,23 +2162,29 @@ def _published_stratum(
     records: Sequence[ActivityPrimitiveRecord],
 ) -> dict[str, Any]:
     successes = sum(_assembly_success(record) for record in records)
+    interruption_cases = [
+        record for record in records if "tool_cancellation_interruption" in record.scenario_tags
+    ]
     return {
         "count": len(records),
         "suppressed": False,
+        "timing_scope": dict(TIMING_SCOPE),
         "assembly_rate": _rate_summary(successes, len(records)),
         "cer_micros": _edit_rate_micros(records, word=False),
         "wer_micros": _edit_rate_micros(records, word=True),
         "cer": _edit_summary(records, word=False),
         "wer": _edit_summary(records, word=True),
         "first_audio_ms": _timing_summary(
-            [record.first_audio_ms for record in records if record.first_audio_ms is not None]
+            [record.first_audio_ms for record in records if record.first_audio_ms is not None],
+            scheduled_case_count=len(records),
         ),
         "interruption_tail_ms": _timing_summary(
             [
                 record.interruption_tail_ms
-                for record in records
+                for record in interruption_cases
                 if record.interruption_tail_ms is not None
-            ]
+            ],
+            scheduled_case_count=len(interruption_cases),
         ),
         "structural_outcomes": _structural_outcomes(records),
     }
@@ -1570,27 +2206,28 @@ def _structural_outcomes(
             for status in ("matched", "ambiguous", "unassigned")
         },
         "lifecycle_status": {
-            status: sum(record.observed_lifecycle_status == status for record in records)
-            for status in (
-                "retrospective_complete",
-                "partial",
-                "cancelled",
-                "dropped",
-                "missing",
-                "duplicate",
-            )
+            "scheduled_case_count": len(records),
+            "zero_denominator": not records,
+            "exact_match_count": sum(
+                record.expected_lifecycle_status == record.observed_lifecycle_status
+                for record in records
+            ),
+            "expected_counts": {
+                status: sum(record.expected_lifecycle_status == status for record in records)
+                for status in LIFECYCLE_STATUSES
+            },
+            "observed_counts": {
+                status: sum(record.observed_lifecycle_status == status for record in records)
+                for status in LIFECYCLE_STATUSES
+            },
         },
         "duplicate_count": sum(record.duplicate_count for record in records),
         "contamination_count": sum(record.contamination_count for record in records),
-        "late_fragment_count": sum(
-            record.late_fragment_mutation_count for record in records
-        ),
+        "late_fragment_count": sum(record.late_fragment_mutation_count for record in records),
         "malformed_count": sum(record.malformed_count for record in records),
         "stale_count": sum(record.stale_count for record in records),
         "teardown_count": sum(record.teardown_violation_count for record in records),
-        "resource_outcome_count": sum(
-            record.error_code in resource_errors for record in records
-        ),
+        "resource_outcome_count": sum(record.error_code in resource_errors for record in records),
     }
 
 
@@ -1672,10 +2309,24 @@ def _percentile(values: Sequence[int], percentile: int) -> int:
     return ordered[rank - 1]
 
 
-def _timing_summary(values: Sequence[int]) -> dict[str, Any]:
+def _timing_summary(
+    values: Sequence[int],
+    *,
+    scheduled_case_count: int,
+) -> dict[str, Any]:
+    if (
+        isinstance(scheduled_case_count, bool)
+        or not isinstance(scheduled_case_count, int)
+        or scheduled_case_count < 0
+        or len(values) > scheduled_case_count
+    ):
+        raise EvaluationError("timing population is invalid")
     if not values:
         return {
             "count": 0,
+            "observed_count": 0,
+            "scheduled_case_count": scheduled_case_count,
+            "zero_denominator": scheduled_case_count == 0,
             "p50": None,
             "p95": None,
             "max": None,
@@ -1690,6 +2341,9 @@ def _timing_summary(values: Sequence[int]) -> dict[str, Any]:
         }
     return {
         "count": len(values),
+        "observed_count": len(values),
+        "scheduled_case_count": scheduled_case_count,
+        "zero_denominator": scheduled_case_count == 0,
         "p50": _percentile(values, 50),
         "p95": _percentile(values, 95),
         "max": max(values),
@@ -1828,9 +2482,10 @@ def _safe_id_list(value: object, *, label: str, maximum: int) -> tuple[str, ...]
 
 def _failure_report(failures: Mapping[str, int]) -> dict[str, Any]:
     report = {
-        "schema_id": REPORT_SCHEMA_ID,
+        "schema_id": EVALUATION_RESULT_SCHEMA_ID,
         "status": "no_go",
         "campaign_id": None,
+        "phase_history": [],
         "selected_policy_ms": None,
         "candidate_policy_results": {},
         "record_root": {"sha256": None, "leaf_count": 0, "key_id": None},
@@ -1869,6 +2524,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        capture_trusted_startup_identity(
+            REPO_ROOT,
+            expected_target="evaluate-qualification",
+        )
         raw = read_private_file(
             args.bundle,
             repo_root=REPO_ROOT,
@@ -1898,7 +2557,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             record_root_key_id=args.record_root_key_id,
         )
         _write_private_report(args.output, report)
-    except (EvaluationError, PrivatePathError, OSError, TypeError, ValueError):
+    except (
+        EvaluationError,
+        IdentityError,
+        PrivatePathError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
         print('{"error_code":"private_custody_rejected","status":"blocked"}')
         return 2
     return 0 if report["status"] == "pass" else 1

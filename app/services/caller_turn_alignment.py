@@ -10,7 +10,7 @@ import unicodedata
 from app.services.caller_turns import CallerTurnEvent, CallerTurnEventKind
 
 
-ALIGNMENT_SCHEMA_ID = "gate_0b_alignment_v1"
+ALIGNMENT_SCHEMA_ID = "gate_0b_alignment_v2"
 SUPPORTED_LANGUAGES = frozenset({"ar", "en", "es", "fr", "hi", "ht", "pt", "zh"})
 MAX_FRAGMENT_COUNT = 128
 MAX_TEXT_CODEPOINTS = 4_000
@@ -207,6 +207,14 @@ class _Candidate:
     wer: Fraction | None
     critical_spans: tuple[CriticalSpanOutcome, ...]
     fidelity_passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _CriticalSpanInterval:
+    outcome_mask: int
+    reference_start: int
+    hypothesis_start: int
+    length: int
 
 
 def normalize_text(text: str, language: str) -> NormalizedText:
@@ -440,17 +448,22 @@ def _score_candidate(
             normalized_transcript.words,
         )
         wer = Fraction(word_edits.distance, len(normalized_reference.words))
+    normalized_spans = tuple(
+        normalize_text(span.text, span.language or reference.language)
+        for span in reference.critical_spans
+    )
+    critical_exactness = _critical_span_exactness(
+        normalized_reference,
+        normalized_transcript,
+        normalized_spans,
+        character_distance=character_edits.distance,
+        word_distance=None if word_edits is None else word_edits.distance,
+    )
     critical_outcomes = tuple(
         CriticalSpanOutcome(
             span_ordinal=index,
             kind=span.kind,
-            exact=_critical_span_is_exact(
-                normalized_reference,
-                normalized_transcript,
-                normalize_text(span.text, span.language or reference.language),
-                character_distance=character_edits.distance,
-                word_distance=None if word_edits is None else word_edits.distance,
-            ),
+            exact=critical_exactness[index],
         )
         for index, span in enumerate(reference.critical_spans)
     )
@@ -470,48 +483,207 @@ def _score_candidate(
     )
 
 
-def _critical_span_is_exact(
+def _critical_span_exactness(
     reference: NormalizedText,
     hypothesis: NormalizedText,
-    span: NormalizedText,
+    spans: tuple[NormalizedText, ...],
     *,
     character_distance: int,
     word_distance: int | None,
+) -> tuple[bool, ...]:
+    word_intervals: list[_CriticalSpanInterval] = []
+    character_intervals: list[_CriticalSpanInterval] = []
+    exactness = [False] * len(spans)
+
+    for index, span in enumerate(spans):
+        reference_units, hypothesis_units, span_units = _comparable_alignment_units(
+            reference,
+            hypothesis,
+            span,
+        )
+        reference_positions = _sequence_occurrence_indices(reference_units, span_units)
+        hypothesis_positions = _sequence_occurrence_indices(hypothesis_units, span_units)
+        if len(reference_positions) != 1 or len(hypothesis_positions) != 1:
+            continue
+        interval = _CriticalSpanInterval(
+            outcome_mask=1 << index,
+            reference_start=reference_positions[0],
+            hypothesis_start=hypothesis_positions[0],
+            length=len(span_units),
+        )
+        if _uses_word_alignment(reference, hypothesis, span):
+            word_intervals.append(interval)
+        else:
+            character_intervals.append(interval)
+
+    preserved_mask = 0
+    if word_intervals:
+        if word_distance is None or reference.words is None or hypothesis.words is None:
+            raise RuntimeError("word alignment distance is unavailable")
+        preserved_mask |= _preserved_interval_mask(
+            reference.words,
+            hypothesis.words,
+            tuple(word_intervals),
+            total_distance=word_distance,
+        )
+    if character_intervals:
+        preserved_mask |= _preserved_interval_mask(
+            reference.characters,
+            hypothesis.characters,
+            tuple(character_intervals),
+            total_distance=character_distance,
+        )
+    for index in range(len(exactness)):
+        exactness[index] = bool(preserved_mask & (1 << index))
+    return tuple(exactness)
+
+
+def _preserved_interval_mask(
+    reference: tuple[str, ...],
+    hypothesis: tuple[str, ...],
+    intervals: tuple[_CriticalSpanInterval, ...],
+    *,
+    total_distance: int,
+) -> int:
+    all_intervals_mask = sum(interval.outcome_mask for interval in intervals)
+    hypothesis_length = len(hypothesis)
+    unreachable = total_distance + 1
+    previous_costs = [unreachable] * (hypothesis_length + 1)
+    previous_masks = [0] * (hypothesis_length + 1)
+    previous_costs[0] = 0
+    previous_masks[0] = all_intervals_mask
+
+    for hypothesis_index in range(1, min(hypothesis_length, total_distance) + 1):
+        previous_costs[hypothesis_index] = hypothesis_index
+        previous_masks[hypothesis_index] = _mask_after_alignment_edge(
+            previous_masks[hypothesis_index - 1],
+            intervals,
+            source=(0, hypothesis_index - 1),
+            destination=(0, hypothesis_index),
+        )
+
+    for reference_index in range(1, len(reference) + 1):
+        current_costs = [unreachable] * (hypothesis_length + 1)
+        current_masks = [0] * (hypothesis_length + 1)
+        if reference_index <= total_distance:
+            current_costs[0] = reference_index
+            current_masks[0] = _mask_after_alignment_edge(
+                previous_masks[0],
+                intervals,
+                source=(reference_index - 1, 0),
+                destination=(reference_index, 0),
+            )
+
+        band_start = max(1, reference_index - total_distance)
+        band_end = min(hypothesis_length, reference_index + total_distance)
+        for hypothesis_index in range(band_start, band_end + 1):
+            candidates = (
+                (
+                    previous_costs[hypothesis_index - 1]
+                    + (reference[reference_index - 1] != hypothesis[hypothesis_index - 1]),
+                    previous_masks[hypothesis_index - 1],
+                    (reference_index - 1, hypothesis_index - 1),
+                ),
+                (
+                    previous_costs[hypothesis_index] + 1,
+                    previous_masks[hypothesis_index],
+                    (reference_index - 1, hypothesis_index),
+                ),
+                (
+                    current_costs[hypothesis_index - 1] + 1,
+                    current_masks[hypothesis_index - 1],
+                    (reference_index, hypothesis_index - 1),
+                ),
+            )
+            best_cost = min(cost for cost, _, _ in candidates)
+            if best_cost > total_distance:
+                continue
+            best_masks = tuple(
+                _mask_after_alignment_edge(
+                    mask,
+                    intervals,
+                    source=source,
+                    destination=(reference_index, hypothesis_index),
+                )
+                for cost, mask, source in candidates
+                if cost == best_cost
+            )
+            preserved_mask = best_masks[0]
+            for candidate_mask in best_masks[1:]:
+                preserved_mask &= candidate_mask
+            current_costs[hypothesis_index] = best_cost
+            current_masks[hypothesis_index] = preserved_mask
+        previous_costs = current_costs
+        previous_masks = current_masks
+
+    if previous_costs[hypothesis_length] != total_distance:
+        raise RuntimeError("critical-span alignment distance is inconsistent")
+    return previous_masks[hypothesis_length]
+
+
+def _mask_after_alignment_edge(
+    preserved_mask: int,
+    intervals: tuple[_CriticalSpanInterval, ...],
+    *,
+    source: tuple[int, int],
+    destination: tuple[int, int],
+) -> int:
+    for interval in intervals:
+        if preserved_mask & interval.outcome_mask and not _edge_preserves_interval(
+            interval,
+            source=source,
+            destination=destination,
+        ):
+            preserved_mask &= ~interval.outcome_mask
+    return preserved_mask
+
+
+def _edge_preserves_interval(
+    interval: _CriticalSpanInterval,
+    *,
+    source: tuple[int, int],
+    destination: tuple[int, int],
 ) -> bool:
-    reference_units, hypothesis_units, span_units = _comparable_alignment_units(
-        reference,
-        hypothesis,
-        span,
-    )
-    total_distance = character_distance if span.words is None else word_distance
-    if total_distance is None:
-        return False
-    reference_positions = _sequence_occurrence_indices(reference_units, span_units)
-    hypothesis_positions = _sequence_occurrence_indices(hypothesis_units, span_units)
-    if len(reference_positions) != 1 or len(hypothesis_positions) != 1:
-        return False
-    reference_start = reference_positions[0]
-    span_end = reference_start + len(span_units)
-    hypothesis_start = hypothesis_positions[0]
-    return (
-        compute_edit_counts(
-            reference_units[:reference_start],
-            hypothesis_units[:hypothesis_start],
-        ).distance
-        + compute_edit_counts(
-            reference_units[span_end:],
-            hypothesis_units[hypothesis_start + len(span_units) :],
-        ).distance
-        == total_distance
-    )
+    reference_index, hypothesis_index = source
+    destination_reference, destination_hypothesis = destination
+    reference_end = interval.reference_start + interval.length
+    hypothesis_end = interval.hypothesis_start + interval.length
+
+    if (
+        reference_index <= interval.reference_start
+        and hypothesis_index <= interval.hypothesis_start
+    ):
+        if (
+            destination_reference <= interval.reference_start
+            and destination_hypothesis <= interval.hypothesis_start
+        ):
+            return True
+        return (
+            reference_index == interval.reference_start
+            and hypothesis_index == interval.hypothesis_start
+            and destination_reference == reference_index + 1
+            and destination_hypothesis == hypothesis_index + 1
+        )
+
+    progress = reference_index - interval.reference_start
+    if 0 < progress < interval.length and hypothesis_index == interval.hypothesis_start + progress:
+        return (
+            destination_reference == reference_index + 1
+            and destination_hypothesis == hypothesis_index + 1
+        )
+    return reference_index >= reference_end and hypothesis_index >= hypothesis_end
 
 
 def _comparable_alignment_units(
     *values: NormalizedText,
 ) -> tuple[tuple[str, ...], ...]:
-    if all(value.words is not None for value in values):
+    if _uses_word_alignment(*values):
         return tuple(value.words for value in values)  # type: ignore[return-value]
     return tuple(value.characters for value in values)
+
+
+def _uses_word_alignment(*values: NormalizedText) -> bool:
+    return all(value.words is not None for value in values)
 
 
 def _sequence_occurrence_indices(

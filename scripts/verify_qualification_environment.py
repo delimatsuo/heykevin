@@ -16,12 +16,26 @@ from typing import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_STARTUP_MARKER_ENV = "KEVIN_GATE0B_TRUSTED_STARTUP"
+_TRUSTED_STARTUP_FLAGS = (
+    sys.flags.isolated == 1
+    and sys.flags.no_site == 1
+    and sys.flags.ignore_environment == 1
+    and sys.flags.no_user_site == 1
+    and sys.flags.safe_path is True
+)
+if __name__ == "__main__" and (
+    _STARTUP_MARKER_ENV not in os.environ or not _TRUSTED_STARTUP_FLAGS
+):
+    print('{"error_code":"qualification_startup_required","status":"blocked"}')
+    raise SystemExit(2)
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.services.qualification_identity import (  # noqa: E402
     IdentityError,
     canonical_json_bytes,
+    capture_trusted_startup_identity,
 )
 from app.services.qualification_environment import (  # noqa: E402
     build_execution_identity_report,
@@ -53,10 +67,15 @@ def _snapshot_path(source_sha: str) -> Path:
     return Path(tempfile.gettempdir()) / f"kevin-gate0b-env-{root_digest}-{source_sha}.json"
 
 
-def _identity_report(source_sha: str) -> dict[str, object]:
+def _identity_report(
+    source_sha: str,
+    *,
+    trusted_startup: dict[str, object],
+) -> dict[str, object]:
     return build_execution_identity_report(
         REPO_ROOT,
         expected_source_sha=source_sha,
+        trusted_startup=trusted_startup,
     )
 
 
@@ -72,8 +91,13 @@ def _write_private(path: Path, report: dict[str, object]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        startup = capture_trusted_startup_identity(
+            REPO_ROOT,
+            expected_target="verify-environment",
+        )
         source_sha = _head()
-        report = _identity_report(source_sha)
+        startup_policy = startup.policy_report_dict()
+        report = _identity_report(source_sha, trusted_startup=startup_policy)
         snapshot = _snapshot_path(source_sha)
         if args.phase == "before":
             if snapshot.exists():
@@ -95,6 +119,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "identity_sha256": sha256(canonical_json_bytes(report)).hexdigest(),
                 "phase": args.phase,
+                "startup_identity_sha256": sha256(
+                    canonical_json_bytes(startup_policy)
+                ).hexdigest(),
                 "status": "pass",
             },
             sort_keys=True,

@@ -230,7 +230,7 @@ holdout schedule commitment before the one-shot holdout claim.
 
 Raw provider messages are reduced independently twice and then discarded. Output
 audio is counted and discarded. Canonical references and transcript fragments may
-exist only inside the allowlisted encrypted audit capsule. Capsule schema v3 stores
+exist only inside the allowlisted encrypted audit capsule. Capsule schema v5 stores
 adapted transcript events and ordered raw wire facts once per logical session;
 activity entries contain metadata and references only. The evaluator independently
 derives timing, premature output, response gaps, terminal ordering, causal tool

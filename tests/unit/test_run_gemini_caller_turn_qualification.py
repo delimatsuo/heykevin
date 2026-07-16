@@ -39,6 +39,7 @@ from app.services.qualification_identity import (
     RUNTIME_SITE_PACKAGES_SCHEMA_ID,
     TRUSTED_STARTUP_POLICY_SCHEMA_ID,
     AttemptClaim,
+    IdentityError,
     canonical_json_bytes,
     ledger_location_sha256,
 )
@@ -400,6 +401,20 @@ class HangingAfterMessagesSession(YieldingFakeSession):
         raise AssertionError("unreachable")
 
 
+class DelayedMessageSession(YieldingFakeSession):
+    def __init__(self, messages, *, delayed_index: int, delay_seconds: float):
+        super().__init__(messages)
+        self._receive_index = 0
+        self._delayed_index = delayed_index
+        self._delay_seconds = delay_seconds
+
+    async def receive(self):
+        if self._receive_index == self._delayed_index:
+            await asyncio.sleep(self._delay_seconds)
+        self._receive_index += 1
+        return await super().receive()
+
+
 class FakeConnector:
     def __init__(self, sessions):
         self.sessions = list(sessions)
@@ -468,7 +483,23 @@ def _measurement_clock_factory(
     receipt_values: list[int],
 ):
     def build(plan: SessionPlan | NoSpeechWindowPlan) -> ReceiptClock:
-        return ReceiptClock(sorted([*receipt_values, *_outbound_clock_values(plan)]))
+        values = [*receipt_values, *_outbound_clock_values(plan)]
+        if isinstance(plan, NoSpeechWindowPlan):
+            values.append(max(values, default=0) + 1)
+        else:
+            segments = runner_module._connection_segments(plan)
+            for index, (_epoch, base_at_ms, _inputs) in enumerate(segments):
+                next_base_at_ms = (
+                    segments[index + 1][1] if index + 1 < len(segments) else None
+                )
+                segment_values = [
+                    value
+                    for value in values
+                    if value >= base_at_ms
+                    and (next_base_at_ms is None or value < next_base_at_ms)
+                ]
+                values.append(max(segment_values, default=base_at_ms) + 1)
+        return ReceiptClock(sorted(values))
 
     return build
 
@@ -491,9 +522,7 @@ def _identity_for_approval_root(data: bytes) -> CapturedExecutionIdentity:
 def _default_measurement_clock_factory(
     plan: SessionPlan | NoSpeechWindowPlan,
 ) -> ReceiptClock:
-    return ReceiptClock(
-        sorted([*_receipt_times_for_plan(plan), *_outbound_clock_values(plan)])
-    )
+    return _measurement_clock_factory(_receipt_times_for_plan(plan))(plan)
 
 
 class FakeCustodyLedger:
@@ -1083,6 +1112,7 @@ def _config() -> SessionExecutionConfig:
         max_message_bytes=64 * 1024,
         session_timeout_seconds=30,
         response_gap_limit_ms=500,
+        post_completion_observation_ms=3_000,
     )
 
 
@@ -1725,9 +1755,9 @@ def test_no_speech_receive_loop_is_live_while_paced_audio_is_still_sending() -> 
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            measurement_clock_factory=lambda _plan: ReceiptClock(
-                [0, 0, 120, 125, 130]
-            ),
+                measurement_clock_factory=lambda _plan: ReceiptClock(
+                    [0, 0, 120, 125, 130, 131]
+                ),
             sleep_ms=sleep_ms,
         )
     )
@@ -2277,12 +2307,29 @@ def test_fresh_restart_drains_each_persistent_connection_segment() -> None:
             _restart_plan(),
             config=replace(
                 _config(),
-                session_timeout_seconds=2,
+                session_timeout_seconds=10,
             ),
             connector=connector,
             credential=SecretCredential(CANARY_SECRET),
-            measurement_clock_factory=_measurement_clock_factory(
-                [0, 120, 130, 700, 820, 830]
+            measurement_clock_factory=lambda _plan: ReceiptClock(
+                [
+                    0,
+                    0,
+                    20,
+                    80,
+                    100,
+                    120,
+                    130,
+                    3_130,
+                    3_130,
+                    3_200,
+                    3_220,
+                    3_280,
+                    3_300,
+                    3_320,
+                    3_330,
+                    6_330,
+                ]
             ),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
@@ -2354,6 +2401,37 @@ def test_abnormal_close_is_reduced_to_bounded_code_without_exception_text() -> N
     assert result.error_code == "provider_closed"
     assert result.wire_observations[1].abnormal_close_count == 1
     assert CANARY_SECRET not in json.dumps(result.redacted_report_dict())
+
+
+def test_clean_close_before_standard_sender_finishes_fails_and_cancels_input() -> None:
+    session = FakeSession([{"setupComplete": {}}, _usage_message(), None])
+
+    async def lagged_sleep(_value: int) -> None:
+        for _ in range(100):
+            await asyncio.sleep(0)
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=lambda _plan: ReceiptClock(range(1_000)),
+            sleep_ms=lagged_sleep,
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "provider_closed"
+    close = next(fact for fact in result.wire_facts if fact.kind == "stream_closed")
+    usage = next(fact for fact in result.wire_facts if fact.kind == "usage_received")
+    assert close.at_ms > usage.at_ms
+    assert all(
+        fact.at_ms <= close.at_ms
+        for fact in result.wire_facts
+        if fact.kind.startswith("caller_")
+    )
+    assert session.closed is True
 
 
 def test_audio_after_turn_terminal_is_rejected_and_counted() -> None:
@@ -2456,6 +2534,37 @@ def test_usage_metadata_does_not_hide_delayed_audio_after_terminal() -> None:
     assert result.wire_observations[1].audio_after_terminal_count == 1
 
 
+def test_post_completion_observation_catches_audio_arriving_after_600_ms() -> None:
+    late = _server_event(terminal=False)
+    late["serverContent"].pop("inputTranscription")
+    session = DelayedMessageSession(
+        [
+            {"setupComplete": {}},
+            _server_event(),
+            _usage_message(),
+            late,
+            None,
+        ],
+        delayed_index=3,
+        delay_seconds=0.6,
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _plan(),
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130, 730]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "audio_after_terminal"
+    assert result.wire_observations[1].audio_after_terminal_count == 1
+
+
 def test_no_speech_usage_metadata_does_not_hide_delayed_activation() -> None:
     session = YieldingFakeSession(
         [
@@ -2496,13 +2605,92 @@ def test_usage_completion_uses_bounded_quiet_drain_when_stream_stays_open() -> N
             config=_config(),
             connector=FakeConnector([session]),
             credential=SecretCredential(CANARY_SECRET),
-            measurement_clock_factory=_measurement_clock_factory([0, 120]),
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 3_120]),
             sleep_ms=lambda _value: asyncio.sleep(0),
         )
     )
 
     assert result.complete is True
     assert result.error_code is None
+    assert session.closed is True
+    observation = next(
+        fact for fact in result.wire_facts if fact.kind == "observation_complete"
+    )
+    usage = next(fact for fact in result.wire_facts if fact.kind == "usage_received")
+    assert observation.at_ms - usage.at_ms == 3_000
+
+
+def test_no_speech_identity_failure_precedes_budget_and_connector_factory() -> None:
+    budget = runner_module._RequestBudget(limit=1)
+    factory_calls = 0
+
+    def factory(_credential: SecretCredential):
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakeConnector([])
+
+    def guard() -> None:
+        raise IdentityError("identity recapture failed")
+
+    connector = runner_module._ReservedConnector(
+        budget=budget,
+        credential=SecretCredential(CANARY_SECRET),
+        factory=factory,
+        identity_guard=guard,
+    )
+
+    result = asyncio.run(
+        execute_injected_no_speech_window(
+            _no_speech_plan(),
+            config=_config(),
+            connector=connector,
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=_measurement_clock_factory([0]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "source_identity_failed"
+    assert result.provider_request_count == 0
+    assert budget.consumed == 0
+    assert factory_calls == 0
+
+
+def test_clean_close_before_no_speech_sender_finishes_fails_and_cancels_input() -> None:
+    session = FakeSession([{"setupComplete": {}}, _usage_message(), None])
+    plan = replace(
+        _no_speech_plan(),
+        replay_inputs=(
+            replace(_no_speech_plan().replay_inputs[0], at_ms=20),
+        ),
+    )
+
+    async def lagged_sleep(_value: int) -> None:
+        for _ in range(100):
+            await asyncio.sleep(0)
+
+    result = asyncio.run(
+        execute_injected_no_speech_window(
+            plan,
+            config=_config(),
+            connector=FakeConnector([session]),
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=lambda _plan: ReceiptClock(range(1_000)),
+            sleep_ms=lagged_sleep,
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "provider_closed"
+    close = next(fact for fact in result.wire_facts if fact.kind == "stream_closed")
+    usage = next(fact for fact in result.wire_facts if fact.kind == "usage_received")
+    assert close.at_ms > usage.at_ms
+    assert all(
+        fact.at_ms <= close.at_ms
+        for fact in result.wire_facts
+        if fact.kind == "caller_audio_sent"
+    )
     assert session.closed is True
 
 
@@ -2531,6 +2719,8 @@ def test_no_speech_window_records_false_activation_without_computing_verdict() -
         "response_open",
         "audio_received",
         "response_terminal",
+        "usage_received",
+        "stream_closed",
         "teardown_complete",
     ]
     assert "passed" not in result.redacted_report_dict()
@@ -2651,7 +2841,7 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
         custodian_private_key=custodian,
         expected_key_id="audit_custodian_1",
     )
-    assert opened["schema_id"] == "gate_0b_audit_capsule_v6"
+    assert opened["schema_id"] == "gate_0b_audit_capsule_v7"
     assert opened["source_fact_bundle_sha256"] == "5" * 64
     assert opened["runtime_identity_before_sha256"] == TEST_EXECUTION_IDENTITY_SHA256
     assert opened["runtime_identity_after_sha256"] == TEST_EXECUTION_IDENTITY_SHA256
@@ -2660,7 +2850,13 @@ def test_authorized_attempt_claims_before_secret_and_hands_off_encrypted_capsule
     assert opened["activities"][0]["reference_text"] == "purpose recorded phrase 0"
     assert [
         fact["kind"] for fact in opened["no_speech_windows"][0]["wire_facts"]
-    ] == ["connection_open", "caller_audio_sent", "teardown_complete"]
+    ] == [
+        "connection_open",
+        "caller_audio_sent",
+        "usage_received",
+        "stream_closed",
+        "teardown_complete",
+    ]
     usage, failures = derive_audit_capsule_accounting(opened)
     assert usage["provider_requests"] == 64
     assert usage["input_audio_seconds"] == 4
@@ -2731,6 +2927,57 @@ def test_identity_drift_blocks_reconnect_before_budget_or_connector_factory() ->
     ):
         asyncio.run(connector.connect(replace(request, epoch=2)))
 
+    assert guard_calls == 2
+    assert budget.consumed == 1
+    assert factory_calls == 1
+    assert len(underlying.requests) == 1
+
+
+def test_identity_capture_error_on_restart_is_source_identity_failure() -> None:
+    first = FakeSession(
+        [
+            {"setupComplete": {}},
+            _server_event(text="first epoch"),
+            _usage_message(),
+            None,
+        ]
+    )
+    underlying = FakeConnector([first])
+    budget = runner_module._RequestBudget(limit=2)
+    guard_calls = 0
+    factory_calls = 0
+
+    def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            raise IdentityError("identity recapture failed")
+
+    def factory(_credential: SecretCredential):
+        nonlocal factory_calls
+        factory_calls += 1
+        return underlying
+
+    connector = runner_module._ReservedConnector(
+        budget=budget,
+        credential=SecretCredential(CANARY_SECRET),
+        factory=factory,
+        identity_guard=guard,
+    )
+
+    result = asyncio.run(
+        execute_injected_session(
+            _restart_plan(),
+            config=_config(),
+            connector=connector,
+            credential=SecretCredential(CANARY_SECRET),
+            measurement_clock_factory=_measurement_clock_factory([0, 120, 130]),
+            sleep_ms=lambda _value: asyncio.sleep(0),
+        )
+    )
+
+    assert result.complete is False
+    assert result.error_code == "source_identity_failed"
     assert guard_calls == 2
     assert budget.consumed == 1
     assert factory_calls == 1
@@ -3381,18 +3628,29 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
     )
     campaign["signature"] = base64.b64encode(b"invalid").decode("ascii")
     touched: list[str] = []
+    release = _asset_release(
+        (_plan(),),
+        (),
+        preregistration,
+        campaign,
+        attempt,
+        split="development",
+    )
+    loader = release.loader
+    assert isinstance(loader, FakeAssetLoader)
+    ledger = FakeCustodyLedger(ledger_path, campaign_envelope=campaign)
+    original_identity = ledger.identity
+
+    def tracked_identity() -> LedgerCustodyIdentity:
+        touched.append("ledger")
+        return original_identity()
+
+    monkeypatch.setattr(ledger, "identity", tracked_identity)
 
     with pytest.raises(ValueError, match="signature"):
         asyncio.run(
             execute_authorized_attempt(
-                _asset_release(
-                    (_plan(),),
-                    (),
-                    preregistration,
-                    campaign,
-                    attempt,
-                    split="development",
-                ),
+                release,
                 preregistration=preregistration,
                 config=AuthorizedAttemptConfig(
                     preregistration_sha256=preregistration["preregistration_sha256"],
@@ -3405,7 +3663,7 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
                 session_config=_config(),
                 campaign_envelope=campaign,
                 attempt_envelope=attempt,
-                ledger=FakeCustodyLedger(ledger_path, campaign_envelope=campaign),
+                ledger=ledger,
                 ledger_custodian_public_key=LEDGER_PUBLIC_KEY,
                 now=NOW,
                 credential_loader=lambda _reference: touched.append("credential"),
@@ -3421,7 +3679,33 @@ def test_invalid_approval_never_reads_secret_or_constructs_connector(
         )
 
     assert touched == []
+    assert loader.authorizations == []
     assert not ledger_path.exists()
+
+
+def test_asset_release_proxy_is_rejected_without_loader_property_access() -> None:
+    touched: list[str] = []
+
+    class HostileRelease:
+        @property
+        def loader(self):
+            touched.append("loader")
+            raise AssertionError("loader property must remain inert")
+
+        @property
+        def privacy_envelope(self):
+            touched.append("privacy_envelope")
+            raise AssertionError("release properties must remain inert")
+
+        @property
+        def privacy_public_key(self):
+            touched.append("privacy_public_key")
+            raise AssertionError("release properties must remain inert")
+
+    with pytest.raises(RunnerError, match="asset release is invalid"):
+        runner_module._validate_asset_release(HostileRelease())  # type: ignore[arg-type]
+
+    assert touched == []
 
 
 def test_stale_privacy_receipt_blocks_asset_ledger_secret_and_connector(
@@ -3790,7 +4074,12 @@ def test_preregistration_binds_every_observable_execution_input_before_claim(
     )
 
     touched: list[str] = []
-    with pytest.raises(ValueError, match="preregistration"):
+    expected_error = {
+        "project": "privacy custody",
+        "approval_public_key": "signature",
+        "ledger_custodian": "custody binding",
+    }.get(mutation, "preregistration")
+    with pytest.raises(ValueError, match=expected_error):
         asyncio.run(
             execute_authorized_attempt(
                 _asset_release(

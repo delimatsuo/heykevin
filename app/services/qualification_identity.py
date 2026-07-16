@@ -1017,28 +1017,116 @@ def _linked_native_dependencies(
 ) -> tuple[list[Path], set[str]]:
     system = platform.system()
     if system == "Darwin":
-        command = [DARWIN_LINK_TOOL, "-L", str(path)]
+        tool = DARWIN_LINK_TOOL
+        commands = (
+            [tool, "-L", str(path)],
+            [tool, "-D", str(path)],
+            [tool, "-l", str(path)],
+        )
     elif system == "Linux":
-        command = [LINUX_LINK_TOOL, str(path)]
+        tool = LINUX_LINK_TOOL
+        commands = ([tool, str(path)],)
     else:
         raise IdentityError("native runtime platform is unsupported")
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )  # nosec B603
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise IdentityError("native runtime dependency inspection failed") from exc
+    _require_externally_immutable_tool(tool)
+    outputs: list[str] = []
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )  # nosec B603
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            raise IdentityError("native runtime dependency inspection failed") from exc
+        if completed.stderr.strip():
+            raise IdentityError("native runtime dependency inspection failed")
+        outputs.append(completed.stdout)
     if system == "Darwin":
         return _parse_darwin_dependencies(
-            completed.stdout,
+            outputs[0],
             binary=path,
             executable=executable,
+            install_names=_parse_darwin_install_names(outputs[1]),
+            runpaths=_parse_darwin_runpaths(
+                outputs[2],
+                binary=path,
+                executable=executable,
+            ),
         )
-    return _parse_linux_dependencies(completed.stdout)
+    return _parse_linux_dependencies(outputs[0])
+
+
+def _require_externally_immutable_tool(path: str) -> None:
+    candidate = Path(os.path.realpath(os.path.abspath(path)))
+    if os.geteuid() == 0 or not candidate.exists() or candidate.is_symlink():
+        raise IdentityError("native dependency inspection tool is mutable")
+    for current in (candidate, *candidate.parents):
+        try:
+            metadata = current.stat()
+        except OSError as exc:
+            raise IdentityError("native dependency inspection tool is mutable") from exc
+        if metadata.st_uid != 0 or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise IdentityError("native dependency inspection tool is mutable")
+    if os.access(candidate, os.W_OK):
+        raise IdentityError("native dependency inspection tool is mutable")
+
+
+def _parse_darwin_install_names(output: str) -> set[str]:
+    install_names: set[str] = set()
+    seen_header = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if raw_line.rstrip().endswith(":"):
+            seen_header = True
+            continue
+        if not seen_header:
+            raise IdentityError("native runtime dependency inspection failed")
+        install_names.add(line)
+    if not seen_header:
+        raise IdentityError("native runtime dependency inspection failed")
+    return install_names
+
+
+def _parse_darwin_runpaths(
+    output: str,
+    *,
+    binary: Path,
+    executable: Path,
+) -> tuple[Path, ...]:
+    runpaths: list[Path] = []
+    expect_path = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line == "cmd LC_RPATH":
+            expect_path = True
+            continue
+        if not expect_path:
+            continue
+        if not line.startswith("path ") or " (offset " not in line:
+            continue
+        raw_path = line.removeprefix("path ").split(" (offset ", 1)[0]
+        if raw_path.startswith("@loader_path/"):
+            candidate = binary.parent / raw_path.removeprefix("@loader_path/")
+        elif raw_path.startswith("@executable_path/"):
+            candidate = executable.parent / raw_path.removeprefix("@executable_path/")
+        elif raw_path.startswith("/"):
+            candidate = Path(raw_path)
+        else:
+            raise IdentityError("native runtime runpath is unsupported")
+        runpaths.append(Path(os.path.realpath(os.path.abspath(candidate))))
+        expect_path = False
+    if expect_path:
+        raise IdentityError("native runtime dependency inspection failed")
+    return tuple(runpaths)
 
 
 def _parse_darwin_dependencies(
@@ -1046,38 +1134,41 @@ def _parse_darwin_dependencies(
     *,
     binary: Path,
     executable: Path,
+    install_names: set[str] | None = None,
+    runpaths: Sequence[Path] = (),
 ) -> tuple[list[Path], set[str]]:
     resolved: list[Path] = []
     virtual: set[str] = set()
-    first_load_for_architecture = True
-    for raw_line in output.splitlines()[1:]:
+    seen_header = False
+    ids = set() if install_names is None else install_names
+    for raw_line in output.splitlines():
+        if not raw_line.strip():
+            continue
         if not raw_line.startswith("\t"):
-            first_load_for_architecture = True
+            if not raw_line.rstrip().endswith(":"):
+                raise IdentityError("native runtime dependency inspection failed")
+            seen_header = True
             continue
+        if not seen_header:
+            raise IdentityError("native runtime dependency inspection failed")
         line = raw_line.strip()
-        if not line:
-            continue
         load_name = line.split(" (", 1)[0]
-        if first_load_for_architecture and Path(load_name).name == binary.name:
-            first_load_for_architecture = False
+        if load_name in ids:
             continue
-        first_load_for_architecture = False
         if load_name.startswith("@loader_path/"):
             candidate = binary.parent / load_name.removeprefix("@loader_path/")
         elif load_name.startswith("@executable_path/"):
             candidate = executable.parent / load_name.removeprefix("@executable_path/")
         elif load_name.startswith("@rpath/"):
-            local = binary.parent / load_name.removeprefix("@rpath/")
-            if local.is_file():
-                candidate = local
-            else:
-                virtual.add(load_name)
-                continue
+            suffix = load_name.removeprefix("@rpath/")
+            candidates = [runpath / suffix for runpath in runpaths]
+            candidate = next((value for value in candidates if value.is_file()), None)
+            if candidate is None:
+                raise IdentityError("native runtime dependency is unavailable")
         elif load_name.startswith("/"):
             candidate = Path(load_name)
         else:
-            virtual.add(load_name)
-            continue
+            raise IdentityError("native runtime dependency is unavailable")
         if candidate.is_file():
             if _canonical_path(candidate) == _canonical_path(binary):
                 continue
@@ -1086,6 +1177,8 @@ def _parse_darwin_dependencies(
             virtual.add(load_name)
         else:
             raise IdentityError("native runtime dependency is unavailable")
+    if not seen_header:
+        raise IdentityError("native runtime dependency inspection failed")
     return resolved, virtual
 
 
@@ -1381,9 +1474,7 @@ def capture_environment_identity(
     python_version = platform.python_version()
     if python_version != expected_python:
         raise IdentityError("Python version mismatch")
-    uv_output = _command("uv", "--version")
-    match = re.fullmatch(r"uv ([0-9]+\.[0-9]+\.[0-9]+)(?: .*)?", uv_output)
-    if match is None or match.group(1) != expected_uv:
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected_uv) is None:
         raise IdentityError("uv version mismatch")
     python_executable = Path(sys.executable).resolve()
     uv_location = shutil.which("uv")
@@ -2001,19 +2092,6 @@ def _git_bytes(root: Path, *args: str) -> bytes:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise IdentityError("Git identity command failed") from exc
     return completed.stdout
-
-
-def _command(*args: str) -> str:
-    try:
-        completed = subprocess.run(
-            list(args),
-            check=True,
-            capture_output=True,
-            text=True,
-        )  # nosec B603
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise IdentityError("environment identity command failed") from exc
-    return completed.stdout.strip()
 
 
 def _distribution_files_sha256(distribution: importlib.metadata.Distribution) -> str:

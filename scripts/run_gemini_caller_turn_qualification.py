@@ -117,6 +117,7 @@ MAX_OUTPUT_AUDIO_BYTES = 120 * 24_000 * 2
 MAX_OUTPUT_AUDIO_PER_RUN_BYTES = 1_800 * 24_000 * 2
 MAX_COST_PER_SESSION_MICROUSD = 250_000
 MAX_WHOLE_RUN_SECONDS = 3_600
+POST_COMPLETION_OBSERVATION_MS = 3_000
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40,64}")
 PINNED_APPROVAL_ROOT_PATH = REPO_ROOT / "config/qualification/gate_0b_approval_root.ed25519.pub"
@@ -373,6 +374,7 @@ class SessionExecutionConfig:
     max_message_bytes: int
     session_timeout_seconds: int
     response_gap_limit_ms: int
+    post_completion_observation_ms: int
 
     def __post_init__(self) -> None:
         if self.endpoint != OFFICIAL_ENDPOINT:
@@ -408,6 +410,8 @@ class SessionExecutionConfig:
             raise RunnerError("session timeout is invalid")
         if self.response_gap_limit_ms != 500:
             raise RunnerError("response gap limit must remain 500 ms")
+        if self.post_completion_observation_ms != POST_COMPLETION_OBSERVATION_MS:
+            raise RunnerError("post-completion observation must remain 3000 ms")
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,12 +652,15 @@ class WireFact:
             "goaway",
             "interrupted",
             "malformed",
+            "observation_complete",
             "response_open",
             "response_terminal",
+            "stream_closed",
             "teardown_complete",
             "teardown_failed",
             "tool_call_cancelled",
             "tool_call_open",
+            "usage_received",
         }:
             raise RunnerError("wire fact kind is invalid")
         _bounded_int(self.at_ms, label="wire fact time", maximum=7_200_000)
@@ -1015,6 +1022,13 @@ async def _execute_session_flow(
                     setup_at_ms,
                     epoch=epoch,
                 )
+                if setup_response is None:
+                    _record_wire_fact(
+                        wire_facts,
+                        "stream_closed",
+                        setup_at_ms,
+                        epoch=epoch,
+                    )
             except _MeasurementClockError:
                 error_code = "measurement_clock_invalid"
                 raise _AbortConnection from None
@@ -1152,7 +1166,7 @@ async def _execute_session_flow(
                             and active_response_activity is None
                             and segment_activity_ordinals <= terminal_activities
                         ),
-                        quiet_timeout_ms=config.response_gap_limit_ms,
+                        quiet_timeout_ms=config.post_completion_observation_ms,
                     )
                 except ProviderSessionClosed:
                     error_code = "provider_closed"
@@ -1176,8 +1190,36 @@ async def _execute_session_flow(
                     error_code = "connector_failure"
                     break
                 if quiet_period_elapsed:
+                    try:
+                        observation_at_ms = measurement_clock_ms()
+                    except _MeasurementClockError:
+                        error_code = "measurement_clock_invalid"
+                        break
+                    if (
+                        observation_at_ms - last_receipt_ms
+                        < config.post_completion_observation_ms
+                    ):
+                        error_code = "observation_window_incomplete"
+                        break
+                    _record_wire_fact(
+                        wire_facts,
+                        "observation_complete",
+                        observation_at_ms,
+                        epoch=epoch,
+                    )
                     break
                 if message is None:
+                    try:
+                        stream_closed_at_ms = measurement_clock_ms()
+                    except _MeasurementClockError:
+                        error_code = "measurement_clock_invalid"
+                        break
+                    _record_wire_fact(
+                        wire_facts,
+                        "stream_closed",
+                        stream_closed_at_ms,
+                        epoch=epoch,
+                    )
                     if not sender_done.is_set():
                         pending_interactions = {
                             replay_input.kind
@@ -1188,7 +1230,7 @@ async def _execute_session_flow(
                         if pending_interactions:
                             error_code = "expected_interaction_missing"
                             break
-                        await sender_done.wait()
+                        error_code = "provider_closed"
                     break
                 at_ms = measurement_clock_ms()
                 last_receipt_ms = at_ms
@@ -1286,6 +1328,13 @@ async def _execute_session_flow(
                         break
                     connection_usage = parsed_usage
                     usage_frame_count += 1
+                    _record_wire_fact(
+                        wire_facts,
+                        "usage_received",
+                        at_ms,
+                        epoch=epoch,
+                        activity_ordinal=active_response_activity,
+                    )
                     if set(message) == {"usageMetadata"}:
                         continue
 
@@ -1724,6 +1773,8 @@ async def execute_injected_no_speech_window(
         )
     except TimeoutError:
         return _failed_no_speech("session_timeout")
+    except ExecutionIdentityDriftError:
+        return _failed_no_speech("source_identity_failed", provider_request_count=0)
     except RequestReservationError:
         return _failed_no_speech("provider_request_reservation_exhausted")
     except Exception:
@@ -1752,6 +1803,8 @@ async def _execute_no_speech_flow(
     )
     try:
         session = await connector.connect(request)
+    except ExecutionIdentityDriftError:
+        return _failed_no_speech("source_identity_failed", provider_request_count=0)
     except RequestReservationError:
         raise
     except Exception:
@@ -1779,6 +1832,8 @@ async def _execute_no_speech_flow(
         setup = await session.receive()
         last_receipt_ms = measurement_clock_ms()
         _record_wire_fact(wire_facts, "connection_open", last_receipt_ms, epoch=1)
+        if setup is None:
+            _record_wire_fact(wire_facts, "stream_closed", last_receipt_ms, epoch=1)
         if setup != {"setupComplete": {}}:
             error_code = "setup_rejected"
         else:
@@ -1822,7 +1877,7 @@ async def _execute_no_speech_flow(
                         session,
                         sender_done=sender_done,
                         completion_pending=usage_frame_count > 0 and not response_open,
-                        quiet_timeout_ms=config.response_gap_limit_ms,
+                        quiet_timeout_ms=config.post_completion_observation_ms,
                     )
                 except ProviderSessionClosed:
                     abnormal_close_count += 1
@@ -1835,10 +1890,38 @@ async def _execute_no_speech_flow(
                     )
                     break
                 if quiet_period_elapsed:
+                    try:
+                        observation_at_ms = measurement_clock_ms()
+                    except _MeasurementClockError:
+                        error_code = "measurement_clock_invalid"
+                        break
+                    if (
+                        observation_at_ms - last_receipt_ms
+                        < config.post_completion_observation_ms
+                    ):
+                        error_code = "observation_window_incomplete"
+                        break
+                    _record_wire_fact(
+                        wire_facts,
+                        "observation_complete",
+                        observation_at_ms,
+                        epoch=1,
+                    )
                     break
                 if message is None:
+                    try:
+                        stream_closed_at_ms = measurement_clock_ms()
+                    except _MeasurementClockError:
+                        error_code = "measurement_clock_invalid"
+                        break
+                    _record_wire_fact(
+                        wire_facts,
+                        "stream_closed",
+                        stream_closed_at_ms,
+                        epoch=1,
+                    )
                     if not sender_done.is_set():
-                        await sender_done.wait()
+                        error_code = "provider_closed"
                     break
                 at_ms = measurement_clock_ms()
                 last_receipt_ms = at_ms
@@ -1881,6 +1964,12 @@ async def _execute_no_speech_flow(
                         break
                     usage = parsed_usage
                     usage_frame_count += 1
+                    _record_wire_fact(
+                        wire_facts,
+                        "usage_received",
+                        at_ms,
+                        epoch=1,
+                    )
                     if set(message) == {"usageMetadata"}:
                         continue
 
@@ -2101,7 +2190,14 @@ class _ReservedConnector:
         self._identity_guard = identity_guard
 
     async def connect(self, request: InjectedConnectionRequest) -> InjectedSession:
-        self._identity_guard()
+        try:
+            self._identity_guard()
+        except ExecutionIdentityDriftError:
+            raise
+        except Exception as exc:
+            raise ExecutionIdentityDriftError(
+                "execution environment identity could not be revalidated"
+            ) from exc
         self._budget.consume()
         connector = self._factory(self._credential)
         if connector is None or not callable(getattr(connector, "connect", None)):
@@ -2348,20 +2444,7 @@ async def execute_authorized_attempt(
         pricing=pricing,
     )
     approval_public_key = _load_pinned_approval_public_key(environment_identity)
-    _verify_execution_preregistration(
-        preregistration,
-        config=config,
-        session_config=session_config,
-        approval_public_key=approval_public_key,
-        ledger=ledger,
-        privacy_public_key=asset_release.privacy_public_key,
-        pricing=pricing,
-        custodian_public_key=custodian_public_key,
-        custodian_key_id=custodian_key_id,
-        capsule_path=capsule_path,
-        capsule_location_field="audit_capsule_location_sha256",
-        required_split="development",
-    )
+    _validate_execution_preregistration_document(preregistration)
     campaign = verify_campaign_approval(
         campaign_envelope,
         public_key=approval_public_key,
@@ -2405,6 +2488,26 @@ async def execute_authorized_attempt(
         ]["zdr_or_residual_retention_acceptance_sha256"],
         now=now,
     )
+    ledger_identity = _validate_ledger_custody_binding(
+        campaign=campaign,
+        ledger=ledger,
+        public_key=ledger_custodian_public_key,
+        label="campaign",
+    )
+    _verify_execution_preregistration(
+        preregistration,
+        config=config,
+        session_config=session_config,
+        approval_public_key=approval_public_key,
+        ledger_identity=ledger_identity,
+        privacy_public_key=asset_release.privacy_public_key,
+        pricing=pricing,
+        custodian_public_key=custodian_public_key,
+        custodian_key_id=custodian_key_id,
+        capsule_path=capsule_path,
+        capsule_location_field="audit_capsule_location_sha256",
+        required_split="development",
+    )
     plans, no_speech_plans = _materialize_qualification_assets(
         asset_release,
         privacy_authorization,
@@ -2432,12 +2535,6 @@ async def execute_authorized_attempt(
     if required_requests > authorization.provider_request_reservation:
         raise RunnerError("signed request reservation is insufficient")
     _require_preregistered_attempt_liability(authorization, preregistration)
-    ledger_identity = _validate_ledger_custody_binding(
-        campaign=campaign,
-        ledger=ledger,
-        public_key=ledger_custodian_public_key,
-        label="campaign",
-    )
     preclaim_state = _replay_bound_ledger_snapshot(
         ledger=ledger,
         public_key=ledger_custodian_public_key,
@@ -2764,20 +2861,7 @@ async def execute_authorized_holdout(
         pricing=pricing,
     )
     approval_public_key = _load_pinned_approval_public_key(environment_identity)
-    _verify_execution_preregistration(
-        preregistration,
-        config=config,
-        session_config=session_config,
-        approval_public_key=approval_public_key,
-        ledger=ledger,
-        privacy_public_key=asset_release.privacy_public_key,
-        pricing=pricing,
-        custodian_public_key=custodian_public_key,
-        custodian_key_id=custodian_key_id,
-        capsule_path=capsule_path,
-        capsule_location_field="holdout_capsule_location_sha256",
-        required_split="holdout",
-    )
+    _validate_execution_preregistration_document(preregistration)
     campaign = verify_campaign_approval(
         campaign_envelope,
         public_key=approval_public_key,
@@ -2799,6 +2883,20 @@ async def execute_authorized_holdout(
         ledger=ledger,
         public_key=ledger_custodian_public_key,
         label="holdout",
+    )
+    _verify_execution_preregistration(
+        preregistration,
+        config=config,
+        session_config=session_config,
+        approval_public_key=approval_public_key,
+        ledger_identity=ledger_identity,
+        privacy_public_key=asset_release.privacy_public_key,
+        pricing=pricing,
+        custodian_public_key=custodian_public_key,
+        custodian_key_id=custodian_key_id,
+        capsule_path=capsule_path,
+        capsule_location_field="holdout_capsule_location_sha256",
+        required_split="holdout",
     )
     state = _replay_bound_ledger_snapshot(
         ledger=ledger,
@@ -3279,11 +3377,10 @@ def _validate_attempt_configuration(
 
 def _validate_asset_release(release: AuthorizedAssetRelease) -> None:
     if (
-        not isinstance(release, AuthorizedAssetRelease)
+        type(release) is not AuthorizedAssetRelease
         or not isinstance(release.privacy_envelope, Mapping)
         or not isinstance(release.privacy_public_key, bytes)
         or len(release.privacy_public_key) != 32
-        or not callable(getattr(release.loader, "load", None))
     ):
         raise RunnerError("qualification asset release is invalid")
 
@@ -3293,7 +3390,13 @@ def _materialize_qualification_assets(
     authorization: PrivacyCustodyAuthorization,
 ) -> tuple[tuple[SessionPlan, ...], tuple[NoSpeechWindowPlan, ...]]:
     try:
-        assets = release.loader.load(authorization)
+        loader = release.loader
+        load = getattr(loader, "load", None)
+        if not callable(load):
+            raise RunnerError("qualification asset release is invalid")
+        assets = load(authorization)
+    except RunnerError:
+        raise
     except Exception:
         raise RunnerError("qualification assets could not be released") from None
     if not isinstance(assets, QualificationAssets):
@@ -3469,7 +3572,7 @@ def _verify_execution_preregistration(
     config: AuthorizedAttemptConfig,
     session_config: SessionExecutionConfig,
     approval_public_key: bytes,
-    ledger: LedgerCustodyClient,
+    ledger_identity: LedgerCustodyIdentity,
     privacy_public_key: bytes,
     pricing: PricingSchedule,
     custodian_public_key: bytes,
@@ -3479,25 +3582,7 @@ def _verify_execution_preregistration(
     required_split: str,
 ) -> None:
     """Recompute the approved document and bind every directly observable input."""
-    if not isinstance(document, Mapping):
-        raise RunnerError("preregistration document is invalid")
-    immutable = document.get("immutable_values")
-    if not isinstance(immutable, Mapping):
-        raise RunnerError("preregistration document is invalid")
-    try:
-        values = {
-            "schema_id": "gate_0b_preregistration_values_v2",
-            **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
-        }
-    except KeyError as exc:
-        raise RunnerError("preregistration document is invalid") from exc
-    expected = build_preregistration(values)
-    if dict(document) != expected:
-        raise RunnerError("preregistration document or digest mismatch")
-
-    if not isinstance(ledger, LedgerCustodyClient):
-        raise RunnerError("preregistration ledger custody client is unavailable")
-    ledger_identity = ledger.identity()
+    immutable, expected = _validate_execution_preregistration_document(document)
     if not isinstance(ledger_identity, LedgerCustodyIdentity):
         raise RunnerError("preregistration ledger custody identity is invalid")
     if (
@@ -3541,7 +3626,11 @@ def _verify_execution_preregistration(
     }
     expected_observable = {
         "preregistration_sha256": expected["preregistration_sha256"],
-        **{field: immutable[field] for field in observable if field != "preregistration_sha256"},
+        **{
+            field: immutable[field]
+            for field in observable
+            if field != "preregistration_sha256"
+        },
     }
     if observable != expected_observable:
         raise RunnerError("preregistration execution binding mismatch")
@@ -3549,10 +3638,33 @@ def _verify_execution_preregistration(
         config.policy_ms not in immutable["candidate_policies_ms"]
         or session_config.session_timeout_seconds
         > immutable["usage_caps"]["session_timeout_seconds"]
+        or session_config.post_completion_observation_ms
+        != immutable["usage_caps"]["post_completion_observation_ms"]
         or config.whole_run_timeout_seconds
         > immutable["usage_caps"]["whole_run_wall_clock_seconds"]
     ):
         raise RunnerError("preregistration execution cap mismatch")
+
+
+def _validate_execution_preregistration_document(
+    document: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    if not isinstance(document, Mapping):
+        raise RunnerError("preregistration document is invalid")
+    immutable = document.get("immutable_values")
+    if not isinstance(immutable, Mapping):
+        raise RunnerError("preregistration document is invalid")
+    try:
+        values = {
+            "schema_id": "gate_0b_preregistration_values_v2",
+            **{field: immutable[field] for field in PREREGISTRATION_EXTERNAL_FIELDS},
+        }
+    except KeyError as exc:
+        raise RunnerError("preregistration document is invalid") from exc
+    expected = build_preregistration(values)
+    if dict(document) != expected:
+        raise RunnerError("preregistration document or digest mismatch")
+    return immutable, expected
 
 
 
@@ -3790,7 +3902,7 @@ def _build_audit_capsule(
     if len(splits) != 1:
         raise RunnerError("audit capsule results must contain exactly one split")
     return {
-        "schema_id": "gate_0b_audit_capsule_v6",
+        "schema_id": "gate_0b_audit_capsule_v7",
         "campaign_id": campaign_id,
         "policy_ms": policy_ms,
         "source_fact_bundle_sha256": source_fact_bundle_sha256,
@@ -4751,6 +4863,7 @@ def build_dry_run_preregistration() -> dict[str, Any]:
                 "provider_requests_per_run": 128,
                 "provider_requests_per_campaign": 384,
                 "session_timeout_seconds": 120,
+                "post_completion_observation_ms": POST_COMPLETION_OBSERVATION_MS,
                 "whole_run_wall_clock_seconds": 3_600,
             },
             "audio_caps": {

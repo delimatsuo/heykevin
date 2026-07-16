@@ -53,7 +53,7 @@ from app.services.qualification_identity import canonical_json_bytes
 
 ACTIVITY_PRIMITIVE_SCHEMA_ID = "gate_0b_activity_primitive_v2"
 NO_SPEECH_PRIMITIVE_SCHEMA_ID = "gate_0b_no_speech_primitive_v1"
-AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v6"
+AUDIT_CAPSULE_SCHEMA_ID = "gate_0b_audit_capsule_v7"
 CAPSULE_ACCOUNTING_SCHEMA_ID = "gate_0b_capsule_accounting_v1"
 SEALED_CAPSULE_SCHEMA_ID = "gate_0b_sealed_capsule_v1"
 SIGNED_ROOT_SCHEMA_ID = "gate_0b_signed_record_root_v1"
@@ -114,12 +114,15 @@ WIRE_FACT_KINDS = frozenset(
         "goaway",
         "interrupted",
         "malformed",
+        "observation_complete",
         "response_open",
         "response_terminal",
+        "stream_closed",
         "teardown_complete",
         "teardown_failed",
         "tool_call_cancelled",
         "tool_call_open",
+        "usage_received",
     }
 )
 CAPSULE_FAILURE_CODES = frozenset(
@@ -133,6 +136,7 @@ CAPSULE_FAILURE_CODES = frozenset(
         "malformed_tool_cancellation",
         "malformed_message",
         "message_too_large",
+        "observation_window_incomplete",
         "premature_current_response",
         "premature_usage_metadata",
         "provider_closed",
@@ -1905,51 +1909,76 @@ def _capsule_wire_observation(
         value["response_ordinal"] not in terminals for value in response_opens
     )
     interruption_tail_ms: int | None = None
-    if "tool_cancellation_interruption" in scenario_tags:
-        caller_audio = [
+    caller_audio = [
+        value
+        for value in ordered
+        if value["kind"] == "caller_audio_sent"
+        and value["activity_ordinal"] == activity_ordinal
+    ]
+    if caller_audio:
+        trigger = caller_audio[0]
+        prior_responses = [
             value
             for value in ordered
-            if value["kind"] == "caller_audio_sent"
-            and value["activity_ordinal"] == activity_ordinal
-        ]
-        if caller_audio:
-            trigger = caller_audio[0]
-            open_tools = [
-                value
-                for value in ordered
-                if value["kind"] == "tool_call_open"
-                and value["activity_ordinal"] != activity_ordinal
-                and value["epoch"] == trigger["epoch"]
-                and (value["at_ms"], value["sequence"])
+            if value["kind"] == "response_open"
+            and value["activity_ordinal"] != activity_ordinal
+            and value["epoch"] == trigger["epoch"]
+            and (value["at_ms"], value["sequence"])
+            < (trigger["at_ms"], trigger["sequence"])
+            and not any(
+                terminal["kind"] == "response_terminal"
+                and terminal["response_ordinal"] == value["response_ordinal"]
+                and terminal["epoch"] == trigger["epoch"]
+                and (terminal["at_ms"], terminal["sequence"])
                 < (trigger["at_ms"], trigger["sequence"])
-            ]
-            cancellations = [
-                value
-                for value in ordered
-                if value["kind"] == "tool_call_cancelled"
-                and value["activity_ordinal"] == activity_ordinal
-                and value["epoch"] == trigger["epoch"]
-                and (value["at_ms"], value["sequence"])
-                >= (trigger["at_ms"], trigger["sequence"])
-            ]
-            interruptions = [
-                value
-                for value in ordered
-                if value["kind"] == "interrupted"
-                and value["activity_ordinal"] == activity_ordinal
-                and value["epoch"] == trigger["epoch"]
-                and (value["at_ms"], value["sequence"])
-                >= (trigger["at_ms"], trigger["sequence"])
-            ]
-            if open_tools and cancellations and interruptions:
-                prior_ordinal = open_tools[-1]["activity_ordinal"]
+                for terminal in ordered
+            )
+        ]
+        if prior_responses:
+            prior_response = prior_responses[-1]
+            evidence_complete = True
+            if "tool_cancellation_interruption" in scenario_tags:
+                prior_ordinal = prior_response["activity_ordinal"]
+                open_tools = [
+                    value
+                    for value in ordered
+                    if value["kind"] == "tool_call_open"
+                    and value["activity_ordinal"] == prior_ordinal
+                    and value["epoch"] == trigger["epoch"]
+                    and (value["at_ms"], value["sequence"])
+                    < (trigger["at_ms"], trigger["sequence"])
+                ]
+                cancellations = [
+                    value
+                    for value in ordered
+                    if value["kind"] == "tool_call_cancelled"
+                    and value["activity_ordinal"] == activity_ordinal
+                    and value["epoch"] == trigger["epoch"]
+                    and (value["at_ms"], value["sequence"])
+                    >= (trigger["at_ms"], trigger["sequence"])
+                ]
+                interruptions = [
+                    value
+                    for value in ordered
+                    if value["kind"] == "interrupted"
+                    and value["activity_ordinal"] == activity_ordinal
+                    and value["epoch"] == trigger["epoch"]
+                    and (value["at_ms"], value["sequence"])
+                    >= (trigger["at_ms"], trigger["sequence"])
+                ]
+                evidence_complete = bool(
+                    open_tools and cancellations and interruptions
+                )
+            if evidence_complete:
                 tail_audio = [
                     value["at_ms"]
                     for value in ordered
                     if value["kind"] == "audio_received"
-                    and value["activity_ordinal"] == prior_ordinal
+                    and value["response_ordinal"]
+                    == prior_response["response_ordinal"]
                     and value["epoch"] == trigger["epoch"]
-                    and value["at_ms"] >= trigger["at_ms"]
+                    and (value["at_ms"], value["sequence"])
+                    >= (trigger["at_ms"], trigger["sequence"])
                 ]
                 interruption_tail_ms = (
                     max(value - trigger["at_ms"] for value in tail_audio)
@@ -2192,7 +2221,60 @@ def _validate_connection_open_topology(
             raise MeasurementError("audit capsule connection-open topology is invalid")
     if current_epoch != provider_request_count:
         raise MeasurementError("audit capsule connection-open topology is invalid")
+    _validate_connection_completion_facts(wire_facts, expected_epochs=expected_epochs)
     return opens
+
+
+def _validate_connection_completion_facts(
+    wire_facts: list[Mapping[str, Any]],
+    *,
+    expected_epochs: tuple[int, ...],
+) -> None:
+    provider_receipt_kinds = {
+        "abnormal_close",
+        "audio_after_terminal",
+        "audio_received",
+        "false_activity",
+        "goaway",
+        "interrupted",
+        "malformed",
+        "response_open",
+        "response_terminal",
+        "tool_call_cancelled",
+        "tool_call_open",
+        "usage_received",
+    }
+    for epoch in expected_epochs:
+        completions = [
+            fact
+            for fact in wire_facts
+            if fact["epoch"] == epoch
+            and fact["kind"] in {"stream_closed", "observation_complete"}
+        ]
+        if len(completions) != 1:
+            raise MeasurementError("audit capsule observation endpoint is invalid")
+        completion = completions[0]
+        if any(
+            fact is not completion
+            and fact["kind"] not in {"teardown_complete", "teardown_failed"}
+            and (fact["at_ms"], fact["sequence"])
+            > (completion["at_ms"], completion["sequence"])
+            for fact in wire_facts
+            if fact["epoch"] == epoch
+        ):
+            raise MeasurementError("audit capsule completion endpoint is not final")
+        receipts = [
+            fact
+            for fact in wire_facts
+            if fact["epoch"] == epoch and fact["kind"] in provider_receipt_kinds
+        ]
+        if completion["kind"] == "stream_closed":
+            continue
+        if not receipts:
+            raise MeasurementError("audit capsule observation endpoint is invalid")
+        latest_receipt_ms = max(fact["at_ms"] for fact in receipts)
+        if completion["at_ms"] - latest_receipt_ms < 3_000:
+            raise MeasurementError("audit capsule observation window is incomplete")
 
 
 def _validate_response_wire_state(raw: list[Mapping[str, Any]]) -> None:

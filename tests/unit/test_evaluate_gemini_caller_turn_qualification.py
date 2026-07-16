@@ -229,6 +229,7 @@ def _setup_sha256(project: str) -> str:
         max_message_bytes=1_024,
         session_timeout_seconds=120,
         response_gap_limit_ms=500,
+        post_completion_observation_ms=3_000,
     )
     return sha256(canonical_json_bytes(build_gate0b_setup_identity(config))).hexdigest()
 
@@ -2078,6 +2079,33 @@ def test_evaluator_vetoes_contamination_even_when_fidelity_metrics_pass() -> Non
     assert sample["interaction_passed"] is True
     assert sample["assembly_passed"] is False
     assert sample["passed"] is False
+
+
+def test_evaluator_rejects_untagged_wire_derived_interruption_tail_violation() -> None:
+    records = tuple(
+        _activity_record(policy_ms=100, ordinal=ordinal, split="development")
+        for ordinal in range(128)
+    )
+    assert records[0].scenario_tags == ("standard",)
+    records = (
+        replace(records[0], interruption_tail_ms=10_000),
+        *records[1:],
+    )
+
+    sample = evaluator_module._evaluate_sample(
+        records,
+        no_speech_records=tuple(_no_speech_record(ordinal) for ordinal in range(32)),
+    )
+
+    tagged_count = sum(
+        "tool_cancellation_interruption" in record.scenario_tags
+        for record in records
+    )
+    assert sample["interaction_passed"] is False
+    assert sample["passed"] is False
+    assert sample["published"]["interruption_tail_ms"][
+        "scheduled_case_count"
+    ] == tagged_count + 1
 
 
 @pytest.mark.parametrize("lifecycle_status", ("partial", "cancelled", "dropped"))

@@ -15,7 +15,10 @@ path is intentionally blocked. The checked-in approval root contains exactly
 `UNPROVISIONED`, so campaign approval verification cannot succeed.
 
 Every executable Gate 0B entry point is allowlisted behind
-`scripts/launch_qualification.py` and must start with `python -B -I -S`. Direct
+`scripts/launch_qualification.py` and must start with `python -B -I -S`. An actual
+qualification or evaluation must instead start at the literal externally provisioned
+`/opt/hey-kevin-gate0b/bin/python3.12` path; using `python`, `env python`, or any
+other `PATH` lookup for a sensitive target is forbidden. Direct
 runner, evaluator, and environment-verifier execution fails before project or
 third-party imports. The launcher ignores ambient Python path configuration,
 does not process `.pth` files or customization modules, and binds its canonical
@@ -32,6 +35,11 @@ Interpreter installation v2 recursively binds the Python executable, framework o
 `libpython`, standard-library and site native extensions, linked OpenSSL/runtime
 libraries, and the platform loader identity. `LD_*` and `DYLD_*` configuration is
 forbidden, and a loaded native image outside that closure blocks startup.
+Darwin install IDs and `LC_RPATH` entries are resolved to concrete files before
+hashing; unresolved non-system dependencies fail closed. Once the approval root is
+provisioned, the runner `--execute` and evaluator paths additionally require a
+non-root process using a root-owned runtime that is not writable by the qualification
+user. This externally owned boundary is required before any third-party import.
 
 ## Fixed Boundary
 
@@ -56,6 +64,8 @@ The implementation pins:
   code-switch direction, applicable critical span, and the 16 silence plus 16
   background-noise windows in each split;
 - the request, duration, timeout, attempt, and cost ceilings in the approved plan.
+- a fixed 3,000 ms post-completion observation horizon, covering the 500 ms VAD
+  silence window plus the 2,500 ms maximum first-audio gate.
 
 `app/services/gemini_pipeline.py` and `app/services/voice_pipeline.py` must not
 import or call any Gate 0B module.
@@ -69,7 +79,7 @@ Run from a clean worktree at the reviewed implementation commit:
 unset LD_LIBRARY_PATH
 uv lock --check
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -m pytest tests/unit --tb=short -q
+  python -m pytest --tb=short -q
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   ruff check app/services/caller_turn_alignment.py \
   app/services/caller_turn_measurement.py \
@@ -265,13 +275,22 @@ setup identity, for example as `REVIEWED_GATE0B_SOURCE_SHA` and
 execution time or replaced with values from the current machine. Pass them to the
 launcher as follows for every executable target:
 
+The setup operator must install the exact externally provisioned, root-owned Python
+3.12.13 runtime at `/opt/hey-kevin-gate0b/bin/python3.12`. That executable, every
+parent directory,
+its standard library, and its site-packages tree must be root-owned, must not be
+writable by the qualification user, group, or other users, and must match the
+reviewed runtime identity. The literal path anchors startup before sensitive
+arguments become visible to Python code; do not replace it with a variable or a
+`PATH` lookup.
+
 ```bash
 test -n "$REVIEWED_GATE0B_SOURCE_SHA"
 test -n "$REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256"
 readonly REVIEWED_GATE0B_SOURCE_SHA
 readonly REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256
 # Add the target-specific approved arguments after these launcher approvals.
-python -B -I -S scripts/launch_qualification.py run-qualification \
+/opt/hey-kevin-gate0b/bin/python3.12 -B -I -S scripts/launch_qualification.py run-qualification \
   --expected-source-sha "$REVIEWED_GATE0B_SOURCE_SHA" \
   --expected-runtime-site-packages-sha256 \
     "$REVIEWED_GATE0B_RUNTIME_SITE_PACKAGES_SHA256"
@@ -339,12 +358,14 @@ holdout schedule commitment before the one-shot holdout claim.
 
 Raw provider messages are reduced independently twice and then discarded. Output
 audio is counted and discarded. Canonical references and transcript fragments may
-exist only inside the allowlisted encrypted audit capsule. Capsule schema v6 stores
+exist only inside the allowlisted encrypted audit capsule. Capsule schema v7 stores
 adapted transcript events and ordered raw wire facts once per logical session;
 activity entries contain metadata and references only. The evaluator independently
 derives timing, premature output, response gaps, terminal ordering, causal tool
 cancellation/interruption, close, malformed-message, runaway-output, and teardown
-facts from that session evidence. The storage sink must return a digest-matched
+facts from that session evidence. Every connection epoch proves either clean stream
+closure or a complete 3,000 ms quiet observation endpoint after the latest provider
+receipt. The storage sink must return a digest-matched
 handoff receipt before an attempt can be marked complete.
 
 For every candidate policy, the evaluator replays each logical session's original

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from hashlib import sha1, sha256
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -148,6 +149,62 @@ def test_native_dependency_parser_rejects_missing_linux_dependency(
         module._parse_linux_dependencies("libmissing.so =>\tnot found\n")
 
 
+@pytest.mark.parametrize(
+    ("module", "error_type"),
+    (
+        (identity_module, IdentityError),
+        (launcher_module, launcher_module.BootstrapError),
+    ),
+)
+def test_native_dependency_parser_rejects_malformed_darwin_output(
+    tmp_path: Path,
+    module: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type, match="dependency inspection failed"):
+        module._parse_darwin_dependencies(
+            "not an object file\n",
+            binary=tmp_path / "invalid.so",
+            executable=tmp_path / "python",
+        )
+
+
+@pytest.mark.parametrize(
+    ("module", "error_type"),
+    (
+        (identity_module, IdentityError),
+        (launcher_module, launcher_module.BootstrapError),
+    ),
+)
+def test_native_dependency_inspector_rejects_tool_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module: object,
+    error_type: type[Exception],
+) -> None:
+    binary = tmp_path / "native.so"
+    executable = tmp_path / "python"
+    binary.write_bytes(b"native")
+    executable.write_bytes(b"python")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        module,
+        "_require_externally_immutable_tool",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=f"{binary}:\n",
+            stderr="inspection warning\n",
+        ),
+    )
+
+    with pytest.raises(error_type, match="dependency inspection failed"):
+        module._linked_native_dependencies(binary, executable=executable)
+
+
 @pytest.mark.parametrize("module", (identity_module, launcher_module))
 def test_native_dependency_parser_handles_darwin_fat_binary_output(
     tmp_path: Path,
@@ -183,13 +240,14 @@ def test_native_dependency_parser_handles_darwin_fat_binary_output(
         "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
         f"{binary} (architecture arm64):\n"
         "\t@rpath/libmissing.dylib (compatibility version 1.0.0)\n"
-        "\tlibrelative-install-name.dylib (compatibility version 1.0.0)\n"
     )
 
     resolved, virtual = module._parse_darwin_dependencies(
         output,
         binary=binary,
         executable=executable,
+        install_names={str(binary), "@rpath/libmissing.dylib"},
+        runpaths=(tmp_path,),
     )
 
     assert resolved == [
@@ -201,9 +259,74 @@ def test_native_dependency_parser_handles_darwin_fat_binary_output(
     ]
     assert virtual == {
         "/usr/lib/libSystem.B.dylib",
-        "@rpath/libmissing.dylib",
-        "librelative-install-name.dylib",
     }
+
+
+@pytest.mark.parametrize(
+    ("module", "error_type"),
+    (
+        (identity_module, IdentityError),
+        (launcher_module, launcher_module.BootstrapError),
+    ),
+)
+def test_native_dependency_parser_rejects_unresolved_darwin_rpath(
+    tmp_path: Path,
+    module: object,
+    error_type: type[Exception],
+) -> None:
+    binary = tmp_path / "native.so"
+    binary.write_bytes(b"native")
+    output = f"{binary}:\n\t@rpath/libmissing.dylib (compatibility version 1.0.0)\n"
+
+    with pytest.raises(error_type, match="dependency is unavailable"):
+        module._parse_darwin_dependencies(
+            output,
+            binary=binary,
+            executable=tmp_path / "python",
+            runpaths=(tmp_path / "missing",),
+        )
+
+
+@pytest.mark.parametrize("module", (identity_module, launcher_module))
+def test_darwin_install_ids_and_runpaths_resolve_actual_dependency(
+    tmp_path: Path,
+    module: object,
+) -> None:
+    binary = tmp_path / "extensions" / "native.so"
+    executable = tmp_path / "bin" / "python"
+    dependency = tmp_path / "Frameworks" / "libdependency.dylib"
+    dependency.parent.mkdir(parents=True)
+    binary.parent.mkdir()
+    executable.parent.mkdir()
+    for path in (binary, executable, dependency):
+        path.write_bytes(path.name.encode("ascii"))
+    install_names = module._parse_darwin_install_names(
+        f"{binary}:\n@rpath/native-install-id.so\n"
+    )
+    runpaths = module._parse_darwin_runpaths(
+        "Load command 1\n"
+        "          cmd LC_RPATH\n"
+        "      cmdsize 48\n"
+        "         path @loader_path/../Frameworks (offset 12)\n",
+        binary=binary,
+        executable=executable,
+    )
+    output = (
+        f"{binary}:\n"
+        "\t@rpath/native-install-id.so (compatibility version 0.0.0)\n"
+        "\t@rpath/libdependency.dylib (compatibility version 1.0.0)\n"
+    )
+
+    resolved, virtual = module._parse_darwin_dependencies(
+        output,
+        binary=binary,
+        executable=executable,
+        install_names=install_names,
+        runpaths=runpaths,
+    )
+
+    assert resolved == [dependency]
+    assert virtual == set()
 
 
 def _redacted_source_identity_for(
@@ -509,6 +632,31 @@ def test_environment_identity_binds_exact_runtime_and_imports() -> None:
     assert set(identity.import_sha256) == {"websockets", "app.utils.audio"}
     assert identity.distribution_files_sha256["websockets"]
     assert all("/" not in value for value in identity.redacted_report_dict().values() if isinstance(value, str))
+
+
+def test_environment_identity_never_executes_path_selected_uv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_run = identity_module.subprocess.run
+    uv_location = shutil.which("uv")
+    assert uv_location is not None
+
+    def guarded_run(command, *args, **kwargs):
+        if isinstance(command, list) and command and Path(command[0]).name == "uv":
+            raise AssertionError("PATH-selected uv must not execute")
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(identity_module.subprocess, "run", guarded_run)
+
+    identity = capture_environment_identity(
+        repo_root=Path.cwd(),
+        expected_python="3.12.13",
+        expected_uv="0.11.7",
+        import_names=("websockets", "app.utils.audio"),
+    )
+
+    assert identity.uv_version == "0.11.7"
+    assert identity.uv_executable_sha256 == sha256(Path(uv_location).read_bytes()).hexdigest()
 
 
 def test_launcher_and_runtime_capture_the_same_complete_path_redacted_interpreter_identity(

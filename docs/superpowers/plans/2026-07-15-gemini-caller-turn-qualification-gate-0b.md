@@ -478,6 +478,13 @@ The preregistered sample gate requires:
 - zero missing interruption/cancellation/terminal classifications;
 - zero abnormal closes, runaway output, response timeout, or response gap over the
   preregistered 500 ms bound.
+- every connection epoch ends with a clean stream close or a fixed 3,000 ms quiet
+  observation endpoint after the latest provider receipt. The horizon is the 500 ms
+  VAD silence window plus the 2,500 ms maximum first-audio gate.
+- a clean stream close is valid only after the scheduled caller-input sender has
+  completed. Closure while input remains scheduled is a bounded provider failure and
+  cancels the sender. Every completion endpoint is causally after all non-teardown
+  wire facts in its epoch.
 
 Output-turn attribution is deterministic. A local response ordinal opens on the
 first model-content/audio event after the preceding response terminal and closes on
@@ -539,7 +546,13 @@ construction, reject unless:
 - the committed Git blob for each dependency matches the worktree bytes.
 
 Execution uses a checked-in hash-bearing `uv.lock`, Python `3.12.13`, `uv 0.11.7`,
-frozen/no-sync execution, and an immutable container/interpreter image digest. No
+and frozen/no-sync execution. Provisioned sensitive execution requires a non-root
+process over a root-owned Python, standard-library, native-runtime, and site-packages
+tree that the qualification user cannot modify. The shell must invoke the literal,
+externally provisioned `/opt/hey-kevin-gate0b/bin/python3.12` path; bare `python`,
+`env python`, variables, aliases, and other `PATH` lookups are forbidden for actual
+qualification and evaluation so untrusted startup code cannot observe sensitive
+arguments before the launcher validates runtime identity. No
 dependency resolution, installation, or
 environment mutation may occur after an attempt is claimed. The preregistration
 binds exact Python patch version, `uv` version, OS/platform/architecture, Unicode data
@@ -913,7 +926,10 @@ Commands become valid as files land:
 uv lock --check
 uv sync --locked --extra dev --python 3.12.13
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python scripts/verify_qualification_environment.py --phase before
+  python -B -I -S scripts/launch_qualification.py verify-environment \
+  --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA" \
+  --expected-runtime-site-packages-sha256 \
+  "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" --phase before
 
 uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest \
   tests/unit/test_caller_turn_qualification.py \
@@ -931,7 +947,7 @@ uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest \
   tests/unit/test_voice_turn_replay.py -q
 
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python -m pytest tests/unit -q
+  python -m pytest --tb=short -q
 
 uv run --locked --no-sync --extra dev --python 3.12.13 ruff check \
   app/services/caller_turn_qualification.py \
@@ -950,7 +966,10 @@ uv run --locked --no-sync --extra dev --python 3.12.13 ruff check \
   tests/unit/test_evaluate_gemini_caller_turn_qualification.py
 
 uv run --locked --no-sync --extra dev --python 3.12.13 \
-  python scripts/verify_qualification_environment.py --phase after
+  python -B -I -S scripts/launch_qualification.py verify-environment \
+  --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA" \
+  --expected-runtime-site-packages-sha256 \
+  "$QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" --phase after
 
 git diff --check
 git diff d7969ac -- app/services/gemini_pipeline.py app/services/voice_pipeline.py

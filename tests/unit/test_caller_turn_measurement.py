@@ -225,7 +225,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         serialization.PublicFormat.Raw,
     )
     payload = {
-        "schema_id": "gate_0b_audit_capsule_v6",
+        "schema_id": "gate_0b_audit_capsule_v7",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "source_fact_bundle_sha256": "1" * 64,
@@ -314,6 +314,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
         "no_speech_windows": [],
     }
 
+    _normalize_wire_sequences(payload)
     envelope = seal_audit_capsule(
         payload,
         custodian_public_key=public_key,
@@ -397,7 +398,7 @@ def test_audit_capsule_is_allowlisted_and_sealed_to_custodian_key() -> None:
 
 def test_custodian_capsule_derives_all_development_policies_and_no_speech_records() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v6",
+        "schema_id": "gate_0b_audit_capsule_v7",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "source_fact_bundle_sha256": "1" * 64,
@@ -618,7 +619,7 @@ def _literal_wire_capsule() -> dict[str, object]:
         }
 
     return {
-        "schema_id": "gate_0b_audit_capsule_v6",
+        "schema_id": "gate_0b_audit_capsule_v7",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "source_fact_bundle_sha256": "1" * 64,
@@ -687,9 +688,15 @@ def _literal_wire_capsule() -> dict[str, object]:
                     ),
                     fact("response_terminal", 230, 7, response_ordinal=1),
                     fact(
+                        "stream_closed",
+                        230,
+                        8,
+                        activity_ordinal=None,
+                    ),
+                    fact(
                         "teardown_complete",
                         240,
-                        8,
+                        9,
                         activity_ordinal=None,
                     ),
                 ],
@@ -715,7 +722,11 @@ def _literal_wire_capsule() -> dict[str, object]:
     }
 
 
-def _normalize_wire_sequences(capsule: dict[str, object]) -> None:
+def _normalize_wire_sequences(
+    capsule: dict[str, object],
+    *,
+    preserve_stream_close: bool = False,
+) -> None:
     sessions = capsule["sessions"]
     assert isinstance(sessions, list)
     session = sessions[0]
@@ -733,6 +744,55 @@ def _normalize_wire_sequences(capsule: dict[str, object]) -> None:
                 "audio_bytes": 0,
             }
         )
+    opened_epochs = {
+        fact["epoch"] for fact in facts if fact["kind"] == "connection_open"
+    }
+    completed_epochs = {
+        fact["epoch"]
+        for fact in facts
+        if fact["kind"] in {"stream_closed", "observation_complete"}
+    }
+    for epoch in sorted(opened_epochs - completed_epochs):
+        facts.append(
+            {
+                "kind": "stream_closed",
+                "at_ms": max(
+                    fact["at_ms"] for fact in facts if fact["epoch"] == epoch
+                ),
+                "response_ordinal": None,
+                "activity_ordinal": None,
+                "sequence": 100_000,
+                "epoch": epoch,
+                "audio_bytes": 0,
+            }
+        )
+    if not preserve_stream_close:
+        provider_receipt_kinds = {
+            "abnormal_close",
+            "audio_after_terminal",
+            "audio_received",
+            "false_activity",
+            "goaway",
+            "interrupted",
+            "malformed",
+            "response_open",
+            "response_terminal",
+            "tool_call_cancelled",
+            "tool_call_open",
+            "usage_received",
+        }
+        for completion in (
+            fact for fact in facts if fact["kind"] == "stream_closed"
+        ):
+            receipt_times = [
+                fact["at_ms"]
+                for fact in facts
+                if fact["epoch"] == completion["epoch"]
+                and fact["kind"] in provider_receipt_kinds
+            ]
+            if receipt_times:
+                completion["at_ms"] = max(completion["at_ms"], max(receipt_times))
+                completion["sequence"] = 100_000
     facts.sort(key=lambda value: (value["at_ms"], value["sequence"]))
     for sequence, fact in enumerate(facts):
         fact["sequence"] = sequence
@@ -769,6 +829,21 @@ def _normalize_wire_sequences(capsule: dict[str, object]) -> None:
                     "response_ordinal": None,
                     "activity_ordinal": None,
                     "sequence": 0,
+                    "epoch": 1,
+                    "audio_bytes": 0,
+                }
+            )
+        if not any(
+            fact["kind"] in {"stream_closed", "observation_complete"}
+            for fact in window_facts
+        ):
+            window_facts.append(
+                {
+                    "kind": "stream_closed",
+                    "at_ms": max(fact["at_ms"] for fact in window_facts),
+                    "response_ordinal": None,
+                    "activity_ordinal": None,
+                    "sequence": 100_000,
                     "epoch": 1,
                     "audio_bytes": 0,
                 }
@@ -992,6 +1067,31 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
     )
     cancellation = next(record for record in records if record.activity_ordinal == 3)
     assert cancellation.interruption_tail_ms == 50
+
+    ordinary_interruption = deepcopy(post_cancellation_audio)
+    ordinary_activity = next(
+        activity
+        for activity in ordinary_interruption["activities"]  # type: ignore[index]
+        if activity["activity_ordinal"] == 3
+    )
+    ordinary_activity["scenario_tags"] = ["standard"]
+    ordinary_facts = ordinary_interruption["sessions"][0]["wire_facts"]  # type: ignore[index]
+    ordinary_interruption["sessions"][0]["wire_facts"] = [  # type: ignore[index]
+        value
+        for value in ordinary_facts
+        if value["kind"]
+        not in {"tool_call_open", "tool_call_cancelled", "interrupted"}
+    ]
+    _normalize_wire_sequences(ordinary_interruption)
+    ordinary_records, _ = derive_primitive_records_from_capsule(
+        ordinary_interruption,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+    ordinary = next(
+        record for record in ordinary_records if record.activity_ordinal == 3
+    )
+    assert ordinary.interruption_tail_ms == 50
 
     no_open = deepcopy(capsule)
     no_open["sessions"][0]["wire_facts"] = [  # type: ignore[index]
@@ -1827,7 +1927,7 @@ def test_measurement_does_not_apply_chinese_character_units_to_english_reference
 
 def test_compensating_missing_and_extra_turns_follow_causal_activity_ownership() -> None:
     capsule = _literal_wire_capsule()
-    capsule["schema_id"] = "gate_0b_audit_capsule_v6"
+    capsule["schema_id"] = "gate_0b_audit_capsule_v7"
     session = capsule["sessions"][0]  # type: ignore[index]
     session["events"] = [
         {
@@ -2052,9 +2152,78 @@ def test_response_activity_label_must_match_latest_actual_caller_audio() -> None
         )
 
 
+def test_capsule_rejects_incomplete_post_completion_observation_window() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    completion = next(value for value in facts if value["kind"] == "stream_closed")
+    completion["kind"] = "observation_complete"
+    completion["at_ms"] = 3_229
+    _normalize_wire_sequences(capsule)
+
+    with pytest.raises(MeasurementError, match="observation window is incomplete"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
+def test_capsule_rejects_provider_receipt_after_claimed_stream_close() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    completion = next(value for value in facts if value["kind"] == "stream_closed")
+    facts.append(
+        {
+            "kind": "usage_received",
+            "at_ms": completion["at_ms"] + 1,
+            "response_ordinal": None,
+            "activity_ordinal": None,
+            "sequence": 100_000,
+            "epoch": 1,
+            "audio_bytes": 0,
+        }
+    )
+    _normalize_wire_sequences(capsule, preserve_stream_close=True)
+
+    with pytest.raises(MeasurementError, match="completion endpoint is not final"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
+def test_capsule_rejects_caller_output_after_claimed_stream_close() -> None:
+    capsule = _literal_wire_capsule()
+    facts = capsule["sessions"][0]["wire_facts"]  # type: ignore[index]
+    assert isinstance(facts, list)
+    completion = next(value for value in facts if value["kind"] == "stream_closed")
+    facts.append(
+        {
+            "kind": "caller_audio_sent",
+            "at_ms": completion["at_ms"] + 1,
+            "response_ordinal": None,
+            "activity_ordinal": 3,
+            "sequence": 100_000,
+            "epoch": 1,
+            "audio_bytes": 640,
+        }
+    )
+    _normalize_wire_sequences(capsule, preserve_stream_close=True)
+
+    with pytest.raises(MeasurementError, match="completion endpoint is not final"):
+        derive_primitive_records_from_capsule(
+            capsule,
+            policies_ms=(250,),
+            commitment_key=CAMPAIGN_KEY,
+        )
+
+
 def test_capsule_accounting_rejects_missing_units_identity_and_unbounded_failures() -> None:
     capsule = {
-        "schema_id": "gate_0b_audit_capsule_v6",
+        "schema_id": "gate_0b_audit_capsule_v7",
         "campaign_id": "campaign_1",
         "policy_ms": 250,
         "source_fact_bundle_sha256": "1" * 64,

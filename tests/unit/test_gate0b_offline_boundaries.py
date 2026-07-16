@@ -3,6 +3,7 @@
 import ast
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import py_compile
@@ -39,6 +40,9 @@ LIVE_PIPELINES = (
 )
 DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
 RUNBOOK = Path("docs/gemini-caller-turn-qualification-gate-0b.md")
+IMPLEMENTATION_PLAN = Path(
+    "docs/superpowers/plans/2026-07-15-gemini-caller-turn-qualification-gate-0b.md"
+)
 RUNNER = Path("scripts/run_gemini_caller_turn_qualification.py")
 EVALUATOR = Path("scripts/evaluate_gemini_caller_turn_qualification.py")
 ENVIRONMENT_VERIFIER = Path("scripts/verify_qualification_environment.py")
@@ -149,7 +153,9 @@ def _create_runtime(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     bytecode.parent.mkdir()
     py_compile.compile(str(source), cfile=str(bytecode), doraise=True)
     native = package / "approved_native.so"
-    native.write_bytes(b"native-extension")
+    native_source = Path(math.__file__ or "")
+    assert native_source.is_file()
+    shutil.copyfile(native_source, native)
     metadata = site_packages / "approved_package-1.0.0.dist-info" / "METADATA"
     metadata.parent.mkdir()
     metadata.write_text("Name: approved-package\nVersion: 1.0.0\n", encoding="utf-8")
@@ -926,6 +932,52 @@ socket.getaddrinfo = deny
     }
 
 
+def test_provisioned_sensitive_target_rejects_user_mutable_runtime_before_import(
+    tmp_path: Path,
+    qualification_repo: Path,
+) -> None:
+    sentinel = tmp_path / "sensitive-target-imported"
+    approval_root = (
+        qualification_repo
+        / "config/qualification/gate_0b_approval_root.ed25519.pub"
+    )
+    approval_root.write_bytes(b"a" * 32)
+    _install_sentinel_target(qualification_repo, RUNNER, sentinel)
+    _git(qualification_repo, "add", str(approval_root))
+    _git(qualification_repo, "commit", "-m", "provision approval root")
+    probe = _startup_probe(
+        sys.executable,
+        launcher=qualification_repo / TRUSTED_STARTUP,
+    )
+    assert probe.returncode == 0, probe.stderr
+    report = json.loads(probe.stdout)
+
+    completed = subprocess.run(
+        _approved_target_command(
+            sys.executable,
+            qualification_repo,
+            target="run-qualification",
+            source_sha=report["source_preflight"]["source_sha"],
+            site_manifest_sha256=report["runtime_site_packages_manifest"][
+                "manifest_sha256"
+            ],
+            target_args=("--execute",),
+        ),
+        cwd=qualification_repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert json.loads(completed.stdout) == {
+        "error_code": "qualification_startup_invalid",
+        "status": "blocked",
+    }
+    assert sentinel.exists() is False
+
+
 def test_runbook_creates_operator_owned_private_directories(tmp_path: Path) -> None:
     source = RUNBOOK.read_text(encoding="utf-8")
     dry_run_section = source.split("## Dry-Run Template", 1)[1]
@@ -964,6 +1016,7 @@ def test_runbook_creates_operator_owned_private_directories(tmp_path: Path) -> N
 def test_ci_uses_exact_locked_qualification_environment() -> None:
     source = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
     normalized = " ".join(source.split())
+    runbook_normalized = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
 
     assert source.count(APPROVED_UV_INSTALL) == 1
     assert source.index(APPROVED_UV_INSTALL) < source.index("- name: Run tests")
@@ -974,6 +1027,8 @@ def test_ci_uses_exact_locked_qualification_environment() -> None:
         "run: /usr/bin/env -u LD_LIBRARY_PATH uv run --locked --no-sync "
         "--extra dev --python 3.12.13 python -m pytest --tb=short -q"
     ) in normalized
+    assert "python -m pytest --tb=short -q" in runbook_normalized
+    assert "python -m pytest tests/unit" not in runbook_normalized
     assert "python -B -I -S scripts/launch_qualification.py probe" in normalized
     assert "QUALIFICATION_EXPECTED_SOURCE_SHA" in source
     assert "QUALIFICATION_EXPECTED_RUNTIME_SITE_PACKAGES_SHA256" in source
@@ -986,3 +1041,29 @@ def test_ci_uses_exact_locked_qualification_environment() -> None:
     assert "ruff check" in source
     assert "bandit -q -lll" in normalized
     assert 'pip install -e ".[dev]"' not in source
+
+
+def test_plan_routes_environment_verification_through_trusted_launcher() -> None:
+    source = IMPLEMENTATION_PLAN.read_text(encoding="utf-8")
+    normalized = " ".join(source.split())
+
+    assert "python scripts/verify_qualification_environment.py" not in normalized
+    assert normalized.count(
+        "python -B -I -S scripts/launch_qualification.py verify-environment"
+    ) == 2
+    assert "python -m pytest --tb=short -q" in normalized
+
+
+def test_runbook_sensitive_launch_starts_from_external_absolute_python() -> None:
+    source = RUNBOOK.read_text(encoding="utf-8")
+    actual_execution = source.split(
+        "The probe-derived values above are limited to CI and offline dry-run discovery.",
+        1,
+    )[1].split("## Approval Sequence", 1)[0]
+
+    assert "externally provisioned, root-owned" in actual_execution
+    assert (
+        "/opt/hey-kevin-gate0b/bin/python3.12 -B -I -S "
+        "scripts/launch_qualification.py run-qualification"
+    ) in " ".join(actual_execution.split())
+    assert "\npython -B -I -S scripts/launch_qualification.py" not in actual_execution

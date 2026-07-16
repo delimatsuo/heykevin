@@ -1018,6 +1018,9 @@ def _component_digests(
         max_message_bytes=1_024,
         session_timeout_seconds=immutable["usage_caps"]["session_timeout_seconds"],
         response_gap_limit_ms=500,
+        post_completion_observation_ms=immutable["usage_caps"][
+            "post_completion_observation_ms"
+        ],
     )
     setup_identity = build_gate0b_setup_identity(config)
     setup_sha256 = hashlib.sha256(canonical_json_bytes(setup_identity)).hexdigest()
@@ -1584,9 +1587,19 @@ def _validate_published_sample(sample: object) -> None:
     interruption_count = interruption_group.get("count")
     if isinstance(interruption_count, bool) or not isinstance(interruption_count, int):
         raise EvaluationError("published interruption population is invalid")
+    interruption_summary = sample["interruption_tail_ms"]
+    if not isinstance(interruption_summary, Mapping):
+        raise EvaluationError("published interruption timing is invalid")
+    scheduled_interruption_count = interruption_summary.get("scheduled_case_count")
+    if (
+        isinstance(scheduled_interruption_count, bool)
+        or not isinstance(scheduled_interruption_count, int)
+        or not interruption_count <= scheduled_interruption_count <= activity_count
+    ):
+        raise EvaluationError("published interruption population is invalid")
     _validate_timing_summary(
-        sample["interruption_tail_ms"],
-        scheduled_case_count=interruption_count,
+        interruption_summary,
+        scheduled_case_count=scheduled_interruption_count,
     )
     structural = sample["structural_outcomes"]
     if not isinstance(structural, Mapping):
@@ -2004,11 +2017,8 @@ def _evaluate_sample(
     )
 
     first_audio = [record.first_audio_ms for record in records if record.first_audio_ms is not None]
-    interruption = [
-        record.interruption_tail_ms
-        for record in records
-        if "tool_cancellation_interruption" in record.scenario_tags
-    ]
+    interruption_records = _interruption_population(records)
+    interruption = [record.interruption_tail_ms for record in interruption_records]
     wire_zero_fields = (
         "premature_current_audio_count",
         "audio_after_terminal_count",
@@ -2068,7 +2078,7 @@ def _evaluate_sample(
         ),
         "interruption_tail_ms": _timing_summary(
             [value for value in interruption if value is not None],
-            scheduled_case_count=len(interruption),
+            scheduled_case_count=len(interruption_records),
         ),
         "languages": _published_groups(records, key="language"),
         "conditions": _published_groups(records, key="condition"),
@@ -2332,9 +2342,7 @@ def _published_stratum(
     records: Sequence[ActivityPrimitiveRecord],
 ) -> dict[str, Any]:
     successes = sum(_assembly_success(record) for record in records)
-    interruption_cases = [
-        record for record in records if "tool_cancellation_interruption" in record.scenario_tags
-    ]
+    interruption_cases = _interruption_population(records)
     return {
         "count": len(records),
         "suppressed": False,
@@ -2358,6 +2366,17 @@ def _published_stratum(
         ),
         "structural_outcomes": _structural_outcomes(records),
     }
+
+
+def _interruption_population(
+    records: Sequence[ActivityPrimitiveRecord],
+) -> list[ActivityPrimitiveRecord]:
+    return [
+        record
+        for record in records
+        if record.interruption_tail_ms is not None
+        or "tool_cancellation_interruption" in record.scenario_tags
+    ]
 
 
 def _structural_outcomes(

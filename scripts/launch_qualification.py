@@ -87,6 +87,10 @@ NATIVE_EXTENSION_SUFFIXES = (".dll", ".dylib", ".pyd", ".so")
 NATIVE_LOADER_ENV_PREFIXES = ("DYLD_", "LD_")
 DARWIN_LINK_TOOL = "/usr/bin/otool"
 LINUX_LINK_TOOL = "/usr/bin/ldd"
+UNPROVISIONED_APPROVAL_ROOT = b"UNPROVISIONED\n"
+APPROVAL_ROOT_RELATIVE_PATH = (
+    "config/qualification/gate_0b_approval_root.ed25519.pub"
+)
 TARGETS = {
     "evaluate-qualification": "scripts/evaluate_gemini_caller_turn_qualification.py",
     "run-qualification": "scripts/run_gemini_caller_turn_qualification.py",
@@ -443,6 +447,118 @@ def _execute_snapshot_target(
         del sys.meta_path[0]
 
 
+def _require_root_owned_nonwritable_path(path: Path) -> None:
+    candidate = Path(_canonical_path(path))
+    if not candidate.exists() or candidate.is_symlink():
+        raise BootstrapError("externally immutable runtime is unavailable")
+    for current in (candidate, *candidate.parents):
+        try:
+            metadata = current.stat()
+        except OSError as exc:
+            raise BootstrapError(
+                "externally immutable runtime is unavailable"
+            ) from exc
+        if metadata.st_uid != 0 or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise BootstrapError("externally immutable runtime is unavailable")
+    if os.access(candidate, os.W_OK):
+        raise BootstrapError("externally immutable runtime is unavailable")
+
+
+def _require_externally_immutable_tool(path: str) -> None:
+    if os.geteuid() == 0:
+        raise BootstrapError("native dependency inspection tool is mutable")
+    try:
+        _require_root_owned_nonwritable_path(Path(path))
+    except BootstrapError as exc:
+        raise BootstrapError("native dependency inspection tool is mutable") from exc
+
+
+def _require_externally_immutable_runtime(
+    *,
+    runtime_site: str,
+    stdlib_paths: Sequence[str],
+    python_executable: str,
+) -> None:
+    if os.geteuid() == 0:
+        raise BootstrapError("externally immutable runtime requires a non-root process")
+    roots = {
+        Path(_canonical_path(runtime_site)),
+        Path(_canonical_path(python_executable)),
+        *(Path(_canonical_path(value)) for value in stdlib_paths),
+    }
+    for root in sorted(roots, key=lambda value: str(value)):
+        if not root.exists():
+            existing = next((parent for parent in root.parents if parent.exists()), None)
+            if existing is None:
+                raise BootstrapError("externally immutable runtime is unavailable")
+            _require_root_owned_nonwritable_path(existing)
+            continue
+        _require_root_owned_nonwritable_path(root)
+        if not root.is_dir():
+            continue
+        try:
+            descendants = tuple(root.rglob("*"))
+        except OSError as exc:
+            raise BootstrapError("externally immutable runtime is unavailable") from exc
+        for descendant in descendants:
+            _require_root_owned_nonwritable_path(descendant)
+
+
+def _approval_root_is_provisioned(
+    repo_root: str,
+    source_preflight: Mapping[str, object],
+) -> bool:
+    dependencies = source_preflight.get("dependencies")
+    if not isinstance(dependencies, Mapping):
+        raise BootstrapError("approval root source identity is unavailable")
+    identity = dependencies.get(APPROVAL_ROOT_RELATIVE_PATH)
+    if not isinstance(identity, Mapping):
+        raise BootstrapError("approval root source identity is unavailable")
+    expected_sha256 = identity.get("worktree_sha256")
+    if not isinstance(expected_sha256, str):
+        raise BootstrapError("approval root source identity is unavailable")
+    data = _read_executable_source(Path(repo_root, APPROVAL_ROOT_RELATIVE_PATH))
+    if sha256(data).hexdigest() != expected_sha256:
+        raise BootstrapError("approval root source identity changed")
+    return data != UNPROVISIONED_APPROVAL_ROOT
+
+
+def _require_sensitive_target_runtime(
+    *,
+    target: str,
+    target_args: Sequence[str],
+    marker: Mapping[str, object],
+) -> None:
+    sensitive = target == "evaluate-qualification" or (
+        target == "run-qualification" and "--execute" in target_args
+    )
+    if not sensitive:
+        return
+    repo_root = marker.get("repo_root")
+    source_preflight = marker.get("source_preflight")
+    runtime_site = marker.get("runtime_site_packages")
+    stdlib_paths = marker.get("effective_sys_path")
+    python_executable = marker.get("python_executable")
+    if (
+        not isinstance(repo_root, str)
+        or not isinstance(source_preflight, Mapping)
+        or not isinstance(runtime_site, str)
+        or not isinstance(stdlib_paths, list)
+        or not all(isinstance(value, str) for value in stdlib_paths)
+        or not isinstance(python_executable, str)
+    ):
+        raise BootstrapError("trusted startup runtime identity is invalid")
+    if not _approval_root_is_provisioned(repo_root, source_preflight):
+        return
+    _require_externally_immutable_runtime(
+        runtime_site=runtime_site,
+        stdlib_paths=tuple(
+            value for value in stdlib_paths if value not in {repo_root, runtime_site}
+        ),
+        python_executable=python_executable,
+    )
+
+
 def _bytecode_source(path: Path) -> Path:
     if path.parent.name == "__pycache__":
         source_name = path.name.split(".", 1)[0] + ".py"
@@ -691,28 +807,101 @@ def _linked_native_dependencies(
 ) -> tuple[list[Path], set[str]]:
     system = platform.system()
     if system == "Darwin":
-        command = [DARWIN_LINK_TOOL, "-L", str(path)]
+        tool = DARWIN_LINK_TOOL
+        commands = (
+            [tool, "-L", str(path)],
+            [tool, "-D", str(path)],
+            [tool, "-l", str(path)],
+        )
     elif system == "Linux":
-        command = [LINUX_LINK_TOOL, str(path)]
+        tool = LINUX_LINK_TOOL
+        commands = ([tool, str(path)],)
     else:
         raise BootstrapError("native runtime platform is unsupported")
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )  # nosec B603
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise BootstrapError("native runtime dependency inspection failed") from exc
+    _require_externally_immutable_tool(tool)
+    outputs: list[str] = []
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )  # nosec B603
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            raise BootstrapError("native runtime dependency inspection failed") from exc
+        if completed.stderr.strip():
+            raise BootstrapError("native runtime dependency inspection failed")
+        outputs.append(completed.stdout)
     if system == "Darwin":
         return _parse_darwin_dependencies(
-            completed.stdout,
+            outputs[0],
             binary=path,
             executable=executable,
+            install_names=_parse_darwin_install_names(outputs[1]),
+            runpaths=_parse_darwin_runpaths(
+                outputs[2],
+                binary=path,
+                executable=executable,
+            ),
         )
-    return _parse_linux_dependencies(completed.stdout)
+    return _parse_linux_dependencies(outputs[0])
+
+
+def _parse_darwin_install_names(output: str) -> set[str]:
+    install_names: set[str] = set()
+    seen_header = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if raw_line.rstrip().endswith(":"):
+            seen_header = True
+            continue
+        if not seen_header:
+            raise BootstrapError("native runtime dependency inspection failed")
+        install_names.add(line)
+    if not seen_header:
+        raise BootstrapError("native runtime dependency inspection failed")
+    return install_names
+
+
+def _parse_darwin_runpaths(
+    output: str,
+    *,
+    binary: Path,
+    executable: Path,
+) -> tuple[Path, ...]:
+    runpaths: list[Path] = []
+    expect_path = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line == "cmd LC_RPATH":
+            expect_path = True
+            continue
+        if not expect_path:
+            continue
+        if not line.startswith("path ") or " (offset " not in line:
+            continue
+        raw_path = line.removeprefix("path ").split(" (offset ", 1)[0]
+        if raw_path.startswith("@loader_path/"):
+            candidate = binary.parent / raw_path.removeprefix("@loader_path/")
+        elif raw_path.startswith("@executable_path/"):
+            candidate = executable.parent / raw_path.removeprefix("@executable_path/")
+        elif raw_path.startswith("/"):
+            candidate = Path(raw_path)
+        else:
+            raise BootstrapError("native runtime runpath is unsupported")
+        runpaths.append(Path(_canonical_path(candidate)))
+        expect_path = False
+    if expect_path:
+        raise BootstrapError("native runtime dependency inspection failed")
+    return tuple(runpaths)
 
 
 def _parse_darwin_dependencies(
@@ -720,38 +909,41 @@ def _parse_darwin_dependencies(
     *,
     binary: Path,
     executable: Path,
+    install_names: set[str] | None = None,
+    runpaths: Sequence[Path] = (),
 ) -> tuple[list[Path], set[str]]:
     resolved: list[Path] = []
     virtual: set[str] = set()
-    first_load_for_architecture = True
-    for raw_line in output.splitlines()[1:]:
+    seen_header = False
+    ids = set() if install_names is None else install_names
+    for raw_line in output.splitlines():
+        if not raw_line.strip():
+            continue
         if not raw_line.startswith("\t"):
-            first_load_for_architecture = True
+            if not raw_line.rstrip().endswith(":"):
+                raise BootstrapError("native runtime dependency inspection failed")
+            seen_header = True
             continue
+        if not seen_header:
+            raise BootstrapError("native runtime dependency inspection failed")
         line = raw_line.strip()
-        if not line:
-            continue
         load_name = line.split(" (", 1)[0]
-        if first_load_for_architecture and Path(load_name).name == binary.name:
-            first_load_for_architecture = False
+        if load_name in ids:
             continue
-        first_load_for_architecture = False
         if load_name.startswith("@loader_path/"):
             candidate = binary.parent / load_name.removeprefix("@loader_path/")
         elif load_name.startswith("@executable_path/"):
             candidate = executable.parent / load_name.removeprefix("@executable_path/")
         elif load_name.startswith("@rpath/"):
-            local = binary.parent / load_name.removeprefix("@rpath/")
-            if local.is_file():
-                candidate = local
-            else:
-                virtual.add(load_name)
-                continue
+            suffix = load_name.removeprefix("@rpath/")
+            candidates = [runpath / suffix for runpath in runpaths]
+            candidate = next((value for value in candidates if value.is_file()), None)
+            if candidate is None:
+                raise BootstrapError("native runtime dependency is unavailable")
         elif load_name.startswith("/"):
             candidate = Path(load_name)
         else:
-            virtual.add(load_name)
-            continue
+            raise BootstrapError("native runtime dependency is unavailable")
         if candidate.is_file():
             if _canonical_path(candidate) == _canonical_path(binary):
                 continue
@@ -760,6 +952,8 @@ def _parse_darwin_dependencies(
             virtual.add(load_name)
         else:
             raise BootstrapError("native runtime dependency is unavailable")
+    if not seen_header:
+        raise BootstrapError("native runtime dependency inspection failed")
     return resolved, virtual
 
 
@@ -1183,6 +1377,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             target=target,
             expected_source_sha=expected_source_sha,
             expected_runtime_site_packages_sha256=expected_site_sha256,
+        )
+        _require_sensitive_target_runtime(
+            target=target,
+            target_args=target_args,
+            marker=marker,
         )
         source_snapshot = _capture_execution_source_snapshot(
             repo_root,

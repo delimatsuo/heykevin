@@ -639,7 +639,7 @@ def _fragment_is_foreign(
         for reference in references
     ):
         return True
-    return _fragment_contains_unique_foreign_token(
+    return _fragment_contains_foreign_token(
         fragment,
         activity_ordinal=activity_ordinal,
         references=references,
@@ -696,7 +696,7 @@ def _fragment_contains_unique_foreign_sequence(
     )
 
 
-def _fragment_contains_unique_foreign_token(
+def _fragment_contains_foreign_token(
     fragment: str,
     *,
     activity_ordinal: int,
@@ -721,15 +721,9 @@ def _fragment_contains_unique_foreign_token(
             if reference.language == language
             for token in _normalized_tokens(reference.text, language)
         }
-        foreign_owner_counts = Counter(
-            token
-            for reference in foreign_references
-            for token in set(_normalized_tokens(reference.text, language))
-        )
         if any(
             token in candidate_tokens
             and token not in expected_tokens
-            and foreign_owner_counts[token] == 1
             for token in fragment_tokens
         ):
             return True
@@ -1763,7 +1757,6 @@ def _capsule_wire_observation(
                     and value["activity_ordinal"] == prior_ordinal
                     and value["epoch"] == trigger["epoch"]
                     and value["at_ms"] >= trigger["at_ms"]
-                    and value["at_ms"] <= cancellations[0]["at_ms"]
                 ]
                 interruption_tail_ms = (
                     max(value - trigger["at_ms"] for value in tail_audio)

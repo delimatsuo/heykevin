@@ -1626,6 +1626,37 @@ def test_evaluator_vetoes_contamination_even_when_fidelity_metrics_pass() -> Non
     assert sample["passed"] is False
 
 
+def test_evaluator_rejects_missing_scenario_critical_span() -> None:
+    records = tuple(
+        _activity_record(policy_ms=100, ordinal=ordinal, split="development")
+        for ordinal in range(128)
+    )
+    target_index = next(
+        index
+        for index, record in enumerate(records)
+        if "number_dictation" in record.scenario_tags
+    )
+    target = records[target_index]
+    records = (
+        *records[:target_index],
+        replace(
+            target,
+            critical_spans=tuple(
+                fact for fact in target.critical_spans if fact.kind != "digits"
+            ),
+        ),
+        *records[target_index + 1 :],
+    )
+
+    sample = evaluator_module._evaluate_sample(
+        records,
+        no_speech_records=tuple(_no_speech_record(ordinal) for ordinal in range(32)),
+    )
+
+    assert sample["fidelity_passed"] is False
+    assert sample["passed"] is False
+
+
 def test_policy_selection_uses_lowest_passing_development_policy_only() -> None:
     artifact, public_key = _artifact(
         selected_policy_ms=250,

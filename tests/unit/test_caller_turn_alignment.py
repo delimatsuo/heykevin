@@ -176,6 +176,62 @@ def test_corrupted_but_nearest_transcript_fails_critical_span_fidelity() -> None
     }
 
 
+def test_moved_critical_span_does_not_pass_as_exact() -> None:
+    reference = ActivityReference(
+        8,
+        "en",
+        (
+            "please confirm with the customer that the scheduled technician does not "
+            "need emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning"
+        ),
+        critical_spans=(CriticalSpan(CriticalSpanKind.NEGATION, "not"),),
+    )
+
+    result = align_fragments(
+        (
+            "not please confirm with the customer that the scheduled technician does "
+            "need emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning",
+        ),
+        references=(reference,),
+        policy=_policy(),
+    )
+
+    assert result.cer <= Fraction(1, 10)
+    assert result.wer is not None and result.wer <= Fraction(1, 10)
+    assert result.critical_spans[0].exact is False
+    assert result.fidelity_passed is False
+
+
+def test_duplicated_critical_span_does_not_pass_as_exact() -> None:
+    reference = ActivityReference(
+        8,
+        "en",
+        (
+            "please confirm with the customer that the scheduled technician does not "
+            "need emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning"
+        ),
+        critical_spans=(CriticalSpan(CriticalSpanKind.NEGATION, "not"),),
+    )
+
+    result = align_fragments(
+        (
+            "please confirm with the customer that the scheduled technician does not "
+            "not need emergency access to the locked equipment room during the routine "
+            "maintenance visit tomorrow morning",
+        ),
+        references=(reference,),
+        policy=_policy(),
+    )
+
+    assert result.cer <= Fraction(1, 10)
+    assert result.wer is not None and result.wer <= Fraction(1, 10)
+    assert result.critical_spans[0].exact is False
+    assert result.fidelity_passed is False
+
+
 @pytest.mark.parametrize(
     ("language", "reference_text", "candidate", "kind", "span"),
     (

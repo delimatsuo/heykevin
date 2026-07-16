@@ -116,9 +116,13 @@ class ActivityReference:
             normalized_span = normalize_text(span.text, span.language or self.language)
             if not normalized_span.characters:
                 raise ValueError("critical span must contain normalized characters")
+            reference_units, span_units = _comparable_alignment_units(
+                normalized_reference,
+                normalized_span,
+            )
             if _count_sequence_occurrences(
-                normalized_reference.characters,
-                normalized_span.characters,
+                reference_units,
+                span_units,
             ) != 1:
                 raise ValueError("critical span must map uniquely within its reference")
 
@@ -436,14 +440,16 @@ def _score_candidate(
             normalized_transcript.words,
         )
         wer = Fraction(word_edits.distance, len(normalized_reference.words))
-
     critical_outcomes = tuple(
         CriticalSpanOutcome(
             span_ordinal=index,
             kind=span.kind,
-            exact=_contains_sequence(
-                normalized_transcript.characters,
-                normalize_text(span.text, span.language or reference.language).characters,
+            exact=_critical_span_is_exact(
+                normalized_reference,
+                normalized_transcript,
+                normalize_text(span.text, span.language or reference.language),
+                character_distance=character_edits.distance,
+                word_distance=None if word_edits is None else word_edits.distance,
             ),
         )
         for index, span in enumerate(reference.critical_spans)
@@ -461,6 +467,63 @@ def _score_candidate(
         wer=wer,
         critical_spans=critical_outcomes,
         fidelity_passed=fidelity_passed,
+    )
+
+
+def _critical_span_is_exact(
+    reference: NormalizedText,
+    hypothesis: NormalizedText,
+    span: NormalizedText,
+    *,
+    character_distance: int,
+    word_distance: int | None,
+) -> bool:
+    reference_units, hypothesis_units, span_units = _comparable_alignment_units(
+        reference,
+        hypothesis,
+        span,
+    )
+    total_distance = character_distance if span.words is None else word_distance
+    if total_distance is None:
+        return False
+    reference_positions = _sequence_occurrence_indices(reference_units, span_units)
+    hypothesis_positions = _sequence_occurrence_indices(hypothesis_units, span_units)
+    if len(reference_positions) != 1 or len(hypothesis_positions) != 1:
+        return False
+    reference_start = reference_positions[0]
+    span_end = reference_start + len(span_units)
+    hypothesis_start = hypothesis_positions[0]
+    return (
+        compute_edit_counts(
+            reference_units[:reference_start],
+            hypothesis_units[:hypothesis_start],
+        ).distance
+        + compute_edit_counts(
+            reference_units[span_end:],
+            hypothesis_units[hypothesis_start + len(span_units) :],
+        ).distance
+        == total_distance
+    )
+
+
+def _comparable_alignment_units(
+    *values: NormalizedText,
+) -> tuple[tuple[str, ...], ...]:
+    if all(value.words is not None for value in values):
+        return tuple(value.words for value in values)  # type: ignore[return-value]
+    return tuple(value.characters for value in values)
+
+
+def _sequence_occurrence_indices(
+    container: tuple[str, ...],
+    target: tuple[str, ...],
+) -> tuple[int, ...]:
+    if not target:
+        return ()
+    return tuple(
+        index
+        for index in range(len(container) - len(target) + 1)
+        if container[index : index + len(target)] == target
     )
 
 

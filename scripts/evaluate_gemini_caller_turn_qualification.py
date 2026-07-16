@@ -108,6 +108,12 @@ THRESHOLDS = {
     "interruption_tail_p95_ms": 250,
     "interruption_tail_max_ms": 500,
 }
+APPLICABLE_CRITICAL_SPANS = {
+    "number_dictation": "digits",
+    "correction": "correction",
+    "code_switch_english_to_language": "english_to_language",
+    "code_switch_language_to_english": "language_to_english",
+}
 EVIDENCE_CONTEXT_HMAC_DOMAIN = b"gate-0b-evidence-context-v3\x00"
 FINAL_IDENTITY_FIELDS = frozenset(
     {
@@ -1196,6 +1202,7 @@ def _evaluate_sample(
             )
             for group in _groups(records, key="language").values()
         )
+        and _critical_span_contract_passes(records)
         and all(fact.exact for record in records for fact in record.critical_spans)
         and REQUIRED_CRITICAL_KINDS
         <= {fact.kind for record in records for fact in record.critical_spans}
@@ -1277,6 +1284,19 @@ def _evaluate_sample(
         "passed": assembly_passed and fidelity_passed and interaction_passed,
         "published": published,
     }
+
+
+def _critical_span_contract_passes(
+    records: Sequence[ActivityPrimitiveRecord],
+) -> bool:
+    for record in records:
+        kinds = {fact.kind for fact in record.critical_spans}
+        if not kinds or any(
+            tag in record.scenario_tags and kind not in kinds
+            for tag, kind in APPLICABLE_CRITICAL_SPANS.items()
+        ):
+            return False
+    return True
 
 
 def _assembly_success(record: ActivityPrimitiveRecord) -> bool:

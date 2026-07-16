@@ -820,6 +820,33 @@ def test_causal_cancellation_tail_distinguishes_zero_from_missing_evidence() -> 
     cancellation = next(record for record in records if record.activity_ordinal == 3)
     assert cancellation.interruption_tail_ms == 0
 
+    post_cancellation_audio = deepcopy(capsule)
+    delayed_facts = post_cancellation_audio["sessions"][0]["wire_facts"]  # type: ignore[index]
+    terminal = next(
+        value
+        for value in delayed_facts
+        if value["kind"] == "response_terminal" and value["response_ordinal"] == 1
+    )
+    terminal["at_ms"] = 310
+    delayed_facts.append(
+        fact(
+            "audio_received",
+            300,
+            99,
+            activity=2,
+            response=1,
+            audio_bytes=320,
+        )
+    )
+    _normalize_wire_sequences(post_cancellation_audio)
+    records, _ = derive_primitive_records_from_capsule(
+        post_cancellation_audio,
+        policies_ms=(250,),
+        commitment_key=CAMPAIGN_KEY,
+    )
+    cancellation = next(record for record in records if record.activity_ordinal == 3)
+    assert cancellation.interruption_tail_ms == 50
+
     no_open = deepcopy(capsule)
     no_open["sessions"][0]["wire_facts"] = [  # type: ignore[index]
         fact
@@ -1294,7 +1321,7 @@ def test_measurement_detects_unique_foreign_chinese_character() -> None:
     assert record.contamination_count == 1
 
 
-def test_measurement_ignores_single_token_shared_by_foreign_references() -> None:
+def test_measurement_detects_single_token_shared_by_foreign_references() -> None:
     current = ActivityReference(
         3,
         "en",
@@ -1330,7 +1357,7 @@ def test_measurement_ignores_single_token_shared_by_foreign_references() -> None
     )
 
     assert record.assignment_status == "matched"
-    assert record.contamination_count == 0
+    assert record.contamination_count == 1
 
 
 def test_measurement_does_not_apply_chinese_character_units_to_english_reference() -> None:

@@ -255,6 +255,14 @@ cancellation/interruption, close, malformed-message, runaway-output, and teardow
 facts from that session evidence. The storage sink must return a digest-matched
 handoff receipt before an attempt can be marked complete.
 
+Critical spans qualify only when one unique token sequence (or character sequence
+for unsegmented languages) is preserved by an optimal reference-to-hypothesis
+alignment. Moved or duplicated spans fail, and every scenario-specific required span
+kind must be present. Contamination includes a foreign token absent from the current
+reference even when several foreign activities share it. Interruption tail includes
+all causally prior response audio emitted after the new caller-audio trigger,
+including audio that continues after cancellation is observed.
+
 Each sealed capsule retains the complete payload-safe runtime identity report before
 and after its provider split, together with both report hashes. The evaluator binds
 those reports to preregistration, rejects intra-split or cross-split drift, and

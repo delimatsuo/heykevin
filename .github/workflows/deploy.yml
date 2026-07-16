@@ -61,7 +61,8 @@ jobs:
           set -euo pipefail
           umask 077
           probe_path="$RUNNER_TEMP/gate0b-startup-probe.json"
-          uv run --locked --no-sync --extra dev --python 3.12.13 \
+          /usr/bin/env -u LD_LIBRARY_PATH \
+            uv run --locked --no-sync --extra dev --python 3.12.13 \
             python -B -I -S scripts/launch_qualification.py probe > "$probe_path"
           python -B -I -S - "$probe_path" >> "$GITHUB_ENV" <<'PY'
           import json
@@ -81,6 +82,7 @@ jobs:
 
       - name: Capture qualification environment before tests
         run: >-
+          /usr/bin/env -u LD_LIBRARY_PATH
           uv run --locked --no-sync --extra dev --python 3.12.13
           python -B -I -S scripts/launch_qualification.py verify-environment
           --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA"
@@ -88,7 +90,7 @@ jobs:
           --phase before
 
       - name: Run tests
-        run: uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest --tb=short -q
+        run: /usr/bin/env -u LD_LIBRARY_PATH uv run --locked --no-sync --extra dev --python 3.12.13 python -m pytest --tb=short -q
 
       - name: Run qualification static checks
         run: |
@@ -135,6 +137,7 @@ jobs:
 
       - name: Verify qualification environment after tests
         run: >-
+          /usr/bin/env -u LD_LIBRARY_PATH
           uv run --locked --no-sync --extra dev --python 3.12.13
           python -B -I -S scripts/launch_qualification.py verify-environment
           --expected-source-sha "$QUALIFICATION_EXPECTED_SOURCE_SHA"

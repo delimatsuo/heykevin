@@ -662,7 +662,10 @@ def test_loaded_native_image_outside_closure_is_rejected(
         )
 
 
-@pytest.mark.parametrize("variable", ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES"))
+@pytest.mark.parametrize(
+    "variable",
+    ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES"),
+)
 def test_native_loader_environment_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     variable: str,

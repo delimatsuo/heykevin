@@ -65,6 +65,8 @@ import or call any Gate 0B module.
 Run from a clean worktree at the reviewed implementation commit:
 
 ```bash
+# GitHub setup-python exports this loader override; qualification processes do not.
+unset LD_LIBRARY_PATH
 uv lock --check
 uv run --locked --no-sync --extra dev --python 3.12.13 \
   python -m pytest tests/unit --tb=short -q

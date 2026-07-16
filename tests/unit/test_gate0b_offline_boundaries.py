@@ -673,6 +673,13 @@ def test_trusted_startup_requires_bytecode_disabled_at_interpreter_start(
         launcher_module._require_isolated_no_site_startup()
 
 
+def test_ci_removes_hosted_python_loader_override_from_gate0b_processes() -> None:
+    source = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+
+    assert source.count("/usr/bin/env -u LD_LIBRARY_PATH") == 4
+    assert "unset LD_LIBRARY_PATH" in RUNBOOK.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("target", (RUNNER, EVALUATOR, ENVIRONMENT_VERIFIER))
 def test_gate0b_targets_reject_forged_marker_under_normal_python(target: Path) -> None:
     environment = os.environ.copy()
@@ -964,8 +971,8 @@ def test_ci_uses_exact_locked_qualification_environment() -> None:
     assert "run: uv lock --check" in source
     assert "run: uv sync --locked --extra dev --python 3.12.13" in source
     assert (
-        "run: uv run --locked --no-sync --extra dev --python 3.12.13 "
-        "python -m pytest --tb=short -q"
+        "run: /usr/bin/env -u LD_LIBRARY_PATH uv run --locked --no-sync "
+        "--extra dev --python 3.12.13 python -m pytest --tb=short -q"
     ) in normalized
     assert "python -B -I -S scripts/launch_qualification.py probe" in normalized
     assert "QUALIFICATION_EXPECTED_SOURCE_SHA" in source

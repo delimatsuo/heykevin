@@ -63,7 +63,7 @@ or caller digest in the evidence artifact.
 ## Default-Branch Workflow Preflight
 
 The exact-candidate deploy and hardened rollback workflows must already be present
-on `origin/main`. This requires PR #110 to be separately reviewed, authorized, and
+on `origin/main`. This requires PR #112 to be separately reviewed, authorized, and
 merged at its reviewed head. Do not substitute a branch-ref dispatch, a push to
 `staging`, or a manual `gcloud run deploy` command.
 
@@ -75,13 +75,13 @@ Run the read-only, fail-closed preflight before requesting deployment authorizat
   --reviewed-candidate-sha "$REVIEWED_CANDIDATE_SHA" \
   --rollback-revision "$ROLLBACK_REVISION" \
   --candidate-pr 111 \
-  --workflow-pr 110
+  --workflow-pr 112
 ```
 
 The command first binds every mutable candidate identity to the independently
 supplied reviewed SHA. It then fetches remote refs, verifies both PR identities,
 compares the deploy and rollback workflows on `origin/main` with the exact reviewed
-PR #110 versions, and confirms the rollback revision still matches live staging. A
+PR #112 versions, and confirms the rollback revision still matches live staging. A
 `blocked` or `error` result ends the attempt. A `ready` result is evidence only and
 leaves every authorization value false.
 

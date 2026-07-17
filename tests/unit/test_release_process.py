@@ -88,9 +88,10 @@ def test_production_deploy_rejects_candidate_override():
     production_job = workflow.split("deploy-production:", 1)[1]
 
     assert "Production does not accept candidate_sha" in production_job
+    assert 'test -z "$CANDIDATE_SHA"' in production_job
 
 
-def test_deploy_workflow_defaults_observation_shadow_off_and_removes_production_key():
+def test_deploy_workflow_defaults_observation_shadow_off_and_removes_key():
     workflow = Path(".github/workflows/deploy.yml").read_text()
     staging_job = workflow.split("deploy-staging:", 1)[1].split(
         "deploy-production:", 1
@@ -98,12 +99,13 @@ def test_deploy_workflow_defaults_observation_shadow_off_and_removes_production_
     production_job = workflow.split("deploy-production:", 1)[1]
 
     disabled = "RECEPTIONIST_OBSERVATION_SHADOW_ENABLED=false"
-    hmac_key = "RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY"
+    remove_key = (
+        "--remove-secrets RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY"
+    )
     assert disabled in staging_job
     assert disabled in production_job
-    assert f"--remove-env-vars {hmac_key}" in production_job
-    assert hmac_key not in production_job.split("env:", 1)[1].split("steps:", 1)[0]
-    assert 'test -z "$CANDIDATE_SHA"' in production_job
+    assert remove_key in staging_job
+    assert remove_key in production_job
 
 
 def test_staging_release_paths_require_sandbox_apns_before_gcp_auth():

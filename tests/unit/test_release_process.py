@@ -83,6 +83,20 @@ def test_deploy_health_check_requires_exact_deployed_sha():
     assert 'test "$DEPLOYED_SHA" = "$DEPLOY_SHA"' in workflow
 
 
+def test_staging_health_check_uses_the_tagged_candidate_revision():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    staging_job = workflow.split("deploy-staging:", 1)[1].split(
+        "deploy-production:", 1
+    )[0]
+
+    assert "--tag staging" in staging_job
+    assert "--format='json(status.traffic)'" in staging_job
+    assert 'entry.get("tag") == "staging"' in staging_job
+    assert 'test -n "$STAGING_TAG_URL"' in staging_job
+    assert '"$STAGING_TAG_URL/health"' in staging_job
+    assert "--format='value(status.url)'" not in staging_job
+
+
 def test_production_deploy_rejects_candidate_override():
     workflow = Path(".github/workflows/deploy.yml").read_text()
     production_job = workflow.split("deploy-production:", 1)[1]

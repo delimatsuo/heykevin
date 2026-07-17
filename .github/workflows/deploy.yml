@@ -156,17 +156,19 @@ jobs:
       - name: Health check
         run: |
           sleep 15
-          STAGING_URL=$(gcloud run services describe "$STAGING_SERVICE" \
+          STAGING_TRAFFIC=$(gcloud run services describe "$STAGING_SERVICE" \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
-            --format='value(status.url)')
+            --format='json(status.traffic)')
+          STAGING_TAG_URL=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_urls=[entry.get("url", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_urls[0] if len(tagged_urls) == 1 else "")' <<< "$STAGING_TRAFFIC")
+          test -n "$STAGING_TAG_URL" || (echo "Missing tagged staging revision URL" && exit 1)
           HEALTH_JSON=$(curl -sf \
             --retry 5 \
             --retry-all-errors \
             --retry-delay 3 \
             --connect-timeout 5 \
             --max-time 30 \
-            "$STAGING_URL/health")
+            "$STAGING_TAG_URL/health")
           DEPLOYED_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$HEALTH_JSON")
           # DEPLOY_SHA is exported to GITHUB_ENV by the deployment step.
           # shellcheck disable=SC2153

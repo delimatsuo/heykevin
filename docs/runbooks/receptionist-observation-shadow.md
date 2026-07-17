@@ -57,9 +57,32 @@ later `/health.deploy_sha`. The rollback revision must be nonempty. Store only t
 opaque contractor label emitted by the operator tool; do not put the contractor ID
 or caller digest in the evidence artifact.
 
+## Default-Branch Workflow Preflight
+
+The exact-candidate deploy and hardened rollback workflows must already be present
+on `origin/main`. This requires PR #110 to be separately reviewed, authorized, and
+merged at its reviewed head. Do not substitute a branch-ref dispatch, a push to
+`staging`, or a manual `gcloud run deploy` command.
+
+Run the read-only, fail-closed preflight before requesting deployment authorization:
+
+```bash
+.venv/bin/python scripts/verify_receptionist_observation_shadow_release.py \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --rollback-revision "$ROLLBACK_REVISION" \
+  --candidate-pr 111 \
+  --workflow-pr 110
+```
+
+The command fetches remote refs, verifies both PR identities, compares the deploy
+and rollback workflows on `origin/main` with the exact reviewed PR #110 versions,
+and confirms the rollback revision still matches live staging. A `blocked` or
+`error` result ends the attempt. A `ready` result is evidence only and leaves every
+authorization value false.
+
 ## Exact-SHA Staging Deployment
 
-Run only after explicit staging-deployment authorization:
+Run only after a `ready` preflight and explicit staging-deployment authorization:
 
 ```bash
 gh workflow run deploy.yml \

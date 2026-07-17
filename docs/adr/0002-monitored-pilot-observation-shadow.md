@@ -98,15 +98,18 @@ reviewed gates complete, every evidence package must preserve these values:
   "active_control_validated": false,
   "provider_execution_authorized": false,
   "real_caller_data_authorized": false,
-  "staging_authorized": false,
+  "staging_deployment_authorized": false,
+  "staging_flag_enablement_authorized": false,
   "production_authorized": false,
   "release_authorized": false
 }
 ```
 
-`staging_authorized` becomes true only in the separately recorded staging
-enablement artifact for one exact SHA, contractor, caller HMAC digest, and expiry.
-It is not changed by code review, merge, or deployment alone.
+`staging_deployment_authorized` and `staging_flag_enablement_authorized` are
+separate decisions. The deployment value applies only to one exact SHA and leaves
+the shadow forced off. The enablement value applies only to the separately recorded
+contractor, caller HMAC digest, and expiry. Neither is changed by code review or
+merge, and deployment alone never changes the enablement value.
 
 ## Implementation Gates
 

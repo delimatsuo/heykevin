@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     allow_production_resources_in_non_production: bool = False
     log_level: str = "INFO"
     port: int = 8080
+    deploy_sha: str = ""
 
     # Application-level encryption for call transcripts at rest (F-11).
     # 32-byte AES-256-GCM key, base64 encoded. Generate with

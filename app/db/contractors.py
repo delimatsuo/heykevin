@@ -27,6 +27,7 @@ PROTECTED_FIELDS = frozenset({
     "jobber_lead_capture_enabled",
     # Staging diagnostics — operator-only, short-lived, test-caller allowlisting.
     "receptionist_observation_shadow_enabled",
+    "receptionist_observation_shadow_authorized_sha",
     "receptionist_observation_shadow_expires_at",
     "receptionist_observation_shadow_caller_digests",
     # Identity bindings — written only at account creation / authenticated migration.

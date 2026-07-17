@@ -21,6 +21,7 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
+_DEPLOY_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 _SUPPORTED_LIFECYCLE_KINDS = frozenset(
     {
         CallerTurnEventKind.CONNECTION_CLOSED,
@@ -53,6 +54,16 @@ def _is_authorized(
     if settings.receptionist_observation_shadow_enabled is not True:
         return False
     if contractor_config.get("receptionist_observation_shadow_enabled") is not True:
+        return False
+    authorized_sha = contractor_config.get(
+        "receptionist_observation_shadow_authorized_sha"
+    )
+    if (
+        not isinstance(authorized_sha, str)
+        or _DEPLOY_SHA_PATTERN.fullmatch(authorized_sha) is None
+        or _DEPLOY_SHA_PATTERN.fullmatch(settings.deploy_sha or "") is None
+        or not hmac.compare_digest(authorized_sha, settings.deploy_sha)
+    ):
         return False
 
     expires_at = contractor_config.get("receptionist_observation_shadow_expires_at")

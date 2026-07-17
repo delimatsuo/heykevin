@@ -31,6 +31,7 @@ from app.services.receptionist_observation_shadow import (
 
 TEST_CALLER = "synthetic-test-caller"
 TEST_HMAC_KEY = "k" * 32
+TEST_DEPLOY_SHA = "a" * 40
 
 
 async def _noop(*_args, **_kwargs):
@@ -50,6 +51,7 @@ def _contractor_config(*, now: int, caller: str = TEST_CALLER) -> dict:
         "contractor_id": "synthetic-staging-contractor",
         "business_name": "Synthetic Services",
         "receptionist_observation_shadow_enabled": True,
+        "receptionist_observation_shadow_authorized_sha": TEST_DEPLOY_SHA,
         "receptionist_observation_shadow_expires_at": now + 600,
         "receptionist_observation_shadow_caller_digests": [
             compute_caller_hmac_digest(caller, TEST_HMAC_KEY)
@@ -59,6 +61,7 @@ def _contractor_config(*, now: int, caller: str = TEST_CALLER) -> dict:
 
 def _configure_staging(monkeypatch) -> None:
     monkeypatch.setattr(settings, "environment", "staging")
+    monkeypatch.setattr(settings, "deploy_sha", TEST_DEPLOY_SHA, raising=False)
     monkeypatch.setattr(settings, "receptionist_observation_shadow_enabled", True)
     monkeypatch.setattr(
         settings,
@@ -75,6 +78,7 @@ def _configure_staging(monkeypatch) -> None:
 def test_observation_shadow_release_fields_are_server_protected():
     assert {
         "receptionist_observation_shadow_enabled",
+        "receptionist_observation_shadow_authorized_sha",
         "receptionist_observation_shadow_expires_at",
         "receptionist_observation_shadow_caller_digests",
     } <= PROTECTED_FIELDS
@@ -88,6 +92,7 @@ def test_observation_shadow_release_fields_are_server_protected():
         {"global_enabled": False},
         {"account_enabled": False},
         {"account_enabled": "true"},
+        {"authorized_sha": "b" * 40},
         {"expires_at": 0},
         {"expires_at": "later"},
         {"expires_at": 5_000},
@@ -121,6 +126,7 @@ def test_builder_fails_closed_unless_every_staging_test_gate_matches(
         )
     field_changes = {
         "account_enabled": "receptionist_observation_shadow_enabled",
+        "authorized_sha": "receptionist_observation_shadow_authorized_sha",
         "expires_at": "receptionist_observation_shadow_expires_at",
         "caller_digests": "receptionist_observation_shadow_caller_digests",
     }

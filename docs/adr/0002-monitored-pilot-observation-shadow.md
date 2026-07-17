@@ -51,9 +51,11 @@ The sidecar may initialize only when every condition is true:
 2. The global observation-shadow flag is the boolean `true`.
 3. The contractor observation-shadow flag is the boolean `true` and is protected
    from client profile updates.
-4. The contractor authorization has a future expiry within the configured maximum
+4. The contractor authorization names the exact 40-character `DEPLOY_SHA` reported
+   by the running revision.
+5. The contractor authorization has a future expiry within the configured maximum
    window.
-5. The caller identifier matches a contractor allowlist using a dedicated HMAC key;
+6. The caller identifier matches a contractor allowlist using a dedicated HMAC key;
    raw caller identifiers and allowlist digests are never logged.
 
 Production startup must reject an enabled global observation-shadow flag. The

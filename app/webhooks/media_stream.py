@@ -157,6 +157,7 @@ MAX_MEDIA_INGRESS_AUDIO_CHUNKS = 600
 class _TwilioIngressEvent:
     kind: str
     audio: bytes = b""
+    received_at: float = 0.0
 
 
 class _TwilioMediaIngress:
@@ -181,6 +182,8 @@ class _TwilioMediaIngress:
         self.buffered_audio_bytes = 0
         self.buffered_audio_chunks = 0
         self.high_water_audio_bytes = 0
+        self.delivery_lag_samples = 0
+        self.max_delivery_lag_ms = 0
         self.overflowed = False
         self.stop_received = False
         self.ended = False
@@ -272,7 +275,11 @@ class _TwilioMediaIngress:
                     break
 
                 self._queue.put_nowait(
-                    _TwilioIngressEvent(kind="media", audio=audio)
+                    _TwilioIngressEvent(
+                        kind="media",
+                        audio=audio,
+                        received_at=time.monotonic(),
+                    )
                 )
                 self.buffered_audio_bytes = attempted_bytes
                 self.buffered_audio_chunks = attempted_chunks
@@ -293,6 +300,12 @@ class _TwilioMediaIngress:
         if event and event.kind == "media":
             self.buffered_audio_bytes -= len(event.audio)
             self.buffered_audio_chunks -= 1
+            if event.received_at > 0:
+                self.delivery_lag_samples += 1
+                self.max_delivery_lag_ms = max(
+                    self.max_delivery_lag_ms,
+                    max(0, round((time.monotonic() - event.received_at) * 1000)),
+                )
         return event
 
 
@@ -315,40 +328,50 @@ async def _consume_twilio_ingress(
     on_stream_stop,
     on_max_duration,
 ) -> str:
-    ready = await pipeline.wait_until_audio_ready()
-    if not ready:
-        return "pipeline_unavailable"
+    try:
+        ready = await pipeline.wait_until_audio_ready()
+        if not ready:
+            return "pipeline_unavailable"
 
-    elapsed_ms = (
-        max(0, round((time.monotonic() - media_stream_started_at) * 1000))
-        if media_stream_started_at > 0
-        else 0
-    )
-    logger.info(
-        "voice_timing event=inbound_media_ready call=%s "
-        "call_elapsed_ms=%s buffered_audio_ms=%s buffered_chunks=%s",
-        _call_label(call_sid),
-        elapsed_ms,
-        round(ingress.buffered_audio_bytes / 8),
-        ingress.buffered_audio_chunks,
-    )
+        elapsed_ms = (
+            max(0, round((time.monotonic() - media_stream_started_at) * 1000))
+            if media_stream_started_at > 0
+            else 0
+        )
+        logger.info(
+            "voice_timing event=inbound_media_ready call=%s "
+            "call_elapsed_ms=%s buffered_audio_ms=%s buffered_chunks=%s",
+            _call_label(call_sid),
+            elapsed_ms,
+            round(ingress.buffered_audio_bytes / 8),
+            ingress.buffered_audio_chunks,
+        )
 
-    while True:
-        if ingress.overflowed:
-            return "overflow"
-        event = await ingress.receive()
-        if ingress.overflowed:
-            return "overflow"
-        if event is None:
-            return "closed"
-        if time.time() - call_started_at > max_call_duration_seconds:
-            await on_max_duration()
-            return "max_duration"
-        if event.kind == "media":
-            await pipeline.process_audio_in(event.audio)
-        elif event.kind == "stop":
-            await on_stream_stop()
-            return "stop"
+        while True:
+            if ingress.overflowed:
+                return "overflow"
+            event = await ingress.receive()
+            if ingress.overflowed:
+                return "overflow"
+            if event is None:
+                return "closed"
+            if time.time() - call_started_at > max_call_duration_seconds:
+                await on_max_duration()
+                return "max_duration"
+            if event.kind == "media":
+                await pipeline.process_audio_in(event.audio)
+            elif event.kind == "stop":
+                await on_stream_stop()
+                return "stop"
+    finally:
+        logger.info(
+            "voice_timing event=inbound_media_delivery_summary call=%s "
+            "samples=%s max_delivery_lag_ms=%s max_queue_audio_ms=%s",
+            _call_label(call_sid),
+            ingress.delivery_lag_samples,
+            ingress.max_delivery_lag_ms,
+            round(ingress.high_water_audio_bytes / 8),
+        )
 
 
 async def _serve_pipeline_ingress(

@@ -70,6 +70,8 @@ async def test_twilio_ingress_buffers_audio_in_order_under_a_byte_bound():
     assert closed_event is None
     assert ingress.buffered_audio_bytes == 0
     assert ingress.buffered_audio_chunks == 0
+    assert ingress.delivery_lag_samples == 2
+    assert ingress.max_delivery_lag_ms >= 0
 
 
 @pytest.mark.asyncio

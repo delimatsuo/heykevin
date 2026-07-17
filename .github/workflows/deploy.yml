@@ -161,18 +161,38 @@ jobs:
             --region "$GCP_REGION" \
             --format='json(status.traffic)')
           STAGING_TAG_URL=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_urls=[entry.get("url", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_urls[0] if len(tagged_urls) == 1 else "")' <<< "$STAGING_TRAFFIC")
+          STAGING_TAG_REVISION=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_revisions=[entry.get("revisionName", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_revisions[0] if len(tagged_revisions) == 1 else "")' <<< "$STAGING_TRAFFIC")
           test -n "$STAGING_TAG_URL" || (echo "Missing tagged staging revision URL" && exit 1)
-          HEALTH_JSON=$(curl -sf \
+          test -n "$STAGING_TAG_REVISION" || (echo "Missing tagged staging revision" && exit 1)
+          CANDIDATE_HEALTH_JSON=$(curl -sf \
             --retry 5 \
             --retry-all-errors \
             --retry-delay 3 \
             --connect-timeout 5 \
             --max-time 30 \
             "$STAGING_TAG_URL/health")
-          DEPLOYED_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$HEALTH_JSON")
+          CANDIDATE_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$CANDIDATE_HEALTH_JSON")
           # DEPLOY_SHA is exported to GITHUB_ENV by the deployment step.
           # shellcheck disable=SC2153
-          test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Staging health deploy SHA mismatch" && exit 1)
+          test "$CANDIDATE_SHA" = "$DEPLOY_SHA" || (echo "Tagged staging candidate deploy SHA mismatch" && exit 1)
+          gcloud run services update-traffic "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --to-revisions="${STAGING_TAG_REVISION}=100"
+          STAGING_URL=$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='value(status.url)')
+          HEALTH_JSON=$(curl -sf \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            --connect-timeout 5 \
+            --max-time 30 \
+            "$STAGING_URL/health")
+          DEPLOYED_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$HEALTH_JSON")
+          # shellcheck disable=SC2153
+          test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Staging traffic deploy SHA mismatch" && exit 1)
           echo "Staging health verified for deploy SHA $DEPLOY_SHA"
 
   deploy-production:

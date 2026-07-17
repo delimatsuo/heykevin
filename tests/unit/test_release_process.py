@@ -94,7 +94,15 @@ def test_staging_health_check_uses_the_tagged_candidate_revision():
     assert 'entry.get("tag") == "staging"' in staging_job
     assert 'test -n "$STAGING_TAG_URL"' in staging_job
     assert '"$STAGING_TAG_URL/health"' in staging_job
-    assert "--format='value(status.url)'" not in staging_job
+    assert 'test -n "$STAGING_TAG_REVISION"' in staging_job
+    assert 'test "$CANDIDATE_SHA" = "$DEPLOY_SHA"' in staging_job
+    assert 'gcloud run services update-traffic "$STAGING_SERVICE"' in staging_job
+    assert '--to-revisions="${STAGING_TAG_REVISION}=100"' in staging_job
+    assert staging_job.index('test "$CANDIDATE_SHA" = "$DEPLOY_SHA"') < staging_job.index(
+        'gcloud run services update-traffic "$STAGING_SERVICE"'
+    )
+    assert "--format='value(status.url)'" in staging_job
+    assert '"$STAGING_URL/health"' in staging_job
 
 
 def test_production_deploy_rejects_candidate_override():
@@ -191,10 +199,10 @@ def test_release_health_checks_retry_transient_failures_with_timeouts():
         for path in (".github/workflows/deploy.yml", ".github/workflows/rollback.yml")
     )
 
-    assert workflows.count("--retry 5") == 3
-    assert workflows.count("--retry-all-errors") == 3
-    assert workflows.count("--connect-timeout 5") == 3
-    assert workflows.count("--max-time 30") == 3
+    assert workflows.count("--retry 5") == 4
+    assert workflows.count("--retry-all-errors") == 4
+    assert workflows.count("--connect-timeout 5") == 4
+    assert workflows.count("--max-time 30") == 4
 
 
 def test_temporary_gcp_credentials_are_excluded_from_build_contexts():

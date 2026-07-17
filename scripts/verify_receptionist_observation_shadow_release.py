@@ -44,11 +44,16 @@ class ReleaseContext:
 def verify_release_prerequisites(
     *,
     candidate_sha: str,
+    reviewed_candidate_sha: str,
     rollback_revision: str,
     context: ReleaseContext,
 ) -> dict[str, Any]:
     if SHA_PATTERN.fullmatch(candidate_sha) is None:
         raise PreflightError("candidate SHA must be an exact lowercase commit SHA")
+    if SHA_PATTERN.fullmatch(reviewed_candidate_sha) is None:
+        raise PreflightError("reviewed candidate SHA must be an exact lowercase commit SHA")
+    if candidate_sha != reviewed_candidate_sha:
+        raise PreflightError("candidate SHA does not match the independently reviewed SHA")
     if ROLLBACK_PATTERN.fullmatch(rollback_revision) is None:
         raise PreflightError("rollback revision is invalid")
     if context.local_head != candidate_sha:
@@ -79,6 +84,7 @@ def verify_release_prerequisites(
     return {
         "status": "ready",
         "candidate_sha": candidate_sha,
+        "reviewed_candidate_sha": reviewed_candidate_sha,
         "rollback_revision": rollback_revision,
         "candidate_identity_verified": True,
         "default_branch_workflows_verified": True,
@@ -174,6 +180,11 @@ def _collect_context(*, candidate_pr: int, workflow_pr: int) -> ReleaseContext:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument(
+        "--reviewed-candidate-sha",
+        required=True,
+        help="exact SHA copied from the independent review record; never derive it from Git",
+    )
     parser.add_argument("--rollback-revision", required=True)
     parser.add_argument("--candidate-pr", type=int, default=REQUIRED_CANDIDATE_PR)
     parser.add_argument("--workflow-pr", type=int, default=REQUIRED_WORKFLOW_PR)
@@ -193,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         summary = verify_release_prerequisites(
             candidate_sha=args.candidate_sha,
+            reviewed_candidate_sha=args.reviewed_candidate_sha,
             rollback_revision=args.rollback_revision,
             context=context,
         )

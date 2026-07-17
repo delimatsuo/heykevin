@@ -46,13 +46,16 @@ Before a separately authorized deployment, record:
 
 ```bash
 CANDIDATE_SHA="$(git rev-parse origin/codex/voice-pilot-shadow)"
+REVIEWED_CANDIDATE_SHA=<copy-exact-sha-from-independent-review-record>
 ROLLBACK_REVISION="$(gcloud run services describe kevin-api-staging \
   --project kevin-491315 \
   --region us-central1 \
   --format='value(status.latestReadyRevisionName)')"
 ```
 
-The candidate must equal the current remote branch head, PR head, reviewed SHA, and
+Never derive `REVIEWED_CANDIDATE_SHA` from Git, the remote branch, or the PR. Copy it
+from the completed independent exact-head review record. The candidate must equal
+that independent value, the current remote branch head, PR head, local head, and
 later `/health.deploy_sha`. The rollback revision must be nonempty. Store only the
 opaque contractor label emitted by the operator tool; do not put the contractor ID
 or caller digest in the evidence artifact.
@@ -69,16 +72,18 @@ Run the read-only, fail-closed preflight before requesting deployment authorizat
 ```bash
 .venv/bin/python scripts/verify_receptionist_observation_shadow_release.py \
   --candidate-sha "$CANDIDATE_SHA" \
+  --reviewed-candidate-sha "$REVIEWED_CANDIDATE_SHA" \
   --rollback-revision "$ROLLBACK_REVISION" \
   --candidate-pr 111 \
   --workflow-pr 110
 ```
 
-The command fetches remote refs, verifies both PR identities, compares the deploy
-and rollback workflows on `origin/main` with the exact reviewed PR #110 versions,
-and confirms the rollback revision still matches live staging. A `blocked` or
-`error` result ends the attempt. A `ready` result is evidence only and leaves every
-authorization value false.
+The command first binds every mutable candidate identity to the independently
+supplied reviewed SHA. It then fetches remote refs, verifies both PR identities,
+compares the deploy and rollback workflows on `origin/main` with the exact reviewed
+PR #110 versions, and confirms the rollback revision still matches live staging. A
+`blocked` or `error` result ends the attempt. A `ready` result is evidence only and
+leaves every authorization value false.
 
 ## Exact-SHA Staging Deployment
 

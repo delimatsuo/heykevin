@@ -51,6 +51,7 @@ def _context(**changes) -> ReleaseContext:
 def test_preflight_accepts_only_exact_reviewed_release_identity():
     summary = verify_release_prerequisites(
         candidate_sha=CANDIDATE_SHA,
+        reviewed_candidate_sha=CANDIDATE_SHA,
         rollback_revision=ROLLBACK_REVISION,
         context=_context(),
     )
@@ -58,6 +59,7 @@ def test_preflight_accepts_only_exact_reviewed_release_identity():
     assert summary == {
         "status": "ready",
         "candidate_sha": CANDIDATE_SHA,
+        "reviewed_candidate_sha": CANDIDATE_SHA,
         "rollback_revision": ROLLBACK_REVISION,
         "candidate_identity_verified": True,
         "default_branch_workflows_verified": True,
@@ -122,33 +124,60 @@ def test_preflight_rejects_identity_or_default_branch_drift(changes, message):
     with pytest.raises(PreflightError, match=message):
         verify_release_prerequisites(
             candidate_sha=CANDIDATE_SHA,
+            reviewed_candidate_sha=CANDIDATE_SHA,
             rollback_revision=ROLLBACK_REVISION,
             context=_context(**changes),
         )
 
 
 @pytest.mark.parametrize(
-    ("candidate_sha", "rollback_revision"),
+    ("candidate_sha", "reviewed_candidate_sha", "rollback_revision"),
     [
-        ("short", ROLLBACK_REVISION),
-        (CANDIDATE_SHA, "kevin-api-00076-nug"),
+        ("short", CANDIDATE_SHA, ROLLBACK_REVISION),
+        (CANDIDATE_SHA, "short", ROLLBACK_REVISION),
+        (CANDIDATE_SHA, CANDIDATE_SHA, "kevin-api-00076-nug"),
     ],
 )
 def test_preflight_rejects_malformed_release_identifiers(
     candidate_sha,
+    reviewed_candidate_sha,
     rollback_revision,
 ):
     with pytest.raises(PreflightError):
         verify_release_prerequisites(
             candidate_sha=candidate_sha,
+            reviewed_candidate_sha=reviewed_candidate_sha,
             rollback_revision=rollback_revision,
             context=_context(),
+        )
+
+
+def test_preflight_rejects_newer_self_consistent_head_after_review():
+    newer_sha = "b" * 40
+    newer_context = _context(
+        local_head=newer_sha,
+        remote_heads={HEAD_BRANCH: newer_sha},
+        candidate_pr={
+            "state": "OPEN",
+            "headRefOid": newer_sha,
+            "headRefName": HEAD_BRANCH,
+            "baseRefName": REQUIRED_CANDIDATE_BASE,
+        },
+    )
+
+    with pytest.raises(PreflightError, match="independently reviewed"):
+        verify_release_prerequisites(
+            candidate_sha=newer_sha,
+            reviewed_candidate_sha=CANDIDATE_SHA,
+            rollback_revision=ROLLBACK_REVISION,
+            context=newer_context,
         )
 
 
 def test_ready_summary_remains_nonauthorizing():
     summary = verify_release_prerequisites(
         candidate_sha=CANDIDATE_SHA,
+        reviewed_candidate_sha=CANDIDATE_SHA,
         rollback_revision=ROLLBACK_REVISION,
         context=_context(),
     )

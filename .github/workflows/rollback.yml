@@ -129,7 +129,7 @@ jobs:
 
       - name: Write trusted Cloud Build source policy
         if: inputs.method == 'redeploy-tag'
-        run: printf '%s\n' "$CLOUD_BUILD_IGNORE_POLICY" > "$RUNNER_TEMP/kevin-release.gcloudignore"
+        run: printf '%s\n' "$CLOUD_BUILD_IGNORE_POLICY" > .gcloudignore
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -176,7 +176,6 @@ jobs:
           fi
           gcloud run deploy "$SERVICE" \
             --source . \
-            --ignore-file "$RUNNER_TEMP/kevin-release.gcloudignore" \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
             --allow-unauthenticated \

@@ -202,19 +202,19 @@ def test_temporary_gcp_credentials_are_excluded_from_build_contexts():
 def test_source_deploys_use_workflow_owned_cloud_build_allowlist():
     deploy_workflow = Path(".github/workflows/deploy.yml").read_text()
     rollback_workflow = Path(".github/workflows/rollback.yml").read_text()
-    ignore_flag = '--ignore-file "$RUNNER_TEMP/kevin-release.gcloudignore"'
+    policy_write = 'printf \'%s\\n\' "$CLOUD_BUILD_IGNORE_POLICY" > .gcloudignore'
 
     for workflow in (deploy_workflow, rollback_workflow):
         assert "CLOUD_BUILD_IGNORE_POLICY: |-" in workflow
-        assert 'printf \'%s\\n\' "$CLOUD_BUILD_IGNORE_POLICY"' in workflow
+        assert "--ignore-file" not in workflow
         assert "gha-creds-*.json" in workflow
         assert "!Dockerfile" in workflow
         assert "!app/**" in workflow
 
     assert deploy_workflow.count("--source .") == 2
-    assert deploy_workflow.count(ignore_flag) == 2
+    assert deploy_workflow.count(policy_write) == 2
     assert rollback_workflow.count("--source .") == 1
-    assert rollback_workflow.count(ignore_flag) == 1
+    assert rollback_workflow.count(policy_write) == 1
 
 
 def test_public_apple_trust_anchors_are_included_in_docker_context():

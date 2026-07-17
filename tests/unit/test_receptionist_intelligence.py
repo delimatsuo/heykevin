@@ -589,6 +589,35 @@ def test_gemini_greetings_are_bounded_and_disclose_ai_transcription():
     assert "currently closed" in greetings[2]
 
 
+def test_gemini_long_business_name_greetings_remain_within_word_budget():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    long_name_config = _plumbing_config() | {
+        "business_name": "North Shore Emergency Plumbing and Heating Services",
+    }
+    business = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=long_name_config,
+    )
+    after_hours = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=long_name_config,
+    )
+    after_hours._after_hours = True
+
+    greetings = [business._build_greeting_text(), after_hours._build_greeting_text()]
+
+    assert all(len(greeting.split()) <= 24 for greeting in greetings)
+    assert all("may be transcribed and summarized" in greeting for greeting in greetings)
+    assert all("North Shore Emergency Plumbing and Heating" in greeting for greeting in greetings)
+
+
 @pytest.mark.asyncio
 async def test_gemini_start_sends_exact_greeting_and_safe_startup_metrics(
     monkeypatch,
@@ -933,6 +962,35 @@ async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=audio_backlog_overflow" in messages
     assert "12345678" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gemini_audio_queue_preserves_audio_until_byte_budget_is_reached(
+    monkeypatch,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ensure_audio_playout_task = lambda: None
+
+    audio_chunk = b"x" * 320  # 40 ms of 8 kHz mulaw audio.
+    for _ in range(129):
+        await pipeline._enqueue_model_audio(audio_chunk)
+
+    assert pipeline._audio_queue.qsize() == 129
+    assert pipeline._queued_audio_bytes == 129 * len(audio_chunk)
+    assert not pipeline._audio_backlog_overflowed
 
 
 @pytest.mark.asyncio

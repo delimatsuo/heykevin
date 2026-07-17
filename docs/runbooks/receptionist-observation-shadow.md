@@ -2,17 +2,25 @@
 
 ## Status And Boundaries
 
-This runbook is for synthetic calls made by the maintainer to the isolated staging
-service. It does not authorize a deployment, flag change, customer call, semantic
-extraction, controller decision, merge, production action, or changes to PR #76.
+The completed staging deployment is a **shadow-off deployment baseline only**. It
+does not authorize a flag change, synthetic or customer call, contractor/test-caller
+authorization, secret creation, semantic extraction, controller decision, merge,
+production action, or changes to PR #76.
+
+The high-assurance Gate 0B provider-qualification program is intentionally archived
+at closed PR #109. Its checked-in Gate 0A predecessor remains fail-closed for
+provider execution, and its corpus manifest remains pending. Do not run a synthetic
+call window or enable the observation service until a separately authorized
+successor Gate 0B plan, implementation, immutable preregistration, and approval
+artifact are complete.
 
 Keep these decisions separate:
 
 1. code and exact-SHA review;
 2. staging deployment;
-3. staging service flag and secret mount;
-4. contractor/test-caller authorization;
-5. each structured call window;
+3. staging service flag and secret mount (deferred);
+4. contractor/test-caller authorization (deferred);
+5. each structured call window (deferred);
 6. rollback or cleanup;
 7. any later controller work.
 
@@ -102,6 +110,10 @@ deploy does not authorize flag enablement.
 
 ## Shadow-Off Window
 
+**Deferred. Do not execute.** The required Gate 0B successor and its immutable
+approval artifact do not exist. The requirements below are retained for a future
+separately authorized pilot; they are not authorization to place any call.
+
 With `RECEPTIONIST_OBSERVATION_SHADOW_ENABLED=false`, run the pre-registered
 synthetic call script. Capture payload-free voice metrics for:
 
@@ -117,6 +129,11 @@ Do not capture or export transcript text, phone values, raw Gemini messages, aud
 tool arguments, prompts, or exception bodies.
 
 ## Service Enablement
+
+**Deferred. Do not execute.** No separate flag-enablement authorization exists, and
+the Gate 0B prerequisite described above remains unmet. Do not create the secret,
+mount an HMAC key, set the observation flag to `true`, or write contractor
+authorization.
 
 Run only after separate flag-enablement authorization. Create or update a dedicated
 staging secret; never reuse a live provider, admin, OAuth, or production secret.
@@ -157,6 +174,9 @@ Firestore client or writing protected fields. Authorization expires automaticall
 and becomes invalid after any deploy SHA change.
 
 ## Shadow-On Window
+
+**Deferred. Do not execute.** This window requires the future Gate 0B approval,
+the enabled service, and short-lived contractor authorization described above.
 
 Use the same synthetic scripts and call counts as the shadow-off window. The pilot
 requires two separate windows overall, each with at least:

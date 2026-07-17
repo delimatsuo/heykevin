@@ -215,6 +215,9 @@ def test_source_deploys_use_workflow_owned_cloud_build_allowlist():
     assert deploy_workflow.count(policy_write) == 2
     assert rollback_workflow.count("--source .") == 1
     assert rollback_workflow.count(policy_write) == 1
+    assert rollback_workflow.index('git checkout --detach "$ROLLBACK_COMMIT_SHA"') < (
+        rollback_workflow.index(policy_write)
+    ) < rollback_workflow.index('gcloud run deploy "$SERVICE"')
 
 
 def test_public_apple_trust_anchors_are_included_in_docker_context():

@@ -34,6 +34,23 @@ CURRENT_MANIFEST = Path("tests/fixtures/caller_turn_audio/manifest.json")
 RUNNER_PATH = Path("scripts/qualify_gemini_caller_turn_assembly.py")
 EVALUATOR_PATH = Path("scripts/evaluate_caller_turn_assembly.py")
 PIPELINE_PATH = Path("app/services/gemini_pipeline.py")
+PINNED_SOURCE_DEPENDENCIES = (
+    (
+        "IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256",
+        qualification.PIPELINE_PATH,
+        qualification.IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256,
+    ),
+    (
+        "IMMUTABLE_VOICE_PIPELINE_SUPPORTED_FILE_SHA256",
+        qualification.VOICE_PIPELINE_PATH,
+        qualification.IMMUTABLE_VOICE_PIPELINE_SUPPORTED_FILE_SHA256,
+    ),
+    (
+        "IMMUTABLE_CONFIG_SUPPORTED_FILE_SHA256",
+        qualification.CONFIG_PATH,
+        qualification.IMMUTABLE_CONFIG_SUPPORTED_FILE_SHA256,
+    ),
+)
 
 
 def _file_sha(path: Path) -> str:
@@ -43,20 +60,7 @@ def _file_sha(path: Path) -> str:
 @pytest.fixture(autouse=True)
 def _support_current_source_for_unit_tests(monkeypatch):
     """Exercise downstream gates without authorizing this source in the runner."""
-    for constant, path in (
-        (
-            "IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256",
-            qualification.PIPELINE_PATH,
-        ),
-        (
-            "IMMUTABLE_VOICE_PIPELINE_SUPPORTED_FILE_SHA256",
-            qualification.VOICE_PIPELINE_PATH,
-        ),
-        (
-            "IMMUTABLE_CONFIG_SUPPORTED_FILE_SHA256",
-            qualification.CONFIG_PATH,
-        ),
-    ):
+    for constant, path, _pinned_digest in PINNED_SOURCE_DEPENDENCIES:
         monkeypatch.setattr(qualification, constant, _file_sha(path))
 
 
@@ -496,12 +500,19 @@ def test_unexplained_immutable_pipeline_deviation_is_a_hard_failure(tmp_path):
     assert caught.value.code == "setup_deviation_unexplained"
 
 
-def test_changed_live_source_is_a_hard_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        qualification,
-        "IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256",
-        "0" * 64,
-    )
+@pytest.mark.parametrize(
+    ("constant", "path", "pinned_digest"),
+    PINNED_SOURCE_DEPENDENCIES,
+)
+def test_each_pinned_live_source_mismatch_is_a_hard_failure(
+    tmp_path,
+    monkeypatch,
+    constant,
+    path,
+    pinned_digest,
+):
+    assert pinned_digest != _file_sha(path)
+    monkeypatch.setattr(qualification, constant, pinned_digest)
     document = _provider_setup()
     setup_path = tmp_path / "setup.json"
     setup_sha = _write_json(setup_path, document)

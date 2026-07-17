@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import qualify_gemini_caller_turn_assembly as qualification
 from scripts.qualify_gemini_caller_turn_assembly import (
     OFFICIAL_ENDPOINTS,
     QualificationConfig,
@@ -37,6 +38,26 @@ PIPELINE_PATH = Path("app/services/gemini_pipeline.py")
 
 def _file_sha(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _support_current_source_for_unit_tests(monkeypatch):
+    """Exercise downstream gates without authorizing this source in the runner."""
+    for constant, path in (
+        (
+            "IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256",
+            qualification.PIPELINE_PATH,
+        ),
+        (
+            "IMMUTABLE_VOICE_PIPELINE_SUPPORTED_FILE_SHA256",
+            qualification.VOICE_PIPELINE_PATH,
+        ),
+        (
+            "IMMUTABLE_CONFIG_SUPPORTED_FILE_SHA256",
+            qualification.CONFIG_PATH,
+        ),
+    ):
+        monkeypatch.setattr(qualification, constant, _file_sha(path))
 
 
 def _provider_setup() -> dict[str, object]:
@@ -473,6 +494,27 @@ def test_unexplained_immutable_pipeline_deviation_is_a_hard_failure(tmp_path):
         build_preregistration(changed)
 
     assert caught.value.code == "setup_deviation_unexplained"
+
+
+def test_changed_live_source_is_a_hard_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        qualification,
+        "IMMUTABLE_PIPELINE_SUPPORTED_FILE_SHA256",
+        "0" * 64,
+    )
+    document = _provider_setup()
+    setup_path = tmp_path / "setup.json"
+    setup_sha = _write_json(setup_path, document)
+
+    with pytest.raises(QualificationError) as caught:
+        canonicalize_qualification_setup(
+            document,
+            setup_file_sha256=setup_sha,
+            deviations_sha256="d" * 64,
+            source_sha=SOURCE_SHA,
+        )
+
+    assert caught.value.code == "immutable_source_mismatch"
 
 
 def test_canonical_setup_rejects_payload_hidden_in_reported_configuration(tmp_path):

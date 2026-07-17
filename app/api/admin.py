@@ -5,11 +5,13 @@ Protected by global admin token only — not accessible via contractor tokens.
 
 import asyncio
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.db import calls as call_db
+from app.db import post_call_handoffs as handoff_db
 from app.db.admin_audit import list_admin_audit_events, write_admin_audit_event
 from app.db.firestore_client import get_firestore_client
 from app.middleware.auth import verify_api_token
@@ -46,6 +48,24 @@ SECRET_CONTRACTOR_FIELDS = {
     "jobber_refresh_token",
     "token_hash",
 }
+
+PostCallHandoffStatus = Literal[
+    "pending",
+    "in_progress",
+    "completed",
+    "needs_attention",
+    "acknowledged",
+]
+PostCallResolution = Literal[
+    "verified_complete",
+    "customer_contacted_manually",
+    "no_action_required",
+    "false_alarm",
+]
+
+
+class AcknowledgePostCallHandoffRequest(BaseModel):
+    resolution: PostCallResolution
 
 
 def _contractor_list_item(doc) -> dict:
@@ -189,6 +209,92 @@ def _contractor_inventory_item(doc) -> dict:
 # ---------------------------------------------------------------------------
 # Overview
 # ---------------------------------------------------------------------------
+
+
+@router.get("/post-call-handoffs")
+async def admin_list_post_call_handoffs(
+    request: Request,
+    status: PostCallHandoffStatus = "needs_attention",
+    limit: int = 50,
+):
+    """Return a bounded payload-free operational queue."""
+    _require_admin(request)
+    bounded_limit = max(1, min(limit, 100))
+    handoffs = await handoff_db.list_handoffs(status, limit=bounded_limit)
+    return {
+        "status": status,
+        "count": len(handoffs),
+        "limit": bounded_limit,
+        "has_more": len(handoffs) >= bounded_limit,
+        "handoffs": handoffs,
+    }
+
+
+@router.post("/post-call-handoffs/{call_sid}/acknowledge")
+async def admin_acknowledge_post_call_handoff(
+    call_sid: str,
+    body: AcknowledgePostCallHandoffRequest,
+    request: Request,
+):
+    """Acknowledge operator review without retrying external effects."""
+    _require_admin(request)
+    if not call_sid or len(call_sid) > 128:
+        raise HTTPException(status_code=422, detail="Invalid call identifier")
+
+    current = await handoff_db.get_handoff(call_sid)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Post-call handoff not found")
+    if current.get("status") != "needs_attention":
+        raise HTTPException(
+            status_code=409,
+            detail="Only needs_attention handoffs can be acknowledged",
+        )
+
+    acknowledged = await handoff_db.acknowledge_handoff(
+        call_sid,
+        body.resolution,
+    )
+    if not acknowledged:
+        raise HTTPException(
+            status_code=409,
+            detail="Post-call handoff state changed; reload before acknowledging",
+        )
+
+    summary = handoff_db.safe_handoff_summary(call_sid, current)
+    acknowledged_at = time.time()
+    call_status_mirrored = await call_db.save_call(
+        call_sid,
+        {
+            "post_call_status": "acknowledged",
+            "post_call_failure_code": summary["failure_code"],
+            "post_call_completed_effects": summary["completed_effects"],
+            "post_call_failed_effects": summary["failed_effects"],
+            "post_call_resolution": body.resolution,
+            "post_call_acknowledged_at": acknowledged_at,
+        },
+    )
+    await write_admin_audit_event(
+        request=request,
+        action="acknowledge_post_call_handoff",
+        target_type="post_call_handoff",
+        target_id=call_sid,
+        reason=body.resolution,
+        before={
+            "status": "needs_attention",
+            "failure_code": summary["failure_code"],
+        },
+        after={
+            "status": "acknowledged",
+            "resolution": body.resolution,
+        },
+        metadata={"call_status_mirrored": call_status_mirrored},
+    )
+    return {
+        "status": "acknowledged",
+        "call_sid": call_sid,
+        "resolution": body.resolution,
+        "call_status_mirrored": call_status_mirrored,
+    }
 
 @router.get("/overview")
 async def admin_overview(request: Request):

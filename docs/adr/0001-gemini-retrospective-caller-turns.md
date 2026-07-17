@@ -1,6 +1,6 @@
 # ADR 0001: Gemini Retrospective Caller Turns
 
-- Status: Proposed, pending Gate 0B empirical evidence
+- Status: Proposed, pending empirical evidence; staging diagnostics narrowed by ADR 0002
 - Date: 2026-07-14
 - Decision owners: Hey Kevin voice and controller maintainers
 - Scope: Offline caller-turn assembly qualification only
@@ -92,6 +92,11 @@ them:
 - using real caller audio, transcripts, identifiers, or credentials;
 - enabling the provider execution path without a new reviewed successor;
 - staging, production, deployment, feature flags, or release claims.
+
+ADR 0002 now authorizes only a test-restricted staging diagnostic that imports the
+adapter and assembler and emits payload-free metrics. It does not authorize
+semantic extraction, controller state, customer data, the archived Gate 0B runner,
+or any production action. All other prohibitions above remain in force.
 
 ## References
 

@@ -123,3 +123,54 @@ def test_production_requires_explicit_twilio_account_boundary(monkeypatch):
 
     with pytest.raises(RuntimeError, match="PRODUCTION_TWILIO_ACCOUNT_SID is required"):
         config.validate_runtime_safety()
+
+
+@pytest.mark.parametrize(
+    ("enabled", "hmac_key", "message"),
+    [
+        (True, "", "RECEPTIONIST_OBSERVATION_SHADOW_ENABLED must be false"),
+        (
+            False,
+            "k" * 32,
+            "RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY must be absent",
+        ),
+    ],
+)
+def test_production_rejects_observation_shadow_flag_or_key(
+    monkeypatch,
+    enabled,
+    hmac_key,
+    message,
+):
+    monkeypatch.setattr(config.settings, "environment", "production")
+    monkeypatch.setattr(config.settings, "appstore_environment", "production")
+    monkeypatch.setattr(config.settings, "apns_sandbox", False)
+    monkeypatch.setattr(config.settings, "cloud_run_url", config.PRODUCTION_CLOUD_RUN_URL)
+    monkeypatch.setattr(config.settings, "firestore_project_id", config.PRODUCTION_GCP_PROJECT_ID)
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        config.PRODUCTION_FIREBASE_DATABASE_URL,
+    )
+    monkeypatch.setattr(config.settings, "production_twilio_account_sid", "AC_PROD")
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_PROD")
+    monkeypatch.setattr(
+        config.settings,
+        "transcript_encryption_key",
+        base64.b64encode(b"k" * 32).decode("ascii"),
+    )
+    monkeypatch.setattr(
+        config.settings,
+        "receptionist_observation_shadow_enabled",
+        enabled,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        config.settings,
+        "receptionist_observation_shadow_caller_hmac_key",
+        hmac_key,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        config.validate_runtime_safety()

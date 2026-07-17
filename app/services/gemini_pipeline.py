@@ -173,6 +173,7 @@ class GeminiPipeline:
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
+        self._observation_shadow = self._build_receptionist_observation_shadow()
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -194,6 +195,49 @@ class GeminiPipeline:
 
         # Language for post-call processing
         self._language = user_language or "en"
+
+    def _build_receptionist_observation_shadow(self):
+        """Build the staging diagnostic without affecting live call setup."""
+        try:
+            from app.services.receptionist_observation_shadow import (
+                build_receptionist_observation_shadow,
+            )
+
+            return build_receptionist_observation_shadow(
+                contractor_config=self._contractor_config,
+                caller_identifier=self._caller_phone,
+            )
+        except Exception as error:
+            logger.error(
+                "voice_event event=observation_shadow_init_error exception_type=%s",
+                type(error).__name__,
+            )
+            return None
+
+    def _observe_receptionist_shadow(self, message: object) -> None:
+        """Offer one message to the diagnostic without awaiting or copying it."""
+        shadow = self._observation_shadow
+        if shadow is not None:
+            shadow.try_enqueue_message(message)
+
+    def _observe_receptionist_shadow_lifecycle(self, kind: str) -> None:
+        """Offer one local lifecycle marker to the diagnostic."""
+        shadow = self._observation_shadow
+        if shadow is not None:
+            shadow.try_enqueue_lifecycle(kind)
+
+    async def _stop_receptionist_shadow(self) -> None:
+        """Stop the diagnostic within its own short teardown bound."""
+        shadow = self._observation_shadow
+        if shadow is None:
+            return
+        try:
+            await shadow.stop()
+        except Exception as error:
+            logger.error(
+                "voice_event event=observation_shadow_stop_error exception_type=%s",
+                type(error).__name__,
+            )
 
     def _build_generation_config(self) -> dict:
         """Return Gemini Live generation config tuned for phone-call latency."""
@@ -552,6 +596,7 @@ class GeminiPipeline:
             self._audio_playout_task.cancel()
         await self._discard_reconnect_audio("stop", end_reconnect=True)
         await self._clear_audio_queue()
+        await self._stop_receptionist_shadow()
         if self._ws:
             try:
                 await self._ws.close()
@@ -603,6 +648,7 @@ class GeminiPipeline:
             if not self._connected or self._reconnecting:
                 return
             self._reconnecting = True
+        self._observe_receptionist_shadow_lifecycle("reconnect_started")
         try:
             self._invalidate_tool_task("reconnect")
             if self._caller_transcript_buf:
@@ -697,6 +743,7 @@ class GeminiPipeline:
                     break
 
                 data = json.loads(message)
+                self._observe_receptionist_shadow(data)
                 server_content = data.get("serverContent", {})
                 self._buffer_caller_transcript(data, server_content)
 
@@ -818,6 +865,7 @@ class GeminiPipeline:
         except asyncio.CancelledError:
             pass
         except ConnectionClosed as e:
+            self._observe_receptionist_shadow_lifecycle("connection_closed")
             # rcvd_then_sent: True = peer (Gemini) closed first, False = we closed first, None = abnormal
             peer_initiated = getattr(e, "rcvd_then_sent", None)
             received_close = getattr(e, "rcvd", None)

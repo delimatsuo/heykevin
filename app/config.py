@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4
+    receptionist_observation_shadow_enabled: bool = False
+    receptionist_observation_shadow_caller_hmac_key: str = ""
+    receptionist_observation_shadow_max_authorization_seconds: int = 3600
 
     # Twilio Voice SDK (for iOS app)
     twilio_api_key_sid: str = ""      # API Key SID (not the Account SID)
@@ -155,6 +158,14 @@ def validate_runtime_safety() -> None:
         )
 
     if env == "production":
+        if settings.receptionist_observation_shadow_enabled:
+            errors.append(
+                "RECEPTIONIST_OBSERVATION_SHADOW_ENABLED must be false in production"
+            )
+        if settings.receptionist_observation_shadow_caller_hmac_key:
+            errors.append(
+                "RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY must be absent in production"
+            )
         if settings.appstore_environment != "production":
             errors.append("APPSTORE_ENVIRONMENT must be production when ENVIRONMENT=production")
         if settings.apns_sandbox:
@@ -185,6 +196,25 @@ def validate_runtime_safety() -> None:
             errors.append("PRODUCTION_TWILIO_ACCOUNT_SID is required outside production")
         elif settings.twilio_account_sid == settings.production_twilio_account_sid:
             errors.append("TWILIO_ACCOUNT_SID must not be the production account outside production")
+
+    if env == "staging" and settings.receptionist_observation_shadow_enabled:
+        if len(
+            settings.receptionist_observation_shadow_caller_hmac_key.encode("utf-8")
+        ) < 32:
+            errors.append(
+                "RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY must be at least "
+                "32 bytes when the staging shadow is enabled"
+            )
+        max_seconds = settings.receptionist_observation_shadow_max_authorization_seconds
+        if (
+            isinstance(max_seconds, bool)
+            or not isinstance(max_seconds, int)
+            or not 60 <= max_seconds <= 86_400
+        ):
+            errors.append(
+                "RECEPTIONIST_OBSERVATION_SHADOW_MAX_AUTHORIZATION_SECONDS must be "
+                "between 60 and 86400"
+            )
 
     if errors:
         raise RuntimeError("Unsafe runtime configuration: " + "; ".join(errors))

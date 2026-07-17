@@ -25,6 +25,10 @@ PROTECTED_FIELDS = frozenset({
     "deleted_app_detected_at",
     # Integrations — feature flags are enabled by backend/admin flows only.
     "jobber_lead_capture_enabled",
+    # Staging diagnostics — operator-only, short-lived, test-caller allowlisting.
+    "receptionist_observation_shadow_enabled",
+    "receptionist_observation_shadow_expires_at",
+    "receptionist_observation_shadow_caller_digests",
     # Identity bindings — written only at account creation / authenticated migration.
     # Allowing PATCH to overwrite these would let an attacker hijack another account
     # by claiming its phone number or Apple user ID. (Security audit F-04.)

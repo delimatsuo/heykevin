@@ -177,56 +177,88 @@ class ReceptionistObservationShadow:
         return True
 
     def try_enqueue_message(self, message: object) -> bool:
-        """Queue one existing provider message without awaiting or copying it."""
-        if not self._message_has_turn_signal(message):
+        """Queue a payload-minimized event projection without awaiting."""
+        projected = self._project_turn_message(message)
+        if projected is None:
             self.ignored_message_count += 1
             return True
-        return self._try_enqueue("message", message)
+        return self._try_enqueue("message", projected)
 
-    def _message_has_turn_signal(self, message: object) -> bool:
-        """Coalesce streamed model audio before it consumes diagnostic capacity."""
+    def _project_turn_message(self, message: object) -> object | None:
+        """Keep caller transcript and event markers, never model/tool payloads."""
         if not isinstance(message, dict):
-            return True
+            return []
+        projected: dict[str, object] = {}
+
+        for field in ("inputTranscript", "inputTranscription"):
+            if field in message:
+                projected[field] = self._project_transcription(message[field])
+
         content = message.get("serverContent")
         if content is not None and not isinstance(content, dict):
-            return True
-
-        has_non_model_signal = any(
-            field in message
-            for field in (
-                "inputTranscript",
-                "inputTranscription",
-                "toolCall",
-                "toolCallCancellation",
-            )
-        )
-        has_model_signal = False
+            projected["serverContent"] = None
         if isinstance(content, dict):
-            has_non_model_signal = has_non_model_signal or any(
-                field in content
-                for field in (
-                    "inputTranscript",
-                    "inputTranscription",
-                    "generationComplete",
-                    "turnComplete",
-                    "interrupted",
-                )
-            )
+            projected_content: dict[str, object] = {}
+            for field in ("inputTranscript", "inputTranscription"):
+                if field in content:
+                    projected_content[field] = self._project_transcription(
+                        content[field]
+                    )
+            for field in ("generationComplete", "turnComplete", "interrupted"):
+                if field in content:
+                    projected_content[field] = content[field]
             if "modelTurn" in content:
                 model_turn = content["modelTurn"]
                 if not isinstance(model_turn, dict):
-                    return True
-                parts = model_turn.get("parts", [])
-                if not isinstance(parts, list):
-                    return True
-                if parts and not self._model_output_enqueued:
-                    has_model_signal = True
-                    self._model_output_enqueued = True
+                    projected_content["modelTurn"] = None
+                else:
+                    parts = model_turn.get("parts", [])
+                    if not isinstance(parts, list):
+                        projected_content["modelTurn"] = {"parts": None}
+                    elif parts and not self._model_output_enqueued:
+                        projected_content["modelTurn"] = {"parts": [{}]}
+                        self._model_output_enqueued = True
 
             if content.get("turnComplete") is True or content.get("interrupted") is True:
                 self._model_output_enqueued = False
+            if projected_content:
+                projected["serverContent"] = projected_content
 
-        return has_non_model_signal or has_model_signal
+        if "toolCall" in message:
+            tool_call = message["toolCall"]
+            if not isinstance(tool_call, dict):
+                projected["toolCall"] = None
+            else:
+                function_calls = tool_call.get("functionCalls", [])
+                projected["toolCall"] = {
+                    "functionCalls": (
+                        ([{}] if function_calls else [])
+                        if isinstance(function_calls, list)
+                        else None
+                    )
+                }
+
+        if "toolCallCancellation" in message:
+            cancellation = message["toolCallCancellation"]
+            if not isinstance(cancellation, dict):
+                projected["toolCallCancellation"] = None
+            else:
+                ids = cancellation.get("ids", [])
+                if not isinstance(ids, list) or len(ids) > 128:
+                    projected_ids: object = None
+                elif any(not isinstance(value, str) for value in ids):
+                    projected_ids = [None]
+                else:
+                    projected_ids = ["redacted"] if ids else []
+                projected["toolCallCancellation"] = {"ids": projected_ids}
+
+        return projected or None
+
+    @staticmethod
+    def _project_transcription(value: object) -> object:
+        if isinstance(value, dict):
+            return {"text": value.get("text", "")}
+        return value
 
     def try_enqueue_lifecycle(self, kind: CallerTurnEventKind | str) -> bool:
         """Queue one supported local lifecycle event without blocking."""
@@ -263,6 +295,12 @@ class ReceptionistObservationShadow:
         self.enqueued_item_count += 1
         self.max_queue_depth = max(self.max_queue_depth, self._queue.qsize())
         return True
+
+    def abort(self) -> None:
+        """Synchronously disable diagnostic work after a live-boundary failure."""
+        self._closed = True
+        if self._worker_task and not self._worker_task.done():
+            self._worker_task.cancel()
 
     async def stop(self, *, timeout_seconds: float = 0.1) -> None:
         """Flush queued diagnostics within a short bound, then stop the worker."""

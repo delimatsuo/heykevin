@@ -25,6 +25,7 @@ Add a separate stacked branch containing a staging-only observation sidecar:
 
 ```text
 existing Gemini server message
+  -> payload-minimized turn-event projection
   -> nonblocking bounded enqueue
   -> GeminiTurnEventAdapter
   -> CallerTurnEvent

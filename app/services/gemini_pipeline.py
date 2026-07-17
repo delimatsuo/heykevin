@@ -217,14 +217,52 @@ class GeminiPipeline:
     def _observe_receptionist_shadow(self, message: object) -> None:
         """Offer one message to the diagnostic without awaiting or copying it."""
         shadow = self._observation_shadow
-        if shadow is not None:
+        if shadow is None:
+            return
+        try:
             shadow.try_enqueue_message(message)
+        except Exception as error:
+            self._disable_receptionist_shadow(
+                shadow,
+                operation="message",
+                error=error,
+            )
 
     def _observe_receptionist_shadow_lifecycle(self, kind: str) -> None:
         """Offer one local lifecycle marker to the diagnostic."""
         shadow = self._observation_shadow
-        if shadow is not None:
+        if shadow is None:
+            return
+        try:
             shadow.try_enqueue_lifecycle(kind)
+        except Exception as error:
+            self._disable_receptionist_shadow(
+                shadow,
+                operation="lifecycle",
+                error=error,
+            )
+
+    def _disable_receptionist_shadow(
+        self,
+        shadow,
+        *,
+        operation: str,
+        error: Exception,
+    ) -> None:
+        """Fail the diagnostic closed without changing the live call path."""
+        self._observation_shadow = None
+        abort = getattr(shadow, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
+        logger.error(
+            "voice_event event=observation_shadow_enqueue_error operation=%s "
+            "exception_type=%s",
+            operation,
+            type(error).__name__,
+        )
 
     async def _stop_receptionist_shadow(self) -> None:
         """Stop the diagnostic within its own short teardown bound."""

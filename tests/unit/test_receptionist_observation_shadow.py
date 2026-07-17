@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -156,7 +157,7 @@ async def test_sidecar_emits_only_payload_free_turn_metrics(caplog):
         quiescence_ms=10,
         shadow_id="shadow-test",
     )
-    private_transcript = "Private Caller at 123 Secret Lane callback 555-765-4321"
+    private_transcript = "Private Caller at 123 Secret Lane callback PHONE_SENTINEL"
     private_output = "Private model response"
 
     with caplog.at_level(
@@ -185,7 +186,7 @@ async def test_sidecar_emits_only_payload_free_turn_metrics(caplog):
     assert private_output not in messages
     assert "Private Caller" not in messages
     assert "123 Secret Lane" not in messages
-    assert "555-765-4321" not in messages
+    assert "PHONE_SENTINEL" not in messages
 
 
 @pytest.mark.asyncio
@@ -237,6 +238,43 @@ def test_streamed_model_audio_is_coalesced_before_it_can_fill_the_queue(monkeypa
     assert shadow.dropped_item_count == 0
     assert shadow.ignored_message_count == 100
     assert shadow._queue.qsize() == 2
+
+
+def test_enqueue_projection_removes_model_payload_and_tool_arguments(monkeypatch):
+    shadow = ReceptionistObservationShadow(
+        queue_size=2,
+        quiescence_ms=10,
+        shadow_id="shadow-test",
+    )
+    monkeypatch.setattr(shadow, "_ensure_worker", lambda: True)
+
+    assert shadow.try_enqueue_message(
+        {
+            "serverContent": {
+                "inputTranscription": {"text": "Synthetic caller request"},
+                "modelTurn": {
+                    "parts": [
+                        {
+                            "text": "private-model-text",
+                            "inlineData": {"data": "private-model-audio"},
+                        }
+                    ]
+                },
+            },
+            "toolCall": {
+                "functionCalls": [
+                    {"name": "lookup", "args": {"private": "private-tool-argument"}}
+                ]
+            },
+        }
+    )
+
+    queued = shadow._queue.get_nowait()
+    serialized = json.dumps(queued.value)
+    assert "Synthetic caller request" in serialized
+    assert "private-model-text" not in serialized
+    assert "private-model-audio" not in serialized
+    assert "private-tool-argument" not in serialized
 
 
 def test_reconnect_resets_model_output_coalescing_before_worker_processing(monkeypatch):
@@ -314,6 +352,26 @@ async def test_lifecycle_reconnect_and_stop_are_bounded_and_payload_free(caplog)
     assert shadow.worker_task is None or shadow.worker_task.done()
 
 
+@pytest.mark.asyncio
+async def test_abort_synchronously_disables_and_cancels_diagnostic_worker():
+    shadow = ReceptionistObservationShadow(
+        queue_size=4,
+        quiescence_ms=10,
+        shadow_id="shadow-test",
+    )
+    assert shadow.try_enqueue_message(
+        {"serverContent": {"inputTranscription": {"text": "Synthetic request"}}}
+    )
+    task = shadow.worker_task
+    assert task is not None
+
+    shadow.abort()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert task.done()
+    assert shadow.try_enqueue_message({"serverContent": {"turnComplete": True}}) is False
+
+
 def test_sidecar_has_no_controller_tool_persistence_or_post_call_imports():
     path = Path("app/services/receptionist_observation_shadow.py")
     tree = ast.parse(path.read_text())
@@ -388,3 +446,48 @@ def test_pipeline_never_builds_observation_shadow_outside_staging(monkeypatch):
     )
 
     assert pipeline._observation_shadow is None
+
+
+@pytest.mark.parametrize("operation", ["message", "lifecycle"])
+def test_pipeline_contains_synchronous_shadow_enqueue_failures(
+    operation,
+    caplog,
+):
+    private_error = "failed for Private Caller at 123 Secret Lane"
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="synthetic-call",
+        contractor_config={"effective_mode": "personal"},
+    )
+
+    class FailingShadow:
+        def __init__(self):
+            self.aborted = False
+
+        def try_enqueue_message(self, _message):
+            raise RuntimeError(private_error)
+
+        def try_enqueue_lifecycle(self, _kind):
+            raise RuntimeError(private_error)
+
+        def abort(self):
+            self.aborted = True
+
+    failing_shadow = FailingShadow()
+    pipeline._observation_shadow = failing_shadow
+    with caplog.at_level(logging.ERROR, logger="app.services.gemini_pipeline"):
+        if operation == "message":
+            pipeline._observe_receptionist_shadow(
+                {"serverContent": {"inputTranscription": {"text": private_error}}}
+            )
+        else:
+            pipeline._observe_receptionist_shadow_lifecycle("reconnect_started")
+
+    assert pipeline._observation_shadow is None
+    assert failing_shadow.aborted is True
+    assert "event=observation_shadow_enqueue_error" in caplog.text
+    assert f"operation={operation}" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    assert private_error not in caplog.text
+    assert "Private Caller" not in caplog.text

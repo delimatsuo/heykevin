@@ -36,6 +36,14 @@ async def _noop(*_args, **_kwargs):
     return None
 
 
+async def _wait_until(predicate, *, timeout_seconds: float = 0.5) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("timed out waiting for observation shadow state")
+        await asyncio.sleep(0.005)
+
+
 def _contractor_config(*, now: int, caller: str = TEST_CALLER) -> dict:
     return {
         "contractor_id": "synthetic-staging-contractor",
@@ -164,7 +172,7 @@ async def test_sidecar_emits_only_payload_free_turn_metrics(caplog):
                 }
             }
         )
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: shadow.emitted_turn_count == 1)
         await shadow.stop()
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -272,7 +280,7 @@ async def test_worker_error_is_payload_free_and_never_escapes_to_live_path(
         assert shadow.try_enqueue_message(
             {"serverContent": {"inputTranscription": {"text": private_error}}}
         )
-        await asyncio.sleep(0.02)
+        await _wait_until(lambda: shadow.worker_error_count == 1)
         await shadow.stop()
 
     assert shadow.worker_error_count == 1
@@ -358,7 +366,6 @@ async def test_enabled_pipeline_observation_never_sends_or_changes_prompt(
     pipeline._observe_receptionist_shadow(
         {"serverContent": {"inputTranscription": {"text": "Synthetic request"}}}
     )
-    await asyncio.sleep(0.02)
     await pipeline._stop_receptionist_shadow()
 
     assert pipeline._observation_shadow is not None

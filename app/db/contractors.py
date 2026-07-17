@@ -30,6 +30,7 @@ PROTECTED_FIELDS = frozenset({
     "receptionist_observation_shadow_authorized_sha",
     "receptionist_observation_shadow_expires_at",
     "receptionist_observation_shadow_caller_digests",
+    "receptionist_observation_shadow_authorized_at",
     # Identity bindings — written only at account creation / authenticated migration.
     # Allowing PATCH to overwrite these would let an attacker hijack another account
     # by claiming its phone number or Apple user ID. (Security audit F-04.)

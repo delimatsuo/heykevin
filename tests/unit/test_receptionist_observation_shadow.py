@@ -81,6 +81,7 @@ def test_observation_shadow_release_fields_are_server_protected():
         "receptionist_observation_shadow_authorized_sha",
         "receptionist_observation_shadow_expires_at",
         "receptionist_observation_shadow_caller_digests",
+        "receptionist_observation_shadow_authorized_at",
     } <= PROTECTED_FIELDS
 
 

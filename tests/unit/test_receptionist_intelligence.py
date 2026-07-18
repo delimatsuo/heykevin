@@ -827,6 +827,7 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
+    assert generation_config["max_output_tokens"] == 96
     await pipeline.stop()
 
 

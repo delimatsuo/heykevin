@@ -86,6 +86,7 @@ class GeminiPipeline:
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
+    MAX_RESPONSE_OUTPUT_TOKENS = 96
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -202,6 +203,7 @@ class GeminiPipeline:
         config = {
             "response_modalities": ["AUDIO"],
             "temperature": settings.gemini_live_temperature,
+            "max_output_tokens": self.MAX_RESPONSE_OUTPUT_TOKENS,
             "speech_config": {
                 "voice_config": {
                     "prebuilt_voice_config": {

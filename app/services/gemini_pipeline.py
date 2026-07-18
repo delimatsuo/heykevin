@@ -253,20 +253,14 @@ class GeminiPipeline:
         )
 
         if mode == "personal":
-            return (
-                f"Hi, this is Kevin, {owner_first}'s AI assistant. This call may be "
-                f"transcribed and summarized for {owner_first}. How can I help?"
-            )
+            return f"Hi, this is Kevin, {owner_first}'s assistant. How can I help?"
         if self._after_hours:
             return (
-                f"{business_name} is currently closed. Kevin, an AI assistant. "
-                "This call may be transcribed and summarized. "
-                "How can I help?"
+                f"{business_name} is currently closed. My name is Kevin. How can I help?"
             )
         return (
-            f"Hi, you've reached {business_name}. Kevin, an AI assistant. "
-            "This call may be transcribed and summarized. "
-            "How can I help?"
+            f"Hi, thank you for calling {business_name}. My name is Kevin. "
+            "How can I help you?"
         )
 
     async def _send_greeting(self) -> None:

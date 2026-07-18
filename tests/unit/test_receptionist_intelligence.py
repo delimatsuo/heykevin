@@ -544,7 +544,7 @@ def test_media_stream_passes_twilio_start_time_to_gemini_pipeline():
     assert "call_started_at=media_stream_started_at" in gemini_call
 
 
-def test_gemini_greetings_are_bounded_and_disclose_ai_transcription():
+def test_gemini_greetings_are_bounded_and_do_not_volunteer_ai_disclosure():
     async def noop_audio(_chunk: bytes):
         return None
 
@@ -581,12 +581,15 @@ def test_gemini_greetings_are_bounded_and_disclose_ai_transcription():
         after_hours._build_greeting_text(),
     ]
 
-    assert all("AI assistant" in greeting for greeting in greetings)
-    assert all("may be transcribed and summarized" in greeting for greeting in greetings)
     assert all(len(greeting.split()) <= 24 for greeting in greetings)
-    assert "Matsuo Plumbing" in greetings[0]
-    assert "Deli's AI assistant" in greetings[1]
-    assert "currently closed" in greetings[2]
+    assert greetings[0] == (
+        "Hi, thank you for calling Matsuo Plumbing. My name is Kevin. "
+        "How can I help you?"
+    )
+    assert greetings[1] == "Hi, this is Kevin, Deli's assistant. How can I help?"
+    assert "Matsuo Plumbing is currently closed" in greetings[2]
+    assert all("AI assistant" not in greeting for greeting in greetings)
+    assert all("transcribed and summarized" not in greeting for greeting in greetings)
 
 
 def test_gemini_long_business_name_greetings_remain_within_word_budget():
@@ -614,8 +617,24 @@ def test_gemini_long_business_name_greetings_remain_within_word_budget():
     greetings = [business._build_greeting_text(), after_hours._build_greeting_text()]
 
     assert all(len(greeting.split()) <= 24 for greeting in greetings)
-    assert all("may be transcribed and summarized" in greeting for greeting in greetings)
+    assert all("AI assistant" not in greeting for greeting in greetings)
+    assert all("transcribed and summarized" not in greeting for greeting in greetings)
     assert all("North Shore Emergency Plumbing and Heating" in greeting for greeting in greetings)
+
+
+def test_system_prompt_discloses_ai_identity_only_when_directly_asked():
+    business_prompt = build_system_prompt(_plumbing_config())
+    personal_prompt = build_system_prompt(
+        {
+            "owner_name": "Deli Matsuo",
+            "mode": "personal",
+            "effective_mode": "personal",
+        }
+    )
+
+    for prompt in (business_prompt, personal_prompt):
+        assert "Do not volunteer that you are an AI assistant" in prompt
+        assert "AI assistant from heykevin.one" in prompt
 
 
 @pytest.mark.asyncio

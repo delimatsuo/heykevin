@@ -720,3 +720,62 @@ def test_augmented_collection_assignment_preserves_existing_aliases():
     assert known_facts == ["service_object:faucet", "urgency:routine"]
     assert asked_slots == {"service_action", "callback_intent"}
     assert memory_refs_used == {"replacement-memory-ref"}
+
+
+@pytest.mark.parametrize("invalid_value", ["false", 0, 1, None])
+def test_caller_identity_requires_boolean_confirmed_assignment(invalid_value: object):
+    identity = CallerIdentity(confirmed=False)
+
+    with pytest.raises(TypeError, match="confirmed must be a boolean"):
+        identity.confirmed = invalid_value
+
+    assert identity.confirmed is False
+    with pytest.raises(TypeError, match="confirmed must be a boolean"):
+        CallerIdentity(confirmed=invalid_value)
+
+
+@pytest.mark.parametrize("invalid_value", ["false", 0, 1, None])
+def test_state_requires_boolean_side_effect_assignment(invalid_value: object):
+    state = IntakeState(side_effects_allowed=False)
+
+    with pytest.raises(TypeError, match="side_effects_allowed must be a boolean"):
+        state.side_effects_allowed = invalid_value
+
+    assert state.side_effects_allowed is False
+    with pytest.raises(TypeError, match="side_effects_allowed must be a boolean"):
+        IntakeState(side_effects_allowed=invalid_value)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "valid_value"),
+    [
+        ("phase", IntakePhase.GREETING),
+        ("business_scope", BusinessScope.UNCLEAR),
+        ("intent", Intent.UNKNOWN),
+        ("service_action", ServiceAction.UNKNOWN),
+        ("urgency", Urgency.UNKNOWN),
+        ("callback_intent", CallbackIntent.NONE),
+        ("callback_confirmation", CallbackConfirmation.UNKNOWN),
+        ("address_need", AddressNeed.NONE),
+    ],
+)
+def test_state_requires_typed_enum_assignment(field_name: str, valid_value: object):
+    state = IntakeState()
+    original_value = getattr(state, field_name)
+
+    for invalid_value in (valid_value.value, None, 0):
+        with pytest.raises(
+            TypeError,
+            match=f"{field_name} must be a {type(valid_value).__name__}",
+        ):
+            setattr(state, field_name, invalid_value)
+        assert getattr(state, field_name) is original_value
+
+        with pytest.raises(
+            TypeError,
+            match=f"{field_name} must be a {type(valid_value).__name__}",
+        ):
+            IntakeState(**{field_name: invalid_value})
+
+    setattr(state, field_name, valid_value)
+    assert getattr(state, field_name) is valid_value

@@ -86,7 +86,7 @@ class GeminiPipeline:
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
-    MAX_RESPONSE_OUTPUT_TOKENS = 256
+    MAX_RESPONSE_OUTPUT_TOKENS = 128
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",

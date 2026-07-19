@@ -1,11 +1,15 @@
 # Typed Receptionist Observation Qualification Plan
 
-> **Status:** Rebaselined on 2026-07-19 at current `main`
-> `218822f2a2d1fa06d285de12d1ebeaecd26f6461`. The plan file at `b9a0cf3` is
-> byte-identical to the file on that baseline, although that historical commit is
-> not itself an ancestor of `main`; its Gate 0 artifacts already exist. This
-> revision authorizes documentation, SHA-bound offline audits,
-> synthetic fixtures, and mocked-provider tests only. It does not authorize
+> **Status:** Current-main Gate 0A closure remains blocked as of 2026-07-19.
+> The historical audit baseline is
+> `218822f2a2d1fa06d285de12d1ebeaecd26f6461`; current `main` is
+> `baf2fd9fee82e4a769550a556ebf308c3a5704d9`. Gate 0 artifacts are unchanged,
+> but the live Gemini and legacy voice pipeline files drifted after the reviewed
+> baseline, and the hard-pinned qualification command correctly rejects the
+> current tree with `immutable_source_mismatch`. See
+> `docs/gate0a-current-main-drift-reconciliation.md`. This revision authorizes
+> documentation, SHA-bound offline audits, synthetic fixtures, and
+> mocked-provider tests only. It does not authorize repinning the runner,
 > provider execution, real caller data, a runtime worker, live pipeline wiring,
 > staging, production, deployment, or changes to PR #76.
 
@@ -48,7 +52,7 @@ The merged controller rules remain non-negotiable:
 4. Missing, ambiguous, malformed, late, or rejected input causes no state change.
 5. Offline or retrospective evidence cannot be labeled as live behavior evidence.
 
-### 1.1 Current-main rebaseline
+### 1.1 Historical rebaseline
 
 The original Task 0A-0C creation sequence is historical. At immutable baseline
 `218822f2a2d1fa06d285de12d1ebeaecd26f6461`, the following artifacts already
@@ -73,6 +77,24 @@ requirement, the existing implementation and test, any demonstrated gap, and the
 expected offline evidence. Only a demonstrated gap may authorize a new offline
 test or implementation ticket. Re-running the historical creation tasks is not
 authorized.
+
+### 1.2 Current-main drift reconciliation
+
+The 2026-07-19 reconciliation at
+`baf2fd9fee82e4a769550a556ebf308c3a5704d9` found no Gate 0 import or wiring in
+either live pipeline and no change to the Gate 0 source, tests, evaluator,
+fixtures, ADR, or qualification runbook. It did find behavior-affecting live
+pipeline drift after `218822f`, including generation bounds, queue bounds,
+greeting construction, assistant-disclosure instructions, and voice-turn latency
+telemetry. Those changes are outside this plan's authority and invalidate a
+baseline-to-current no-diff claim.
+
+The current qualification command remains fail closed. Do not update its immutable
+source hashes as part of Gate 0A. The exact hash inventory, drift classification,
+verification results, and successor requirements are recorded in
+`docs/gate0a-current-main-drift-reconciliation.md`. A fresh staff/security review
+and separately authorized merge of that reconciliation are required before a
+separate user decision may authorize drafting any Gate 0B successor plan.
 
 ## 2. Gate 0: Establish the Input Contract First
 

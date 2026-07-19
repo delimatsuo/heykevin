@@ -151,11 +151,35 @@ jobs:
             --build-service-account "$STAGING_BUILD_SERVICE_ACCOUNT" \
             --remove-secrets RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY \
             --update-env-vars "ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=$FIRESTORE_PROJECT_ID,FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL,APNS_SANDBOX=$APNS_SANDBOX,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,RECEPTIONIST_OBSERVATION_SHADOW_ENABLED=false,DEPLOY_SHA=$DEPLOY_SHA" \
-            --tag staging
+            --tag staging \
+            --no-traffic
 
       - name: Health check
         run: |
           sleep 15
+          STAGING_TRAFFIC=$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='json(status.traffic)')
+          STAGING_TAG_URL=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_urls=[entry.get("url", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_urls[0] if len(tagged_urls) == 1 else "")' <<< "$STAGING_TRAFFIC")
+          STAGING_TAG_REVISION=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_revisions=[entry.get("revisionName", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_revisions[0] if len(tagged_revisions) == 1 else "")' <<< "$STAGING_TRAFFIC")
+          test -n "$STAGING_TAG_URL" || (echo "Missing tagged staging revision URL" && exit 1)
+          test -n "$STAGING_TAG_REVISION" || (echo "Missing tagged staging revision" && exit 1)
+          CANDIDATE_HEALTH_JSON=$(curl -sf \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            --connect-timeout 5 \
+            --max-time 30 \
+            "$STAGING_TAG_URL/health")
+          CANDIDATE_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$CANDIDATE_HEALTH_JSON")
+          # DEPLOY_SHA is exported to GITHUB_ENV by the deployment step.
+          # shellcheck disable=SC2153
+          test "$CANDIDATE_SHA" = "$DEPLOY_SHA" || (echo "Tagged staging candidate deploy SHA mismatch" && exit 1)
+          gcloud run services update-traffic "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --to-revisions="${STAGING_TAG_REVISION}=100"
           STAGING_URL=$(gcloud run services describe "$STAGING_SERVICE" \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
@@ -168,9 +192,8 @@ jobs:
             --max-time 30 \
             "$STAGING_URL/health")
           DEPLOYED_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$HEALTH_JSON")
-          # DEPLOY_SHA is exported to GITHUB_ENV by the deployment step.
           # shellcheck disable=SC2153
-          test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Staging health deploy SHA mismatch" && exit 1)
+          test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Staging traffic deploy SHA mismatch" && exit 1)
           echo "Staging health verified for deploy SHA $DEPLOY_SHA"
 
   deploy-production:

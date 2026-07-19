@@ -65,7 +65,7 @@ class GeminiPipeline:
     - stop() -> closes connection
 
     Same callbacks: on_audio_out, on_transcript, on_clear_audio,
-    on_call_complete, on_urgency_detected.
+    on_response_first_media_sent, on_call_complete, on_urgency_detected.
     """
 
     URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
@@ -98,6 +98,7 @@ class GeminiPipeline:
         on_audio_out: Callable[[bytes], Awaitable[None]],
         on_transcript: Callable[[str, str], Awaitable[None]],
         on_clear_audio: Optional[Callable[[], Awaitable[bool]]] = None,
+        on_response_first_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
         on_call_complete: Optional[Callable[[], Awaitable[None]]] = None,
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
@@ -108,6 +109,7 @@ class GeminiPipeline:
         self.on_audio_out = on_audio_out
         self.on_transcript = on_transcript
         self.on_clear_audio = on_clear_audio
+        self.on_response_first_media_sent = on_response_first_media_sent
         self.on_call_complete = on_call_complete
         self.on_urgency_detected = on_urgency_detected
         self._call_sid = call_sid
@@ -157,10 +159,13 @@ class GeminiPipeline:
         self._last_caller_transcript_fragment_monotonic = 0.0
         self._response_start_latency_logged = False
         self._response_turn_number = 0
+        self._response_audio_turn_started = False
         self._barge_in_number = 0
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
-        self._audio_queue: asyncio.Queue[tuple[bytes, float, int]] = asyncio.Queue(
+        self._audio_queue: asyncio.Queue[
+            tuple[bytes, float, int] | tuple[bytes, float, int, int, float]
+        ] = asyncio.Queue(
             maxsize=self.MAX_AUDIO_QUEUE_CHUNKS
         )
         self._queued_audio_bytes = 0
@@ -168,6 +173,7 @@ class GeminiPipeline:
         self._audio_backlog_recoveries = 0
         self._audio_output_lock = asyncio.Lock()
         self._audio_epoch = 0
+        self._last_usage_metrics: tuple[tuple[str, int], ...] | None = None
         self._pipeline_started_at = (
             call_started_at if call_started_at is not None else time.monotonic()
         )
@@ -176,6 +182,9 @@ class GeminiPipeline:
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
         self._audio_chunks_sent = 0
+        self._cumulative_inbound_audio_ms = 0
+        self._cumulative_outbound_audio_ms = 0
+        self._last_response_first_media_sent_turn = -1
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -446,6 +455,7 @@ class GeminiPipeline:
                 }
             }
         }))
+        self._cumulative_inbound_audio_ms += round(len(mulaw_bytes) / 8)
         if not self._first_inbound_audio_logged:
             self._first_inbound_audio_logged = True
             self._log_voice_timing(
@@ -699,6 +709,7 @@ class GeminiPipeline:
 
                 data = json.loads(message)
                 server_content = data.get("serverContent", {})
+                self._log_usage_metadata(data)
                 self._buffer_caller_transcript(data, server_content)
 
                 # Handle interruption (barge-in)
@@ -740,6 +751,7 @@ class GeminiPipeline:
                     if inline_data.get("mimeType", "").startswith("audio/"):
                         audio_b64 = inline_data.get("data", "")
                         if audio_b64:
+                            self._begin_response_audio_turn()
                             self._log_response_start_latency()
                             pcm_24k = base64.b64decode(audio_b64)
                             await self._enqueue_model_audio(pcm_24k)
@@ -900,7 +912,13 @@ class GeminiPipeline:
         self._ensure_audio_playout_task()
         try:
             self._audio_queue.put_nowait(
-                (mulaw_chunk, duration_seconds, self._audio_epoch)
+                (
+                    mulaw_chunk,
+                    duration_seconds,
+                    self._audio_epoch,
+                    self._response_turn_number,
+                    self._response_first_audio_at,
+                )
             )
         except asyncio.QueueFull:
             await self._handle_audio_backlog_overflow(
@@ -946,7 +964,12 @@ class GeminiPipeline:
         """
         try:
             while self._connected:
-                mulaw_chunk, duration_seconds, audio_epoch = await self._audio_queue.get()
+                queued_item = await self._audio_queue.get()
+                mulaw_chunk, duration_seconds, audio_epoch = queued_item[:3]
+                response_turn = 0
+                response_first_audio_at = 0.0
+                if len(queued_item) == 5:
+                    response_turn, response_first_audio_at = queued_item[3:]
                 self._queued_audio_bytes = max(
                     0,
                     self._queued_audio_bytes - len(mulaw_chunk),
@@ -976,6 +999,29 @@ class GeminiPipeline:
                                 queue_depth=self._audio_queue.qsize(),
                             )
                         self._audio_chunks_sent += 1
+                        self._cumulative_outbound_audio_ms += round(
+                            duration_seconds * 1_000
+                        )
+                        if response_turn > self._last_response_first_media_sent_turn:
+                            self._last_response_first_media_sent_turn = response_turn
+                            self._log_voice_timing(
+                                "response_first_twilio_media_sent",
+                                turn=response_turn,
+                                first_audio_to_twilio_send_ms=self._elapsed_ms(
+                                    response_first_audio_at
+                                ) if response_first_audio_at > 0 else 0,
+                                cumulative_inbound_audio_ms=self._cumulative_inbound_audio_ms,
+                                cumulative_outbound_audio_ms=self._cumulative_outbound_audio_ms,
+                            )
+                            if self.on_response_first_media_sent:
+                                try:
+                                    await self.on_response_first_media_sent(response_turn)
+                                except Exception as error:
+                                    self._log_voice_timing(
+                                        "response_playback_mark_error",
+                                        turn=response_turn,
+                                        exception_type=type(error).__name__,
+                                    )
                         sent = True
                     if duration_seconds > 0:
                         await asyncio.sleep(duration_seconds * 0.9)
@@ -989,6 +1035,20 @@ class GeminiPipeline:
                             and audio_epoch == self._audio_epoch
                         ):
                             self._mark_kevin_activity()
+                            if response_turn and response_first_audio_at > 0:
+                                self._log_voice_timing(
+                                    "response_playout_drained",
+                                    turn=response_turn,
+                                    first_audio_to_playout_ms=self._elapsed_ms(
+                                        response_first_audio_at
+                                    ),
+                                    cumulative_inbound_audio_ms=(
+                                        self._cumulative_inbound_audio_ms
+                                    ),
+                                    cumulative_outbound_audio_ms=(
+                                        self._cumulative_outbound_audio_ms
+                                    ),
+                                )
         except asyncio.CancelledError:
             pass
 
@@ -1102,16 +1162,23 @@ class GeminiPipeline:
             0,
             int((now - self._last_caller_transcript_fragment_monotonic) * 1000),
         )
-        self._response_turn_number += 1
-        self._response_first_audio_at = now
-        self._generated_audio_ms = 0
         self._log_voice_timing(
             "response_first_audio",
             turn=self._response_turn_number,
             latency_ms=latency_ms,
+            latency_basis="input_transcript_fragment",
             call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
         )
         self._response_start_latency_logged = True
+
+    def _begin_response_audio_turn(self) -> None:
+        """Assign one monotonic diagnostic turn to every model audio response."""
+        if self._response_audio_turn_started:
+            return
+        self._response_turn_number += 1
+        self._response_audio_turn_started = True
+        self._response_first_audio_at = time.monotonic()
+        self._generated_audio_ms = 0
 
     def _log_response_turn_latency(self, response_text: str) -> None:
         if self._response_first_audio_at > 0:
@@ -1138,7 +1205,36 @@ class GeminiPipeline:
     def _reset_response_metrics(self) -> None:
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
+        self._response_audio_turn_started = False
         self._last_caller_transcript_flushed_at = 0.0
+
+    def _log_usage_metadata(self, data: dict) -> None:
+        """Emit bounded provider token totals without retaining provider payloads."""
+        usage = data.get("usageMetadata")
+        if not isinstance(usage, dict):
+            return
+
+        metric_names = {
+            "promptTokenCount": "prompt_tokens",
+            "responseTokenCount": "response_tokens",
+            "totalTokenCount": "total_tokens",
+        }
+        metrics = tuple(
+            (metric_name, value)
+            for source_name, metric_name in metric_names.items()
+            if isinstance((value := usage.get(source_name)), int)
+            and not isinstance(value, bool)
+            and value >= 0
+        )
+        if not metrics or metrics == self._last_usage_metrics:
+            return
+
+        self._last_usage_metrics = metrics
+        self._log_voice_timing(
+            "model_usage",
+            turn=self._response_turn_number,
+            **dict(metrics),
+        )
 
     # --- Tool Calling ---
 

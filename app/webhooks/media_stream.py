@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import time
 from types import SimpleNamespace
+from typing import Callable
 
 from fastapi import APIRouter, WebSocket
 
@@ -93,6 +94,33 @@ async def _send_twilio_clear(
     return True
 
 
+async def _send_twilio_playback_mark(
+    websocket: WebSocket,
+    *,
+    stream_sid: str,
+    playback_marks: "_TwilioPlaybackMarks",
+    turn: int,
+    call_sid: str,
+) -> bool:
+    """Request a Twilio transport receipt, not caller-heard latency evidence."""
+    if not stream_sid:
+        return False
+    name = playback_marks.reserve(turn=turn)
+    if not name:
+        return False
+    try:
+        await websocket.send_json({
+            "event": "mark",
+            "streamSid": stream_sid,
+            "mark": {"name": name},
+        })
+    except Exception as error:
+        playback_marks.discard(name)
+        _log_safe_exception("twilio_playback_mark_error", error, call_sid)
+        return False
+    return True
+
+
 async def _finish_max_call_duration(on_call_complete) -> None:
     """Play a provider-independent limit message, then hang up the call."""
     from twilio.twiml.voice_response import VoiceResponse
@@ -151,6 +179,7 @@ def _log_task_exception(task: asyncio.Task):
 WS_MAX_MESSAGE_SIZE = 65_536
 MAX_MEDIA_INGRESS_AUDIO_BYTES = 96_000  # 12 seconds of 8 kHz mulaw
 MAX_MEDIA_INGRESS_AUDIO_CHUNKS = 600
+MAX_PENDING_TWILIO_PLAYBACK_MARKS = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +187,62 @@ class _TwilioIngressEvent:
     kind: str
     audio: bytes = b""
     received_at: float = 0.0
+
+
+@dataclass(slots=True)
+class _PendingPlaybackMark:
+    turn: int
+    sent_at: float
+    cleared: bool = False
+
+
+class _TwilioPlaybackMarks:
+    """Bounded, payload-free Twilio transport receipts for played or cleared media."""
+
+    def __init__(self, *, call_sid: str, max_pending: int = MAX_PENDING_TWILIO_PLAYBACK_MARKS):
+        self._call_sid = call_sid
+        self._max_pending = max_pending
+        self._pending: dict[str, _PendingPlaybackMark] = {}
+        self._sequence = 0
+
+    def reserve(self, *, turn: int) -> str | None:
+        self._sequence += 1
+        name = f"response-{turn}-{self._sequence}"
+        return name if self.register(turn=turn, name=name) else None
+
+    def register(self, *, turn: int, name: str) -> bool:
+        if len(self._pending) >= self._max_pending:
+            logger.warning(
+                "voice_timing event=twilio_playback_mark_skipped call=%s "
+                "reason=pending_limit pending=%s limit=%s",
+                _call_label(self._call_sid),
+                len(self._pending),
+                self._max_pending,
+            )
+            return False
+        self._pending[name] = _PendingPlaybackMark(turn=turn, sent_at=time.monotonic())
+        return True
+
+    def discard(self, name: str) -> None:
+        self._pending.pop(name, None)
+
+    def mark_pending_cleared(self) -> None:
+        for pending in self._pending.values():
+            pending.cleared = True
+
+    def resolve(self, name: str) -> bool:
+        pending = self._pending.pop(name, None)
+        if pending is None:
+            return False
+        logger.info(
+            "voice_timing event=twilio_playback_mark_resolved call=%s "
+            "turn=%s status=%s media_to_mark_ms=%s",
+            _call_label(self._call_sid),
+            pending.turn,
+            "cleared" if pending.cleared else "played",
+            max(0, round((time.monotonic() - pending.sent_at) * 1_000)),
+        )
+        return True
 
 
 class _TwilioMediaIngress:
@@ -170,11 +255,13 @@ class _TwilioMediaIngress:
         call_sid: str,
         max_buffered_audio_bytes: int = MAX_MEDIA_INGRESS_AUDIO_BYTES,
         max_buffered_audio_chunks: int = MAX_MEDIA_INGRESS_AUDIO_CHUNKS,
+        on_playback_mark: Callable[[str], object] | None = None,
     ) -> None:
         self._websocket = websocket
         self._call_sid = call_sid
         self._max_buffered_audio_bytes = max_buffered_audio_bytes
         self._max_buffered_audio_chunks = max_buffered_audio_chunks
+        self._on_playback_mark = on_playback_mark
         # Two reserved slots guarantee stop and close signals cannot be starved.
         self._queue: asyncio.Queue[_TwilioIngressEvent | None] = asyncio.Queue(
             maxsize=max_buffered_audio_chunks + 2
@@ -184,6 +271,7 @@ class _TwilioMediaIngress:
         self.high_water_audio_bytes = 0
         self.delivery_lag_samples = 0
         self.max_delivery_lag_ms = 0
+        self.total_delivery_lag_ms = 0
         self.overflowed = False
         self.stop_received = False
         self.ended = False
@@ -227,6 +315,15 @@ class _TwilioMediaIngress:
                     break
 
                 kind = data.get("event", "")
+                if kind == "mark":
+                    mark = data.get("mark")
+                    name = mark.get("name") if isinstance(mark, dict) else ""
+                    if isinstance(name, str) and name and self._on_playback_mark:
+                        try:
+                            self._on_playback_mark(name)
+                        except Exception as error:
+                            _log_safe_exception("playback_mark_handler_error", error, self._call_sid)
+                    continue
                 if kind == "stop":
                     self.stop_received = True
                     self._queue.put_nowait(_TwilioIngressEvent(kind="stop"))
@@ -306,6 +403,10 @@ class _TwilioMediaIngress:
                     self.max_delivery_lag_ms,
                     max(0, round((time.monotonic() - event.received_at) * 1000)),
                 )
+                self.total_delivery_lag_ms += max(
+                    0,
+                    round((time.monotonic() - event.received_at) * 1000),
+                )
         return event
 
 
@@ -366,9 +467,13 @@ async def _consume_twilio_ingress(
     finally:
         logger.info(
             "voice_timing event=inbound_media_delivery_summary call=%s "
-            "samples=%s max_delivery_lag_ms=%s max_queue_audio_ms=%s",
+            "samples=%s mean_delivery_lag_ms=%s max_delivery_lag_ms=%s "
+            "max_queue_audio_ms=%s",
             _call_label(call_sid),
             ingress.delivery_lag_samples,
+            round(ingress.total_delivery_lag_ms / ingress.delivery_lag_samples)
+            if ingress.delivery_lag_samples
+            else 0,
             ingress.max_delivery_lag_ms,
             round(ingress.high_water_audio_bytes / 8),
         )
@@ -498,7 +603,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     # Begin bounded reads before database/config startup so Twilio audio cannot
     # sit unread while the call is authenticated and the provider connects.
-    ingress = _TwilioMediaIngress(websocket, call_sid=call_sid)
+    playback_marks = _TwilioPlaybackMarks(call_sid=call_sid)
+    ingress = _TwilioMediaIngress(
+        websocket,
+        call_sid=call_sid,
+        on_playback_mark=playback_marks.resolve,
+    )
     ingress_task = asyncio.create_task(ingress.run())
 
     # Validate WebSocket token against RTDB
@@ -587,9 +697,22 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     async def on_clear_audio():
         """Clear Twilio's outbound audio buffer (used during barge-in)."""
         nonlocal stream_sid
-        return await _send_twilio_clear(
+        cleared = await _send_twilio_clear(
             websocket,
             stream_sid=stream_sid or "",
+            call_sid=call_sid,
+        )
+        if cleared:
+            playback_marks.mark_pending_cleared()
+        return cleared
+
+    async def on_response_first_media_sent(turn: int):
+        """Ask Twilio to acknowledge first-response media playout or clearing."""
+        return await _send_twilio_playback_mark(
+            websocket,
+            stream_sid=stream_sid or "",
+            playback_marks=playback_marks,
+            turn=turn,
             call_sid=call_sid,
         )
 
@@ -728,6 +851,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 on_audio_out=on_audio_out,
                 on_transcript=on_transcript,
                 on_clear_audio=on_clear_audio,
+                on_response_first_media_sent=on_response_first_media_sent,
                 on_call_complete=on_call_complete,
                 on_urgency_detected=on_urgency_detected,
                 call_sid=call_sid,

@@ -1425,9 +1425,13 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
 
     sent_chunks = []
+    marked_turns = []
 
     async def record_audio(chunk: bytes):
         sent_chunks.append(chunk)
+
+    async def record_playback_mark(turn: int):
+        marked_turns.append(turn)
 
     async def noop_transcript(_speaker: str, _text: str):
         return None
@@ -1438,6 +1442,7 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     pipeline = GeminiPipeline(
         on_audio_out=record_audio,
         on_transcript=noop_transcript,
+        on_response_first_media_sent=record_playback_mark,
         call_sid="CA_test",
         contractor_config=_plumbing_config(),
     )
@@ -1454,7 +1459,14 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
                 "outputTranscription": {"text": private_response_text}
             }
         }),
-        json.dumps({"serverContent": {"turnComplete": True}}),
+        json.dumps({
+            "serverContent": {"turnComplete": True},
+            "usageMetadata": {
+                "promptTokenCount": 4321,
+                "responseTokenCount": 123,
+                "totalTokenCount": 4444,
+            },
+        }),
     ])
     caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
 
@@ -1463,11 +1475,19 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert sent_chunks == [generated_audio]
+    assert marked_turns == [1]
     assert messages.count("voice_timing event=response_first_audio") == 1
     assert "latency_ms=" in messages
+    assert "latency_basis=input_transcript_fragment" in messages
     assert messages.count("voice_timing event=model_turn_complete") == 1
     assert "generated_audio_ms=1000" in messages
     assert "words=5" in messages
+    assert messages.count("voice_timing event=response_playout_drained") == 1
+    assert "first_audio_to_playout_ms=" in messages
+    assert messages.count("voice_timing event=model_usage") == 1
+    assert "prompt_tokens=4321" in messages
+    assert "response_tokens=123" in messages
+    assert "total_tokens=4444" in messages
     assert private_caller_text not in messages
     assert private_response_text not in messages
     await pipeline.stop()
@@ -1504,6 +1524,44 @@ async def test_gemini_turn_complete_without_transcript_closes_response_metrics(c
     assert "chars=0 words=0" in messages
     assert pipeline._response_first_audio_at == 0.0
     assert pipeline._generated_audio_ms == 0
+
+
+@pytest.mark.asyncio
+async def test_gemini_marks_each_audio_turn_when_input_transcription_is_absent(
+    monkeypatch,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+    marked_turns = []
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def record_playback_mark(turn: int):
+        marked_turns.append(turn)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_response_first_media_sent=record_playback_mark,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"first response"),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+        _gemini_audio_message(b"second response"),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    assert marked_turns == [1, 2]
+    await pipeline.stop()
 
 
 @pytest.mark.asyncio
@@ -2521,6 +2579,7 @@ async def test_gemini_background_tool_task_returns_current_result(monkeypatch):
 @pytest.mark.asyncio
 async def test_gemini_barge_in_discards_stale_output_until_turn_completes(monkeypatch):
     sent_chunks = []
+    marked_turns = []
     transcripts = []
     call_completed = asyncio.Event()
 
@@ -2528,6 +2587,9 @@ async def test_gemini_barge_in_discards_stale_output_until_turn_completes(monkey
 
     async def record_audio(chunk: bytes):
         sent_chunks.append(chunk)
+
+    async def record_playback_mark(turn: int):
+        marked_turns.append(turn)
 
     async def record_transcript(speaker: str, text: str):
         transcripts.append((speaker, text))
@@ -2542,6 +2604,7 @@ async def test_gemini_barge_in_discards_stale_output_until_turn_completes(monkey
         on_audio_out=record_audio,
         on_transcript=record_transcript,
         on_clear_audio=noop_clear,
+        on_response_first_media_sent=record_playback_mark,
         on_call_complete=on_call_complete,
         call_sid="CA_test",
         contractor_config=_plumbing_config(),
@@ -2570,6 +2633,7 @@ async def test_gemini_barge_in_discards_stale_output_until_turn_completes(monkey
     await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
 
     assert sent_chunks == [b"fresh audio"]
+    assert marked_turns == [2]
     assert transcripts == [("Kevin", "I heard your interruption.")]
     assert pipeline._transcript_lines == ["Kevin: I heard your interruption."]
     assert not call_completed.is_set()

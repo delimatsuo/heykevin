@@ -6,6 +6,7 @@ import pytest
 
 from app.services.receptionist_state import (
     AddressNeed,
+    BusinessScope,
     CallerIdentity,
     CallerObservation,
     CallbackConfirmation,
@@ -107,6 +108,37 @@ def test_intake_state_tracks_callback_and_scheduling_intent():
     assert "callback_intent:requested" in state.known_facts
 
 
+def test_intake_state_applies_and_restores_scope_identity_and_address_transitions():
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Synthetic Caller",
+        caller_source="synthetic_memory",
+        caller_confidence=0.95,
+    )
+
+    state.apply_caller_observation(
+        CallerObservation(
+            identity_confirmed=False,
+            business_scope=BusinessScope.OUT_OF_SCOPE,
+            business_scope_reason="synthetic unsupported service",
+            address_need=AddressNeed.REQUIRED_NOW,
+        )
+    )
+
+    assert state.caller_identity.confirmed is False
+    assert state.business_scope == BusinessScope.OUT_OF_SCOPE
+    assert state.business_scope_reason == "synthetic unsupported service"
+    assert state.address_need == AddressNeed.REQUIRED_NOW
+    assert state.phase == IntakePhase.UNDERSTAND_REQUEST
+
+    restored = IntakeState.from_dict(state.to_dict())
+    assert restored.caller_identity.confirmed is False
+    assert restored.business_scope == BusinessScope.OUT_OF_SCOPE
+    assert restored.business_scope_reason == "synthetic unsupported service"
+    assert restored.address_need == AddressNeed.REQUIRED_NOW
+    assert restored.side_effects_allowed is False
+
+
 def test_intake_state_tracks_callback_rejection_and_language():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     state.callback_intent = CallbackIntent.REQUESTED
@@ -138,6 +170,41 @@ def test_intake_state_tracks_only_replacement_callback_last_four():
 
     with pytest.raises(ValueError, match="exactly four digits"):
         CallerObservation(callback_phone_last_four="caller-full-phone")
+
+
+@pytest.mark.parametrize(
+    "caller_phone_last_four",
+    ["123", "12345", "12ab", "caller-full-phone"],
+)
+def test_intake_state_restore_rejects_non_last_four_caller_phone(
+    caller_phone_last_four: str,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported["caller_phone_last_four"] = caller_phone_last_four
+
+    with pytest.raises(ValueError, match="exactly four digits"):
+        IntakeState.from_dict(exported)
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+@pytest.mark.parametrize("value", [1234, 0, False, True])
+def test_intake_state_restore_rejects_non_string_phone_last_four(
+    field_name: str,
+    value: object,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field_name] = value
+
+    with pytest.raises(TypeError, match=f"{field_name} must be a string"):
+        IntakeState.from_dict(exported)
+
+
+def test_intake_state_restore_rejects_non_boolean_side_effect_permission():
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported["side_effects_allowed"] = "false"
+
+    with pytest.raises(TypeError, match="side_effects_allowed must be a boolean"):
+        IntakeState.from_dict(exported)
 
 
 def test_intake_state_records_asked_slots_without_duplicates():

@@ -186,6 +186,19 @@ def test_intake_state_restore_rejects_non_last_four_caller_phone(
         IntakeState.from_dict(exported)
 
 
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+@pytest.mark.parametrize("value", [1234, 0, False, True])
+def test_intake_state_restore_rejects_non_string_phone_last_four(
+    field_name: str,
+    value: object,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field_name] = value
+
+    with pytest.raises(TypeError, match=f"{field_name} must be a string"):
+        IntakeState.from_dict(exported)
+
+
 def test_intake_state_restore_rejects_non_boolean_side_effect_permission():
     exported = IntakeState.new(call_sid="CA_test").to_dict()
     exported["side_effects_allowed"] = "false"

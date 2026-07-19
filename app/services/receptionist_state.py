@@ -286,11 +286,20 @@ def _normalize_observation_text(value: str, *, max_length: int) -> str:
     return normalized
 
 
-def _normalize_phone_last_four(value: str, *, field_name: str) -> str:
+def _normalize_phone_last_four(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
     normalized = value.strip()
     if len(normalized) != 4 or not normalized.isdigit():
         raise ValueError(f"{field_name} must contain exactly four digits")
     return normalized
+
+
+def _restore_phone_last_four(data: dict[str, Any], *, field_name: str) -> str:
+    value = data.get(field_name)
+    if value is None or value == "":
+        return ""
+    return _normalize_phone_last_four(value, field_name=field_name)
 
 
 def phone_last_four(phone: str) -> str:
@@ -452,21 +461,13 @@ class IntakeState:
             call_sid=str(data.get("call_sid") or ""),
             phase=IntakePhase(data.get("phase") or IntakePhase.GREETING.value),
             caller_identity=CallerIdentity.from_dict(data.get("caller_identity")),
-            caller_phone_last_four=(
-                _normalize_phone_last_four(
-                    str(data["caller_phone_last_four"]),
-                    field_name="caller_phone_last_four",
-                )
-                if data.get("caller_phone_last_four")
-                else ""
+            caller_phone_last_four=_restore_phone_last_four(
+                data,
+                field_name="caller_phone_last_four",
             ),
-            callback_phone_last_four=(
-                _normalize_phone_last_four(
-                    str(data["callback_phone_last_four"]),
-                    field_name="callback_phone_last_four",
-                )
-                if data.get("callback_phone_last_four")
-                else ""
+            callback_phone_last_four=_restore_phone_last_four(
+                data,
+                field_name="callback_phone_last_four",
             ),
             business_scope=BusinessScope(data.get("business_scope") or BusinessScope.UNCLEAR.value),
             business_scope_reason=str(data.get("business_scope_reason") or ""),

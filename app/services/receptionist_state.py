@@ -130,11 +130,14 @@ class CallerIdentity:
     def from_dict(cls, data: dict[str, Any] | None) -> "CallerIdentity":
         data = data or {}
         confidence = data.get("confidence")
+        confirmed = data.get("confirmed", False)
+        if not isinstance(confirmed, bool):
+            raise TypeError("confirmed must be a boolean")
         return cls(
             name=str(data.get("name") or ""),
             confidence=0.0 if confidence is None else confidence,
             source=str(data.get("source") or ""),
-            confirmed=bool(data.get("confirmed") or False),
+            confirmed=confirmed,
         )
 
 

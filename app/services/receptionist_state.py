@@ -178,7 +178,10 @@ class CallerObservation:
             object.__setattr__(
                 self,
                 "callback_phone_last_four",
-                _normalize_callback_last_four(self.callback_phone_last_four),
+                _normalize_phone_last_four(
+                    self.callback_phone_last_four,
+                    field_name="callback_phone_last_four",
+                ),
             )
 
     @classmethod
@@ -283,11 +286,22 @@ def _normalize_observation_text(value: str, *, max_length: int) -> str:
     return normalized
 
 
-def _normalize_callback_last_four(value: str) -> str:
+def _normalize_phone_last_four(value: str, *, field_name: str) -> str:
     normalized = value.strip()
     if len(normalized) != 4 or not normalized.isdigit():
-        raise ValueError("callback_phone_last_four must contain exactly four digits")
+        raise ValueError(f"{field_name} must contain exactly four digits")
     return normalized
+
+
+def _restore_phone_last_four(data: dict[str, Any], *, field_name: str) -> str:
+    if field_name not in data:
+        return ""
+    value = data[field_name]
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if value == "":
+        return ""
+    return _normalize_phone_last_four(value, field_name=field_name)
 
 
 def phone_last_four(phone: str) -> str:
@@ -441,15 +455,21 @@ class IntakeState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "IntakeState":
+        side_effects_allowed = data.get("side_effects_allowed", False)
+        if not isinstance(side_effects_allowed, bool):
+            raise TypeError("side_effects_allowed must be a boolean")
+
         return cls(
             call_sid=str(data.get("call_sid") or ""),
             phase=IntakePhase(data.get("phase") or IntakePhase.GREETING.value),
             caller_identity=CallerIdentity.from_dict(data.get("caller_identity")),
-            caller_phone_last_four=str(data.get("caller_phone_last_four") or ""),
-            callback_phone_last_four=(
-                _normalize_callback_last_four(str(data["callback_phone_last_four"]))
-                if data.get("callback_phone_last_four")
-                else ""
+            caller_phone_last_four=_restore_phone_last_four(
+                data,
+                field_name="caller_phone_last_four",
+            ),
+            callback_phone_last_four=_restore_phone_last_four(
+                data,
+                field_name="callback_phone_last_four",
             ),
             business_scope=BusinessScope(data.get("business_scope") or BusinessScope.UNCLEAR.value),
             business_scope_reason=str(data.get("business_scope_reason") or ""),
@@ -467,7 +487,7 @@ class IntakeState:
             ),
             address_need=AddressNeed(data.get("address_need") or AddressNeed.NONE.value),
             memory_refs_used=set(data.get("memory_refs_used") or []),
-            side_effects_allowed=bool(data.get("side_effects_allowed") or False),
+            side_effects_allowed=side_effects_allowed,
             language=str(data.get("language") or "unknown"),
         )
 

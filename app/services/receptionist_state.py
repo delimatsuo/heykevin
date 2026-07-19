@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
+import re
 from typing import Any, Iterable
 
 
@@ -25,6 +26,7 @@ ASKABLE_SLOTS = frozenset(
 _KNOWN_FACT_SLOT_ALIASES = {
     "callback_intent": "callback_preference",
 }
+_FULL_PHONE_PATTERN = re.compile(r"(?<!\d)\+?\d[\d .()/\-]{7,}\d(?!\d)")
 
 
 class IntakePhase(str, Enum):
@@ -104,6 +106,16 @@ class CallerIdentity:
     confirmed: bool = False
 
     def __post_init__(self) -> None:
+        self.name = _normalize_safe_text(
+            self.name,
+            field_name="caller_identity.name",
+            max_length=160,
+        )
+        self.source = _normalize_safe_text(
+            self.source,
+            field_name="caller_identity.source",
+            max_length=160,
+        )
         self.confidence = _normalize_confidence(self.confidence)
 
     def to_dict(self) -> dict[str, Any]:
@@ -166,13 +178,21 @@ class CallerObservation:
             object.__setattr__(
                 self,
                 "service_object",
-                _normalize_observation_text(self.service_object, max_length=80),
+                _normalize_safe_text(
+                    self.service_object,
+                    field_name="service_object",
+                    max_length=80,
+                ),
             )
         if self.business_scope_reason is not None:
             object.__setattr__(
                 self,
                 "business_scope_reason",
-                _normalize_observation_text(self.business_scope_reason, max_length=160),
+                _normalize_safe_text(
+                    self.business_scope_reason,
+                    field_name="business_scope_reason",
+                    max_length=160,
+                ),
             )
         if self.callback_phone_last_four is not None:
             object.__setattr__(
@@ -254,7 +274,7 @@ def _optional_observation_text(data: dict[str, Any], key: str) -> str | None:
 
 
 def _normalize_language_code(value: str) -> str:
-    code = value.strip()
+    code = _normalize_safe_text(value, field_name="language", max_length=35)
     parts = code.split("-")
     if (
         not code
@@ -279,11 +299,31 @@ def _normalize_confidence(value: object) -> float:
     return normalized
 
 
-def _normalize_observation_text(value: str, *, max_length: int) -> str:
+def _normalize_safe_text(value: str, *, field_name: str, max_length: int) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
     normalized = value.strip()
-    if len(normalized) > max_length or any(ord(character) < 32 for character in normalized):
-        raise ValueError("observation text is invalid")
+    if len(normalized) > max_length:
+        raise ValueError(f"{field_name} exceeds its maximum length")
+    if any(ord(character) < 32 for character in normalized):
+        raise ValueError(f"{field_name} contains control characters")
+    if _FULL_PHONE_PATTERN.search(normalized):
+        raise ValueError(f"{field_name} cannot contain a full phone number")
     return normalized
+
+
+def _normalize_safe_text_collection(
+    values: Iterable[str],
+    *,
+    field_name: str,
+    max_length: int,
+) -> list[str]:
+    if isinstance(values, str):
+        raise TypeError(f"{field_name} must be a non-string collection")
+    return [
+        _normalize_safe_text(value, field_name=field_name, max_length=max_length)
+        for value in values
+    ]
 
 
 def _normalize_phone_last_four(value: object, *, field_name: str) -> str:
@@ -295,11 +335,33 @@ def _normalize_phone_last_four(value: object, *, field_name: str) -> str:
     return normalized
 
 
+def _normalize_phone_last_four_or_empty(value: object, *, field_name: str) -> str:
+    if value == "":
+        return ""
+    return _normalize_phone_last_four(value, field_name=field_name)
+
+
 def _restore_phone_last_four(data: dict[str, Any], *, field_name: str) -> str:
     value = data.get(field_name)
     if value is None or value == "":
         return ""
     return _normalize_phone_last_four(value, field_name=field_name)
+
+
+def _restore_safe_text_collection(
+    data: dict[str, Any],
+    *,
+    field_name: str,
+    max_length: int,
+) -> list[str]:
+    value = data.get(field_name)
+    if value is None:
+        return []
+    return _normalize_safe_text_collection(
+        value,
+        field_name=field_name,
+        max_length=max_length,
+    )
 
 
 def phone_last_four(phone: str) -> str:
@@ -329,6 +391,51 @@ class IntakeState:
     side_effects_allowed: bool = False
     language: str = "unknown"
 
+    def __post_init__(self) -> None:
+        self.caller_phone_last_four = _normalize_phone_last_four_or_empty(
+            self.caller_phone_last_four,
+            field_name="caller_phone_last_four",
+        )
+        self.callback_phone_last_four = _normalize_phone_last_four_or_empty(
+            self.callback_phone_last_four,
+            field_name="callback_phone_last_four",
+        )
+        self.call_sid = _normalize_safe_text(
+            self.call_sid,
+            field_name="call_sid",
+            max_length=128,
+        )
+        self.business_scope_reason = _normalize_safe_text(
+            self.business_scope_reason,
+            field_name="business_scope_reason",
+            max_length=160,
+        )
+        self.service_object = _normalize_safe_text(
+            self.service_object,
+            field_name="service_object",
+            max_length=80,
+        )
+        self.known_facts = _normalize_safe_text_collection(
+            self.known_facts,
+            field_name="known_facts",
+            max_length=160,
+        )
+        self.asked_slots = set(
+            _normalize_safe_text_collection(
+                self.asked_slots,
+                field_name="asked_slots",
+                max_length=80,
+            )
+        )
+        self.memory_refs_used = set(
+            _normalize_safe_text_collection(
+                self.memory_refs_used,
+                field_name="memory_refs_used",
+                max_length=160,
+            )
+        )
+        self.language = _normalize_language_code(self.language)
+
     @classmethod
     def new(
         cls,
@@ -349,7 +456,13 @@ class IntakeState:
                 confirmed=bool(caller_name and caller_confidence >= 0.8),
             ),
             caller_phone_last_four=phone_last_four(caller_phone),
-            memory_refs_used=set(memory_refs_used),
+            memory_refs_used=set(
+                _normalize_safe_text_collection(
+                    memory_refs_used,
+                    field_name="memory_refs_used",
+                    max_length=160,
+                )
+            ),
         )
 
     def apply_caller_observation(self, observation: CallerObservation) -> None:
@@ -409,7 +522,13 @@ class IntakeState:
 
     def mark_slot_asked(self, slot: str) -> None:
         if slot:
-            self.asked_slots.add(slot)
+            self.asked_slots.add(
+                _normalize_safe_text(
+                    slot,
+                    field_name="asked_slots",
+                    max_length=80,
+                )
+            )
 
     def known_askable_slots(self) -> set[str]:
         slots: set[str] = set()
@@ -475,8 +594,18 @@ class IntakeState:
             service_object=str(data.get("service_object") or ""),
             service_action=ServiceAction(data.get("service_action") or ServiceAction.UNKNOWN.value),
             urgency=Urgency(data.get("urgency") or Urgency.UNKNOWN.value),
-            known_facts=list(data.get("known_facts") or []),
-            asked_slots=set(data.get("asked_slots") or []),
+            known_facts=_restore_safe_text_collection(
+                data,
+                field_name="known_facts",
+                max_length=160,
+            ),
+            asked_slots=set(
+                _restore_safe_text_collection(
+                    data,
+                    field_name="asked_slots",
+                    max_length=80,
+                )
+            ),
             callback_intent=CallbackIntent(
                 data.get("callback_intent") or CallbackIntent.NONE.value
             ),
@@ -484,7 +613,13 @@ class IntakeState:
                 data.get("callback_confirmation") or CallbackConfirmation.UNKNOWN.value
             ),
             address_need=AddressNeed(data.get("address_need") or AddressNeed.NONE.value),
-            memory_refs_used=set(data.get("memory_refs_used") or []),
+            memory_refs_used=set(
+                _restore_safe_text_collection(
+                    data,
+                    field_name="memory_refs_used",
+                    max_length=160,
+                )
+            ),
             side_effects_allowed=side_effects_allowed,
             language=str(data.get("language") or "unknown"),
         )

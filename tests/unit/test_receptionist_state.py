@@ -379,3 +379,114 @@ def test_intake_state_does_not_escalate_explicitly_negated_emergency():
 
     assert state.intent == Intent.SERVICE_REQUEST
     assert state.urgency == Urgency.ROUTINE
+
+
+def _synthetic_full_phone() -> str:
+    return "-".join(("212", "555", "0123"))
+
+
+def _synthetic_slash_phone() -> str:
+    return "/".join(("212", "555", "0123"))
+
+
+def test_state_text_inputs_reject_full_phone_numbers():
+    phone = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        CallerIdentity(name=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerIdentity(source=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerObservation(service_object=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerObservation(business_scope_reason=phone)
+
+
+def test_state_text_inputs_reject_slash_separated_phone_numbers():
+    phone = _synthetic_slash_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        CallerIdentity(name=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerObservation(service_object=phone)
+
+
+@pytest.mark.parametrize("field", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_restore_rejects_full_phone_numbers_in_collections(field: str):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field] = [_synthetic_full_phone()]
+
+    with pytest.raises(ValueError, match="full phone"):
+        IntakeState.from_dict(exported)
+
+
+def test_state_rejects_full_phone_number_when_recording_asked_slot():
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="full phone"):
+        state.mark_slot_asked(_synthetic_full_phone())
+
+
+def test_state_rejects_full_phone_number_in_memory_reference():
+    with pytest.raises(ValueError, match="full phone"):
+        IntakeState.new(
+            call_sid="CA_test",
+            memory_refs_used=(_synthetic_full_phone(),),
+        )
+
+
+@pytest.mark.parametrize("field", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_direct_construction_rejects_scalar_collection(field: str):
+    with pytest.raises(TypeError, match=f"{field} must be a non-string collection"):
+        IntakeState(**{field: "single-value"})
+
+
+@pytest.mark.parametrize("field", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_restore_rejects_scalar_collection(field: str):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field] = "single-value"
+
+    with pytest.raises(TypeError, match=f"{field} must be a non-string collection"):
+        IntakeState.from_dict(exported)
+
+
+def test_state_new_rejects_scalar_memory_references():
+    with pytest.raises(TypeError, match="memory_refs_used must be a non-string collection"):
+        IntakeState.new(call_sid="CA_test", memory_refs_used="single-value")
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+def test_state_direct_construction_rejects_full_phone_last_four(field_name: str):
+    with pytest.raises(ValueError, match="exactly four digits"):
+        IntakeState(**{field_name: _synthetic_full_phone()})
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+@pytest.mark.parametrize("value", [1234, False])
+def test_state_direct_construction_rejects_non_string_phone_last_four(
+    field_name: str,
+    value: object,
+):
+    with pytest.raises(TypeError, match=f"{field_name} must be a string"):
+        IntakeState(**{field_name: value})
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+def test_state_restore_rejects_full_phone_last_four(field_name: str):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field_name] = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="exactly four digits"):
+        IntakeState.from_dict(exported)
+
+
+def test_state_last_four_fields_preserve_valid_and_legacy_empty_values():
+    state = IntakeState(
+        caller_phone_last_four="1234",
+        callback_phone_last_four="5678",
+    )
+
+    assert state.to_dict()["caller_phone_last_four"] == "1234"
+    assert state.to_dict()["callback_phone_last_four"] == "5678"
+    assert IntakeState.from_dict({}).caller_phone_last_four == ""
+    assert IntakeState.from_dict({}).callback_phone_last_four == ""

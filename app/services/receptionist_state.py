@@ -98,6 +98,18 @@ class AddressNeed(str, Enum):
     CONFIRMED = "confirmed"
 
 
+_INTAKE_ENUM_FIELDS: dict[str, type[Enum]] = {
+    "phase": IntakePhase,
+    "business_scope": BusinessScope,
+    "intent": Intent,
+    "service_action": ServiceAction,
+    "urgency": Urgency,
+    "callback_intent": CallbackIntent,
+    "callback_confirmation": CallbackConfirmation,
+    "address_need": AddressNeed,
+}
+
+
 @dataclass
 class CallerIdentity:
     name: str = ""
@@ -120,6 +132,8 @@ class CallerIdentity:
             )
         elif name == "confidence":
             value = _normalize_confidence(value)
+        elif name == "confirmed" and not isinstance(value, bool):
+            raise TypeError("confirmed must be a boolean")
         super().__setattr__(name, value)
 
     def to_dict(self) -> dict[str, Any]:
@@ -500,6 +514,9 @@ class IntakeState:
     language: str = "unknown"
 
     def __setattr__(self, name: str, value: object) -> None:
+        expected_enum = _INTAKE_ENUM_FIELDS.get(name)
+        if expected_enum is not None and not isinstance(value, expected_enum):
+            raise TypeError(f"{name} must be a {expected_enum.__name__}")
         if name in {"caller_phone_last_four", "callback_phone_last_four"}:
             value = _normalize_phone_last_four_or_empty(value, field_name=name)
         elif name == "call_sid":
@@ -516,6 +533,8 @@ class IntakeState:
             value = _MemoryRefsUsedSet(value)
         elif name == "language":
             value = _normalize_language_code(value)
+        elif name == "side_effects_allowed" and not isinstance(value, bool):
+            raise TypeError("side_effects_allowed must be a boolean")
         elif name == "caller_identity" and not isinstance(value, CallerIdentity):
             raise TypeError("caller_identity must be a CallerIdentity")
         super().__setattr__(name, value)

@@ -1,6 +1,9 @@
 """Receptionist call-state memory behavior."""
 
+import copy
+from dataclasses import asdict
 import json
+import pickle
 
 import pytest
 
@@ -510,3 +513,210 @@ def test_state_last_four_fields_preserve_valid_and_legacy_empty_values():
     assert state.to_dict()["callback_phone_last_four"] == "5678"
     assert IntakeState.from_dict({}).caller_phone_last_four == ""
     assert IntakeState.from_dict({}).callback_phone_last_four == ""
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("call_sid", _synthetic_full_phone()),
+        ("caller_phone_last_four", _synthetic_full_phone()),
+        ("callback_phone_last_four", _synthetic_full_phone()),
+        ("business_scope_reason", _synthetic_full_phone()),
+        ("service_object", _synthetic_full_phone()),
+        ("language", _synthetic_full_phone()),
+    ],
+)
+def test_state_rejects_full_phone_numbers_on_direct_scalar_mutation(
+    field_name: str,
+    value: str,
+):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError):
+        setattr(state, field_name, value)
+
+
+@pytest.mark.parametrize("field_name", ["name", "source"])
+def test_caller_identity_rejects_full_phone_numbers_on_direct_mutation(field_name: str):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="full phone"):
+        setattr(state.caller_identity, field_name, _synthetic_full_phone())
+
+
+@pytest.mark.parametrize("field_name", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_rejects_full_phone_numbers_on_direct_collection_assignment(
+    field_name: str,
+):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="full phone"):
+        setattr(state, field_name, [_synthetic_full_phone()])
+
+
+@pytest.mark.parametrize("field_name", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_rejects_full_phone_numbers_on_direct_collection_mutation(
+    field_name: str,
+):
+    state = IntakeState.new(call_sid="CA_test")
+    collection = getattr(state, field_name)
+
+    with pytest.raises(ValueError, match="full phone"):
+        if field_name == "known_facts":
+            collection.append(_synthetic_full_phone())
+        else:
+            collection.add(_synthetic_full_phone())
+
+
+def test_known_facts_rejects_every_text_ingress_mutator_atomically():
+    state = IntakeState(known_facts=["service_object:faucet"])
+    facts = state.known_facts
+    phone = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        facts.append(phone)
+    with pytest.raises(ValueError, match="full phone"):
+        facts.extend([phone])
+    with pytest.raises(ValueError, match="full phone"):
+        facts.insert(0, phone)
+    with pytest.raises(ValueError, match="full phone"):
+        facts[0:0] = [phone]
+    with pytest.raises(ValueError, match="full phone"):
+        facts += [phone]
+
+    assert facts == ["service_object:faucet"]
+
+
+@pytest.mark.parametrize("field_name", ["asked_slots", "memory_refs_used"])
+def test_text_sets_reject_every_ingress_mutator_atomically(field_name: str):
+    state = IntakeState(**{field_name: {"existing-value"}})
+    values = getattr(state, field_name)
+    phone = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        values.add(phone)
+    with pytest.raises(ValueError, match="full phone"):
+        values.update({phone})
+    with pytest.raises(ValueError, match="full phone"):
+        values.__ior__({phone})
+    with pytest.raises(ValueError, match="full phone"):
+        values.__ixor__({phone})
+
+    assert values == {"existing-value"}
+
+
+@pytest.mark.parametrize("field_name", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_rejects_scalar_collection_assignment_after_construction(field_name: str):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(TypeError, match=f"{field_name} must be a non-string collection"):
+        setattr(state, field_name, "single-value")
+
+
+def test_post_construction_validation_preserves_normalized_state_values():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.service_object = " faucet "
+    state.caller_identity.name = " Synthetic Caller "
+    state.caller_identity.source = " fixture "
+
+    assert state.service_object == "faucet"
+    assert state.caller_identity.name == "Synthetic Caller"
+    assert state.caller_identity.source == "fixture"
+
+
+def test_caller_identity_rejects_invalid_confidence_on_direct_mutation():
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="between zero and one"):
+        state.caller_identity.confidence = 1.1
+
+
+def test_state_requires_typed_caller_identity_replacement():
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(TypeError, match="caller_identity must be a CallerIdentity"):
+        state.caller_identity = {"name": "Synthetic Caller"}
+
+    state.caller_identity = CallerIdentity(name="Synthetic Caller")
+    assert state.caller_identity.name == "Synthetic Caller"
+
+
+def test_state_preserves_valid_direct_collection_updates():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.known_facts = ["job_complexity:existing fixture"]
+    state.known_facts.append("urgency:routine")
+    state.asked_slots.add("service_action")
+    state.memory_refs_used.add("fixture-memory-ref")
+
+    assert state.known_facts == ["job_complexity:existing fixture", "urgency:routine"]
+    assert state.asked_slots == {"service_action"}
+    assert state.memory_refs_used == {"fixture-memory-ref"}
+
+
+def test_state_validated_collections_support_deepcopy():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+
+    restored = copy.deepcopy(state)
+
+    assert restored.to_dict() == state.to_dict()
+    assert restored.known_facts is not state.known_facts
+    assert restored.asked_slots is not state.asked_slots
+    assert restored.memory_refs_used is not state.memory_refs_used
+    with pytest.raises(ValueError, match="full phone"):
+        restored.known_facts.append(_synthetic_full_phone())
+
+
+def test_state_validated_collections_support_pickle_round_trip():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+
+    restored = pickle.loads(pickle.dumps(state))
+
+    assert restored.to_dict() == state.to_dict()
+    with pytest.raises(ValueError, match="full phone"):
+        restored.asked_slots.add(_synthetic_full_phone())
+
+
+def test_state_validated_collections_support_dataclass_conversion():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+
+    exported = asdict(state)
+
+    assert exported["known_facts"] == ["service_object:faucet"]
+    assert exported["asked_slots"] == {"service_action"}
+    assert exported["memory_refs_used"] == {"fixture-memory-ref"}
+
+
+def test_augmented_collection_assignment_preserves_existing_aliases():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+    known_facts = state.known_facts
+    asked_slots = state.asked_slots
+    memory_refs_used = state.memory_refs_used
+
+    state.known_facts += ["urgency:routine"]
+    state.asked_slots |= {"callback_intent"}
+    state.memory_refs_used ^= {"fixture-memory-ref", "replacement-memory-ref"}
+
+    assert state.known_facts is known_facts
+    assert state.asked_slots is asked_slots
+    assert state.memory_refs_used is memory_refs_used
+    assert known_facts == ["service_object:faucet", "urgency:routine"]
+    assert asked_slots == {"service_action", "callback_intent"}
+    assert memory_refs_used == {"replacement-memory-ref"}

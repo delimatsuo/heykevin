@@ -105,18 +105,22 @@ class CallerIdentity:
     source: str = ""
     confirmed: bool = False
 
-    def __post_init__(self) -> None:
-        self.name = _normalize_safe_text(
-            self.name,
-            field_name="caller_identity.name",
-            max_length=160,
-        )
-        self.source = _normalize_safe_text(
-            self.source,
-            field_name="caller_identity.source",
-            max_length=160,
-        )
-        self.confidence = _normalize_confidence(self.confidence)
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "name":
+            value = _normalize_safe_text(
+                value,
+                field_name="caller_identity.name",
+                max_length=160,
+            )
+        elif name == "source":
+            value = _normalize_safe_text(
+                value,
+                field_name="caller_identity.source",
+                max_length=160,
+            )
+        elif name == "confidence":
+            value = _normalize_confidence(value)
+        super().__setattr__(name, value)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -367,6 +371,107 @@ def _restore_safe_text_collection(
     )
 
 
+class _ValidatedTextList(list[str]):
+    """List storage that validates all mutations which can introduce text."""
+
+    _field_name = ""
+    _max_length = 0
+
+    def __init__(self, values: Iterable[str] = ()) -> None:
+        super().__init__(self._normalize_values(values))
+
+    def _normalize_value(self, value: object) -> str:
+        return _normalize_safe_text(
+            value,
+            field_name=self._field_name,
+            max_length=self._max_length,
+        )
+
+    def _normalize_values(self, values: Iterable[str]) -> list[str]:
+        return _normalize_safe_text_collection(
+            values,
+            field_name=self._field_name,
+            max_length=self._max_length,
+        )
+
+    def __setitem__(self, index: int | slice, value: object) -> None:
+        if isinstance(index, slice):
+            super().__setitem__(index, self._normalize_values(value))
+        else:
+            super().__setitem__(index, self._normalize_value(value))
+
+    def append(self, value: str) -> None:
+        super().append(self._normalize_value(value))
+
+    def extend(self, values: Iterable[str]) -> None:
+        super().extend(self._normalize_values(values))
+
+    def insert(self, index: int, value: str) -> None:
+        super().insert(index, self._normalize_value(value))
+
+    def __iadd__(self, values: Iterable[str]) -> "_ValidatedTextList":
+        self.extend(values)
+        return self
+
+
+class _KnownFactsList(_ValidatedTextList):
+    _field_name = "known_facts"
+    _max_length = 160
+
+
+class _ValidatedTextSet(set[str]):
+    """Set storage that validates all mutations which can introduce text."""
+
+    _field_name = ""
+    _max_length = 0
+
+    def __init__(self, values: Iterable[str] = ()) -> None:
+        super().__init__(self._normalize_values(values))
+
+    def _normalize_value(self, value: object) -> str:
+        return _normalize_safe_text(
+            value,
+            field_name=self._field_name,
+            max_length=self._max_length,
+        )
+
+    def _normalize_values(self, values: Iterable[str]) -> list[str]:
+        return _normalize_safe_text_collection(
+            values,
+            field_name=self._field_name,
+            max_length=self._max_length,
+        )
+
+    def add(self, value: str) -> None:
+        super().add(self._normalize_value(value))
+
+    def update(self, *values: Iterable[str]) -> None:
+        normalized_values = [self._normalize_values(value) for value in values]
+        for normalized in normalized_values:
+            super().update(normalized)
+
+    def __ior__(self, values: Iterable[str]) -> "_ValidatedTextSet":
+        self.update(values)
+        return self
+
+    def symmetric_difference_update(self, values: Iterable[str]) -> None:
+        super().symmetric_difference_update(self._normalize_values(values))
+
+    def __ixor__(self, values: Iterable[str]) -> "_ValidatedTextSet":
+        self.symmetric_difference_update(values)
+        return self
+
+
+class _AskedSlotsSet(_ValidatedTextSet):
+    _field_name = "asked_slots"
+    _max_length = 80
+
+
+class _MemoryRefsUsedSet(_ValidatedTextSet):
+    _field_name = "memory_refs_used"
+    _max_length = 160
+
+
 def phone_last_four(phone: str) -> str:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return digits[-4:] if len(digits) >= 4 else ""
@@ -394,50 +499,26 @@ class IntakeState:
     side_effects_allowed: bool = False
     language: str = "unknown"
 
-    def __post_init__(self) -> None:
-        self.caller_phone_last_four = _normalize_phone_last_four_or_empty(
-            self.caller_phone_last_four,
-            field_name="caller_phone_last_four",
-        )
-        self.callback_phone_last_four = _normalize_phone_last_four_or_empty(
-            self.callback_phone_last_four,
-            field_name="callback_phone_last_four",
-        )
-        self.call_sid = _normalize_safe_text(
-            self.call_sid,
-            field_name="call_sid",
-            max_length=128,
-        )
-        self.business_scope_reason = _normalize_safe_text(
-            self.business_scope_reason,
-            field_name="business_scope_reason",
-            max_length=160,
-        )
-        self.service_object = _normalize_safe_text(
-            self.service_object,
-            field_name="service_object",
-            max_length=80,
-        )
-        self.known_facts = _normalize_safe_text_collection(
-            self.known_facts,
-            field_name="known_facts",
-            max_length=160,
-        )
-        self.asked_slots = set(
-            _normalize_safe_text_collection(
-                self.asked_slots,
-                field_name="asked_slots",
-                max_length=80,
-            )
-        )
-        self.memory_refs_used = set(
-            _normalize_safe_text_collection(
-                self.memory_refs_used,
-                field_name="memory_refs_used",
-                max_length=160,
-            )
-        )
-        self.language = _normalize_language_code(self.language)
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in {"caller_phone_last_four", "callback_phone_last_four"}:
+            value = _normalize_phone_last_four_or_empty(value, field_name=name)
+        elif name == "call_sid":
+            value = _normalize_safe_text(value, field_name=name, max_length=128)
+        elif name == "business_scope_reason":
+            value = _normalize_safe_text(value, field_name=name, max_length=160)
+        elif name == "service_object":
+            value = _normalize_safe_text(value, field_name=name, max_length=80)
+        elif name == "known_facts" and not isinstance(value, _KnownFactsList):
+            value = _KnownFactsList(value)
+        elif name == "asked_slots" and not isinstance(value, _AskedSlotsSet):
+            value = _AskedSlotsSet(value)
+        elif name == "memory_refs_used" and not isinstance(value, _MemoryRefsUsedSet):
+            value = _MemoryRefsUsedSet(value)
+        elif name == "language":
+            value = _normalize_language_code(value)
+        elif name == "caller_identity" and not isinstance(value, CallerIdentity):
+            raise TypeError("caller_identity must be a CallerIdentity")
+        super().__setattr__(name, value)
 
     @classmethod
     def new(

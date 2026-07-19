@@ -207,6 +207,26 @@ def test_intake_state_restore_rejects_non_boolean_side_effect_permission():
         IntakeState.from_dict(exported)
 
 
+@pytest.mark.parametrize("confirmed", ["false", 0, 1, None])
+def test_intake_state_restore_rejects_non_boolean_identity_confirmation(
+    confirmed: object,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported["caller_identity"]["confirmed"] = confirmed
+
+    with pytest.raises(TypeError, match="confirmed must be a boolean"):
+        IntakeState.from_dict(exported)
+
+
+def test_intake_state_restore_preserves_explicit_phase():
+    state = IntakeState.new(call_sid="CA_test")
+    state.phase = IntakePhase.WRAP_UP
+
+    restored = IntakeState.from_dict(state.to_dict())
+
+    assert restored.phase == IntakePhase.WRAP_UP
+
+
 def test_intake_state_records_asked_slots_without_duplicates():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
 

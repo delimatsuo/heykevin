@@ -18,6 +18,8 @@ os.environ.setdefault("USER_PHONE", "test-user-number")
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
 from app.webhooks.media_stream import (
+    _send_twilio_playback_mark,
+    _TwilioPlaybackMarks,
     _TwilioMediaIngress,
     _consume_twilio_ingress,
     _serve_pipeline_ingress,
@@ -44,6 +46,81 @@ class _IngressWebSocket:
 
     async def close(self, code: int = 1000):
         self.close_codes.append(code)
+
+
+@pytest.mark.asyncio
+async def test_twilio_ingress_forwards_playback_mark_events_without_queueing_them():
+    received_marks = []
+    websocket = _IngressWebSocket([
+        json.dumps({"event": "mark", "mark": {"name": "response-1-1"}}),
+        json.dumps({"event": "stop"}),
+    ])
+    ingress = _TwilioMediaIngress(
+        websocket,
+        call_sid="CA_test",
+        on_playback_mark=received_marks.append,
+    )
+
+    await ingress.run()
+
+    assert received_marks == ["response-1-1"]
+    assert (await ingress.receive()).kind == "stop"
+    assert await ingress.receive() is None
+
+
+def test_twilio_playback_marks_are_bounded_and_classify_clear_without_names(caplog):
+    private_mark_name = "response-7-private-marker"
+    marks = _TwilioPlaybackMarks(
+        call_sid="CA_private_identifier",
+        max_pending=1,
+    )
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    assert marks.register(turn=7, name=private_mark_name)
+    assert marks.register(turn=8, name="response-8-overflow") is False
+    marks.mark_pending_cleared()
+    assert marks.resolve(private_mark_name)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=twilio_playback_mark_skipped" in messages
+    assert "voice_timing event=twilio_playback_mark_resolved" in messages
+    assert "turn=7" in messages
+    assert "status=cleared" in messages
+    assert private_mark_name not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playback_mark_is_sent_after_audio_with_opaque_name(caplog):
+    class RecordingWebSocket:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_json(self, payload):
+            self.payloads.append(payload)
+
+    websocket = RecordingWebSocket()
+    marks = _TwilioPlaybackMarks(call_sid="CA_private_identifier")
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    assert await _send_twilio_playback_mark(
+        websocket,
+        stream_sid="stream-redacted",
+        playback_marks=marks,
+        turn=3,
+        call_sid="CA_private_identifier",
+    )
+
+    payload = websocket.payloads[0]
+    assert payload["event"] == "mark"
+    assert payload["mark"]["name"].startswith("response-3-")
+    assert marks.resolve(payload["mark"]["name"])
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=twilio_playback_mark_resolved" in messages
+    assert "turn=3" in messages
+    assert "status=played" in messages
+    assert "CA_private_identifier" not in messages
 
 
 @pytest.mark.asyncio

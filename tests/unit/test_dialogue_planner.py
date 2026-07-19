@@ -358,6 +358,91 @@ def test_next_action_rejects_contradictory_question_contracts():
         )
 
 
+@pytest.mark.parametrize(
+    "invalid_name",
+    [ActionName.WRAP_UP.value, "unsupported_action", None, 0],
+)
+def test_next_action_requires_action_name_enum(invalid_name: object):
+    with pytest.raises(TypeError, match="name must be an ActionName"):
+        NextAction(
+            name=invalid_name,  # type: ignore[arg-type]
+            reason="invalid test action",
+        )
+
+
+@pytest.mark.parametrize("invalid_bool", ["false", 0, 1, None])
+def test_next_action_requires_real_tool_calls_allowed_bool(invalid_bool: object):
+    with pytest.raises(TypeError, match="tool_calls_allowed must be a bool"):
+        NextAction(
+            name=ActionName.WRAP_UP,
+            reason="invalid test action",
+            tool_calls_allowed=invalid_bool,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("invalid_bool", ["false", 0, 1, None])
+def test_next_action_requires_real_question_required_bool(invalid_bool: object):
+    allowed_slots = ("urgency",) if bool(invalid_bool) else ()
+
+    with pytest.raises(TypeError, match="question_required must be a bool"):
+        NextAction(
+            name=ActionName.ANSWER_DIRECT_QUESTION,
+            reason="invalid test action",
+            allowed_slots=allowed_slots,
+            question_required=invalid_bool,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("allowed_slots", ["urgency"]),
+        ("allowed_slots", ("urgency", 1)),
+        ("forbidden_slots", ["service_address"]),
+        ("forbidden_slots", ("service_address", None)),
+        ("memory_facts_safe_to_use", ["caller_identity:Fixture Caller"]),
+        ("memory_facts_safe_to_use", ("caller_identity:Fixture Caller", 1)),
+    ],
+)
+def test_next_action_requires_immutable_string_tuples(
+    field_name: str,
+    invalid_value: object,
+):
+    arguments = {
+        "name": ActionName.ANSWER_DIRECT_QUESTION,
+        "reason": "invalid test action",
+        field_name: invalid_value,
+    }
+    if field_name == "allowed_slots":
+        arguments["question_required"] = True
+
+    with pytest.raises(TypeError, match=rf"{field_name} must be a tuple of strings"):
+        NextAction(**arguments)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("reason", None),
+        ("reason", 1),
+        ("max_spoken_shape", None),
+        ("max_spoken_shape", ["one short sentence"]),
+    ],
+)
+def test_next_action_requires_string_text_fields(
+    field_name: str,
+    invalid_value: object,
+):
+    arguments = {
+        "name": ActionName.WRAP_UP,
+        "reason": "valid reason",
+        field_name: invalid_value,
+    }
+
+    with pytest.raises(TypeError, match=rf"{field_name} must be a string"):
+        NextAction(**arguments)  # type: ignore[arg-type]
+
+
 def test_planner_allows_address_only_when_state_requires_it():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     state.intent = Intent.SCHEDULING

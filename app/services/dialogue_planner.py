@@ -59,6 +59,25 @@ class NextAction:
     question_required: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, ActionName):
+            raise TypeError("name must be an ActionName")
+        for field_name in ("reason", "max_spoken_shape"):
+            if not isinstance(getattr(self, field_name), str):
+                raise TypeError(f"{field_name} must be a string")
+        for field_name in (
+            "allowed_slots",
+            "forbidden_slots",
+            "memory_facts_safe_to_use",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, tuple) or any(
+                not isinstance(item, str) for item in value
+            ):
+                raise TypeError(f"{field_name} must be a tuple of strings")
+        for field_name in ("tool_calls_allowed", "question_required"):
+            if type(getattr(self, field_name)) is not bool:
+                raise TypeError(f"{field_name} must be a bool")
+
         overlap = set(self.allowed_slots).intersection(self.forbidden_slots)
         if overlap:
             raise ValueError("slots cannot be both allowed and forbidden")

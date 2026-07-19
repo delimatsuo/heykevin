@@ -151,7 +151,8 @@ jobs:
             --build-service-account "$STAGING_BUILD_SERVICE_ACCOUNT" \
             --remove-secrets RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY \
             --update-env-vars "ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=$FIRESTORE_PROJECT_ID,FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL,APNS_SANDBOX=$APNS_SANDBOX,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,RECEPTIONIST_OBSERVATION_SHADOW_ENABLED=false,DEPLOY_SHA=$DEPLOY_SHA" \
-            --tag staging
+            --tag staging \
+            --no-traffic
 
       - name: Health check
         run: |

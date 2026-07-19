@@ -1,5 +1,7 @@
 """Release process hardening tests."""
 
+import os
+import subprocess
 from pathlib import Path
 
 
@@ -32,6 +34,14 @@ def _workflow_run_blocks(workflow: str) -> list[str]:
             index += 1
         blocks.append("\n".join(block))
     return blocks
+
+
+def _staging_health_check_script(workflow: str) -> str:
+    return next(
+        block
+        for block in _workflow_run_blocks(workflow)
+        if "STAGING_TRAFFIC=$(gcloud run services describe" in block
+    )
 
 
 def test_deploy_workflow_passes_commit_sha_to_cloud_run():
@@ -90,6 +100,10 @@ def test_staging_health_check_uses_the_tagged_candidate_revision():
     )[0]
 
     assert "--tag staging" in staging_job
+    staging_deploy = staging_job.split("Deploy to Cloud Run (Staging)", 1)[1].split(
+        "Health check", 1
+    )[0]
+    assert "--no-traffic" in staging_deploy
     assert "--format='json(status.traffic)'" in staging_job
     assert 'entry.get("tag") == "staging"' in staging_job
     assert 'test -n "$STAGING_TAG_URL"' in staging_job
@@ -103,6 +117,59 @@ def test_staging_health_check_uses_the_tagged_candidate_revision():
     )
     assert "--format='value(status.url)'" in staging_job
     assert '"$STAGING_URL/health"' in staging_job
+
+
+def test_tagged_candidate_sha_mismatch_never_updates_staging_traffic(
+    tmp_path: Path, monkeypatch
+):
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    script = _staging_health_check_script(workflow)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    traffic_updated = tmp_path / "traffic-updated"
+
+    gcloud = fake_bin / "gcloud"
+    gcloud.write_text(
+        """#!/bin/sh
+if [ \"$3\" = \"describe\" ]; then
+  printf '%s\\n' '{\"status\":{\"traffic\":[{\"tag\":\"staging\",\"url\":\"https://candidate.example\",\"revisionName\":\"candidate-revision\"}]}}'
+  exit 0
+fi
+if [ \"$3\" = \"update-traffic\" ]; then
+  : > \"$UPDATE_TRAFFIC_MARKER\"
+fi
+"""
+    )
+    gcloud.chmod(0o755)
+
+    curl = fake_bin / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '{\"deploy_sha\":\"mismatch\"}'\n"
+    )
+    curl.chmod(0o755)
+
+    sleep = fake_bin / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("GCP_PROJECT_ID", "project")
+    monkeypatch.setenv("GCP_REGION", "region")
+    monkeypatch.setenv("STAGING_SERVICE", "service")
+    monkeypatch.setenv("DEPLOY_SHA", "expected")
+    monkeypatch.setenv("UPDATE_TRAFFIC_MARKER", str(traffic_updated))
+
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Tagged staging candidate deploy SHA mismatch" in result.stdout
+    assert not traffic_updated.exists()
 
 
 def test_production_deploy_rejects_candidate_override():

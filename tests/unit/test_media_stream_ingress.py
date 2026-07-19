@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import time
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
 from app.webhooks.media_stream import (
     _TwilioMediaIngress,
+    _consume_twilio_ingress,
     _serve_pipeline_ingress,
 )
 
@@ -70,6 +72,8 @@ async def test_twilio_ingress_buffers_audio_in_order_under_a_byte_bound():
     assert closed_event is None
     assert ingress.buffered_audio_bytes == 0
     assert ingress.buffered_audio_chunks == 0
+    assert ingress.delivery_lag_samples == 2
+    assert ingress.max_delivery_lag_ms >= 0
 
 
 @pytest.mark.asyncio
@@ -91,6 +95,80 @@ async def test_twilio_ingress_closes_on_overflow_without_logging_audio(caplog):
     assert ingress.overflowed is True
     assert websocket.close_codes == [1009]
     assert "voice_timing event=inbound_media_buffer_overflow" in messages
+    assert private_frame.decode() not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_ingress_delivery_summary_is_payload_free_on_stream_stop(caplog):
+    private_frame = b"private caller audio"
+    ingress = _TwilioMediaIngress(
+        _IngressWebSocket([_media_message(private_frame), json.dumps({"event": "stop"})]),
+        call_sid="CA_private_identifier",
+    )
+    await ingress.run()
+
+    class ReadyPipeline:
+        async def wait_until_audio_ready(self):
+            return True
+
+        async def process_audio_in(self, audio: bytes):
+            assert audio == private_frame
+
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+    result = await _consume_twilio_ingress(
+        ReadyPipeline(),
+        ingress,
+        call_sid="CA_private_identifier",
+        media_stream_started_at=0.0,
+        call_started_at=time.time(),
+        max_call_duration_seconds=60,
+        on_stream_stop=_noop,
+        on_max_duration=_noop,
+    )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert result == "stop"
+    assert "voice_timing event=inbound_media_delivery_summary" in messages
+    assert "samples=1" in messages
+    assert private_frame.decode() not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_ingress_delivery_summary_is_payload_free_when_pipeline_is_unavailable(
+    caplog,
+):
+    private_frame = b"private caller audio"
+    ingress = _TwilioMediaIngress(
+        _IngressWebSocket([_media_message(private_frame), json.dumps({"event": "stop"})]),
+        call_sid="CA_private_identifier",
+    )
+    await ingress.run()
+
+    class UnavailablePipeline:
+        async def wait_until_audio_ready(self):
+            return False
+
+        async def process_audio_in(self, _audio: bytes):
+            raise AssertionError("audio must not be forwarded")
+
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+    result = await _consume_twilio_ingress(
+        UnavailablePipeline(),
+        ingress,
+        call_sid="CA_private_identifier",
+        media_stream_started_at=0.0,
+        call_started_at=time.time(),
+        max_call_duration_seconds=60,
+        on_stream_stop=_noop,
+        on_max_duration=_noop,
+    )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert result == "pipeline_unavailable"
+    assert "voice_timing event=inbound_media_delivery_summary" in messages
+    assert "samples=0" in messages
     assert private_frame.decode() not in messages
     assert "CA_private_identifier" not in messages
 

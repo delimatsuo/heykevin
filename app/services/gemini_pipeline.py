@@ -81,9 +81,12 @@ class GeminiPipeline:
     CLOSE_TIMEOUT_SECONDS = 1.0
     MAX_RECONNECT_ATTEMPTS = 1
     MAX_RECONNECT_AUDIO_BUFFER_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
-    MAX_AUDIO_QUEUE_CHUNKS = 128
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
+    # Secondary object bound; the byte budget is the effective limit for normal frames.
+    MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
+    MAX_GREETING_BUSINESS_NAME_WORDS = 6
+    MAX_RESPONSE_OUTPUT_TOKENS = 256
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -200,6 +203,7 @@ class GeminiPipeline:
         config = {
             "response_modalities": ["AUDIO"],
             "temperature": settings.gemini_live_temperature,
+            "max_output_tokens": self.MAX_RESPONSE_OUTPUT_TOKENS,
             "speech_config": {
                 "voice_config": {
                     "prebuilt_voice_config": {
@@ -238,6 +242,9 @@ class GeminiPipeline:
             "business_name",
             f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
         )
+        business_name = " ".join(
+            str(business_name).split()[: self.MAX_GREETING_BUSINESS_NAME_WORDS]
+        ) or "the office"
         owner_name = self._contractor_config.get("owner_name", settings.user_name)
         owner_parts = owner_name.split()
         owner_first = owner_parts[0] if owner_parts else "the owner"
@@ -246,20 +253,14 @@ class GeminiPipeline:
         )
 
         if mode == "personal":
-            return (
-                f"Hi, this is Kevin, {owner_first}'s AI assistant. This call may be "
-                f"transcribed and summarized for {owner_first}. How can I help?"
-            )
+            return f"Hi, this is Kevin, {owner_first}'s assistant. How can I help?"
         if self._after_hours:
             return (
-                f"{business_name} is currently closed. I'm Kevin, an AI assistant. "
-                "This call may be transcribed and summarized for the business. "
-                "How can I help?"
+                f"{business_name} is currently closed. My name is Kevin. How can I help?"
             )
         return (
-            f"Hi, you've reached {business_name}. I'm Kevin, an AI assistant. "
-            "This call may be transcribed and summarized for the business. "
-            "How can I help?"
+            f"Hi, thank you for calling {business_name}. My name is Kevin. "
+            "How can I help you?"
         )
 
     async def _send_greeting(self) -> None:

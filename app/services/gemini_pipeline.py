@@ -86,7 +86,25 @@ class GeminiPipeline:
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
-    MAX_RESPONSE_OUTPUT_TOKENS = 128
+    MAX_RESPONSE_OUTPUT_TOKENS = 256
+    MAX_PROVIDER_TOKEN_COUNT = 10_000_000
+
+    _TURN_COMPLETE_REASON_LABELS = {
+        "TURN_COMPLETE_REASON_UNSPECIFIED": "unspecified",
+        "MALFORMED_FUNCTION_CALL": "malformed_function_call",
+        "RESPONSE_REJECTED": "response_rejected",
+        "NEED_MORE_INPUT": "need_more_input",
+        "MAX_REGENERATION_REACHED": "max_regeneration_reached",
+        "GENERATED_CONTENT_PROHIBITED": "generated_content_prohibited",
+        "GENERATED_CONTENT_SAFETY": "generated_content_safety",
+        "GENERATED_CONTENT_BLOCKLIST": "generated_content_blocklist",
+        "GENERATED_AUDIO_SAFETY": "generated_audio_safety",
+        "GENERATED_OTHER": "generated_other",
+    }
+    _RESPONSE_TOKEN_MODALITY_METRICS = {
+        "AUDIO": "response_audio_tokens",
+        "TEXT": "response_text_tokens",
+    }
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -174,6 +192,10 @@ class GeminiPipeline:
         self._audio_output_lock = asyncio.Lock()
         self._audio_epoch = 0
         self._last_usage_metrics: tuple[tuple[str, int], ...] | None = None
+        self._provider_generation_complete_seen = False
+        self._provider_generation_complete_logged = False
+        self._provider_turn_complete_seen = False
+        self._response_output_transcription_finished: bool | None = None
         self._pipeline_started_at = (
             call_started_at if call_started_at is not None else time.monotonic()
         )
@@ -761,6 +783,12 @@ class GeminiPipeline:
                 if output_text and not self._interrupt_speaking:
                     self._kevin_transcript_buf.append(output_text)
 
+                # Provider completion and transcription fields can be co-delivered
+                # with the first audio part. Register that audio turn before taking
+                # the completion snapshot so the fields are not attributed to the
+                # previous turn.
+                self._track_provider_completion(server_content)
+
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
                 if model_turn.get("parts") and self._caller_transcript_buf:
                     await self._flush_caller_transcript()
@@ -768,6 +796,7 @@ class GeminiPipeline:
                 # Handle turn completion — Gemini finished generating. Audio
                 # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
+                    self._log_turn_complete_signal(server_content)
                     overflowed_turn = self._audio_backlog_overflowed
                     interrupted_turn = self._interrupt_speaking
                     if interrupted_turn:
@@ -1175,6 +1204,11 @@ class GeminiPipeline:
         """Assign one monotonic diagnostic turn to every model audio response."""
         if self._response_audio_turn_started:
             return
+        if self._provider_turn_complete_seen:
+            self._provider_generation_complete_seen = False
+            self._provider_generation_complete_logged = False
+            self._provider_turn_complete_seen = False
+            self._response_output_transcription_finished = None
         self._response_turn_number += 1
         self._response_audio_turn_started = True
         self._response_first_audio_at = time.monotonic()
@@ -1208,6 +1242,107 @@ class GeminiPipeline:
         self._response_audio_turn_started = False
         self._last_caller_transcript_flushed_at = 0.0
 
+    def _track_provider_completion(self, server_content: object) -> None:
+        """Log provider signals as ordering snapshots without retaining payloads."""
+        if not isinstance(server_content, dict):
+            return
+
+        output_transcription = server_content.get("outputTranscription")
+        if isinstance(output_transcription, dict):
+            finished = output_transcription.get("finished")
+            if isinstance(finished, bool):
+                transcription_text = output_transcription.get("text")
+                if not isinstance(transcription_text, str):
+                    transcription_text = ""
+                self._log_voice_timing(
+                    "provider_output_transcription_state",
+                    audio_turn_snapshot=self._response_turn_number,
+                    audio_started_before_signal=self._response_audio_turn_started,
+                    after_turn_complete=self._provider_turn_complete_seen,
+                    finished=self._transcription_finished_label(finished),
+                    transcript_chars=len(transcription_text),
+                    transcript_words=len(transcription_text.split()),
+                )
+                if (
+                    not self._provider_turn_complete_seen
+                    and (
+                        finished
+                        or self._response_output_transcription_finished is None
+                    )
+                ):
+                    self._response_output_transcription_finished = finished
+
+        if (
+            server_content.get("generationComplete") is True
+            and not self._provider_generation_complete_logged
+        ):
+            if not self._provider_turn_complete_seen:
+                self._provider_generation_complete_seen = True
+            self._provider_generation_complete_logged = True
+            self._log_voice_timing(
+                "provider_generation_complete_signal",
+                audio_turn_snapshot=self._response_turn_number,
+                audio_started_before_signal=self._response_audio_turn_started,
+                after_turn_complete=self._provider_turn_complete_seen,
+                configured_max_output_tokens=self.MAX_RESPONSE_OUTPUT_TOKENS,
+            )
+
+    @classmethod
+    def _normalize_turn_complete_reason(cls, value: object) -> str:
+        """Return an allowlisted provider reason without logging raw values."""
+        if value is None:
+            return "absent"
+        if not isinstance(value, str):
+            return "unknown"
+        return cls._TURN_COMPLETE_REASON_LABELS.get(value, "unknown")
+
+    @staticmethod
+    def _transcription_finished_label(value: bool | None) -> str:
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        return "absent"
+
+    def _log_turn_complete_signal(self, server_content: dict) -> None:
+        """Log provider completion shape without transcript or provider payload data."""
+        transcript_text = "".join(self._kevin_transcript_buf)
+        self._log_voice_timing(
+            "provider_turn_complete_signal",
+            audio_turn_snapshot=self._response_turn_number,
+            audio_started_before_signal=self._response_audio_turn_started,
+            generation_complete_seen_before_turn_complete=(
+                self._provider_generation_complete_seen
+            ),
+            turn_complete_reason=self._normalize_turn_complete_reason(
+                server_content.get("turnCompleteReason")
+            ),
+            output_transcription_finished_before_turn_complete=(
+                self._transcription_finished_label(
+                    self._response_output_transcription_finished
+                )
+            ),
+            transcript_chars_observed_before_turn_complete=len(transcript_text),
+            transcript_words_observed_before_turn_complete=len(
+                transcript_text.split()
+            ),
+            configured_max_output_tokens=self.MAX_RESPONSE_OUTPUT_TOKENS,
+        )
+        self._provider_generation_complete_seen = False
+        self._provider_generation_complete_logged = False
+        self._response_output_transcription_finished = None
+        self._provider_turn_complete_seen = True
+
+    @classmethod
+    def _bounded_provider_token_count(cls, value: object) -> int | None:
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= cls.MAX_PROVIDER_TOKEN_COUNT
+        ):
+            return value
+        return None
+
     def _log_usage_metadata(self, data: dict) -> None:
         """Emit bounded provider token totals without retaining provider payloads."""
         usage = data.get("usageMetadata")
@@ -1218,14 +1353,46 @@ class GeminiPipeline:
             "promptTokenCount": "prompt_tokens",
             "responseTokenCount": "response_tokens",
             "totalTokenCount": "total_tokens",
+            "thoughtsTokenCount": "thoughts_tokens",
         }
-        metrics = tuple(
-            (metric_name, value)
+        metric_values = {
+            metric_name: bounded_value
             for source_name, metric_name in metric_names.items()
-            if isinstance((value := usage.get(source_name)), int)
-            and not isinstance(value, bool)
-            and value >= 0
+            if (
+                bounded_value := self._bounded_provider_token_count(
+                    usage.get(source_name)
+                )
+            )
+            is not None
+        }
+
+        modality_metrics: dict[str, int] = {}
+        response_details = usage.get("responseTokensDetails")
+        if isinstance(response_details, list):
+            for detail in response_details[:16]:
+                if not isinstance(detail, dict):
+                    continue
+                token_count = self._bounded_provider_token_count(
+                    detail.get("tokenCount")
+                )
+                if token_count is None:
+                    continue
+                metric_name = self._RESPONSE_TOKEN_MODALITY_METRICS.get(
+                    detail.get("modality"),
+                    "response_other_tokens",
+                )
+                modality_metrics[metric_name] = min(
+                    self.MAX_PROVIDER_TOKEN_COUNT,
+                    modality_metrics.get(metric_name, 0) + token_count,
+                )
+
+        metric_values.update(modality_metrics)
+        if not metric_values:
+            return
+        metric_values["configured_max_output_tokens"] = (
+            self.MAX_RESPONSE_OUTPUT_TOKENS
         )
+        metrics = tuple(sorted(metric_values.items()))
         if not metrics or metrics == self._last_usage_metrics:
             return
 

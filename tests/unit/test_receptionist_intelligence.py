@@ -846,7 +846,7 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
-    assert generation_config["max_output_tokens"] == 128
+    assert generation_config["max_output_tokens"] == 256
     await pipeline.stop()
 
 
@@ -1456,15 +1456,37 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
         _gemini_audio_message(generated_audio),
         json.dumps({
             "serverContent": {
-                "outputTranscription": {"text": private_response_text}
+                "outputTranscription": {
+                    "text": private_response_text,
+                    "finished": True,
+                }
             }
         }),
         json.dumps({
-            "serverContent": {"turnComplete": True},
+            "serverContent": {"generationComplete": True},
+        }),
+        json.dumps({
+            "serverContent": {"generationComplete": True},
+        }),
+        json.dumps({
+            "serverContent": {
+                "turnComplete": True,
+                "turnCompleteReason": "TURN_COMPLETE_REASON_UNSPECIFIED",
+            },
             "usageMetadata": {
                 "promptTokenCount": 4321,
                 "responseTokenCount": 123,
                 "totalTokenCount": 4444,
+                "thoughtsTokenCount": 0,
+                "responseTokensDetails": [
+                    {"modality": "AUDIO", "tokenCount": 100},
+                    {"modality": "TEXT", "tokenCount": 23},
+                    {"modality": "PRIVATE_MODALITY", "tokenCount": 7},
+                    {
+                        "modality": "AUDIO",
+                        "tokenCount": GeminiPipeline.MAX_PROVIDER_TOKEN_COUNT + 1,
+                    },
+                ],
             },
         }),
     ])
@@ -1482,12 +1504,23 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     assert messages.count("voice_timing event=model_turn_complete") == 1
     assert "generated_audio_ms=1000" in messages
     assert "words=5" in messages
+    assert messages.count("voice_timing event=provider_generation_complete_signal") == 1
+    assert messages.count("voice_timing event=provider_turn_complete_signal") == 1
+    assert "generation_complete_seen_before_turn_complete=True" in messages
+    assert "turn_complete_reason=unspecified" in messages
+    assert "output_transcription_finished_before_turn_complete=true" in messages
+    assert "configured_max_output_tokens=256" in messages
     assert messages.count("voice_timing event=response_playout_drained") == 1
     assert "first_audio_to_playout_ms=" in messages
     assert messages.count("voice_timing event=model_usage") == 1
     assert "prompt_tokens=4321" in messages
     assert "response_tokens=123" in messages
     assert "total_tokens=4444" in messages
+    assert "thoughts_tokens=0" in messages
+    assert "response_audio_tokens=100" in messages
+    assert "response_text_tokens=23" in messages
+    assert "response_other_tokens=7" in messages
+    assert "PRIVATE_MODALITY" not in messages
     assert private_caller_text not in messages
     assert private_response_text not in messages
     await pipeline.stop()
@@ -1522,8 +1555,281 @@ async def test_gemini_turn_complete_without_transcript_closes_response_metrics(c
     assert "voice_timing event=model_turn_complete" in messages
     assert "generated_audio_ms=750" in messages
     assert "chars=0 words=0" in messages
+    assert "generation_complete_seen_before_turn_complete=False" in messages
+    assert "turn_complete_reason=absent" in messages
+    assert "output_transcription_finished_before_turn_complete=absent" in messages
     assert pipeline._response_first_audio_at == 0.0
     assert pipeline._generated_audio_ms == 0
+
+
+@pytest.mark.parametrize(
+    ("provider_value", "expected"),
+    [
+        (None, "absent"),
+        ("NEED_MORE_INPUT", "need_more_input"),
+        ("UNRECOGNIZED_PRIVATE_REASON", "unknown"),
+        ({"private": "payload"}, "unknown"),
+    ],
+)
+def test_gemini_turn_complete_reason_is_allowlisted(provider_value, expected):
+    assert GeminiPipeline._normalize_turn_complete_reason(provider_value) == expected
+
+
+@pytest.mark.asyncio
+async def test_gemini_generation_complete_before_audio_is_an_unbound_snapshot(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"generationComplete": True}}),
+        _gemini_audio_message(b"response audio"),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    messages = [record.getMessage() for record in caplog.records]
+    generation_line = next(
+        message
+        for message in messages
+        if "event=provider_generation_complete_signal" in message
+    )
+    turn_complete_line = next(
+        message
+        for message in messages
+        if "event=provider_turn_complete_signal" in message
+    )
+    assert "audio_turn_snapshot=0" in generation_line
+    assert "audio_started_before_signal=False" in generation_line
+    assert "audio_turn_snapshot=1" in turn_complete_line
+    assert "generation_complete_seen_before_turn_complete=True" in turn_complete_line
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_late_transcription_finish_does_not_contaminate_next_turn(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"first response"),
+        json.dumps({"serverContent": {"generationComplete": True}}),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+        json.dumps({
+            "serverContent": {
+                "outputTranscription": {"finished": True},
+            }
+        }),
+        _gemini_audio_message(b"second response"),
+        json.dumps({
+            "serverContent": {
+                "outputTranscription": {"finished": False},
+            }
+        }),
+        json.dumps({"serverContent": {"generationComplete": True}}),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    messages = [record.getMessage() for record in caplog.records]
+    transcription_lines = [
+        message
+        for message in messages
+        if "event=provider_output_transcription_state" in message
+    ]
+    turn_complete_lines = [
+        message
+        for message in messages
+        if "event=provider_turn_complete_signal" in message
+    ]
+    assert len(transcription_lines) == 2
+    assert "after_turn_complete=True" in transcription_lines[0]
+    assert len(turn_complete_lines) == 2
+    assert "output_transcription_finished_before_turn_complete=absent" in (
+        turn_complete_lines[0]
+    )
+    assert "output_transcription_finished_before_turn_complete=false" in (
+        turn_complete_lines[1]
+    )
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_co_delivered_completion_binds_to_new_audio_turn(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    private_response_text = "Private co-delivered response"
+    second_audio = base64.b64encode(b"second response").decode("ascii")
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"first response"),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+        json.dumps({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "audio/pcm;rate=24000",
+                            "data": second_audio,
+                        }
+                    }]
+                },
+                "generationComplete": True,
+                "outputTranscription": {
+                    "text": private_response_text,
+                    "finished": True,
+                },
+            }
+        }),
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    messages = [record.getMessage() for record in caplog.records]
+    generation_line = next(
+        message
+        for message in messages
+        if "event=provider_generation_complete_signal" in message
+    )
+    transcription_line = next(
+        message
+        for message in messages
+        if "event=provider_output_transcription_state" in message
+    )
+    turn_complete_lines = [
+        message
+        for message in messages
+        if "event=provider_turn_complete_signal" in message
+    ]
+    assert "audio_turn_snapshot=2" in generation_line
+    assert "audio_started_before_signal=True" in generation_line
+    assert "after_turn_complete=False" in generation_line
+    assert "audio_turn_snapshot=2" in transcription_line
+    assert "audio_started_before_signal=True" in transcription_line
+    assert "after_turn_complete=False" in transcription_line
+    assert len(turn_complete_lines) == 2
+    assert "generation_complete_seen_before_turn_complete=True" in turn_complete_lines[1]
+    assert "output_transcription_finished_before_turn_complete=true" in (
+        turn_complete_lines[1]
+    )
+    assert private_response_text not in "\n".join(messages)
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_no_audio_turn_does_not_inherit_provider_completion_state(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        _gemini_audio_message(b"first response"),
+        json.dumps({
+            "serverContent": {
+                "generationComplete": True,
+                "outputTranscription": {"finished": True},
+                "turnComplete": True,
+            }
+        }),
+        json.dumps({
+            "serverContent": {
+                "turnComplete": True,
+                "turnCompleteReason": "RESPONSE_REJECTED",
+            }
+        }),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    turn_complete_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=provider_turn_complete_signal" in record.getMessage()
+    ]
+    assert len(turn_complete_lines) == 2
+    assert "generation_complete_seen_before_turn_complete=True" in (
+        turn_complete_lines[0]
+    )
+    assert "output_transcription_finished_before_turn_complete=true" in (
+        turn_complete_lines[0]
+    )
+    assert "generation_complete_seen_before_turn_complete=False" in (
+        turn_complete_lines[1]
+    )
+    assert "output_transcription_finished_before_turn_complete=absent" in (
+        turn_complete_lines[1]
+    )
+    assert "turn_complete_reason=response_rejected" in turn_complete_lines[1]
+    await pipeline.stop()
 
 
 @pytest.mark.asyncio

@@ -50,7 +50,7 @@ async def test_legacy_utterance_log_uses_counts_only(caplog):
     processed = []
     processed_event = asyncio.Event()
 
-    async def process_utterance(text: str):
+    async def process_utterance(text: str, **_kwargs):
         processed.append(text)
         processed_event.set()
 

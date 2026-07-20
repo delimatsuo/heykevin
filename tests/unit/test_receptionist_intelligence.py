@@ -21,6 +21,7 @@ from app.services.gemini_pipeline import GeminiPipeline
 from app.services.job_card import _build_extraction_prompt
 from app.services.vcard import generate_vcard
 from app.services.voice_pipeline import (
+    apply_spoken_turn_contract,
     build_system_prompt,
     is_terminal_goodbye,
     is_owner_availability_hold,
@@ -28,6 +29,7 @@ from app.services.voice_pipeline import (
     VoicePipeline,
 )
 from app.services import voice_pipeline as voice_pipeline_module
+from app.services import gemini_pipeline as gemini_pipeline_module
 from app.webhooks.media_stream import _send_twilio_clear
 
 
@@ -364,6 +366,104 @@ def test_business_prompt_answers_scope_and_pricing_before_address_collection():
     assert "Get their name, one-line reason for calling, and service address" not in prompt
 
 
+def test_gemini_spoken_response_policy_is_staging_flagged_and_safety_exempt(
+    monkeypatch,
+):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr(
+        gemini_pipeline_module.settings,
+        "spoken_response_policy_enabled",
+        True,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    assert "SPOKEN TURN CONTRACT" in pipeline._system_prompt
+    assert "three to four seconds" in pipeline._system_prompt
+    assert "soft brevity target, never a cutoff" in pipeline._system_prompt
+    assert "Safety guidance is exempt" in pipeline._system_prompt
+
+
+def test_gemini_spoken_response_policy_defaults_off(monkeypatch):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    monkeypatch.setattr(
+        gemini_pipeline_module.settings,
+        "spoken_response_policy_enabled",
+        False,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    assert "SPOKEN TURN CONTRACT" not in pipeline._system_prompt
+
+
+def test_spoken_response_policy_is_identical_for_both_voice_cohorts():
+    base_prompt = build_system_prompt(_plumbing_config())
+    controlled_prompt = apply_spoken_turn_contract(base_prompt, enabled=True)
+
+    assert "SPOKEN TURN CONTRACT" in controlled_prompt
+    assert "soft brevity target, never a cutoff" in controlled_prompt
+    assert "Safety guidance is exempt" in controlled_prompt
+    assert "one or two short sentences per response, never more" not in controlled_prompt
+
+
+@pytest.mark.asyncio
+async def test_gemini_response_policy_class_resets_per_caller_turn():
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    pipeline._buffer_caller_transcript(
+        {},
+        {"inputTranscription": {"text": "There is a gas leak."}},
+    )
+    pipeline._begin_response_audio_turn()
+    assert pipeline._response_policy_class == "safety"
+
+    pipeline._reset_response_metrics()
+    pipeline._caller_transcript_buf.clear()
+    pipeline._buffer_caller_transcript(
+        {},
+        {"inputTranscription": {"text": "What time do you open?"}},
+    )
+    pipeline._begin_response_audio_turn()
+    assert pipeline._response_policy_class == "ordinary"
+
+    pipeline._reset_response_metrics()
+    pipeline._caller_transcript_buf.clear()
+    pipeline._buffer_caller_transcript(
+        {},
+        {"inputTranscription": {"text": "I can see smoke."}},
+    )
+    pipeline._begin_response_audio_turn()
+    assert pipeline._response_policy_class == "safety"
+    await pipeline.stop()
+
+
 def test_job_card_extraction_prompt_can_classify_out_of_scope_requests():
     prompt = _build_extraction_prompt(
         "Caller: Can you help with my electric panel?\nKevin: Matsuo Plumbing may not be the right company.",
@@ -419,7 +519,7 @@ async def test_voice_pipeline_silence_waits_for_owner_availability_before_prompt
     pipeline.CALLER_SILENCE_GOODBYE_SECONDS = 0
     pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS = 0.03
 
-    async def fake_speak(_text: str):
+    async def fake_speak(_text: str, **_kwargs):
         pipeline._is_speaking = True
         await asyncio.sleep(0)
         pipeline._is_speaking = False
@@ -487,7 +587,207 @@ async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
     await pipeline._handle_caller_speech("What kind of services do you offer?")
 
     assert request_bodies[0]["model"] == "claude-sonnet-5"
+    assert request_bodies[0]["max_tokens"] == 256
     assert transcripts[-1] == ("Kevin", "We handle plumbing repairs.")
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_repairs_max_tokens_before_speaking_partial_output(caplog):
+    request_bodies = []
+    transcripts = []
+    spoken = []
+
+    class FakeClaudeResponse:
+        status_code = 200
+
+        def __init__(self, stop_reason: str, text: str):
+            self._stop_reason = stop_reason
+            self._text = text
+
+        def json(self):
+            return {
+                "stop_reason": self._stop_reason,
+                "content": [{"type": "text", "text": self._text}],
+            }
+
+    class FakeClaudeClient:
+        def __init__(self):
+            self.responses = iter(
+                [
+                    FakeClaudeResponse("max_tokens", "PRIVATE PARTIAL RESPONSE"),
+                    FakeClaudeResponse("end_turn", "Complete safe response."),
+                ]
+            )
+
+        async def post(self, *_args, **kwargs):
+            request_bodies.append(kwargs["json"])
+            return next(self.responses)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def on_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    async def record_speech(text: str, **_kwargs):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=noop_audio,
+        on_transcript=on_transcript,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+    pipeline._speak = record_speech
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._handle_caller_speech("Private caller request")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert [body["max_tokens"] for body in request_bodies] == [256, 512]
+    assert transcripts == [("Kevin", "Complete safe response.")]
+    assert spoken == ["Complete safe response."]
+    assert "voice_timing event=model_generation_incomplete" in messages
+    assert "voice_timing event=model_generation_repair_result" in messages
+    assert "PRIVATE PARTIAL RESPONSE" not in messages
+    assert "Private caller request" not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_repeated_max_tokens_uses_complete_safety_fallback(caplog):
+    transcripts = []
+    spoken = []
+
+    class FakeClaudeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "stop_reason": "max_tokens",
+                "content": [{"type": "text", "text": "PRIVATE PARTIAL SAFETY"}],
+            }
+
+    class FakeClaudeClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeClaudeResponse()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def on_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    async def record_speech(text: str, **_kwargs):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=noop_audio,
+        on_transcript=on_transcript,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+    pipeline._speak = record_speech
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._handle_caller_speech("There is a gas leak")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert len(transcripts) == 1
+    assert transcripts[0][0] == "Kevin"
+    assert "Leave the area now" in transcripts[0][1]
+    assert "emergency services or the gas utility" in transcripts[0][1]
+    assert spoken == [transcripts[0][1]]
+    assert "voice_timing event=model_generation_repair_failed" in messages
+    assert "voice_timing event=model_generation_fallback_selected" in messages
+    assert "safety=True" in messages
+    assert "reason=max_tokens" in messages
+    assert "PRIVATE PARTIAL SAFETY" not in messages
+    assert "There is a gas leak" not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "repair_failure",
+    ["malformed_json", "empty_content", "stage_direction"],
+)
+async def test_voice_pipeline_invalid_max_token_repair_uses_complete_fallback(
+    repair_failure,
+    caplog,
+):
+    transcripts = []
+    spoken = []
+
+    class FakeClaudeResponse:
+        status_code = 200
+
+        def __init__(self, *, initial=False):
+            self.initial = initial
+
+        def json(self):
+            if self.initial:
+                return {
+                    "stop_reason": "max_tokens",
+                    "content": [{"type": "text", "text": "PRIVATE PARTIAL"}],
+                }
+            if repair_failure == "malformed_json":
+                raise ValueError("PRIVATE MALFORMED PROVIDER BODY")
+            if repair_failure == "stage_direction":
+                return {
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "[silence]"}],
+                }
+            return {"stop_reason": "end_turn", "content": []}
+
+    class FakeClaudeClient:
+        def __init__(self):
+            self.responses = iter([
+                FakeClaudeResponse(initial=True),
+                FakeClaudeResponse(),
+            ])
+
+        async def post(self, *_args, **_kwargs):
+            return next(self.responses)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def on_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    async def record_speech(text: str, **_kwargs):
+        spoken.append(text)
+
+    pipeline = VoicePipeline(
+        on_audio_out=noop_audio,
+        on_transcript=on_transcript,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+    pipeline._speak = record_speech
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._handle_caller_speech("Private ordinary caller request")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    expected_reason = (
+        "invalid_payload" if repair_failure == "malformed_json" else "invalid_content"
+    )
+    assert len(transcripts) == 1
+    assert "couldn't complete that answer" in transcripts[0][1]
+    assert spoken == [transcripts[0][1]]
+    assert f"reason={expected_reason}" in messages
+    assert "PRIVATE PARTIAL" not in messages
+    assert "PRIVATE MALFORMED PROVIDER BODY" not in messages
+    assert "Private ordinary caller request" not in messages
+    assert "CA_private_identifier" not in messages
 
 
 @pytest.mark.asyncio
@@ -507,7 +807,7 @@ async def test_voice_pipeline_affirmative_goodbye_still_ends_call(monkeypatch):
         async def post(self, *_args, **_kwargs):
             return FakeClaudeResponse()
 
-    async def noop_audio(_chunk: bytes):
+    async def noop_audio(_chunk: bytes, **_kwargs):
         return None
 
     async def noop_transcript(_speaker: str, _text: str):
@@ -539,6 +839,7 @@ async def test_voice_pipeline_affirmative_goodbye_still_ends_call(monkeypatch):
 @pytest.mark.asyncio
 async def test_elevenlabs_outbound_delivery_failure_ends_call(caplog):
     call_completed = asyncio.Event()
+    end_marked_turns = []
 
     class FakeTTSResponse:
         status_code = 200
@@ -557,9 +858,13 @@ async def test_elevenlabs_outbound_delivery_failure_ends_call(caplog):
     async def on_call_complete():
         call_completed.set()
 
+    async def record_end_mark(turn: int):
+        end_marked_turns.append(turn)
+
     pipeline = VoicePipeline(
         on_audio_out=failed_audio_delivery,
         on_transcript=noop_transcript,
+        on_response_end_media_sent=record_end_mark,
         on_call_complete=on_call_complete,
         call_sid="CA_test",
         contractor_config=_plumbing_config(),
@@ -574,9 +879,166 @@ async def test_elevenlabs_outbound_delivery_failure_ends_call(caplog):
     assert call_completed.is_set()
     assert not pipeline._connected
     assert not pipeline._is_speaking
+    assert end_marked_turns == []
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=outbound_audio_error" in messages
     assert "private closing message" not in messages
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_interruption_sends_no_response_end_mark(monkeypatch):
+    class FakeTTSResponse:
+        status_code = 200
+        content = b"x" * 8_000
+
+    class FakeTTSClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeTTSResponse()
+
+    sent_chunks = []
+    end_marked_turns = []
+
+    async def interrupt_after_first_chunk(chunk: bytes):
+        sent_chunks.append(chunk)
+        pipeline._interrupt_speaking = True
+
+    async def record_end_mark(turn: int):
+        end_marked_turns.append(turn)
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def no_delay(_seconds: float):
+        return None
+
+    monkeypatch.setattr(voice_pipeline_module.asyncio, "sleep", no_delay)
+    pipeline = VoicePipeline(
+        on_audio_out=interrupt_after_first_chunk,
+        on_transcript=noop_transcript,
+        on_response_end_media_sent=record_end_mark,
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeTTSClient()
+    pipeline._connected = True
+
+    await pipeline._speak("complete response text", source="model")
+
+    assert len(sent_chunks) == 1
+    assert end_marked_turns == []
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_logs_complete_turn_timing_and_playback_marks_without_text(
+    monkeypatch,
+    caplog,
+):
+    class FakeTTSResponse:
+        status_code = 200
+        content = b"x" * 800
+
+    class FakeTTSClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeTTSResponse()
+
+    sent_chunks = []
+    first_marked_turns = []
+    end_marked_turns = []
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append(chunk)
+
+    async def record_first_mark(turn: int):
+        first_marked_turns.append(turn)
+
+    async def record_end_mark(turn: int):
+        end_marked_turns.append(turn)
+        return True
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def no_delay(_seconds: float):
+        return None
+
+    monkeypatch.setattr(voice_pipeline_module.asyncio, "sleep", no_delay)
+    pipeline = VoicePipeline(
+        on_audio_out=record_audio,
+        on_transcript=noop_transcript,
+        on_response_first_media_sent=record_first_mark,
+        on_response_end_media_sent=record_end_mark,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeTTSClient()
+    pipeline._connected = True
+    pipeline._caller_turn_number = 3
+    pipeline._caller_turn_committed_at = time.monotonic() - 0.01
+    private_response = "Private response must never appear in timing logs"
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._speak(private_response, source="model", caller_turn=3)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert sent_chunks == [b"x" * 800]
+    assert first_marked_turns == [1]
+    assert end_marked_turns == [1]
+    assert "voice_timing event=tts_request_started" in messages
+    assert "voice_timing event=tts_audio_ready" in messages
+    assert "voice_timing event=response_first_twilio_media_sent" in messages
+    assert "voice_timing event=response_end_playback_mark_requested" in messages
+    assert "first_chunk_duration_ms=100" in messages
+    assert "voice_timing event=response_media_send_finished" in messages
+    assert "caller_turn=3" in messages
+    assert private_response not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_deepgram_caller_turn_commit_is_payload_safe(caplog):
+    committed = asyncio.Event()
+    observed = {}
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = VoicePipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_private_identifier",
+        contractor_config=_plumbing_config(),
+    )
+    private_caller_text = "Private caller speech must not be logged"
+    pipeline._utterance_buffer = [private_caller_text]
+
+    async def record_processing(text, *, caller_turn, committed_at):
+        observed.update(
+            text=text,
+            caller_turn=caller_turn,
+            committed_at=committed_at,
+        )
+        committed.set()
+
+    pipeline._process_utterance = record_processing
+    caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
+
+    await pipeline._flush_utterance("deepgram_speech_final")
+    await asyncio.wait_for(committed.wait(), timeout=1)
+    await pipeline._http_client.aclose()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert observed["text"] == private_caller_text
+    assert observed["caller_turn"] == 1
+    assert observed["committed_at"] > 0
+    assert "voice_timing event=caller_turn_committed" in messages
+    assert "basis=deepgram_speech_final" in messages
+    assert "turn=1" in messages
+    assert private_caller_text not in messages
+    assert "CA_private_identifier" not in messages
 
 
 @pytest.mark.asyncio
@@ -1642,9 +2104,15 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     assert sent_chunks == [generated_audio]
     assert first_marked_turns == [1]
     assert end_marked_turns == [1]
-    assert messages.count("voice_timing event=response_first_audio") == 1
+    assert messages.count("voice_timing event=first_provider_audio") == 1
+    assert (
+        messages.count(
+            "voice_timing event=transcript_fragment_to_first_provider_audio"
+        )
+        == 1
+    )
     assert "latency_ms=" in messages
-    assert "latency_basis=input_transcript_fragment" in messages
+    assert "boundary_basis=last_input_transcript_fragment_proxy" in messages
     assert messages.count("voice_timing event=model_turn_complete") == 1
     assert "generated_audio_ms=1000" in messages
     assert "words=5" in messages
@@ -1752,7 +2220,7 @@ async def test_gemini_failed_final_media_send_produces_no_response_end_mark(monk
 
 
 @pytest.mark.asyncio
-async def test_gemini_response_end_mark_waits_for_provider_completion(monkeypatch):
+async def test_gemini_generation_complete_arms_end_mark_without_turn_complete(monkeypatch):
     monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
     end_marked_turns = []
 
@@ -1780,10 +2248,7 @@ async def test_gemini_response_end_mark_waits_for_provider_completion(monkeypatc
                 self.step += 1
                 await asyncio.wait_for(self.pipeline._audio_queue.join(), timeout=1)
                 assert end_marked_turns == []
-                return json.dumps({"serverContent": {"turnComplete": True}})
-            if self.step == 2:
-                self.step += 1
-                return json.dumps({"serverContent": {"turnComplete": True}})
+                return json.dumps({"serverContent": {"generationComplete": True}})
             raise StopAsyncIteration
 
     websocket = AudioThenCompletionWebSocket()

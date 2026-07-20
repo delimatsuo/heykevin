@@ -7,6 +7,7 @@ Audio conversion at boundaries: mulaw 8kHz (Twilio) <-> PCM 16kHz/24kHz (Gemini)
 import asyncio
 import base64
 from collections import deque
+import hashlib
 import json
 import time
 from typing import Callable, Awaitable, Optional
@@ -25,11 +26,13 @@ from app.services.voice_pipeline import (
     _log_tool_execution_failure,
     _tool_label,
     _tool_execution_error_response,
+    apply_spoken_turn_contract,
     build_system_prompt,
     contains_goodbye,
     is_owner_availability_hold,
     is_terminal_goodbye,
     response_requests_caller_input,
+    SPOKEN_TURN_POLICY_VERSION,
 )
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
@@ -92,6 +95,8 @@ class GeminiPipeline:
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
     MAX_RESPONSE_OUTPUT_TOKENS = 256
     MAX_PROVIDER_TOKEN_COUNT = 10_000_000
+    AUTOMATIC_SILENCE_DURATION_MS = 500
+    AUDIO_PLAYOUT_PACING_RATIO = 0.9
 
     _TURN_COMPLETE_REASON_LABELS = {
         "TURN_COMPLETE_REASON_UNSPECIFIED": "unspecified",
@@ -182,6 +187,8 @@ class GeminiPipeline:
         self._barge_in_number = 0
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
+        self._response_policy_class = "ordinary"
+        self._pending_response_safety = False
         self._audio_queue: asyncio.Queue[
             tuple[bytes, float, int] | tuple[bytes, float, int, int, float]
         ] = asyncio.Queue(
@@ -219,10 +226,13 @@ class GeminiPipeline:
         else:
             from app.services.quiet_hours import is_business_hours
             self._after_hours = not is_business_hours(self._contractor_config)
-        self._system_prompt = build_system_prompt(
-            self._contractor_config,
-            after_hours=self._after_hours,
-            caller_phone=self._caller_phone,
+        self._system_prompt = apply_spoken_turn_contract(
+            build_system_prompt(
+                self._contractor_config,
+                after_hours=self._after_hours,
+                caller_phone=self._caller_phone,
+            ),
+            enabled=settings.spoken_response_policy_enabled,
         )
 
         # Voice selection — pick the best voice for the contractor's language
@@ -358,7 +368,7 @@ class GeminiPipeline:
                             "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
                             "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
                             "prefix_padding_ms": 100,
-                            "silence_duration_ms": 500,
+                            "silence_duration_ms": self.AUTOMATIC_SILENCE_DURATION_MS,
                         },
                         "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
                         "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
@@ -397,6 +407,29 @@ class GeminiPipeline:
                 phase_ms=self._elapsed_ms(setup_started_at),
                 session_elapsed_ms=self._elapsed_ms(session_started_at),
                 call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+            )
+            self._log_voice_timing(
+                "gemini_session_policy",
+                spoken_response_policy_enabled=(
+                    settings.spoken_response_policy_enabled
+                ),
+                configured_max_output_tokens=self.MAX_RESPONSE_OUTPUT_TOKENS,
+                spoken_policy_version=SPOKEN_TURN_POLICY_VERSION,
+            )
+            self._log_voice_timing(
+                "voice_cohort_configuration",
+                cohort="candidate",
+                engine="gemini",
+                model=self._model,
+                activity_detection="automatic",
+                silence_duration_ms=self.AUTOMATIC_SILENCE_DURATION_MS,
+                pacing_ratio=self.AUDIO_PLAYOUT_PACING_RATIO,
+                spoken_policy_enabled=settings.spoken_response_policy_enabled,
+                spoken_policy_version=SPOKEN_TURN_POLICY_VERSION,
+                prompt_digest=hashlib.sha256(
+                    self._system_prompt.encode("utf-8")
+                ).hexdigest()[:12],
+                deploy_sha=settings.deploy_sha,
             )
             logger.info(f"Gemini Live session established (voice={self._voice}, model={self._model})")
 
@@ -792,6 +825,9 @@ class GeminiPipeline:
                 # the completion snapshot so the fields are not attributed to the
                 # previous turn.
                 self._track_provider_completion(server_content)
+                if server_content.get("generationComplete") is True:
+                    self._arm_response_end_candidate("generation_complete")
+                    await self._maybe_send_response_end_mark()
 
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
                 if model_turn.get("parts") and self._caller_transcript_buf:
@@ -841,9 +877,10 @@ class GeminiPipeline:
                         )
                         continue
                     if not interrupted_turn and completed_turn_had_audio:
-                        self._response_end_candidate = (
-                            completed_turn,
-                            completed_audio_epoch,
+                        self._arm_response_end_candidate(
+                            "turn_complete_fallback",
+                            turn=completed_turn,
+                            audio_epoch=completed_audio_epoch,
                         )
                     said_goodbye = False
                     if not interrupted_turn:
@@ -924,6 +961,9 @@ class GeminiPipeline:
                 call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
             )
         self._caller_transcript_buf.append(input_text)
+        self._pending_response_safety = (
+            find_urgent_signal("".join(self._caller_transcript_buf)) is not None
+        )
         self._last_caller_transcript_fragment_at = time.time()
         self._last_caller_transcript_fragment_monotonic = time.monotonic()
         self._response_start_latency_logged = False
@@ -1071,7 +1111,9 @@ class GeminiPipeline:
                                     )
                         sent = True
                     if duration_seconds > 0:
-                        await asyncio.sleep(duration_seconds * 0.9)
+                        await asyncio.sleep(
+                            duration_seconds * self.AUDIO_PLAYOUT_PACING_RATIO
+                        )
                 finally:
                     self._audio_queue.task_done()
                     if self._audio_queue.empty():
@@ -1151,6 +1193,33 @@ class GeminiPipeline:
             accepted=accepted is not False,
         )
 
+    def _arm_response_end_candidate(
+        self,
+        basis: str,
+        *,
+        turn: int | None = None,
+        audio_epoch: int | None = None,
+    ) -> None:
+        """Arm final-media observation from generation completion or fallback."""
+        resolved_turn = self._response_turn_number if turn is None else turn
+        resolved_epoch = self._audio_epoch if audio_epoch is None else audio_epoch
+        if (
+            not self._response_audio_turn_started
+            or self._interrupt_speaking
+            or resolved_turn <= self._last_response_end_mark_attempted_turn
+        ):
+            return
+        candidate = (resolved_turn, resolved_epoch)
+        if self._response_end_candidate == candidate:
+            return
+        self._response_end_candidate = candidate
+        self._log_voice_timing(
+            "response_end_candidate_armed",
+            turn=resolved_turn,
+            epoch=resolved_epoch,
+            basis=basis,
+        )
+
     async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""
         dropped_chunks = 0
@@ -1206,8 +1275,17 @@ class GeminiPipeline:
         self._mark_caller_activity()
 
         # Urgency detection
+        turn_is_safety = find_urgent_signal(full_text) is not None
+        if turn_is_safety and self._response_policy_class != "safety":
+            self._response_policy_class = "safety"
+            self._log_voice_timing(
+                "response_policy_class_updated",
+                turn=self._response_turn_number,
+                policy_class="safety",
+                basis="complete_input_transcript",
+            )
         if not self._urgency_detected and self.on_urgency_detected:
-            if find_urgent_signal(full_text):
+            if turn_is_safety:
                 self._urgency_detected = True
                 self._log_voice_timing("urgency_detected")
                 asyncio.create_task(self.on_urgency_detected(full_text))
@@ -1269,10 +1347,10 @@ class GeminiPipeline:
             int((now - self._last_caller_transcript_fragment_monotonic) * 1000),
         )
         self._log_voice_timing(
-            "response_first_audio",
+            "transcript_fragment_to_first_provider_audio",
             turn=self._response_turn_number,
             latency_ms=latency_ms,
-            latency_basis="input_transcript_fragment",
+            boundary_basis="last_input_transcript_fragment_proxy",
             call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
         )
         self._response_start_latency_logged = True
@@ -1290,6 +1368,15 @@ class GeminiPipeline:
         self._response_audio_turn_started = True
         self._response_first_audio_at = time.monotonic()
         self._generated_audio_ms = 0
+        self._response_policy_class = (
+            "safety" if self._pending_response_safety else "ordinary"
+        )
+        self._log_voice_timing(
+            "first_provider_audio",
+            turn=self._response_turn_number,
+            policy_class=self._response_policy_class,
+            call_elapsed_ms=self._elapsed_ms(self._pipeline_started_at),
+        )
 
     def _log_response_turn_latency(self, response_text: str) -> None:
         if self._response_first_audio_at > 0:
@@ -1300,6 +1387,10 @@ class GeminiPipeline:
                 generated_audio_ms=self._generated_audio_ms,
                 chars=len(response_text),
                 words=len(response_text.split()),
+                policy_class=self._response_policy_class,
+                spoken_response_policy_enabled=(
+                    settings.spoken_response_policy_enabled
+                ),
             )
         self._reset_response_metrics()
 
@@ -1310,12 +1401,15 @@ class GeminiPipeline:
                 turn=self._response_turn_number,
                 model_stream_ms=self._elapsed_ms(self._response_first_audio_at),
                 generated_audio_ms=self._generated_audio_ms,
+                policy_class=self._response_policy_class,
             )
         self._reset_response_metrics()
 
     def _reset_response_metrics(self) -> None:
         self._response_first_audio_at = 0.0
         self._generated_audio_ms = 0
+        self._response_policy_class = "ordinary"
+        self._pending_response_safety = False
         self._response_audio_turn_started = False
         self._last_caller_transcript_flushed_at = 0.0
 

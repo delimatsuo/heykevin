@@ -430,6 +430,8 @@ async def test_ingress_delivery_summary_is_payload_free_on_stream_stop(caplog):
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert result == "stop"
+    assert "voice_timing event=pipeline_ingress_ended" in messages
+    assert "reason=stop" in messages
     assert "voice_timing event=inbound_media_delivery_summary" in messages
     assert "samples=1" in messages
     assert private_frame.decode() not in messages
@@ -468,6 +470,8 @@ async def test_ingress_delivery_summary_is_payload_free_when_pipeline_is_unavail
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert result == "pipeline_unavailable"
+    assert "voice_timing event=pipeline_ingress_ended" in messages
+    assert "reason=pipeline_unavailable" in messages
     assert "voice_timing event=inbound_media_delivery_summary" in messages
     assert "samples=0" in messages
     assert private_frame.decode() not in messages
@@ -708,7 +712,7 @@ async def test_legacy_pipeline_accepts_audio_while_greeting_is_in_progress(monke
     greeting_started = asyncio.Event()
     release_greeting = asyncio.Event()
 
-    async def blocked_speak(_text: str):
+    async def blocked_speak(_text: str, **_kwargs):
         pipeline._is_speaking = True
         greeting_started.set()
         await release_greeting.wait()

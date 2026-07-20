@@ -487,7 +487,7 @@ async def test_voice_tool_error_result_logging_does_not_include_sensitive_payloa
             "error": "Calendar rejected Jane Private at 123 Secret Lane, callback +15551234567."
         })
 
-    async def fake_speak(_text):
+    async def fake_speak(_text, **_kwargs):
         return None
 
     monkeypatch.setattr(pipeline, "_execute_tool", fake_execute_tool)
@@ -556,7 +556,7 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
         assert tool_input["title"] == "Jane Private faucet repair"
         return json.dumps({"success": False, "message": "not created"})
 
-    async def fake_speak(_text):
+    async def fake_speak(_text, **_kwargs):
         return None
 
     monkeypatch.setattr(pipeline, "_execute_tool", fake_execute_tool)

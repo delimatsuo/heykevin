@@ -10,6 +10,7 @@ Full-duplex architecture based on Deepgram best practices:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -53,6 +54,30 @@ _QUESTION_OPENING_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+SPOKEN_TURN_POLICY_VERSION = "spoken-turn-v1"
+_SPOKEN_TURN_CONTRACT = """SPOKEN TURN CONTRACT:
+- For an ordinary turn, choose one conversational action: acknowledge, answer, or ask the next question. If a direct answer needs a follow-up, use one direct sentence and at most one short question.
+- Aim for roughly three to four seconds of continuous, natural speech. Do not add filler, restate the caller's words, or use deliberate long pauses.
+- This is a soft brevity target, never a cutoff. Finish every phrase and question you begin.
+- Safety guidance is exempt from the brevity target. Give every immediate safety step required by the receptionist policy before moving on."""
+_CONFLICTING_SPOKEN_TURN_RULES = (
+    "- ONE or two short sentences per response.",
+    "- Keep spoken turns brief. Use one or two short sentences per response, never more, and ask one short question at a time.",
+)
+_STAGE_DIRECTIONS = {
+    "continues waiting",
+    "holds",
+    "holds the line",
+    "listening",
+    "pause",
+    "pauses",
+    "quiet",
+    "remains silent",
+    "silence",
+    "stays quiet",
+    "waiting",
+    "waits",
+}
 
 
 def _call_label(call_sid: str) -> str:
@@ -89,6 +114,25 @@ def is_terminal_goodbye(text: str) -> bool:
     return contains_goodbye(text) and not response_requests_caller_input(text)
 
 
+def apply_spoken_turn_contract(prompt: str, *, enabled: bool) -> str:
+    """Apply one shared, staging-flagged spoken policy to either voice cohort."""
+    if not enabled:
+        return prompt
+    normalized = prompt
+    for conflicting_rule in _CONFLICTING_SPOKEN_TURN_RULES:
+        normalized = normalized.replace(f"{conflicting_rule}\n", "")
+    return f"{normalized}\n\n{_SPOKEN_TURN_CONTRACT}"
+
+
+def _is_stage_direction(text: str) -> bool:
+    stripped = text.strip().lower().strip("*[]() ")
+    return (
+        stripped in _STAGE_DIRECTIONS
+        or stripped == "..."
+        or stripped.startswith("*") and stripped.endswith("*")
+    )
+
+
 def _log_voice_event(
     event: str,
     call_sid: str = "",
@@ -101,6 +145,21 @@ def _log_voice_event(
     )
     suffix = f" {metric_text}" if metric_text else ""
     logger.log(level, "voice_event event=%s call=%s%s", event, _call_label(call_sid), suffix)
+
+
+def _log_voice_timing(
+    event: str,
+    call_sid: str = "",
+    *,
+    level: int = logging.INFO,
+    **metrics: object,
+) -> None:
+    """Log payload-safe timing fields shared with the Gemini voice path."""
+    metric_text = " ".join(
+        f"{key}={_safe_log_metric(value)}" for key, value in metrics.items()
+    )
+    suffix = f" {metric_text}" if metric_text else ""
+    logger.log(level, "voice_timing event=%s call=%s%s", event, _call_label(call_sid), suffix)
 
 
 def _log_voice_exception(event: str, error: BaseException, call_sid: str = "") -> None:
@@ -488,21 +547,31 @@ class VoicePipeline:
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
     CALLER_SILENCE_GOODBYE_SECONDS = 1
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
+    CLAUDE_MAX_TOKENS = 256
+    CLAUDE_REPAIR_MAX_TOKENS = 512
+    DEEPGRAM_MODEL = "nova-3"
+    DEEPGRAM_ENDPOINTING_MS = 400
+    ELEVENLABS_PACING_RATIO = 0.9
 
     def __init__(
         self,
         on_audio_out: Callable[[bytes], Awaitable[None]],
         on_transcript: Callable[[str, str], Awaitable[None]],
         on_clear_audio: Optional[Callable[[], Awaitable[None]]] = None,
+        on_response_first_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
+        on_response_end_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
         on_call_complete: Optional[Callable[[], Awaitable[None]]] = None,
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
         contractor_config: Optional[dict] = None,
         caller_phone: str = "",
+        call_started_at: Optional[float] = None,
     ):
         self.on_audio_out = on_audio_out
         self.on_transcript = on_transcript
         self.on_clear_audio = on_clear_audio
+        self.on_response_first_media_sent = on_response_first_media_sent
+        self.on_response_end_media_sent = on_response_end_media_sent
         self.on_call_complete = on_call_complete  # callback to hang up
         self.on_urgency_detected = on_urgency_detected  # callback for emergency escalation
         self._call_sid = call_sid
@@ -518,10 +587,13 @@ class VoicePipeline:
             self._after_hours = not is_business_hours(self._contractor_config)
 
         # Build system prompt from config (or defaults)
-        self._system_prompt = build_system_prompt(
-            self._contractor_config,
-            after_hours=self._after_hours,
-            caller_phone=self._caller_phone,
+        self._system_prompt = apply_spoken_turn_contract(
+            build_system_prompt(
+                self._contractor_config,
+                after_hours=self._after_hours,
+                caller_phone=self._caller_phone,
+            ),
+            enabled=settings.spoken_response_policy_enabled,
         )
 
         self._deepgram_ws = None
@@ -576,6 +648,19 @@ class VoicePipeline:
         self._tts_voice_id = ELEVENLABS_VOICE_ID
         self._tts_model_id = ELEVENLABS_MODEL_DEFAULT
 
+        # Payload-safe, per-turn timing. Deepgram's speech_final is the committed
+        # caller boundary for this pipeline; Twilio marks close the playout side.
+        self._pipeline_started_at = (
+            call_started_at if call_started_at is not None else time.monotonic()
+        )
+        self._caller_turn_number = 0
+        self._caller_turn_committed_at = 0.0
+        self._response_turn_number = 0
+
+    def _call_elapsed_ms(self) -> int:
+        started_at = getattr(self, "_pipeline_started_at", time.monotonic())
+        return max(0, round((time.monotonic() - started_at) * 1_000))
+
     async def start(self):
         """Connect to Deepgram and send Kevin's greeting."""
         connected = await self._connect_deepgram()
@@ -584,6 +669,25 @@ class VoicePipeline:
             return False
 
         self._connected = True
+        _log_voice_timing(
+            "voice_cohort_configuration",
+            self._call_sid,
+            cohort="architecture_control",
+            engine="elevenlabs",
+            deepgram_model=self.DEEPGRAM_MODEL,
+            deepgram_endpointing_ms=self.DEEPGRAM_ENDPOINTING_MS,
+            claude_model=settings.anthropic_model,
+            claude_max_tokens=self.CLAUDE_MAX_TOKENS,
+            claude_repair_max_tokens=self.CLAUDE_REPAIR_MAX_TOKENS,
+            elevenlabs_model=self._tts_model_id,
+            pacing_ratio=self.ELEVENLABS_PACING_RATIO,
+            spoken_policy_enabled=settings.spoken_response_policy_enabled,
+            spoken_policy_version=SPOKEN_TURN_POLICY_VERSION,
+            prompt_digest=hashlib.sha256(
+                self._system_prompt.encode("utf-8")
+            ).hexdigest()[:12],
+            deploy_sha=settings.deploy_sha,
+        )
 
         # Proactive Jobber caller lookup — inject CRM context before first response
         if self._has_jobber() and self._caller_phone:
@@ -644,7 +748,12 @@ class VoicePipeline:
             self._conversation.append({"role": "assistant", "content": greeting})
             await self.on_transcript("Kevin", greeting)
             self._audio_input_ready.set()
-            await self._speak(greeting)
+            await self._speak(
+                greeting,
+                source="greeting",
+                caller_turn=0,
+                caller_committed_at=0.0,
+            )
             self._greeting_done = True
 
         return True
@@ -696,7 +805,7 @@ class VoicePipeline:
                 words=len(msg.split()),
             )
             await self.on_transcript("Kevin", msg)
-            await self._speak(msg)
+            await self._speak(msg, source="unavailable")
 
     async def stop(self):
         self._connected = False
@@ -733,7 +842,8 @@ class VoicePipeline:
         Key parameters:
         - encoding=mulaw, sample_rate=8000: accept Twilio's raw audio directly
         - interim_results=true: required for speech_final detection
-        - endpointing=400: finalize after 400ms silence. Lower values feel more
+        - endpointing is the committed caller-turn boundary for this control path.
+          Lower values feel more
           conversational but risk truncating mid-sentence pauses; 400ms is the
           tightest setting that still rides through natural breaths and
           hesitation in our testing.
@@ -743,14 +853,14 @@ class VoicePipeline:
         try:
             url = (
                 "wss://api.deepgram.com/v1/listen"
-                "?model=nova-3"
+                f"?model={self.DEEPGRAM_MODEL}"
                 "&encoding=mulaw"
                 "&sample_rate=8000"
                 "&channels=1"
                 "&punctuate=true"
                 "&smart_format=true"
                 "&interim_results=true"
-                "&endpointing=400"
+                f"&endpointing={self.DEEPGRAM_ENDPOINTING_MS}"
                 "&utterance_end_ms=1000"
                 "&language=multi"
             )
@@ -769,7 +879,10 @@ class VoicePipeline:
             )
 
             self._deepgram_task = asyncio.create_task(self._deepgram_receive_loop())
-            logger.info("Deepgram STT connected (nova-3, mulaw 8kHz, interim+speech_final)")
+            logger.info(
+                "Deepgram STT connected (%s, mulaw 8kHz, interim+speech_final)",
+                self.DEEPGRAM_MODEL,
+            )
             return True
 
         except Exception as error:
@@ -827,7 +940,7 @@ class VoicePipeline:
                 if msg_type == "UtteranceEnd":
                     if self._utterance_buffer:
                         logger.info("UtteranceEnd received — processing buffer")
-                        await self._flush_utterance()
+                        await self._flush_utterance("deepgram_utterance_end")
                     continue
 
                 # Skip non-transcript messages
@@ -858,7 +971,7 @@ class VoicePipeline:
                 if not transcript:
                     # Empty final — Deepgram detected silence
                     if speech_final and self._utterance_buffer:
-                        await self._flush_utterance()
+                        await self._flush_utterance("deepgram_speech_final")
                     continue
 
                 _log_voice_event(
@@ -891,7 +1004,7 @@ class VoicePipeline:
                 # A5: Cap utterance buffer — flush immediately if too large
                 if len(self._utterance_buffer) >= 15:
                     logger.info("Utterance buffer cap (15) reached — flushing immediately")
-                    await self._flush_utterance()
+                    await self._flush_utterance("buffer_limit")
                     continue
 
                 # Show each segment in transcript immediately (real-time feel)
@@ -899,7 +1012,7 @@ class VoicePipeline:
 
                 # If speech_final, the caller is done — process the full utterance
                 if speech_final:
-                    await self._flush_utterance()
+                    await self._flush_utterance("deepgram_speech_final")
 
         except asyncio.CancelledError:
             pass
@@ -975,7 +1088,7 @@ class VoicePipeline:
             if self.on_clear_audio:
                 asyncio.create_task(self.on_clear_audio())
 
-    async def _flush_utterance(self):
+    async def _flush_utterance(self, completion_basis: str = "unknown"):
         """Combine accumulated segments and process as one complete utterance."""
         if not self._utterance_buffer:
             return
@@ -993,12 +1106,55 @@ class VoicePipeline:
             chars=len(combined),
             segments=segment_count,
         )
-        asyncio.create_task(self._process_utterance(combined))
+        self._caller_turn_number = getattr(self, "_caller_turn_number", 0) + 1
+        caller_turn = self._caller_turn_number
+        committed_at = time.monotonic()
+        self._caller_turn_committed_at = committed_at
+        _log_voice_timing(
+            "caller_turn_committed",
+            self._call_sid,
+            turn=caller_turn,
+            basis=completion_basis,
+            segments=segment_count,
+            chars=len(combined),
+            words=len(combined.split()),
+            call_elapsed_ms=self._call_elapsed_ms(),
+        )
+        asyncio.create_task(
+            self._process_utterance(
+                combined,
+                caller_turn=caller_turn,
+                committed_at=committed_at,
+            )
+        )
 
-    async def _process_utterance(self, text: str):
+    async def _process_utterance(
+        self,
+        text: str,
+        *,
+        caller_turn: int | None = None,
+        committed_at: float | None = None,
+    ):
         """Run one Claude→TTS cycle, serialized by lock."""
+        resolved_turn = caller_turn or self._caller_turn_number
+        resolved_committed_at = committed_at or self._caller_turn_committed_at
         async with self._response_lock:
-            await self._handle_caller_speech(text)
+            _log_voice_timing(
+                "response_processing_started",
+                self._call_sid,
+                caller_turn=resolved_turn,
+                queue_wait_ms=(
+                    max(0, round((time.monotonic() - resolved_committed_at) * 1_000))
+                    if resolved_committed_at > 0
+                    else 0
+                ),
+                call_elapsed_ms=self._call_elapsed_ms(),
+            )
+            await self._handle_caller_speech(
+                text,
+                caller_turn=resolved_turn,
+                committed_at=resolved_committed_at,
+            )
 
     # --- Jobber tool definitions (only included if contractor has Jobber connected) ---
 
@@ -1228,7 +1384,142 @@ class VoicePipeline:
 
     # --- Claude LLM ---
 
-    async def _handle_caller_speech(self, caller_text: str):
+    def _generation_incomplete_fallback(self, caller_text: str) -> str:
+        """Return a complete deterministic fallback without using partial output."""
+        signal = find_urgent_signal(caller_text)
+        spanish = self._language == "es"
+        if not signal:
+            return (
+                "Lo siento, no pude completar la respuesta. ¿Puede repetir la pregunta?"
+                if spanish
+                else "I'm sorry, I couldn't complete that answer. Could you repeat the question?"
+            )
+
+        gas_signals = {"gas leak", "fuga de gas", "huele a gas", "olor a gas"}
+        water_signals = {
+            "burst pipe",
+            "flood",
+            "flooding",
+            "pipe burst",
+            "water everywhere",
+            "agua por todas partes",
+            "inundacion",
+            "inundación",
+            "tuberia rota",
+            "tuberia reventada",
+            "tubería rota",
+            "tubería reventada",
+        }
+        electrical_or_fire_signals = {
+            "breaker tripped",
+            "burning smell",
+            "carbon monoxide",
+            "electric panel",
+            "electrical fire",
+            "electrical panel",
+            "fire",
+            "smell burning",
+            "smoke",
+            "sparking",
+            "tripped breaker",
+            "chispas",
+            "echando chispas",
+            "fuego",
+            "humo",
+            "incendio",
+            "monoxido de carbono",
+            "monóxido de carbono",
+        }
+        if signal in gas_signals:
+            return (
+                "Salga del área ahora y llame a emergencias o a la compañía de gas "
+                "desde un lugar seguro."
+                if spanish
+                else "Leave the area now and call emergency services or the gas utility "
+                "from a safe place."
+            )
+        if signal in water_signals:
+            return (
+                "Si puede hacerlo sin riesgo, cierre el suministro principal de agua y "
+                "aléjese de riesgos eléctricos. Llame a emergencias si alguien está en peligro."
+                if spanish
+                else "If you can do so safely, shut off the main water supply and move away "
+                "from electrical hazards. Call emergency services if anyone is in danger."
+            )
+        if signal in electrical_or_fire_signals:
+            return (
+                "Aléjese del panel, del humo o del fuego y llame a emergencias o a un "
+                "electricista autorizado de inmediato."
+                if spanish
+                else "Stay away from the panel, smoke, or fire and contact emergency services "
+                "or a licensed electrician immediately."
+            )
+        return (
+            "Aléjese del peligro y llame a emergencias ahora."
+            if spanish
+            else "Move away from the danger and call emergency services now."
+        )
+
+    async def _deliver_generation_incomplete_fallback(
+        self,
+        caller_text: str,
+        *,
+        caller_turn: int,
+        committed_at: float,
+    ) -> None:
+        fallback = self._generation_incomplete_fallback(caller_text)
+        _log_voice_timing(
+            "model_generation_fallback_selected",
+            self._call_sid,
+            caller_turn=caller_turn,
+            safety=find_urgent_signal(caller_text) is not None,
+            language=self._language if self._language in {"en", "es"} else "other",
+        )
+        self._conversation.append({"role": "assistant", "content": fallback})
+        await self.on_transcript("Kevin", fallback)
+        await self._speak(
+            fallback,
+            source="fallback",
+            caller_turn=caller_turn,
+            caller_committed_at=committed_at,
+        )
+
+    @staticmethod
+    def _has_usable_repair_content(
+        content_blocks: object,
+        stop_reason: object,
+    ) -> bool:
+        """Accept only a complete text response or a structurally valid tool call."""
+        if not isinstance(content_blocks, list):
+            return False
+        if stop_reason == "tool_use":
+            return any(
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and isinstance(block.get("id"), str)
+                and bool(block.get("id"))
+                and isinstance(block.get("name"), str)
+                and bool(block.get("name"))
+                for block in content_blocks
+            )
+        return any(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            and bool(block.get("text", "").strip())
+            and not _is_stage_direction(block.get("text", ""))
+            for block in content_blocks
+        )
+
+    async def _handle_caller_speech(
+        self,
+        caller_text: str,
+        *,
+        caller_turn: int | None = None,
+        committed_at: float | None = None,
+    ):
+        resolved_turn = caller_turn or self._caller_turn_number
+        resolved_committed_at = committed_at or self._caller_turn_committed_at
         self._conversation.append({"role": "user", "content": f"<caller_speech>{caller_text}</caller_speech>"})
 
         # Select tools: Jobber > Google Calendar > none
@@ -1248,7 +1539,10 @@ class VoicePipeline:
             for iteration in range(max_tool_iterations + 1):
                 request_body = {
                     "model": settings.anthropic_model,
-                    "max_tokens": 200 if use_tools else 100,
+                    # This is a fail-safe ceiling, not the normal response-length
+                    # control. The prompt owns brevity; a complete text response
+                    # must exist before any TTS audio is sent.
+                    "max_tokens": self.CLAUDE_MAX_TOKENS,
                     "system": self._system_prompt,
                     "messages": self._conversation[-20:],
                 }
@@ -1258,6 +1552,15 @@ class VoicePipeline:
                 # A4: Retry Claude API call once on failure
                 response = None
                 for attempt in range(2):
+                    request_started_at = time.monotonic()
+                    _log_voice_timing(
+                        "model_request_started",
+                        self._call_sid,
+                        caller_turn=resolved_turn,
+                        iteration=iteration + 1,
+                        attempt=attempt + 1,
+                        call_elapsed_ms=self._call_elapsed_ms(),
+                    )
                     try:
                         response = await client.post(
                             "https://api.anthropic.com/v1/messages",
@@ -1289,12 +1592,175 @@ class VoicePipeline:
                     fallback = "I'm sorry, I'm having trouble. Could you repeat that?"
                     self._conversation.append({"role": "assistant", "content": fallback})
                     await self.on_transcript("Kevin", fallback)
-                    await self._speak(fallback)
+                    await self._speak(
+                        fallback,
+                        source="fallback",
+                        caller_turn=resolved_turn,
+                        caller_committed_at=resolved_committed_at,
+                    )
                     return
 
                 data = response.json()
                 content_blocks = data.get("content", [])
                 stop_reason = data.get("stop_reason", "")
+                safe_stop_reason = (
+                    stop_reason
+                    if stop_reason in {"end_turn", "tool_use", "max_tokens", "stop_sequence"}
+                    else "unknown"
+                )
+                _log_voice_timing(
+                    "model_response_received",
+                    self._call_sid,
+                    caller_turn=resolved_turn,
+                    iteration=iteration + 1,
+                    provider_ms=max(
+                        0,
+                        round((time.monotonic() - request_started_at) * 1_000),
+                    ),
+                    caller_commit_to_model_ms=(
+                        max(
+                            0,
+                            round(
+                                (time.monotonic() - resolved_committed_at) * 1_000
+                            ),
+                        )
+                        if resolved_committed_at > 0
+                        else 0
+                    ),
+                    stop_reason=safe_stop_reason,
+                    call_elapsed_ms=self._call_elapsed_ms(),
+                )
+
+                if stop_reason == "max_tokens":
+                    _log_voice_timing(
+                        "model_generation_incomplete",
+                        self._call_sid,
+                        caller_turn=resolved_turn,
+                        repair_attempt=1,
+                    )
+                    repair_body = dict(request_body)
+                    repair_body["max_tokens"] = self.CLAUDE_REPAIR_MAX_TOKENS
+                    repair_body["system"] = (
+                        f"{self._system_prompt}\n\n"
+                        "GENERATION RECOVERY: The previous candidate was incomplete and "
+                        "will not be spoken. Produce one complete response from the start. "
+                        "For a safety issue, include every required immediate safety step. "
+                        "For an ordinary turn, remain concise."
+                    )
+                    repair_started_at = time.monotonic()
+                    try:
+                        repair_response = await client.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={
+                                "x-api-key": settings.anthropic_api_key,
+                                "anthropic-version": "2023-06-01",
+                                "content-type": "application/json",
+                            },
+                            json=repair_body,
+                            timeout=8.0,
+                        )
+                    except Exception as error:
+                        _log_voice_timing(
+                            "model_generation_repair_failed",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            caller_turn=resolved_turn,
+                            reason="request_error",
+                            exception_type=type(error).__name__,
+                        )
+                        await self._deliver_generation_incomplete_fallback(
+                            caller_text,
+                            caller_turn=resolved_turn,
+                            committed_at=resolved_committed_at,
+                        )
+                        return
+
+                    if repair_response.status_code != 200:
+                        _log_voice_timing(
+                            "model_generation_repair_failed",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            caller_turn=resolved_turn,
+                            reason="provider_status",
+                            status_code=repair_response.status_code,
+                        )
+                        await self._deliver_generation_incomplete_fallback(
+                            caller_text,
+                            caller_turn=resolved_turn,
+                            committed_at=resolved_committed_at,
+                        )
+                        return
+
+                    try:
+                        data = repair_response.json()
+                    except Exception as error:
+                        _log_voice_timing(
+                            "model_generation_repair_failed",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            caller_turn=resolved_turn,
+                            reason="invalid_payload",
+                            exception_type=type(error).__name__,
+                        )
+                        await self._deliver_generation_incomplete_fallback(
+                            caller_text,
+                            caller_turn=resolved_turn,
+                            committed_at=resolved_committed_at,
+                        )
+                        return
+                    if not isinstance(data, dict):
+                        data = {}
+                    content_blocks = data.get("content", [])
+                    stop_reason = data.get("stop_reason", "")
+                    safe_repair_stop_reason = (
+                        stop_reason
+                        if stop_reason
+                        in {"end_turn", "tool_use", "max_tokens", "stop_sequence"}
+                        else "unknown"
+                    )
+                    _log_voice_timing(
+                        "model_generation_repair_result",
+                        self._call_sid,
+                        caller_turn=resolved_turn,
+                        provider_ms=max(
+                            0,
+                            round(
+                                (time.monotonic() - repair_started_at) * 1_000
+                            ),
+                        ),
+                        stop_reason=safe_repair_stop_reason,
+                    )
+                    if stop_reason == "max_tokens":
+                        _log_voice_timing(
+                            "model_generation_repair_failed",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            caller_turn=resolved_turn,
+                            reason="max_tokens",
+                        )
+                        await self._deliver_generation_incomplete_fallback(
+                            caller_text,
+                            caller_turn=resolved_turn,
+                            committed_at=resolved_committed_at,
+                        )
+                        return
+                    if not self._has_usable_repair_content(
+                        content_blocks,
+                        stop_reason,
+                    ):
+                        _log_voice_timing(
+                            "model_generation_repair_failed",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            caller_turn=resolved_turn,
+                            reason="invalid_content",
+                        )
+                        await self._deliver_generation_incomplete_fallback(
+                            caller_text,
+                            caller_turn=resolved_turn,
+                            committed_at=resolved_committed_at,
+                        )
+                        return
 
                 # If Claude wants to use tools
                 if stop_reason == "tool_use":
@@ -1306,7 +1772,12 @@ class VoicePipeline:
                         tool_filler_said = True
                         filler = "Let me check on that for you."
                         await self.on_transcript("Kevin", filler)
-                        await self._speak(filler)
+                        await self._speak(
+                            filler,
+                            source="tool_filler",
+                            caller_turn=resolved_turn,
+                            caller_committed_at=resolved_committed_at,
+                        )
 
                     # Process each tool_use block
                     tool_results = []
@@ -1347,7 +1818,12 @@ class VoicePipeline:
                                 })
                                 self._conversation.append({"role": "assistant", "content": fallback_msg})
                                 await self.on_transcript("Kevin", fallback_msg)
-                                await self._speak(fallback_msg)
+                                await self._speak(
+                                    fallback_msg,
+                                    source="fallback",
+                                    caller_turn=resolved_turn,
+                                    caller_committed_at=resolved_committed_at,
+                                )
                                 return
 
                             tool_results.append({
@@ -1370,11 +1846,7 @@ class VoicePipeline:
                     break
 
                 # Filter out stage directions — don't speak these
-                stripped = kevin_text.strip().lower().strip("*[]() ")
-                stage_directions = {"silence", "holds the line", "waits", "waiting",
-                                    "pauses", "pause", "holds", "listening", "quiet",
-                                    "continues waiting", "remains silent", "stays quiet"}
-                if stripped in stage_directions or stripped == "..." or stripped.startswith("*") and stripped.endswith("*"):
+                if _is_stage_direction(kevin_text):
                     _log_voice_event(
                         "assistant_stage_direction_suppressed",
                         self._call_sid,
@@ -1395,7 +1867,12 @@ class VoicePipeline:
                     words=len(kevin_text.split()),
                 )
                 await self.on_transcript("Kevin", kevin_text)
-                await self._speak(kevin_text)
+                await self._speak(
+                    kevin_text,
+                    source="model",
+                    caller_turn=resolved_turn,
+                    caller_committed_at=resolved_committed_at,
+                )
                 if is_owner_availability_hold(kevin_text):
                     self._start_owner_availability_wait()
 
@@ -1498,7 +1975,7 @@ class VoicePipeline:
             msg = "Are you still there?"
             self._conversation.append({"role": "assistant", "content": msg})
             await self.on_transcript("Kevin", msg)
-            await self._speak(msg)
+            await self._speak(msg, source="silence")
             if self._last_caller_speech_time > prompt_started:
                 self._caller_silence_prompted_at = None
             else:
@@ -1515,7 +1992,7 @@ class VoicePipeline:
             _log_voice_event("caller_silence_timeout", self._call_sid)
             self._conversation.append({"role": "assistant", "content": msg})
             await self.on_transcript("Kevin", msg)
-            await self._speak(msg)
+            await self._speak(msg, source="silence")
         if self.on_call_complete:
             await asyncio.sleep(self.CALLER_SILENCE_GOODBYE_SECONDS)
             await self.on_call_complete()
@@ -1581,16 +2058,55 @@ class VoicePipeline:
                     words=len(msg.split()),
                 )
                 await self.on_transcript("Kevin", msg)
-                await self._speak(msg)
+                await self._speak(msg, source="unavailable")
         except asyncio.CancelledError:
             pass
 
     # --- ElevenLabs TTS (interruptible) ---
 
-    async def _speak(self, text: str):
+    async def _speak(
+        self,
+        text: str,
+        *,
+        source: str = "runtime",
+        caller_turn: int | None = None,
+        caller_committed_at: float | None = None,
+    ):
         """Convert text to speech. Supports barge-in (stops if caller interrupts)."""
+        resolved_caller_turn = (
+            getattr(self, "_caller_turn_number", 0)
+            if caller_turn is None
+            else caller_turn
+        )
+        resolved_committed_at = (
+            getattr(self, "_caller_turn_committed_at", 0.0)
+            if caller_committed_at is None
+            else caller_committed_at
+        )
+        safe_source = source if source in {
+            "fallback",
+            "greeting",
+            "model",
+            "runtime",
+            "silence",
+            "tool_filler",
+            "unavailable",
+        } else "unknown"
+        self._response_turn_number = getattr(self, "_response_turn_number", 0) + 1
+        response_turn = self._response_turn_number
+        tts_started_at = time.monotonic()
         self._is_speaking = True
         self._interrupt_speaking = False
+        _log_voice_timing(
+            "tts_request_started",
+            self._call_sid,
+            turn=response_turn,
+            caller_turn=resolved_caller_turn,
+            source=safe_source,
+            chars=len(text),
+            words=len(text.split()),
+            call_elapsed_ms=self._call_elapsed_ms(),
+        )
 
         try:
             client = self._http_client
@@ -1624,6 +2140,22 @@ class VoicePipeline:
                     bytes=len(mulaw_data),
                     duration_ms=round(len(mulaw_data) / 8),
                 )
+                tts_ready_at = time.monotonic()
+                _log_voice_timing(
+                    "tts_audio_ready",
+                    self._call_sid,
+                    turn=response_turn,
+                    caller_turn=resolved_caller_turn,
+                    source=safe_source,
+                    provider_ms=max(0, round((tts_ready_at - tts_started_at) * 1_000)),
+                    caller_commit_to_tts_ms=(
+                        max(0, round((tts_ready_at - resolved_committed_at) * 1_000))
+                        if resolved_committed_at > 0
+                        else 0
+                    ),
+                    audio_duration_ms=round(len(mulaw_data) / 8),
+                    call_elapsed_ms=self._call_elapsed_ms(),
+                )
 
                 # Send in large chunks for smooth playback
                 chunk_size = 4000  # 500ms of audio
@@ -1634,6 +2166,7 @@ class VoicePipeline:
                 start_time = asyncio.get_event_loop().time()
                 chunk_index = 0
                 delivery_failed = False
+                first_media_sent = False
                 for i in range(0, len(mulaw_data), chunk_size):
                     if not self._connected or self._interrupt_speaking:
                         logger.info("TTS interrupted (barge-in)")
@@ -1654,11 +2187,80 @@ class VoicePipeline:
                         break
                     chunk_index += 1
 
+                    if not first_media_sent:
+                        first_media_sent = True
+                        first_media_at = time.monotonic()
+                        _log_voice_timing(
+                            "response_first_twilio_media_sent",
+                            self._call_sid,
+                            turn=response_turn,
+                            caller_turn=resolved_caller_turn,
+                            source=safe_source,
+                            first_chunk_duration_ms=round(len(chunk) / 8),
+                            tts_ready_to_twilio_ms=max(
+                                0,
+                                round((first_media_at - tts_ready_at) * 1_000),
+                            ),
+                            caller_commit_to_first_media_ms=(
+                                max(
+                                    0,
+                                    round(
+                                        (first_media_at - resolved_committed_at) * 1_000
+                                    ),
+                                )
+                                if resolved_committed_at > 0
+                                else 0
+                            ),
+                            call_elapsed_ms=self._call_elapsed_ms(),
+                        )
+                        if getattr(self, "on_response_first_media_sent", None):
+                            try:
+                                await self.on_response_first_media_sent(response_turn)
+                            except Exception as error:
+                                _log_voice_timing(
+                                    "response_playback_mark_error",
+                                    self._call_sid,
+                                    level=logging.WARNING,
+                                    turn=response_turn,
+                                    phase="first_media",
+                                    exception_type=type(error).__name__,
+                                )
+
                     # Pace at ~real-time
-                    target = start_time + (chunk_index * chunk_duration * 0.9)
+                    target = start_time + (
+                        chunk_index * chunk_duration * self.ELEVENLABS_PACING_RATIO
+                    )
                     delay = target - asyncio.get_event_loop().time()
                     if delay > 0:
                         await asyncio.sleep(delay)
+
+                complete_media_sent = (
+                    first_media_sent
+                    and not delivery_failed
+                    and not self._interrupt_speaking
+                    and chunk_index == num_chunks
+                )
+                if complete_media_sent and getattr(
+                    self, "on_response_end_media_sent", None
+                ):
+                    try:
+                        accepted = await self.on_response_end_media_sent(response_turn)
+                    except Exception as error:
+                        _log_voice_timing(
+                            "response_playback_mark_error",
+                            self._call_sid,
+                            level=logging.WARNING,
+                            turn=response_turn,
+                            phase="response_end",
+                            exception_type=type(error).__name__,
+                        )
+                    else:
+                        _log_voice_timing(
+                            "response_end_playback_mark_requested",
+                            self._call_sid,
+                            turn=response_turn,
+                            accepted=accepted is not False,
+                        )
 
                 # Brief wait for Twilio to finish playing
                 if (
@@ -1671,6 +2273,23 @@ class VoicePipeline:
                 # Update silence timeout — Kevin spoke
                 if not delivery_failed:
                     self._mark_kevin_activity()
+                _log_voice_timing(
+                    "response_media_send_finished",
+                    self._call_sid,
+                    turn=response_turn,
+                    caller_turn=resolved_caller_turn,
+                    source=safe_source,
+                    interrupted=self._interrupt_speaking,
+                    delivery_failed=delivery_failed,
+                    chunks_sent=chunk_index,
+                    chunks_expected=num_chunks,
+                    audio_duration_ms=round(len(mulaw_data) / 8),
+                    tts_start_to_delivery_ms=max(
+                        0,
+                        round((time.monotonic() - tts_started_at) * 1_000),
+                    ),
+                    call_elapsed_ms=self._call_elapsed_ms(),
+                )
             else:
                 _log_voice_event(
                     "tts_provider_error",
@@ -1678,9 +2297,29 @@ class VoicePipeline:
                     level=logging.WARNING,
                     status_code=response.status_code,
                 )
+                _log_voice_timing(
+                    "tts_provider_error",
+                    self._call_sid,
+                    level=logging.WARNING,
+                    turn=response_turn,
+                    caller_turn=resolved_caller_turn,
+                    status_code=response.status_code,
+                    provider_ms=max(
+                        0,
+                        round((time.monotonic() - tts_started_at) * 1_000),
+                    ),
+                )
 
         except Exception as error:
             _log_voice_exception("tts_request_error", error, self._call_sid)
+            _log_voice_timing(
+                "tts_request_error",
+                self._call_sid,
+                level=logging.WARNING,
+                turn=response_turn,
+                caller_turn=resolved_caller_turn,
+                exception_type=type(error).__name__,
+            )
 
         self._is_speaking = False
         self._interrupt_speaking = False

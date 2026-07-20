@@ -606,10 +606,12 @@ async def _consume_twilio_ingress(
     on_stream_stop,
     on_max_duration,
 ) -> str:
+    outcome = "unknown"
     try:
         ready = await pipeline.wait_until_audio_ready()
         if not ready:
-            return "pipeline_unavailable"
+            outcome = "pipeline_unavailable"
+            return outcome
 
         elapsed_ms = (
             max(0, round((time.monotonic() - media_stream_started_at) * 1000))
@@ -627,21 +629,45 @@ async def _consume_twilio_ingress(
 
         while True:
             if ingress.overflowed:
-                return "overflow"
+                outcome = "overflow"
+                return outcome
             event = await ingress.receive()
             if ingress.overflowed:
-                return "overflow"
+                outcome = "overflow"
+                return outcome
             if event is None:
-                return "closed"
+                outcome = "closed"
+                return outcome
             if time.time() - call_started_at > max_call_duration_seconds:
                 await on_max_duration()
-                return "max_duration"
+                outcome = "max_duration"
+                return outcome
             if event.kind == "media":
                 await pipeline.process_audio_in(event.audio)
             elif event.kind == "stop":
                 await on_stream_stop()
-                return "stop"
+                outcome = "stop"
+                return outcome
     finally:
+        engine = (
+            "gemini"
+            if type(pipeline).__name__ == "GeminiPipeline"
+            else "elevenlabs"
+            if type(pipeline).__name__ == "VoicePipeline"
+            else "unknown"
+        )
+        logger.info(
+            "voice_timing event=pipeline_ingress_ended call=%s "
+            "engine=%s reason=%s call_elapsed_ms=%s",
+            _call_label(call_sid),
+            engine,
+            outcome,
+            (
+                max(0, round((time.monotonic() - media_stream_started_at) * 1000))
+                if media_stream_started_at > 0
+                else 0
+            ),
+        )
         logger.info(
             "voice_timing event=inbound_media_delivery_summary call=%s "
             "samples=%s mean_delivery_lag_ms=%s max_delivery_lag_ms=%s "
@@ -1058,11 +1084,14 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 on_audio_out=on_audio_out,
                 on_transcript=on_transcript,
                 on_clear_audio=on_clear_audio,
+                on_response_first_media_sent=on_response_first_media_sent,
+                on_response_end_media_sent=on_response_end_media_sent,
                 on_call_complete=on_call_complete,
                 on_urgency_detected=on_urgency_detected,
                 call_sid=call_sid,
                 contractor_config=contractor_config_loaded,
                 caller_phone=active_call.caller_phone if active_call else "",
+                call_started_at=media_stream_started_at,
             )
             logger.info(
                 "media_event event=pipeline_selected call=%s engine=elevenlabs",

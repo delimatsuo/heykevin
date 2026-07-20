@@ -45,8 +45,8 @@ class VoiceReleaseThresholds:
     first_audio_max_ms: int = 3500
     response_first_audio_p95_ms: int = 1500
     response_first_audio_max_ms: int = 2500
-    generated_audio_p95_ms: int = 6000
-    generated_audio_max_ms: int = 8000
+    generated_audio_p95_ms: int = 4000
+    generated_audio_max_ms: int = 5000
     barge_in_clear_p95_ms: int = 250
     barge_in_clear_max_ms: int = 500
     max_barge_in_clear_failures: int = 0
@@ -301,7 +301,8 @@ def evaluate_voice_release(
         for event in caller_transcript_events
     }
     response_events = _events_for_calls(
-        by_name.get("response_first_audio", []),
+        by_name.get("transcript_fragment_to_first_provider_audio", [])
+        or by_name.get("response_first_audio", []),
         attempted_calls,
     )
     completion_events = _events_for_calls(
@@ -328,6 +329,31 @@ def evaluate_voice_release(
         event
         for event in completion_events
         if _event_key(event, "turn") in completed_response_turn_keys
+    ]
+    policy_classes_by_turn: dict[tuple[str, str], set[str]] = {}
+    for event in matched_completion_events:
+        event_key = _event_key(event, "turn")
+        if event_key is None:
+            continue
+        policy_class = event.get("policy_class")
+        normalized_class = policy_class if policy_class in {"ordinary", "safety"} else "unknown"
+        policy_classes_by_turn.setdefault(event_key, set()).add(normalized_class)
+    conflicting_policy_turns = sum(
+        len(policy_classes) > 1
+        for policy_classes in policy_classes_by_turn.values()
+    )
+    safety_completion_turn_keys = {
+        event_key
+        for event_key, policy_classes in policy_classes_by_turn.items()
+        if policy_classes == {"safety"}
+    }
+    ordinary_completion_turn_keys = (
+        completed_response_turn_keys - safety_completion_turn_keys
+    )
+    ordinary_completion_events = [
+        event
+        for event in matched_completion_events
+        if _event_key(event, "turn") in ordinary_completion_turn_keys
     ]
     matched_interrupted_response_events = [
         event
@@ -413,7 +439,7 @@ def evaluate_voice_release(
         ordinal="turn",
     )
     generated_audio_values = _worst_numeric_values(
-        matched_completion_events,
+        ordinary_completion_events,
         "generated_audio_ms",
         ordinal="turn",
     )
@@ -470,7 +496,7 @@ def evaluate_voice_release(
         len(first_inbound_audio_calls) - len(first_inbound_audio_values),
         len(caller_transcript_calls) - len(caller_transcript_time_values),
         len(response_turn_keys) - len(response_values),
-        len(completed_response_turn_keys) - len(generated_audio_values),
+        len(ordinary_completion_turn_keys) - len(generated_audio_values),
         len(completed_response_turn_keys) - len(completed_model_stream_values),
         (
             len(interrupted_response_turn_keys)
@@ -487,6 +513,7 @@ def evaluate_voice_release(
         + unidentified_barge_events
         + unmatched_terminal_turns
         + conflicting_terminal_turns
+        + conflicting_policy_turns
         + missing_metric_evidence
     )
     inbound_errors = len(by_name.get("inbound_audio_error", []))
@@ -723,6 +750,8 @@ def evaluate_voice_release(
                 caller_transcript_calls & attempted_calls
             ),
             "completed_response_turns": len(completed_response_turn_keys),
+            "ordinary_response_turns": len(ordinary_completion_turn_keys),
+            "safety_response_turns": len(safety_completion_turn_keys),
             "interrupted_response_turns": len(interrupted_response_turn_keys),
             "terminal_response_turns": len(terminal_response_turn_keys),
             "inbound_media_buffer_overflows": inbound_media_buffer_overflows,

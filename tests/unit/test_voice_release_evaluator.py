@@ -45,9 +45,10 @@ def _passing_messages() -> list[str]:
                     call,
                     turn=turn,
                     model_stream_ms=700,
-                    generated_audio_ms=4200,
+                    generated_audio_ms=3800,
                     chars=80,
                     words=14,
+                    policy_class="ordinary",
                 ),
             ])
         if call_number < 5:
@@ -98,6 +99,8 @@ def test_voice_release_evaluator_passes_certification_sample():
         "calls_with_first_inbound_audio": 10,
         "calls_with_caller_transcript": 10,
         "completed_response_turns": 30,
+        "ordinary_response_turns": 30,
+        "safety_response_turns": 0,
         "interrupted_response_turns": 0,
         "terminal_response_turns": 30,
         "inbound_media_buffer_overflows": 0,
@@ -317,7 +320,8 @@ def test_voice_release_evaluator_counts_unique_response_turns():
         "model_turn_complete",
         "call0000",
         turn=1,
-        generated_audio_ms=4200,
+        generated_audio_ms=3800,
+        policy_class="ordinary",
     )
     messages.extend([duplicate_response, duplicate_completion] * 30)
 
@@ -480,6 +484,67 @@ def test_voice_release_evaluator_fails_slow_verbose_and_error_sample():
         "audio_backlog_overflows",
         "outbound_audio_errors",
     } <= failed
+
+
+def test_voice_release_evaluator_rejects_known_bad_ordinary_duration():
+    messages = _passing_messages()
+    messages.extend([
+        _event(
+            "model_turn_complete",
+            "call0008",
+            turn=3,
+            model_stream_ms=7520,
+            generated_audio_ms=7520,
+            policy_class="ordinary",
+        ),
+        _event(
+            "model_turn_complete",
+            "call0009",
+            turn=3,
+            model_stream_ms=7520,
+            generated_audio_ms=7520,
+            policy_class="ordinary",
+        ),
+    ])
+
+    report = evaluate_voice_release(messages)
+    failed = {gate["name"] for gate in report["gates"] if not gate["passed"]}
+
+    assert {
+        "generated_audio_p95_ms",
+        "generated_audio_max_ms",
+    } <= failed
+
+
+def test_voice_release_evaluator_exempts_complete_safety_guidance_from_duration():
+    messages = [
+        message
+        for message in _passing_messages()
+        if not (
+            "event=model_turn_complete" in message
+            and "call=call0009" in message
+            and "turn=3" in message
+        )
+    ]
+    messages.append(
+        _event(
+            "model_turn_complete",
+            "call0009",
+            turn=3,
+            model_stream_ms=9000,
+            generated_audio_ms=9000,
+            policy_class="safety",
+        )
+    )
+
+    report = evaluate_voice_release(messages)
+    gates = {gate["name"]: gate for gate in report["gates"]}
+
+    assert report["status"] == "pass"
+    assert gates["generated_audio_p95_ms"]["passed"]
+    assert gates["generated_audio_max_ms"]["passed"]
+    assert report["sample"]["ordinary_response_turns"] == 29
+    assert report["sample"]["safety_response_turns"] == 1
 
 
 def test_voice_release_evaluator_rejects_insufficient_sample():

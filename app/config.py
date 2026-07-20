@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4
+    spoken_response_policy_enabled: bool = False
 
     # Twilio Voice SDK (for iOS app)
     twilio_api_key_sid: str = ""      # API Key SID (not the Account SID)
@@ -107,6 +108,7 @@ class Settings(BaseSettings):
 
     # App
     environment: str = "development"
+    deploy_sha: str = ""
     apns_sandbox: bool = True  # Use APNs sandbox endpoint; set to false for App Store builds
     allow_production_resources_in_non_production: bool = False
     log_level: str = "INFO"

@@ -120,6 +120,7 @@ def test_presence_ack_replays_original_question_before_accepting_an_answer():
     coordinator.resolve_playback(_receipt(2))
 
     coordinator.caller_activity()
+    assert coordinator.begin_presence_resolution(2)
     assert coordinator.begin_question_replay(2)
     assert coordinator.begin_playback(
         response_turn=3,
@@ -134,6 +135,60 @@ def test_presence_ack_replays_original_question_before_accepting_an_answer():
     assert coordinator.state == TurnLifecycle.AWAITING_REPLY
     clock.now += 10
     assert coordinator.due_action() == CoordinatorDirective.CLOSE_FOR_SILENCE
+
+
+def test_presence_context_requires_typed_acceptance_before_normal_generation():
+    coordinator = VoiceTurnCoordinator()
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    coordinator.resolve_playback(_receipt(1))
+    coordinator._deadline = 0
+    assert coordinator.due_action() == CoordinatorDirective.REPROMPT
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    coordinator.resolve_playback(_receipt(2))
+    coordinator.caller_activity()
+
+    assert coordinator.begin_generation(2) is False
+    assert coordinator.begin_presence_resolution(2) is True
+    assert coordinator.state == TurnLifecycle.RESOLVING_PRESENCE
+    assert coordinator.accept_presence_answer(2) is True
+    assert coordinator.state == TurnLifecycle.GENERATING
+
+
+def test_owner_message_transition_replaces_active_question_contract():
+    coordinator = VoiceTurnCoordinator()
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    coordinator.resolve_playback(_receipt(1))
+
+    assert coordinator.begin_owner_message() is True
+    assert coordinator.state == TurnLifecycle.OWNER_MESSAGE_PENDING
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="message_details",
+        kind="owner_unavailable",
+    )
+    outcome = coordinator.resolve_playback(_receipt(2))
+
+    assert outcome.committed_slot == "message_details"
+    assert coordinator.state == TurnLifecycle.AWAITING_REPLY
 
 
 @pytest.mark.parametrize(

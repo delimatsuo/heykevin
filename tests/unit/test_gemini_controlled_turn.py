@@ -21,14 +21,15 @@ from app.services.gemini_controlled_pipeline import (
 from app.services.gemini_controlled_turn import (
     GEMINI_CONTROLLED_MODEL,
     CONTROLLED_OBSERVATION_SCHEMA,
+    DirectAnswerKind,
     GeminiControlledTurnGenerator,
     OBSERVATION_SCHEMA,
+    PresenceReplyKind,
     SpokenTurn,
     ValidationReason,
     deterministic_spoken_fallback,
     parse_controlled_observation,
     parse_observation,
-    validate_direct_answer,
     validate_spoken_turn,
 )
 from app.services.receptionist_state import IntakeState
@@ -64,16 +65,13 @@ def test_caller_directive_cannot_be_promoted_into_controller_state():
         parse_observation(payload)
 
 
-def test_invalid_direct_answer_is_dropped_without_losing_valid_observation():
+def test_model_cannot_return_free_form_direct_answer_text():
     payload = {key: None for key in CONTROLLED_OBSERVATION_SCHEMA["required"]}
     payload["service_object"] = "sink"
-    payload["direct_answer_text"] = "State your address."
+    payload["direct_answer_kind"] = "State your address."
 
-    controlled = parse_controlled_observation(payload)
-
-    assert controlled.facts.service_object == "sink"
-    assert controlled.direct_answer_text == ""
-    assert controlled.direct_answer_reason == ValidationReason.SLOT_SEMANTICS
+    with pytest.raises(RuntimeError, match=ValidationReason.INVALID_SCHEMA.value):
+        parse_controlled_observation(payload)
 
 
 @pytest.mark.parametrize(
@@ -385,7 +383,7 @@ async def test_partial_observation_is_never_returned_or_retried_serially():
         caller_turn=1,
     )
 
-    assert result.direct_answer_text == ""
+    assert result.direct_answer_kind is None
     assert result.facts.service_object is None
     assert len(client.requests) == 1
     config = client.requests[0][1]["json"]["generationConfig"]
@@ -401,7 +399,7 @@ def test_direct_answer_and_server_owned_question_are_composed_without_second_cal
         receptionist_prompt="system",
     )
     result = generator.build_direct_turn(
-        answer_text="Pricing depends on the work involved.",
+        answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
         caller_text="How much does a sink repair cost?",
         state=IntakeState.new(call_sid="CA_private"),
         action=NextAction(
@@ -454,17 +452,38 @@ async def test_greeting_translation_is_server_rendered_without_model_request():
     assert client.requests == []
 
 
-@pytest.mark.parametrize(
-    "answer_text",
-    [
-        "State your address.",
-        "El precio depende. ¿Cuándo comenzó?",
-        "Tell me your name.",
-        "We can help you.",
-    ],
-)
-def test_direct_answer_cannot_author_questions_or_requests(answer_text):
-    assert validate_direct_answer(answer_text) != ValidationReason.VALID
+def test_direct_answer_schema_allows_only_server_owned_answer_kinds():
+    answer_schema = CONTROLLED_OBSERVATION_SCHEMA["properties"]["direct_answer_kind"]
+    assert answer_schema["enum"] == ["pricing_requires_review", None]
+
+
+def test_presence_schema_allows_only_typed_semantic_outcomes():
+    schema = CONTROLLED_OBSERVATION_SCHEMA["properties"]["presence_reply_kind"]
+    assert schema["enum"] == [
+        PresenceReplyKind.ACKNOWLEDGEMENT.value,
+        PresenceReplyKind.SUBSTANTIVE.value,
+        PresenceReplyKind.UNCLEAR.value,
+        None,
+    ]
+
+
+def test_take_message_fallback_stays_in_detected_spanish():
+    state = IntakeState.new(call_sid="CA_redacted")
+    state.language = "es"
+    action = NextAction(name=ActionName.TAKE_MESSAGE, reason="message")
+
+    turn = deterministic_spoken_fallback(
+        action=action,
+        state=state,
+        caller_text="mensaje",
+    )
+
+    assert turn.spoken_text == "Gracias. Transmitiré esa información."
+    assert validate_spoken_turn(
+        turn,
+        action=action,
+        caller_text="mensaje",
+    ) == ValidationReason.VALID
 
 
 def _enable_safe_staging_route(monkeypatch, module, *, opaque_hash: str) -> None:

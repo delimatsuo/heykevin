@@ -19,6 +19,7 @@ from app.services.dialogue_planner import ActionName, plan_next_action
 from app.services.gemini_controlled_turn import (
     GEMINI_CONTROLLED_MODEL,
     GeminiControlledTurnGenerator,
+    PresenceReplyKind,
     ValidatedTurn,
     ValidationReason,
     deterministic_question_for_slot,
@@ -62,47 +63,6 @@ _CONTROLLED_SOURCE_NAMES = frozenset(
         "unavailable",
     }
 )
-_PRESENCE_ACK_TOKENS = frozenset(
-    {
-        "am",
-        "aqui",
-        "can",
-        "estoy",
-        "hear",
-        "hello",
-        "here",
-        "hi",
-        "hola",
-        "i",
-        "im",
-        "sigo",
-        "si",
-        "still",
-        "sure",
-        "te",
-        "you",
-        "ya",
-        "yeah",
-        "yep",
-        "yes",
-    }
-)
-_PRESENCE_ACK_SIGNALS = frozenset(
-    {"aqui", "estoy", "hello", "here", "hi", "hola", "si", "yeah", "yep", "yes"}
-)
-
-
-def _is_presence_acknowledgement(caller_text: str) -> bool:
-    normalized = caller_text.casefold().replace("í", "i")
-    tokens = re.findall(r"[a-z]+", normalized.replace("'", ""))
-    return bool(
-        tokens
-        and len(tokens) <= 6
-        and set(tokens) <= _PRESENCE_ACK_TOKENS
-        and set(tokens).intersection(_PRESENCE_ACK_SIGNALS)
-    )
-
-
 def _opening_question_from_greeting(greeting: str) -> str:
     match = re.search(r"(?:¿[^?]+\?|[^.!?]+\?)\s*$", greeting)
     return match.group(0).strip() if match else ""
@@ -169,6 +129,12 @@ class _PendingSpeechContract:
     kind: str = "model"
 
 
+@dataclass(frozen=True, slots=True)
+class _PresenceContext:
+    question_text: str
+    asked_slot: str = ""
+
+
 class GeminiControlledPipeline(VoicePipeline):
     """Deepgram -> controlled Gemini text -> ElevenLabs, guarded to staging."""
 
@@ -226,6 +192,7 @@ class GeminiControlledPipeline(VoicePipeline):
         self._pending_speech_contract: _PendingSpeechContract | None = None
         self._pending_reply_slot = ""
         self._presence_reply_pending = False
+        self._suspended_presence_context: _PresenceContext | None = None
         self._last_played_question: tuple[str, str] | None = None
         self._playback_question_candidates: dict[int, tuple[str, str]] = {}
         self._active_generation_task: asyncio.Task | None = None
@@ -278,6 +245,7 @@ class GeminiControlledPipeline(VoicePipeline):
             TurnLifecycle.REPROMPTING,
             TurnLifecycle.AWAITING_PRESENCE,
         }:
+            self._suspend_original_question()
             self._presence_reply_pending = True
         super()._mark_caller_activity()
         self._turn_coordinator.caller_activity()
@@ -289,6 +257,47 @@ class GeminiControlledPipeline(VoicePipeline):
             and self._active_generation_task is not asyncio.current_task()
         ):
             self._active_generation_task.cancel()
+
+    def _suspend_original_question(self) -> None:
+        """Remove business-slot authority while a presence reply is unresolved."""
+        if self._suspended_presence_context is None:
+            question = self._last_played_question
+            if question is None:
+                asked_slot = self._pending_reply_slot
+                question_text = (
+                    deterministic_question_for_slot(
+                        slot=asked_slot,
+                        state=self._intake_state,
+                        spanish=self._intake_state.language.casefold().startswith("es"),
+                    )
+                    if asked_slot
+                    else (
+                        "¿Cómo puedo ayudarle?"
+                        if self._intake_state.language.casefold().startswith("es")
+                        else "How can I help you?"
+                    )
+                )
+                question = (question_text, asked_slot)
+            self._suspended_presence_context = _PresenceContext(*question)
+        self._pending_reply_slot = ""
+
+    @staticmethod
+    def _presence_answer_is_explicit(
+        observation: CallerObservation,
+        asked_slot: str,
+    ) -> bool:
+        if asked_slot == "callback_confirmation":
+            return observation.callback_confirmation not in {
+                None,
+                CallbackConfirmation.UNKNOWN,
+            }
+        if asked_slot == "callback_preference":
+            return observation.callback_intent not in {
+                None,
+                CallbackIntent.NONE,
+                CallbackIntent.OFFERED,
+            }
+        return True
 
     def _authorize_observation(self, observation: CallerObservation) -> CallerObservation:
         """Bind answer-only facts to the slot whose question was audibly played."""
@@ -324,9 +333,62 @@ class GeminiControlledPipeline(VoicePipeline):
                 reason="stale_caller_turn",
             )
             return
-        if self._presence_reply_pending:
-            self._presence_reply_pending = False
-            if _is_presence_acknowledgement(caller_text):
+        presence_context = (
+            self._suspended_presence_context
+            if self._presence_reply_pending
+            else None
+        )
+        self._presence_reply_pending = False
+        begin_accepted = (
+            self._turn_coordinator.begin_presence_resolution(resolved_turn)
+            if presence_context
+            else self._turn_coordinator.begin_generation(resolved_turn)
+        )
+        if not begin_accepted:
+            return
+        self._active_generation_task = asyncio.current_task()
+        try:
+            controlled_observation = await self._turn_generator.extract_observation(
+                caller_text=caller_text,
+                state=self._intake_state,
+                caller_turn=resolved_turn,
+                presence_check_active=presence_context is not None,
+                suspended_slot=presence_context.asked_slot if presence_context else "",
+            )
+        finally:
+            if self._active_generation_task is asyncio.current_task():
+                self._active_generation_task = None
+        if not self._turn_coordinator.accepts_generated_turn(resolved_turn):
+            _log_voice_timing(
+                "controlled_generation_suppressed",
+                self._call_sid,
+                caller_turn=resolved_turn,
+                reason="caller_activity",
+            )
+            return
+
+        if presence_context is not None:
+            presence_kind = controlled_observation.presence_reply_kind
+            explicit_answer = (
+                presence_kind == PresenceReplyKind.SUBSTANTIVE
+                and self._presence_answer_is_explicit(
+                    controlled_observation.facts,
+                    presence_context.asked_slot,
+                )
+            )
+            _log_voice_timing(
+                "controlled_presence_resolution",
+                self._call_sid,
+                caller_turn=resolved_turn,
+                result=(
+                    PresenceReplyKind.SUBSTANTIVE.value
+                    if explicit_answer
+                    else "replay"
+                ),
+                model_kind=(presence_kind.value if presence_kind else "absent"),
+                suspended_slot=bool(presence_context.asked_slot),
+            )
+            if not explicit_answer:
                 if await self._replay_last_question(
                     caller_turn=resolved_turn,
                     committed_at=resolved_committed_at,
@@ -340,26 +402,10 @@ class GeminiControlledPipeline(VoicePipeline):
                     reason="invalid_lifecycle",
                 )
                 return
-        if not self._turn_coordinator.begin_generation(resolved_turn):
-            return
-        self._active_generation_task = asyncio.current_task()
-        try:
-            controlled_observation = await self._turn_generator.extract_observation(
-                caller_text=caller_text,
-                state=self._intake_state,
-                caller_turn=resolved_turn,
-            )
-        finally:
-            if self._active_generation_task is asyncio.current_task():
-                self._active_generation_task = None
-        if not self._turn_coordinator.accepts_generated_turn(resolved_turn):
-            _log_voice_timing(
-                "controlled_generation_suppressed",
-                self._call_sid,
-                caller_turn=resolved_turn,
-                reason="caller_activity",
-            )
-            return
+            if not self._turn_coordinator.accept_presence_answer(resolved_turn):
+                return
+            self._pending_reply_slot = presence_context.asked_slot
+            self._suspended_presence_context = None
 
         observation = self._authorize_observation(controlled_observation.facts)
         urgent_signal = find_urgent_signal(caller_text)
@@ -386,7 +432,7 @@ class GeminiControlledPipeline(VoicePipeline):
         )
         if action.name == ActionName.ANSWER_DIRECT_QUESTION:
             validated = self._turn_generator.build_direct_turn(
-                answer_text=controlled_observation.direct_answer_text,
+                answer_kind=controlled_observation.direct_answer_kind,
                 caller_text=caller_text,
                 state=self._intake_state,
                 action=action,
@@ -550,6 +596,11 @@ class GeminiControlledPipeline(VoicePipeline):
             self._pending_reply_slot = outcome.committed_slot
         if outcome.played and question_candidate:
             self._last_played_question = question_candidate
+        if (
+            outcome.played
+            and self._turn_coordinator.state == TurnLifecycle.AWAITING_PRESENCE
+        ):
+            self._suspend_original_question()
         if outcome.directive == CoordinatorDirective.HANGUP and self.on_call_complete:
             await self.on_call_complete()
             self._turn_coordinator.mark_ended()
@@ -586,7 +637,12 @@ class GeminiControlledPipeline(VoicePipeline):
         caller_turn: int,
         committed_at: float,
     ) -> bool:
-        question = self._last_played_question
+        context = self._suspended_presence_context
+        question = (
+            (context.question_text, context.asked_slot)
+            if context is not None
+            else self._last_played_question
+        )
         if question is None:
             asked_slot = self._pending_reply_slot
             question_text = (
@@ -607,6 +663,7 @@ class GeminiControlledPipeline(VoicePipeline):
             return False
         question_text, asked_slot = question
         self._pending_reply_slot = ""
+        self._suspended_presence_context = None
         self._pending_speech_contract = _PendingSpeechContract(
             expects_input=True,
             asked_slot=asked_slot,
@@ -621,6 +678,56 @@ class GeminiControlledPipeline(VoicePipeline):
             caller_committed_at=committed_at,
         )
         return True
+
+    async def _unavailable_now(self):
+        """Replace any pending question with one receipt-gated message request."""
+        async with self._response_lock:
+            if self._unavailable_said:
+                return
+            if not self._turn_coordinator.begin_owner_message():
+                _log_voice_timing(
+                    "controlled_owner_message_suppressed",
+                    self._call_sid,
+                    reason="invalid_lifecycle",
+                )
+                return
+
+            self._unavailable_said = True
+            self._finish_owner_availability_wait()
+            self._pending_reply_slot = ""
+            self._presence_reply_pending = False
+            self._suspended_presence_context = None
+            self._last_played_question = None
+            self._playback_question_candidates.clear()
+
+            owner_name = self._contractor_config.get("owner_name", settings.user_name)
+            spanish = self._intake_state.language.casefold().startswith("es")
+            question = (
+                "¿Qué mensaje quiere que le transmita?"
+                if spanish
+                else "What message would you like me to pass along?"
+            )
+            message = (
+                f"Lo siento, {owner_name} no está disponible ahora. {question}"
+                if spanish
+                else f"I'm sorry, {owner_name} isn't available right now. {question}"
+            )
+            self._pending_speech_contract = _PendingSpeechContract(
+                expects_input=True,
+                asked_slot="message_details",
+                question_text=question,
+                kind="owner_unavailable",
+            )
+            self._conversation.append({"role": "assistant", "content": message})
+            _log_voice_event(
+                "assistant_message_ready",
+                self._call_sid,
+                source="unavailable",
+                chars=len(message),
+                words=len(message.split()),
+            )
+            await self.on_transcript("Kevin", message)
+            await self._speak(message, source="unavailable")
 
     async def _speak_silence_close(self) -> None:
         async with self._response_lock:

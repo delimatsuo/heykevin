@@ -13,10 +13,11 @@ os.environ.setdefault("USER_PHONE", "+15555550101")
 from app.services.gemini_controlled_pipeline import (
     GeminiControlledPipeline,
     _PendingSpeechContract,
-    _is_presence_acknowledgement,
 )
 from app.services.gemini_controlled_turn import (
     ControlledObservation,
+    DirectAnswerKind,
+    PresenceReplyKind,
 )
 from app.services.receptionist_state import (
     CallbackConfirmation,
@@ -32,22 +33,6 @@ from app.services.voice_turn_coordinator import PlaybackReceipt, PlaybackStatus,
 
 async def _noop(*_args, **_kwargs):
     return None
-
-
-@pytest.mark.parametrize(
-    "caller_text",
-    ["Yes", "Yes, I'm here.", "I am still here", "Sí, aquí estoy", "Hello?"],
-)
-def test_presence_acknowledgement_accepts_only_transport_level_phrases(caller_text):
-    assert _is_presence_acknowledgement(caller_text) is True
-
-
-@pytest.mark.parametrize(
-    "caller_text",
-    ["Yes, that number is correct", "Repair the sink", "My name is Jamie"],
-)
-def test_presence_acknowledgement_preserves_substantive_answers(caller_text):
-    assert _is_presence_acknowledgement(caller_text) is False
 
 
 def _pipeline(*, on_call_complete=_noop) -> GeminiControlledPipeline:
@@ -266,7 +251,7 @@ async def test_presence_ack_replays_the_exact_last_played_question(monkeypatch):
         expects_input=True,
         asked_slot="callback_confirmation",
     )
-    coordinator.resolve_playback(
+    await pipeline.on_playback_receipt(
         PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
     )
     coordinator._deadline = 0
@@ -277,22 +262,38 @@ async def test_presence_ack_replays_the_exact_last_played_question(monkeypatch):
         expects_input=True,
         kind="reprompt",
     )
-    coordinator.resolve_playback(
+    await pipeline.on_playback_receipt(
         PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
     )
-    coordinator.caller_activity()
-    pipeline._presence_reply_pending = True
+    pipeline._mark_caller_activity()
     pipeline._caller_turn_number = 2
     spoken = []
+
+    class PresenceGenerator:
+        async def extract_observation(self, **kwargs):
+            assert kwargs["presence_check_active"] is True
+            assert kwargs["suspended_slot"] == "callback_confirmation"
+            return ControlledObservation(
+                facts=CallerObservation(
+                    callback_confirmation=CallbackConfirmation.CONFIRMED
+                ),
+                presence_reply_kind=PresenceReplyKind.ACKNOWLEDGEMENT,
+            )
 
     async def capture_speak(text, **_kwargs):
         spoken.append(text)
         return True
 
+    pipeline._turn_generator = PresenceGenerator()
     monkeypatch.setattr(pipeline, "_speak", capture_speak)
-    await pipeline._handle_caller_speech("Yes", caller_turn=2, committed_at=1.0)
+    await pipeline._handle_caller_speech(
+        "Sure, I'm listening.",
+        caller_turn=2,
+        committed_at=1.0,
+    )
 
     assert spoken == [question]
+    assert pipeline._intake_state.callback_confirmation == CallbackConfirmation.UNKNOWN
     assert pipeline._pending_reply_slot == ""
     assert pipeline._pending_speech_contract == _PendingSpeechContract(
         expects_input=True,
@@ -300,6 +301,105 @@ async def test_presence_ack_replays_the_exact_last_played_question(monkeypatch):
         question_text=question,
         kind="question_replay",
     )
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_typed_substantive_presence_reply_can_answer_suspended_slot(monkeypatch):
+    pipeline = _pipeline()
+    pipeline._intake_state.callback_intent = CallbackIntent.REQUESTED
+    coordinator = pipeline._turn_coordinator
+    question = "Is the number ending in 1-2-3-4 best for the callback?"
+    pipeline._last_played_question = (question, "callback_confirmation")
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    coordinator._deadline = 0
+    assert coordinator.due_action().value == "reprompt"
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    pipeline._mark_caller_activity()
+    pipeline._caller_turn_number = 2
+
+    class PresenceGenerator:
+        async def extract_observation(self, **_kwargs):
+            return ControlledObservation(
+                facts=CallerObservation(
+                    callback_confirmation=CallbackConfirmation.CONFIRMED
+                ),
+                presence_reply_kind=PresenceReplyKind.SUBSTANTIVE,
+            )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    pipeline._turn_generator = PresenceGenerator()
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+
+    await pipeline._handle_caller_speech(
+        "Yes, that number is correct.",
+        caller_turn=2,
+        committed_at=1.0,
+    )
+
+    assert pipeline._intake_state.callback_confirmation == CallbackConfirmation.CONFIRMED
+    assert spoken != [question]
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owner_unavailable_replaces_pending_question_contract(monkeypatch):
+    pipeline = _pipeline()
+    coordinator = pipeline._turn_coordinator
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    pipeline._response_turn_number = 1
+    spoken = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    await pipeline._unavailable_now()
+
+    assert spoken == [
+        "I'm sorry, Owner isn't available right now. "
+        "What message would you like me to pass along?"
+    ]
+    assert coordinator.state == TurnLifecycle.PLAYING
+    assert pipeline._pending_reply_slot == ""
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    assert pipeline._pending_reply_slot == "message_details"
+    assert coordinator.state == TurnLifecycle.AWAITING_REPLY
     await pipeline._http_client.aclose()
 
 
@@ -354,7 +454,7 @@ async def test_pricing_answer_uses_same_observation_call_then_server_question(mo
                 service_object="sink",
                 service_action=ServiceAction.REPAIR,
             ),
-            direct_answer_text="Pricing depends on the work involved.",
+            direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
         )
 
     spoken = []

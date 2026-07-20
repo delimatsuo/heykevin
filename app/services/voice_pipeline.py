@@ -2129,6 +2129,8 @@ class VoicePipeline:
             "fallback",
             "greeting",
             "model",
+            "owner_unavailable",
+            "question_replay",
             "reprompt",
             "runtime",
             "silence",

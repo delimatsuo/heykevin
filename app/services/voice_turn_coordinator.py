@@ -14,7 +14,9 @@ class TurnLifecycle(str, Enum):
     AWAITING_REPLY = "awaiting_reply"
     REPROMPTING = "reprompting"
     AWAITING_PRESENCE = "awaiting_presence"
+    RESOLVING_PRESENCE = "resolving_presence"
     REPLAYING_QUESTION = "replaying_question"
+    OWNER_MESSAGE_PENDING = "owner_message_pending"
     CLOSE_PENDING = "close_pending"
     ENDED = "ended"
 
@@ -82,6 +84,7 @@ class VoiceTurnCoordinator:
         self._contract: _PlaybackContract | None = None
         self._deadline: float | None = None
         self._reprompt_count = 0
+        self._presence_resolution_required = False
 
     @property
     def current_response_turn(self) -> int | None:
@@ -92,12 +95,14 @@ class VoiceTurnCoordinator:
             self.state != TurnLifecycle.LISTENING
             or caller_turn <= 0
             or caller_turn < self._caller_turn
+            or self._presence_resolution_required
         ):
             return False
         self._caller_turn = caller_turn
         self._contract = None
         self._deadline = None
         self._reprompt_count = 0
+        self._presence_resolution_required = False
         self.state = TurnLifecycle.GENERATING
         return True
 
@@ -122,6 +127,8 @@ class VoiceTurnCoordinator:
             return False
         if kind == "question_replay" and self.state != TurnLifecycle.REPLAYING_QUESTION:
             return False
+        if kind == "owner_unavailable" and self.state != TurnLifecycle.OWNER_MESSAGE_PENDING:
+            return False
         if kind == "silence_close" and self.state != TurnLifecycle.PLAYING:
             return False
         if expects_input and close_after_playback:
@@ -134,6 +141,7 @@ class VoiceTurnCoordinator:
             "fallback",
             "reprompt",
             "question_replay",
+            "owner_unavailable",
             "silence_close",
         }:
             raise ValueError("unknown playback kind")
@@ -157,27 +165,70 @@ class VoiceTurnCoordinator:
     def begin_question_replay(self, caller_turn: int) -> bool:
         """Authorize replay after the caller acknowledges a presence check."""
         if (
-            self.state != TurnLifecycle.LISTENING
+            self.state != TurnLifecycle.RESOLVING_PRESENCE
             or caller_turn <= 0
-            or caller_turn < self._caller_turn
+            or caller_turn != self._caller_turn
             or self._reprompt_count != 1
         ):
             return False
         self._caller_turn = caller_turn
         self._contract = None
         self._deadline = None
+        self._presence_resolution_required = False
         self.state = TurnLifecycle.REPLAYING_QUESTION
+        return True
+
+    def begin_presence_resolution(self, caller_turn: int) -> bool:
+        """Classify a reply to a played presence check without authorizing a slot."""
+        if (
+            self.state != TurnLifecycle.LISTENING
+            or caller_turn <= 0
+            or caller_turn < self._caller_turn
+            or self._reprompt_count != 1
+            or not self._presence_resolution_required
+        ):
+            return False
+        self._caller_turn = caller_turn
+        self._contract = None
+        self._deadline = None
+        self.state = TurnLifecycle.RESOLVING_PRESENCE
+        return True
+
+    def accept_presence_answer(self, caller_turn: int) -> bool:
+        """Authorize normal planning only after a typed substantive presence reply."""
+        if (
+            self.state != TurnLifecycle.RESOLVING_PRESENCE
+            or caller_turn != self._caller_turn
+        ):
+            return False
+        self._reprompt_count = 0
+        self._presence_resolution_required = False
+        self.state = TurnLifecycle.GENERATING
+        return True
+
+    def begin_owner_message(self) -> bool:
+        """Replace any active question with an owner-unavailable message contract."""
+        if self.state in {TurnLifecycle.CLOSE_PENDING, TurnLifecycle.ENDED}:
+            return False
+        self._contract = None
+        self._deadline = None
+        self._reprompt_count = 0
+        self._presence_resolution_required = False
+        self.state = TurnLifecycle.OWNER_MESSAGE_PENDING
         return True
 
     def accepts_generated_turn(self, caller_turn: int) -> bool:
         return (
-            self.state == TurnLifecycle.GENERATING
+            self.state
+            in {TurnLifecycle.GENERATING, TurnLifecycle.RESOLVING_PRESENCE}
             and caller_turn == self._caller_turn
         )
 
     def caller_activity(self) -> None:
         if self.state in {TurnLifecycle.CLOSE_PENDING, TurnLifecycle.ENDED}:
             return
+        if self.state == TurnLifecycle.REPROMPTING:
+            self._presence_resolution_required = True
         self._contract = None
         self._deadline = None
         self.state = TurnLifecycle.LISTENING
@@ -198,6 +249,7 @@ class VoiceTurnCoordinator:
         if receipt.status != PlaybackStatus.PLAYED:
             self._contract = None
             self._deadline = None
+            self._presence_resolution_required = False
             self.state = TurnLifecycle.LISTENING
             return CoordinatorOutcome()
 
@@ -215,6 +267,7 @@ class VoiceTurnCoordinator:
             if contract.kind == "reprompt"
             else TurnLifecycle.AWAITING_REPLY
         )
+        self._presence_resolution_required = contract.kind == "reprompt"
         if not contract.expects_input:
             self._reprompt_count = 1
         self._deadline = self._clock() + self._no_input_seconds
@@ -229,6 +282,7 @@ class VoiceTurnCoordinator:
             return False
         self._contract = None
         self._deadline = None
+        self._presence_resolution_required = False
         self.state = TurnLifecycle.LISTENING
         return True
 
@@ -253,4 +307,5 @@ class VoiceTurnCoordinator:
     def mark_ended(self) -> None:
         self._contract = None
         self._deadline = None
+        self._presence_resolution_required = False
         self.state = TurnLifecycle.ENDED

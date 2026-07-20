@@ -1035,12 +1035,29 @@ struct OnboardingView: View {
         var contractorId = appState.contractorId
 
         // Fast-path: contractor already exists and the profile already has a Kevin
-        // number — skip the patch entirely and finish onboarding. Avoids the round
-        // trip of overwriting restored fields with potentially-stale form values.
+        // number. Persist the selected mode before finishing onboarding, but avoid
+        // overwriting restored profile fields with potentially-stale form values.
         if !contractorId.isEmpty {
             if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
                let existing = profile["twilio_number"] as? String,
                !existing.isEmpty {
+                do {
+                    let updated = try await APIClient.shared.patchContractor(
+                        contractorId,
+                        body: ["mode": mode]
+                    )
+                    if !updated {
+                        errorMessage = mode == "business"
+                            ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+                            : String(localized: "Failed to update profile. Please try again.")
+                        isLoading = false
+                        return
+                    }
+                } catch {
+                    errorMessage = String(localized: "Failed to update profile. Please try again.")
+                    isLoading = false
+                    return
+                }
                 kevinNumber = existing
                 appState.kevinNumber = existing
                 if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }

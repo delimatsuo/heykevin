@@ -1,5 +1,6 @@
 """Live wiring tests for the staging-only controlled Gemini pipeline."""
 
+import asyncio
 import os
 
 import pytest
@@ -362,6 +363,76 @@ async def test_typed_substantive_presence_reply_can_answer_suspended_slot(monkey
 
     assert pipeline._intake_state.callback_confirmation == CallbackConfirmation.CONFIRMED
     assert spoken != [question]
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_speech_during_presence_resolution_restarts_typed_context(monkeypatch):
+    pipeline = _pipeline()
+    coordinator = pipeline._turn_coordinator
+    question = "Is the number ending in 1-2-3-4 best for the callback?"
+    pipeline._last_played_question = (question, "callback_confirmation")
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    coordinator._deadline = 0
+    assert coordinator.due_action().value == "reprompt"
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    pipeline._mark_caller_activity()
+    assert coordinator.begin_presence_resolution(2)
+    pipeline._presence_reply_pending = False
+
+    in_flight = asyncio.create_task(asyncio.sleep(30))
+    pipeline._active_generation_task = in_flight
+    pipeline._mark_caller_activity()
+    await asyncio.sleep(0)
+
+    assert in_flight.cancelled()
+    assert coordinator.state == TurnLifecycle.LISTENING
+    assert pipeline._presence_reply_pending is True
+
+    class PresenceGenerator:
+        async def extract_observation(self, **kwargs):
+            assert kwargs["presence_check_active"] is True
+            return ControlledObservation(
+                facts=CallerObservation(),
+                presence_reply_kind=PresenceReplyKind.ACKNOWLEDGEMENT,
+            )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    pipeline._active_generation_task = None
+    pipeline._turn_generator = PresenceGenerator()
+    pipeline._caller_turn_number = 3
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+
+    await pipeline._handle_caller_speech(
+        "I can hear you now.",
+        caller_turn=3,
+        committed_at=1.0,
+    )
+
+    assert spoken == [question]
     await pipeline._http_client.aclose()
 
 

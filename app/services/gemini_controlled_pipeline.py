@@ -244,6 +244,7 @@ class GeminiControlledPipeline(VoicePipeline):
         if state_before_activity in {
             TurnLifecycle.REPROMPTING,
             TurnLifecycle.AWAITING_PRESENCE,
+            TurnLifecycle.RESOLVING_PRESENCE,
         }:
             self._suspend_original_question()
             self._presence_reply_pending = True
@@ -252,7 +253,8 @@ class GeminiControlledPipeline(VoicePipeline):
         if current_response_turn is not None:
             self._playback_question_candidates.pop(current_response_turn, None)
         if (
-            state_before_activity == TurnLifecycle.GENERATING
+            state_before_activity
+            in {TurnLifecycle.GENERATING, TurnLifecycle.RESOLVING_PRESENCE}
             and self._active_generation_task
             and self._active_generation_task is not asyncio.current_task()
         ):

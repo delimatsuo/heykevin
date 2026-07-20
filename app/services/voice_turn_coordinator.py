@@ -227,7 +227,10 @@ class VoiceTurnCoordinator:
     def caller_activity(self) -> None:
         if self.state in {TurnLifecycle.CLOSE_PENDING, TurnLifecycle.ENDED}:
             return
-        if self.state == TurnLifecycle.REPROMPTING:
+        if self.state in {
+            TurnLifecycle.REPROMPTING,
+            TurnLifecycle.RESOLVING_PRESENCE,
+        }:
             self._presence_resolution_required = True
         self._contract = None
         self._deadline = None

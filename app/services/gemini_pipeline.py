@@ -26,7 +26,10 @@ from app.services.voice_pipeline import (
     _tool_label,
     _tool_execution_error_response,
     build_system_prompt,
+    contains_goodbye,
     is_owner_availability_hold,
+    is_terminal_goodbye,
+    response_requests_caller_input,
 )
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
@@ -105,11 +108,6 @@ class GeminiPipeline:
         "AUDIO": "response_audio_tokens",
         "TEXT": "response_text_tokens",
     }
-
-    GOODBYE_PHRASES = [
-        "have a great day", "have a good day", "have a nice day",
-        "goodbye", "take care",
-    ]
 
     def __init__(
         self,
@@ -1174,11 +1172,18 @@ class GeminiPipeline:
         if apply_side_effects and is_owner_availability_hold(full_text):
             self._start_owner_availability_wait()
 
-        return (
+        if (
             apply_side_effects
             and detect_goodbye
-            and any(p in full_text.lower() for p in self.GOODBYE_PHRASES)
-        )
+            and contains_goodbye(full_text)
+            and response_requests_caller_input(full_text)
+        ):
+            self._log_voice_timing(
+                "goodbye_hangup_blocked",
+                reason="question_pending",
+            )
+
+        return apply_side_effects and detect_goodbye and is_terminal_goodbye(full_text)
 
     def _log_response_start_latency(self):
         if (

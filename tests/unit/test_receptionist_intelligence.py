@@ -22,7 +22,9 @@ from app.services.job_card import _build_extraction_prompt
 from app.services.vcard import generate_vcard
 from app.services.voice_pipeline import (
     build_system_prompt,
+    is_terminal_goodbye,
     is_owner_availability_hold,
+    response_requests_caller_input,
     VoicePipeline,
 )
 from app.services import voice_pipeline as voice_pipeline_module
@@ -189,6 +191,63 @@ def test_personal_prompt_confirms_only_phone_last_four():
     assert "Do not read back the full phone number" in prompt
     assert "Always read back phone numbers digit by digit" not in prompt
     assert "6-5-0, 6-9-1, 8-6-6-7" not in prompt
+
+
+@pytest.mark.parametrize("mode", ["personal", "business"])
+def test_receptionist_prompt_requires_answer_before_closing(mode):
+    config = _plumbing_config()
+    config["mode"] = mode
+    config["effective_mode"] = mode
+
+    prompt = build_system_prompt(config, caller_phone="+15550004321")
+
+    assert "QUESTION TURN POLICY" in prompt
+    assert "must end immediately after that single question" in prompt
+    assert "Then wait silently for the caller's answer" in prompt
+    assert "Never put a confirmation, promise to follow up, wrap-up, thanks, or goodbye" in prompt
+    assert "remains pending until the caller explicitly answers it" in prompt
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "Is the number ending in 4-3-2-1 best for a callback? Have a good day.",
+        "Got it, is that the correct callback number. Take care.",
+    ],
+)
+def test_question_with_goodbye_is_not_terminal(response):
+    assert response_requests_caller_input(response) is True
+    assert is_terminal_goodbye(response) is False
+
+
+def test_structured_wh_question_without_question_mark_is_not_terminal():
+    response = "What is the best time to call you back. Have a good day."
+
+    assert response_requests_caller_input(response) is True
+    assert is_terminal_goodbye(response) is False
+
+
+def test_completed_closing_without_question_is_terminal():
+    response = "I'll send the confirmed details to the owner. Have a good day."
+
+    assert response_requests_caller_input(response) is False
+    assert is_terminal_goodbye(response) is True
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "Will do. Have a good day.",
+        "Can do. Take care.",
+        "Do not hesitate to call again. Goodbye.",
+        "What I can do is pass that along. Have a good day.",
+        "How nice speaking with you. Take care.",
+        "Which is why I'll notify the owner. Goodbye.",
+    ],
+)
+def test_affirmative_or_imperative_closing_is_terminal(response):
+    assert response_requests_caller_input(response) is False
+    assert is_terminal_goodbye(response) is True
 
 
 def test_business_prompt_defers_callback_number_until_callback_intent():
@@ -429,6 +488,52 @@ async def test_voice_pipeline_uses_configured_anthropic_model(monkeypatch):
 
     assert request_bodies[0]["model"] == "claude-sonnet-5"
     assert transcripts[-1] == ("Kevin", "We handle plumbing repairs.")
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_affirmative_goodbye_still_ends_call(monkeypatch):
+    completed = asyncio.Event()
+
+    class FakeClaudeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Will do. Have a good day."}],
+            }
+
+    class FakeClaudeClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeClaudeResponse()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        completed.set()
+
+    async def no_delay(_seconds: float):
+        return None
+
+    monkeypatch.setattr(voice_pipeline_module.asyncio, "sleep", no_delay)
+    pipeline = VoicePipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+    pipeline._speak = noop_audio
+
+    await pipeline._handle_caller_speech("Please pass that along.")
+
+    assert completed.is_set()
 
 
 @pytest.mark.asyncio
@@ -1184,6 +1289,39 @@ async def test_gemini_goodbye_waits_for_audio_playout_before_hangup(monkeypatch)
     release_join.set()
     await asyncio.wait_for(completed.wait(), timeout=1)
     await task
+
+
+@pytest.mark.asyncio
+async def test_gemini_question_with_goodbye_does_not_end_call(caplog):
+    transcripts = []
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def record_transcript(speaker: str, text: str):
+        transcripts.append((speaker, text))
+
+    private_response = (
+        "Is the number ending in 4-3-2-1 best for a callback? Have a good day."
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=record_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._kevin_transcript_buf = [private_response]
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    should_end = await pipeline._flush_kevin_transcript(detect_goodbye=True)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert should_end is False
+    assert transcripts == [("Kevin", private_response)]
+    assert "voice_timing event=goodbye_hangup_blocked" in messages
+    assert "reason=question_pending" in messages
+    assert private_response not in messages
+    await pipeline.stop()
 
 
 @pytest.mark.asyncio

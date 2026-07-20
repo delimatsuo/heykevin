@@ -34,6 +34,25 @@ logger = get_logger(__name__)
 
 _SAFE_LOG_METRIC_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 _KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
+_TERMINAL_GOODBYE_PHRASES = (
+    "have a great day",
+    "have a good day",
+    "have a nice day",
+    "goodbye",
+    "take care",
+)
+_QUESTION_OPENING_PATTERN = re.compile(
+    r"(?:^|[.!,:;]\s+)(?:"
+    r"(?:am|are|can|could|did|do|may|should|will|would)\s+"
+    r"(?:i|you|we|they|there)\b|"
+    r"(?:does|has|is|was)\s+(?:he|she|it|that|this|the|there)\b|"
+    r"were\s+(?:you|we|they|there)\b|"
+    r"(?:how|what|when|where|which|who|why)\s+"
+    r"(?:am|are|can|could|did|do|does|is|may|should|was|were|will|would)\s+"
+    r"(?:i|you|we|they|he|she|it|that|this|there|the|your|our)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _call_label(call_sid: str) -> str:
@@ -49,6 +68,25 @@ def _safe_log_metric(value: object) -> str:
 
 def _tool_label(tool_name: str) -> str:
     return tool_name if tool_name in _KNOWN_TOOL_NAMES else "unknown"
+
+
+def response_requests_caller_input(text: str) -> bool:
+    """Return whether a response asks the caller for an answer."""
+    normalized = " ".join(str(text or "").split())
+    return bool(normalized) and (
+        "?" in normalized or bool(_QUESTION_OPENING_PATTERN.search(normalized))
+    )
+
+
+def contains_goodbye(text: str) -> bool:
+    """Return whether a response contains an allowlisted conversational closing."""
+    normalized = str(text or "").lower()
+    return any(phrase in normalized for phrase in _TERMINAL_GOODBYE_PHRASES)
+
+
+def is_terminal_goodbye(text: str) -> bool:
+    """Only end a call for a closing that does not still request caller input."""
+    return contains_goodbye(text) and not response_requests_caller_input(text)
 
 
 def _log_voice_event(
@@ -164,6 +202,16 @@ CALLBACK NUMBER POLICY:
 """
 
 
+def _question_turn_policy() -> str:
+    """Build the wait-state contract shared by personal and business modes."""
+    return """
+QUESTION TURN POLICY:
+- A response that asks a question must end immediately after that single question. Then wait silently for the caller's answer.
+- Never put a confirmation, promise to follow up, wrap-up, thanks, or goodbye after a question in the same response.
+- Do not treat an unanswered question as answered or confirmed. A callback-number confirmation remains pending until the caller explicitly answers it.
+"""
+
+
 def _service_intake_policy() -> str:
     """Build service-question-first intake rules for business receptionist calls."""
     return """
@@ -227,6 +275,7 @@ def build_system_prompt(
     pronoun = config.get("pronoun", "he")
     mode = config.get("effective_mode") or effective_mode(config)
     callback_policy = _callback_number_policy(caller_phone)
+    question_turn_policy = _question_turn_policy()
     service_intake_policy = _service_intake_policy()
 
     # Personal mode — simple personal assistant
@@ -243,7 +292,7 @@ FLOW:
 5. The system will handle unavailability automatically.
 6. If the caller is ALREADY leaving a message (giving you details, name, or a callback number they volunteered), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 7. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
-8. Once you have their name and message, confirm and wrap up: "I'll pass this along to {owner_name}. Have a great day!"
+8. Once you have their name and message, and the caller has answered any question you asked, confirm and wrap up: "I'll pass this along to {owner_name}. Have a great day!"
 
 RECEPTIONIST OPERATING POLICY:
 - If you say you are checking whether {owner_name} is available, stop talking. The system will wait briefly and then tell the caller whether {owner_name} is unavailable.
@@ -251,6 +300,7 @@ RECEPTIONIST OPERATING POLICY:
 - If the caller goes quiet while you are waiting for their answer, the system may ask if they are still there and hang up if they remain silent. Do not contradict that behavior.
 - If the caller already started leaving a message, listen and collect it. Do not ask permission for a message they are already giving.
 {callback_policy}
+{question_turn_policy}
 
 RULES:
 - ONE or two short sentences per response.
@@ -359,7 +409,7 @@ PHASE 4 — MESSAGE:
 16. If the caller is ALREADY leaving a message (giving details or a callback number they volunteered), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 17. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
 18. If callback, scheduling, or follow-up intent exists, follow the callback number policy below. Otherwise do not ask for or confirm a callback number.
-19. Once you have their name and details, plus any callback number the caller agreed to confirm, wrap up: "I'll send this to {first_name}. Have a good day."
+19. Once you have their name and details, and the caller has answered any callback-number confirmation you asked, wrap up: "I'll send this to {first_name}. Have a good day."
 
 RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
 - New service request: answer direct scope/pricing questions first, then identify caller, issue, urgency, and only collect address when the caller wants service, scheduling, dispatch, callback/follow-up, or a relevant safety emergency requires location. Ask one issue-specific follow-up question at a time only after deciding the request is in scope. Do not ask for a callback number unless the caller asks for or agrees to callback, scheduling, appointment booking, or follow-up.
@@ -371,6 +421,7 @@ RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
 - Media follow-up: for in-scope visual problems, offer that Kevin can text a link after the call for a photo or short video. Do not claim live media review during the call.
 - Silent caller: if the caller stops responding after you ask a question or offer to take a message, the system may ask "Are you still there?" and then end the call if silence continues.
 {callback_policy}
+{question_turn_policy}
 
 RULES:
 - Be warm, friendly, and professional. You represent {business_name}.
@@ -1348,9 +1399,16 @@ class VoicePipeline:
                 if is_owner_availability_hold(kevin_text):
                     self._start_owner_availability_wait()
 
-                # Detect goodbye — hang up the call after Kevin's closing line
-                goodbye_phrases = ["have a great day", "have a good day", "have a nice day", "goodbye", "take care"]
-                if any(phrase in kevin_text.lower() for phrase in goodbye_phrases):
+                # A closing phrase cannot end a turn that still requests caller input.
+                if contains_goodbye(kevin_text) and response_requests_caller_input(
+                    kevin_text
+                ):
+                    _log_voice_event(
+                        "goodbye_hangup_blocked",
+                        self._call_sid,
+                        reason="question_pending",
+                    )
+                elif is_terminal_goodbye(kevin_text):
                     logger.info("Kevin said goodbye — ending call in 2 seconds")
                     await asyncio.sleep(2)
                     if self.on_call_complete:

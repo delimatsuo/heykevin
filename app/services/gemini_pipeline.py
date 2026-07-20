@@ -269,7 +269,7 @@ class GeminiPipeline:
 
     def _call_label(self) -> str:
         """Return a short non-PII call label for operational logs."""
-        return self._call_sid[:8] or "unknown"
+        return _call_label(self._call_sid)
 
     @staticmethod
     def _elapsed_ms(started_at: float) -> int:
@@ -1916,7 +1916,10 @@ class GeminiPipeline:
                             "Be warm and apologetic."
                         )
                         self._unavailable_said = True
-                        logger.info(f"take_message injected into Gemini for {self._call_sid[:8]}")
+                        logger.info(
+                            "voice_event event=take_message_injected call=%s",
+                            _call_label(self._call_sid),
+                        )
                     except Exception as e:
                         self._log_voice_timing(
                             "take_message_instruction_error",

@@ -12,7 +12,7 @@ import pytest
 
 from app.services.gated_actions import ActionKey
 from app.services.gemini_pipeline import GeminiPipeline
-from app.services.voice_pipeline import VoicePipeline
+from app.services.voice_pipeline import VoicePipeline, _call_label
 
 
 async def _noop(*_args, **_kwargs):
@@ -266,7 +266,7 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
 
     assert result == {"success": False, "error": "Tool execution failed."}
     assert "book_appointment" in caplog.text
-    assert "CA123" in caplog.text
+    assert f"call={_call_label('CA123')}" in caplog.text
     assert "ValueError" in caplog.text
     for sensitive_value in sensitive_values:
         assert sensitive_value not in caplog.text
@@ -330,7 +330,10 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
         }
     ]
     assert created == []
-    assert "voice_event event=tool_call call=CA-GEMIN tool=book_appointment" in caplog.text
+    assert (
+        "voice_event event=tool_call "
+        f"call={_call_label('CA-GEMINI-PRIVACY')} tool=book_appointment"
+    ) in caplog.text
     assert "CA-GEMINI-PRIVACY" not in caplog.text
     for sensitive_value in (
         "Jane Private",
@@ -371,7 +374,10 @@ async def test_gemini_tool_log_allowlists_provider_tool_name(monkeypatch, caplog
             [{"id": "tool-1", "name": provider_tool_name, "args": {}}]
         )
 
-    assert "voice_event event=tool_call call=CA-GEMIN tool=unknown" in caplog.text
+    assert (
+        "voice_event event=tool_call "
+        f"call={_call_label('CA-GEMINI-PRIVATE-LONG')} tool=unknown"
+    ) in caplog.text
     assert provider_tool_name not in caplog.text
     assert "CA-GEMINI-PRIVATE-LONG" not in caplog.text
 
@@ -437,7 +443,7 @@ async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitiz
         }
     ]
     assert "book_appointment" in caplog.text
-    assert "call=CA-GEMIN" in caplog.text
+    assert f"call={_call_label('CA-GEMINI-EXCEPTION')}" in caplog.text
     assert "CA-GEMINI-EXCEPTION" not in caplog.text
     assert "RuntimeError" in caplog.text
     response_payload = json.dumps(pipeline._ws.sent)
@@ -497,7 +503,7 @@ async def test_voice_tool_error_result_logging_does_not_include_sensitive_payloa
         await pipeline._handle_caller_speech("I need help with a leak.")
 
     assert "book_appointment" in caplog.text
-    assert "CA123" in caplog.text
+    assert f"call={_call_label('CA123')}" in caplog.text
     for sensitive_value in (
         "Jane Private",
         "123 Secret Lane",
@@ -565,7 +571,10 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
     with caplog.at_level(logging.INFO):
         await pipeline._handle_caller_speech("I need help with a leak.")
 
-    assert "voice_event event=tool_call call=CA123 tool=book_appointment" in caplog.text
+    assert (
+        "voice_event event=tool_call "
+        f"call={_call_label('CA123')} tool=book_appointment"
+    ) in caplog.text
     for sensitive_value in (
         "Jane Private",
         "123 Secret Lane",

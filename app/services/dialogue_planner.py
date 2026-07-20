@@ -7,6 +7,7 @@ from enum import Enum
 
 from app.services.receptionist_state import (
     AddressNeed,
+    BusinessScope,
     CallbackConfirmation,
     CallbackIntent,
     IntakeState,
@@ -89,7 +90,11 @@ class NextAction:
             raise ValueError("question-producing action requires a question contract")
 
 
-def plan_next_action(state: IntakeState) -> NextAction:
+def plan_next_action(
+    state: IntakeState,
+    *,
+    require_caller_name: bool = False,
+) -> NextAction:
     forbidden = _forbidden_slots(state)
     memory_facts = _safe_memory_facts(state)
 
@@ -109,6 +114,51 @@ def plan_next_action(state: IntakeState) -> NextAction:
             tool_calls_allowed=False,
             question_required=bool(safety_slots),
         )
+
+    if state.business_scope == BusinessScope.OUT_OF_SCOPE:
+        if (
+            not state.caller_identity.name
+            and "caller_name" not in forbidden
+        ):
+            return NextAction(
+                name=ActionName.ASK_NAME,
+                reason="identify the caller before taking an out-of-scope message",
+                allowed_slots=("caller_name",),
+                forbidden_slots=tuple(sorted(forbidden)),
+                memory_facts_safe_to_use=memory_facts,
+                max_spoken_shape="briefly explain the scope mismatch and ask only for the caller's name",
+                tool_calls_allowed=False,
+                question_required=True,
+            )
+        if (
+            state.callback_intent == CallbackIntent.NONE
+            and "callback_preference" not in forbidden
+        ):
+            return NextAction(
+                name=ActionName.DECLINE_OUT_OF_SCOPE,
+                reason="the request is outside the configured business scope",
+                allowed_slots=("callback_preference",),
+                forbidden_slots=tuple(sorted(forbidden)),
+                memory_facts_safe_to_use=memory_facts,
+                max_spoken_shape=(
+                    "briefly explain the business may not handle the work, then ask only "
+                    "whether the caller wants a message passed along"
+                ),
+                tool_calls_allowed=False,
+                question_required=True,
+            )
+        if state.callback_intent in {
+            CallbackIntent.DECLINED,
+            CallbackIntent.OFFERED,
+        }:
+            return NextAction(
+                name=ActionName.WRAP_UP,
+                reason="out-of-scope message follow-up was declined or completed",
+                forbidden_slots=tuple(sorted(forbidden)),
+                memory_facts_safe_to_use=memory_facts,
+                max_spoken_shape="close briefly without another question",
+                tool_calls_allowed=False,
+            )
 
     if (
         state.callback_intent == CallbackIntent.ACCEPTED
@@ -250,6 +300,22 @@ def plan_next_action(state: IntakeState) -> NextAction:
             forbidden_slots=tuple(sorted(forbidden)),
             memory_facts_safe_to_use=memory_facts,
             max_spoken_shape="ask one question about the fixture, appliance, or system",
+            tool_calls_allowed=False,
+            question_required=True,
+        )
+
+    if (
+        require_caller_name
+        and not state.caller_identity.name
+        and "caller_name" not in forbidden
+    ):
+        return NextAction(
+            name=ActionName.ASK_NAME,
+            reason="the service request is understood but the caller is not identified",
+            allowed_slots=("caller_name",),
+            forbidden_slots=tuple(sorted(forbidden)),
+            memory_facts_safe_to_use=memory_facts,
+            max_spoken_shape="ask only for the caller's name",
             tool_calls_allowed=False,
             question_required=True,
         )

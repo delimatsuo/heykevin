@@ -164,6 +164,7 @@ class CallerObservation:
     """Provider-neutral facts extracted from one caller turn."""
 
     language: str | None = None
+    caller_name: str | None = None
     identity_confirmed: bool | None = None
     business_scope: BusinessScope | None = None
     business_scope_reason: str | None = None
@@ -195,6 +196,16 @@ class CallerObservation:
             raise TypeError("caller observation enums must use controller enum values")
         if self.language is not None:
             object.__setattr__(self, "language", _normalize_language_code(self.language))
+        if self.caller_name is not None:
+            object.__setattr__(
+                self,
+                "caller_name",
+                _normalize_safe_text(
+                    self.caller_name,
+                    field_name="caller_name",
+                    max_length=160,
+                ),
+            )
         if self.service_object is not None:
             object.__setattr__(
                 self,
@@ -229,6 +240,7 @@ class CallerObservation:
     def from_dict(cls, data: dict[str, Any]) -> "CallerObservation":
         allowed_fields = {
             "language",
+            "caller_name",
             "identity_confirmed",
             "business_scope",
             "business_scope_reason",
@@ -250,6 +262,7 @@ class CallerObservation:
 
         return cls(
             language=_optional_observation_text(data, "language"),
+            caller_name=_optional_observation_text(data, "caller_name"),
             identity_confirmed=identity_confirmed,
             business_scope=(
                 BusinessScope(data["business_scope"])
@@ -571,6 +584,11 @@ class IntakeState:
     def apply_caller_observation(self, observation: CallerObservation) -> None:
         self.phase = IntakePhase.UNDERSTAND_REQUEST
 
+        if observation.caller_name:
+            self.caller_identity.name = observation.caller_name
+            self.caller_identity.confidence = 1.0
+            self.caller_identity.source = "caller_statement"
+            self.caller_identity.confirmed = True
         if observation.identity_confirmed is not None:
             self.caller_identity.confirmed = observation.identity_confirmed
         if observation.language is not None:

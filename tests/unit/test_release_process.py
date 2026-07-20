@@ -93,6 +93,16 @@ def test_deploy_health_check_requires_exact_deployed_sha():
     assert 'test "$DEPLOYED_SHA" = "$DEPLOY_SHA"' in workflow
 
 
+def test_deploys_default_controlled_voice_cohort_off_and_remove_allowlist():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+
+    assert workflow.count("GEMINI_CONTROLLED_PIPELINE_ENABLED=false") == 2
+    assert workflow.count("GEMINI_CONTROLLED_TTS_ZERO_RETENTION_ENABLED=false") == 2
+    assert workflow.count(
+        "--remove-env-vars GEMINI_CONTROLLED_CONTRACTOR_HASHES"
+    ) == 2
+
+
 def test_staging_health_check_uses_the_tagged_candidate_revision():
     workflow = Path(".github/workflows/deploy.yml").read_text()
     staging_job = workflow.split("deploy-staging:", 1)[1].split(

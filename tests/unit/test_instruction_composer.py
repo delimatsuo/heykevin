@@ -116,7 +116,11 @@ def test_composer_includes_only_replacement_callback_last_four():
 
 
 def test_composer_forbids_questions_for_terminal_action():
-    state = IntakeState.new(call_sid="CA_test")
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
     state.intent = Intent.SERVICE_REQUEST
     state.service_object = "faucet"
     state.service_action = ServiceAction.REPAIR

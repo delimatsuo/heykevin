@@ -6,6 +6,7 @@ from app.services.dialogue_planner import ActionName, NextAction, plan_next_acti
 from app.services.receptionist_state import (
     ASKABLE_SLOTS,
     AddressNeed,
+    BusinessScope,
     CallerObservation,
     CallbackConfirmation,
     CallbackIntent,
@@ -142,6 +143,21 @@ def test_planner_does_not_repeat_callback_number_question_without_new_number():
     assert "callback_number" in action.forbidden_slots
 
 
+def test_out_of_scope_declined_followup_wraps_without_trade_intake():
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
+    state.business_scope = BusinessScope.OUT_OF_SCOPE
+    state.callback_intent = CallbackIntent.DECLINED
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.WRAP_UP
+    assert action.allowed_slots == ()
+
+
 def test_planner_does_not_repeat_callback_number_when_caller_id_is_missing():
     state = IntakeState.new(call_sid="CA_test")
     state.callback_intent = CallbackIntent.REQUESTED
@@ -167,7 +183,11 @@ def test_planner_does_not_repeat_unanswered_callback_confirmation():
 
 
 def test_planner_offers_followup_after_supported_intake_slots_are_exhausted():
-    state = IntakeState.new(call_sid="CA_test")
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
     state.intent = Intent.SERVICE_REQUEST
     state.service_object = "faucet"
     state.service_action = ServiceAction.REPAIR
@@ -178,12 +198,28 @@ def test_planner_offers_followup_after_supported_intake_slots_are_exhausted():
 
     assert action.name == ActionName.OFFER_CALLBACK_OR_SCHEDULING
     assert action.allowed_slots == ("callback_preference",)
+
+
+def test_controlled_live_policy_collects_name_before_optional_intake_details():
+    state = IntakeState.new(call_sid="CA_test")
+    state.intent = Intent.SERVICE_REQUEST
+    state.service_object = "faucet"
+    state.service_action = ServiceAction.REPAIR
+
+    action = plan_next_action(state, require_caller_name=True)
+
+    assert action.name == ActionName.ASK_NAME
+    assert action.allowed_slots == ("caller_name",)
     assert action.question_required is True
     assert set(action.allowed_slots).isdisjoint(action.forbidden_slots)
 
 
 def test_planner_wraps_up_after_followup_offer_is_exhausted():
-    state = IntakeState.new(call_sid="CA_test")
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
     state.intent = Intent.SERVICE_REQUEST
     state.service_object = "faucet"
     state.service_action = ServiceAction.REPAIR
@@ -216,7 +252,11 @@ def test_planner_answers_pricing_without_question_when_intake_is_exhausted():
 
 
 def test_planner_does_not_ask_for_known_urgency():
-    state = IntakeState.new(call_sid="CA_test")
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
     state.intent = Intent.SERVICE_REQUEST
     state.service_object = "faucet"
     state.service_action = ServiceAction.REPAIR
@@ -231,7 +271,11 @@ def test_planner_does_not_ask_for_known_urgency():
 
 
 def test_planner_does_not_ask_for_known_job_complexity_fact():
-    state = IntakeState.new(call_sid="CA_test")
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
     state.intent = Intent.SERVICE_REQUEST
     state.service_object = "faucet"
     state.service_action = ServiceAction.REPAIR
@@ -281,7 +325,11 @@ def test_planner_does_not_reask_known_callback_slots():
     ],
 )
 def test_planner_does_not_reoffer_known_callback_preference(known_fact: str):
-    state = IntakeState.new(call_sid="CA_test")
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
     state.intent = Intent.SERVICE_REQUEST
     state.service_object = "faucet"
     state.service_action = ServiceAction.REPAIR

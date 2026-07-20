@@ -17,6 +17,7 @@ os.environ.setdefault("USER_PHONE", "test-user-number")
 
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
+from app.services.voice_turn_coordinator import PlaybackStatus
 from app.webhooks.media_stream import (
     _clear_twilio_audio_with_playback_marks,
     _send_twilio_playback_mark,
@@ -138,6 +139,31 @@ async def test_twilio_playback_mark_is_sent_after_audio_with_opaque_name(caplog)
     assert "phase=response_end" in messages
     assert "status=played" in messages
     assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_response_end_receipt_is_forwarded_as_typed_played_event():
+    receipts = []
+    delivered = asyncio.Event()
+
+    async def on_resolved(receipt):
+        receipts.append(receipt)
+        delivered.set()
+
+    marks = _TwilioPlaybackMarks(
+        call_sid="CA_private_identifier",
+        on_resolved=on_resolved,
+    )
+    name = marks.reserve(turn=14, epoch=14, phase="response_end")
+    assert name is not None
+    assert marks.mark_sent(name)
+    assert marks.resolve(name)
+    await asyncio.wait_for(delivered.wait(), timeout=1)
+
+    assert len(receipts) == 1
+    assert receipts[0].turn == 14
+    assert receipts[0].phase == "response_end"
+    assert receipts[0].status == PlaybackStatus.PLAYED
 
 
 @pytest.mark.asyncio

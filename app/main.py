@@ -87,12 +87,22 @@ async def admin_page():
 @app.get("/health")
 async def health():
     """Health check with non-secret deploy identity."""
+    from app.services.gemini_controlled_pipeline import CONTROLLED_PIPELINE_VERSION
+
     return {
         "status": "ok",
         "environment": settings.environment,
         "service": os.getenv("K_SERVICE", ""),
         "revision": os.getenv("K_REVISION", ""),
         "deploy_sha": os.getenv("DEPLOY_SHA", ""),
+        "gemini_controlled_pipeline_enabled": (
+            settings.environment == "staging"
+            and settings.gemini_controlled_pipeline_enabled
+        ),
+        "gemini_controlled_pipeline_version": CONTROLLED_PIPELINE_VERSION,
+        "gemini_controlled_tts_zero_retention_enabled": (
+            settings.gemini_controlled_tts_zero_retention_enabled
+        ),
     }
 
 

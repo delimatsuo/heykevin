@@ -174,7 +174,9 @@ def test_legacy_tool_failure_log_uses_short_call_label_and_safe_metadata(caplog)
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_event event=tool_execution_error" in messages
-    assert "call=CA123456" in messages
+    call_label = voice_pipeline_module._call_label("CA1234567890FULL")
+    assert f"call={call_label}" in messages
+    assert "CA123456" not in messages
     assert "CA1234567890FULL" not in messages
     assert "exception_type=RuntimeError" in messages
     assert private_error not in messages

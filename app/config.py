@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4
     spoken_response_policy_enabled: bool = False
+    gemini_controlled_pipeline_enabled: bool = False
+    gemini_controlled_contractor_hashes: str = ""
+    gemini_controlled_tts_zero_retention_enabled: bool = False
 
     # Twilio Voice SDK (for iOS app)
     twilio_api_key_sid: str = ""      # API Key SID (not the Account SID)

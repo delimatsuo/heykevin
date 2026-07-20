@@ -19,6 +19,12 @@ async def test_health_includes_deploy_identity_without_secrets(monkeypatch):
     monkeypatch.setenv("K_SERVICE", "kevin-api-staging")
     monkeypatch.setenv("K_REVISION", "kevin-api-staging-00028-suv")
     monkeypatch.setenv("DEPLOY_SHA", "abc123def456")
+    monkeypatch.setattr(main.settings, "gemini_controlled_pipeline_enabled", True)
+    monkeypatch.setattr(
+        main.settings,
+        "gemini_controlled_tts_zero_retention_enabled",
+        True,
+    )
 
     response = await main.health()
 
@@ -28,4 +34,7 @@ async def test_health_includes_deploy_identity_without_secrets(monkeypatch):
         "service": "kevin-api-staging",
         "revision": "kevin-api-staging-00028-suv",
         "deploy_sha": "abc123def456",
+        "gemini_controlled_pipeline_enabled": True,
+        "gemini_controlled_pipeline_version": "gemini-controlled-v1",
+        "gemini_controlled_tts_zero_retention_enabled": True,
     }

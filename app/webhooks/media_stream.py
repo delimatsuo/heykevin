@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 from dataclasses import dataclass
+import inspect
 import json
 import time
 from types import SimpleNamespace
@@ -12,17 +13,14 @@ from typing import Callable
 from fastapi import APIRouter, WebSocket
 
 from app.config import settings
-from app.services.voice_pipeline import VoicePipeline
+from app.services.voice_pipeline import VoicePipeline, _call_label
+from app.services.voice_turn_coordinator import PlaybackReceipt, PlaybackStatus
 from app.db.cache import get_active_call, update_active_call, _init_firebase, ACTIVE_CALLS_PATH
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter()
-
-
-def _call_label(call_sid: str) -> str:
-    return call_sid[:8] or "unknown"
 
 
 def _log_safe_exception(event: str, error: BaseException, call_sid: str = "") -> None:
@@ -261,10 +259,12 @@ class _TwilioPlaybackMarks:
         call_sid: str,
         max_pending: int = MAX_PENDING_TWILIO_PLAYBACK_MARKS,
         timeout_seconds: float = TWILIO_PLAYBACK_MARK_TIMEOUT_SECONDS,
+        on_resolved: Callable[[PlaybackReceipt], object] | None = None,
     ):
         self._call_sid = call_sid
         self._max_pending = max_pending
         self._timeout_seconds = timeout_seconds
+        self._on_resolved = on_resolved
         self._pending: dict[str, _PendingPlaybackMark] = {}
         self._latest_epoch_by_phase: dict[str, int] = {}
         self._sequence = 0
@@ -420,6 +420,21 @@ class _TwilioPlaybackMarks:
             reason,
             max(0, round((time.monotonic() - pending.sent_at) * 1_000)),
         )
+        if self._on_resolved:
+            receipt = PlaybackReceipt(
+                turn=pending.turn,
+                epoch=pending.epoch,
+                phase=pending.phase,
+                status=PlaybackStatus(status),
+                reason=reason,
+            )
+            try:
+                result = self._on_resolved(receipt)
+                if inspect.isawaitable(result):
+                    task = asyncio.create_task(result)
+                    task.add_done_callback(_log_task_exception)
+            except Exception as error:
+                _log_safe_exception("playback_receipt_callback_error", error, self._call_sid)
 
 
 class _TwilioMediaIngress:
@@ -652,6 +667,8 @@ async def _consume_twilio_ingress(
         engine = (
             "gemini"
             if type(pipeline).__name__ == "GeminiPipeline"
+            else "gemini_controlled"
+            if type(pipeline).__name__ == "GeminiControlledPipeline"
             else "elevenlabs"
             if type(pipeline).__name__ == "VoicePipeline"
             else "unknown"
@@ -806,7 +823,18 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     # Begin bounded reads before database/config startup so Twilio audio cannot
     # sit unread while the call is authenticated and the provider connects.
-    playback_marks = _TwilioPlaybackMarks(call_sid=call_sid)
+    pipeline = None
+
+    def on_playback_receipt(receipt: PlaybackReceipt):
+        handler = getattr(pipeline, "on_playback_receipt", None)
+        if handler:
+            return handler(receipt)
+        return None
+
+    playback_marks = _TwilioPlaybackMarks(
+        call_sid=call_sid,
+        on_resolved=on_playback_receipt,
+    )
     ingress = _TwilioMediaIngress(
         websocket,
         call_sid=call_sid,
@@ -857,7 +885,6 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         return
 
     stream_sid = start_stream_sid
-    pipeline = None
     transcript_lines = []
     last_rtdb_update = 0.0
 
@@ -1060,24 +1087,80 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         # Select voice pipeline based on contractor config
         voice_engine = contractor_config_loaded.get("voice_engine", "elevenlabs")
 
-        if voice_engine == "gemini" and settings.gemini_api_key:
-            from app.services.gemini_pipeline import GeminiPipeline
-            pipeline = GeminiPipeline(
-                on_audio_out=on_audio_out,
-                on_transcript=on_transcript,
-                on_clear_audio=on_clear_audio,
-                on_response_first_media_sent=on_response_first_media_sent,
-                on_response_end_media_sent=on_response_end_media_sent,
-                on_call_complete=on_call_complete,
-                on_urgency_detected=on_urgency_detected,
-                call_sid=call_sid,
+        if voice_engine == "gemini":
+            from app.services.gemini_controlled_pipeline import controlled_pipeline_allowed
+
+            controlled_allowed = controlled_pipeline_allowed(
+                contractor_id=_contractor_id,
                 contractor_config=contractor_config_loaded,
-                caller_phone=active_call.caller_phone if active_call else "",
-                call_started_at=media_stream_started_at,
             )
+            if controlled_allowed:
+                from app.services.gemini_controlled_pipeline import (
+                    ControlledPipelineUnavailable,
+                    require_controlled_provider,
+                )
+
+                try:
+                    require_controlled_provider()
+                except ControlledPipelineUnavailable:
+                    logger.error(
+                        "media_event event=pipeline_unavailable call=%s "
+                        "engine=gemini_controlled reason=missing_provider_key",
+                        _call_label(call_sid),
+                    )
+                    raise
+                from app.services.gemini_controlled_pipeline import GeminiControlledPipeline
+
+                pipeline = GeminiControlledPipeline(
+                    on_audio_out=on_audio_out,
+                    on_transcript=on_transcript,
+                    on_clear_audio=on_clear_audio,
+                    on_response_first_media_sent=on_response_first_media_sent,
+                    on_response_end_media_sent=on_response_end_media_sent,
+                    on_call_complete=on_call_complete,
+                    on_urgency_detected=on_urgency_detected,
+                    call_sid=call_sid,
+                    contractor_config=contractor_config_loaded,
+                    caller_phone=active_call.caller_phone if active_call else "",
+                    call_started_at=media_stream_started_at,
+                )
+                selected_engine = "gemini_controlled"
+            elif settings.gemini_api_key:
+                from app.services.gemini_pipeline import GeminiPipeline
+
+                pipeline = GeminiPipeline(
+                    on_audio_out=on_audio_out,
+                    on_transcript=on_transcript,
+                    on_clear_audio=on_clear_audio,
+                    on_response_first_media_sent=on_response_first_media_sent,
+                    on_response_end_media_sent=on_response_end_media_sent,
+                    on_call_complete=on_call_complete,
+                    on_urgency_detected=on_urgency_detected,
+                    call_sid=call_sid,
+                    contractor_config=contractor_config_loaded,
+                    caller_phone=active_call.caller_phone if active_call else "",
+                    call_started_at=media_stream_started_at,
+                )
+                selected_engine = "gemini"
+            else:
+                pipeline = VoicePipeline(
+                    on_audio_out=on_audio_out,
+                    on_transcript=on_transcript,
+                    on_clear_audio=on_clear_audio,
+                    on_response_first_media_sent=on_response_first_media_sent,
+                    on_response_end_media_sent=on_response_end_media_sent,
+                    on_call_complete=on_call_complete,
+                    on_urgency_detected=on_urgency_detected,
+                    call_sid=call_sid,
+                    contractor_config=contractor_config_loaded,
+                    caller_phone=active_call.caller_phone if active_call else "",
+                    call_started_at=media_stream_started_at,
+                )
+                selected_engine = "elevenlabs"
             logger.info(
-                "media_event event=pipeline_selected call=%s engine=gemini",
+                "media_event event=pipeline_selected call=%s engine=%s",
                 _call_label(call_sid),
+                selected_engine,
             )
         else:
             pipeline = VoicePipeline(

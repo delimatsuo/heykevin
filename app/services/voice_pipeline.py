@@ -37,10 +37,13 @@ logger = get_logger(__name__)
 _SAFE_LOG_METRIC_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 _KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
 _TERMINAL_GOODBYE_PHRASES = (
+    "adiós",
+    "cuídese",
     "have a great day",
     "have a good day",
     "have a nice day",
     "goodbye",
+    "que tenga un buen día",
     "take care",
 )
 _QUESTION_OPENING_PATTERN = re.compile(

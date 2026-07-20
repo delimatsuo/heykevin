@@ -159,6 +159,21 @@ def plan_next_action(
                 max_spoken_shape="close briefly without another question",
                 tool_calls_allowed=False,
             )
+        if (
+            state.callback_intent in {
+                CallbackIntent.ACCEPTED,
+                CallbackIntent.REQUESTED,
+            }
+            and state.callback_confirmation == CallbackConfirmation.CONFIRMED
+        ):
+            return NextAction(
+                name=ActionName.WRAP_UP,
+                reason="out-of-scope callback details are confirmed",
+                forbidden_slots=tuple(sorted(forbidden)),
+                memory_facts_safe_to_use=memory_facts,
+                max_spoken_shape="close briefly without returning to service intake",
+                tool_calls_allowed=False,
+            )
 
     if (
         state.callback_intent == CallbackIntent.ACCEPTED

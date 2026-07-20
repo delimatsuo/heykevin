@@ -21,6 +21,7 @@ from app.services.gemini_controlled_turn import (
     GeminiControlledTurnGenerator,
     ValidatedTurn,
     ValidationReason,
+    deterministic_question_for_slot,
     deterministic_spoken_fallback,
     validate_spoken_turn,
 )
@@ -47,7 +48,7 @@ from app.services.voice_turn_coordinator import (
 )
 
 
-CONTROLLED_PIPELINE_VERSION = "gemini-controlled-v1"
+CONTROLLED_PIPELINE_VERSION = "gemini-controlled-v2"
 _COHORT_HASH_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 _CONTROLLED_SOURCE_NAMES = frozenset(
     {
@@ -55,11 +56,56 @@ _CONTROLLED_SOURCE_NAMES = frozenset(
         "fallback",
         "greeting",
         "model",
+        "question_replay",
         "reprompt",
         "silence_close",
         "unavailable",
     }
 )
+_PRESENCE_ACK_TOKENS = frozenset(
+    {
+        "am",
+        "aqui",
+        "can",
+        "estoy",
+        "hear",
+        "hello",
+        "here",
+        "hi",
+        "hola",
+        "i",
+        "im",
+        "sigo",
+        "si",
+        "still",
+        "sure",
+        "te",
+        "you",
+        "ya",
+        "yeah",
+        "yep",
+        "yes",
+    }
+)
+_PRESENCE_ACK_SIGNALS = frozenset(
+    {"aqui", "estoy", "hello", "here", "hi", "hola", "si", "yeah", "yep", "yes"}
+)
+
+
+def _is_presence_acknowledgement(caller_text: str) -> bool:
+    normalized = caller_text.casefold().replace("í", "i")
+    tokens = re.findall(r"[a-z]+", normalized.replace("'", ""))
+    return bool(
+        tokens
+        and len(tokens) <= 6
+        and set(tokens) <= _PRESENCE_ACK_TOKENS
+        and set(tokens).intersection(_PRESENCE_ACK_SIGNALS)
+    )
+
+
+def _opening_question_from_greeting(greeting: str) -> str:
+    match = re.search(r"(?:¿[^?]+\?|[^.!?]+\?)\s*$", greeting)
+    return match.group(0).strip() if match else ""
 
 
 class ControlledPipelineUnavailable(RuntimeError):
@@ -118,6 +164,7 @@ def controlled_pipeline_allowed(
 class _PendingSpeechContract:
     expects_input: bool
     asked_slot: str = ""
+    question_text: str = ""
     close_after_playback: bool = False
     kind: str = "model"
 
@@ -162,6 +209,11 @@ class GeminiControlledPipeline(VoicePipeline):
             caller_source="known_contact" if known_name else "",
             caller_confidence=1.0 if known_name else 0.0,
         )
+        configured_language = str(
+            self._contractor_config.get("user_language", "")
+        ).casefold()[:2]
+        if configured_language in {"en", "es"}:
+            self._intake_state.language = configured_language
         self._turn_coordinator = VoiceTurnCoordinator(
             no_input_seconds=self.CALLER_SILENCE_PROMPT_SECONDS
         )
@@ -173,6 +225,9 @@ class GeminiControlledPipeline(VoicePipeline):
         )
         self._pending_speech_contract: _PendingSpeechContract | None = None
         self._pending_reply_slot = ""
+        self._presence_reply_pending = False
+        self._last_played_question: tuple[str, str] | None = None
+        self._playback_question_candidates: dict[int, tuple[str, str]] = {}
         self._active_generation_task: asyncio.Task | None = None
 
     def _log_cohort_configuration(self) -> None:
@@ -203,6 +258,10 @@ class GeminiControlledPipeline(VoicePipeline):
             user_language=user_language,
         )
 
+    async def _switch_language(self, lang_code: str):
+        await super()._switch_language(lang_code)
+        self._intake_state.language = self._language
+
     def _should_prefetch_jobber(self) -> bool:
         """Keep CRM data outside the first controlled cohort's model and memory path."""
         return False
@@ -214,8 +273,16 @@ class GeminiControlledPipeline(VoicePipeline):
 
     def _mark_caller_activity(self):
         state_before_activity = self._turn_coordinator.state
+        current_response_turn = self._turn_coordinator.current_response_turn
+        if state_before_activity in {
+            TurnLifecycle.REPROMPTING,
+            TurnLifecycle.AWAITING_PRESENCE,
+        }:
+            self._presence_reply_pending = True
         super()._mark_caller_activity()
         self._turn_coordinator.caller_activity()
+        if current_response_turn is not None:
+            self._playback_question_candidates.pop(current_response_turn, None)
         if (
             state_before_activity == TurnLifecycle.GENERATING
             and self._active_generation_task
@@ -257,11 +324,27 @@ class GeminiControlledPipeline(VoicePipeline):
                 reason="stale_caller_turn",
             )
             return
+        if self._presence_reply_pending:
+            self._presence_reply_pending = False
+            if _is_presence_acknowledgement(caller_text):
+                if await self._replay_last_question(
+                    caller_turn=resolved_turn,
+                    committed_at=resolved_committed_at,
+                ):
+                    return
+                self._pending_reply_slot = ""
+                _log_voice_timing(
+                    "controlled_question_replay_suppressed",
+                    self._call_sid,
+                    caller_turn=resolved_turn,
+                    reason="invalid_lifecycle",
+                )
+                return
         if not self._turn_coordinator.begin_generation(resolved_turn):
             return
         self._active_generation_task = asyncio.current_task()
         try:
-            observation = await self._turn_generator.extract_observation(
+            controlled_observation = await self._turn_generator.extract_observation(
                 caller_text=caller_text,
                 state=self._intake_state,
                 caller_turn=resolved_turn,
@@ -278,7 +361,7 @@ class GeminiControlledPipeline(VoicePipeline):
             )
             return
 
-        observation = self._authorize_observation(observation)
+        observation = self._authorize_observation(controlled_observation.facts)
         urgent_signal = find_urgent_signal(caller_text)
         if urgent_signal:
             observation = CallerObservation(
@@ -302,17 +385,13 @@ class GeminiControlledPipeline(VoicePipeline):
             require_caller_name=True,
         )
         if action.name == ActionName.ANSWER_DIRECT_QUESTION:
-            self._active_generation_task = asyncio.current_task()
-            try:
-                validated = await self._turn_generator.generate_turn(
-                    caller_text=caller_text,
-                    state=self._intake_state,
-                    action=action,
-                    caller_turn=resolved_turn,
-                )
-            finally:
-                if self._active_generation_task is asyncio.current_task():
-                    self._active_generation_task = None
+            validated = self._turn_generator.build_direct_turn(
+                answer_text=controlled_observation.direct_answer_text,
+                caller_text=caller_text,
+                state=self._intake_state,
+                action=action,
+                caller_turn=resolved_turn,
+            )
             source = "fallback" if validated.fallback else "model"
         else:
             deterministic = deterministic_spoken_fallback(
@@ -352,6 +431,15 @@ class GeminiControlledPipeline(VoicePipeline):
         self._pending_speech_contract = _PendingSpeechContract(
             expects_input=spoken.expects_input,
             asked_slot=spoken.asked_slot,
+            question_text=(
+                deterministic_question_for_slot(
+                    slot=spoken.asked_slot,
+                    state=self._intake_state,
+                    spanish=self._intake_state.language.casefold().startswith("es"),
+                )
+                if spoken.asked_slot
+                else ""
+            ),
             close_after_playback=action.name == ActionName.WRAP_UP,
             kind="fallback" if validated.fallback else "model",
         )
@@ -388,7 +476,11 @@ class GeminiControlledPipeline(VoicePipeline):
         self._pending_speech_contract = None
         if contract is None:
             if source == "greeting":
-                contract = _PendingSpeechContract(expects_input=True, kind="greeting")
+                contract = _PendingSpeechContract(
+                    expects_input=True,
+                    question_text=_opening_question_from_greeting(text),
+                    kind="greeting",
+                )
             elif source == "unavailable":
                 contract = _PendingSpeechContract(expects_input=True, kind="greeting")
             else:
@@ -411,6 +503,11 @@ class GeminiControlledPipeline(VoicePipeline):
                 reason="stale_turn",
             )
             return None
+        if contract.question_text:
+            self._playback_question_candidates[response_turn] = (
+                contract.question_text,
+                contract.asked_slot,
+            )
         delivered = await super()._speak(
             text,
             source=source,
@@ -418,6 +515,7 @@ class GeminiControlledPipeline(VoicePipeline):
             caller_committed_at=caller_committed_at,
         )
         if delivered is False:
+            self._playback_question_candidates.pop(response_turn, None)
             recovered = self._turn_coordinator.delivery_failed(response_turn)
             _log_voice_timing(
                 "controlled_delivery_failed",
@@ -428,7 +526,15 @@ class GeminiControlledPipeline(VoicePipeline):
         return delivered
 
     async def on_playback_receipt(self, receipt: PlaybackReceipt) -> None:
+        current_response_turn = self._turn_coordinator.current_response_turn
         outcome = self._turn_coordinator.resolve_playback(receipt)
+        question_candidate = None
+        if (
+            receipt.phase == "response_end"
+            and receipt.turn == current_response_turn
+            and receipt.epoch == current_response_turn
+        ):
+            question_candidate = self._playback_question_candidates.pop(receipt.turn, None)
         _log_voice_timing(
             "controlled_playback_transition",
             self._call_sid,
@@ -442,6 +548,8 @@ class GeminiControlledPipeline(VoicePipeline):
         if outcome.committed_slot:
             self._intake_state.mark_slot_asked(outcome.committed_slot)
             self._pending_reply_slot = outcome.committed_slot
+        if outcome.played and question_candidate:
+            self._last_played_question = question_candidate
         if outcome.directive == CoordinatorDirective.HANGUP and self.on_call_complete:
             await self.on_call_complete()
             self._turn_coordinator.mark_ended()
@@ -471,6 +579,48 @@ class GeminiControlledPipeline(VoicePipeline):
             )
             await self.on_transcript("Kevin", message)
             await self._speak(message, source="reprompt")
+
+    async def _replay_last_question(
+        self,
+        *,
+        caller_turn: int,
+        committed_at: float,
+    ) -> bool:
+        question = self._last_played_question
+        if question is None:
+            asked_slot = self._pending_reply_slot
+            question_text = (
+                deterministic_question_for_slot(
+                    slot=asked_slot,
+                    state=self._intake_state,
+                    spanish=self._intake_state.language.casefold().startswith("es"),
+                )
+                if asked_slot
+                else (
+                    "¿Cómo puedo ayudarle?"
+                    if self._intake_state.language.casefold().startswith("es")
+                    else "How can I help you?"
+                )
+            )
+            question = (question_text, asked_slot)
+        if not self._turn_coordinator.begin_question_replay(caller_turn):
+            return False
+        question_text, asked_slot = question
+        self._pending_reply_slot = ""
+        self._pending_speech_contract = _PendingSpeechContract(
+            expects_input=True,
+            asked_slot=asked_slot,
+            question_text=question_text,
+            kind="question_replay",
+        )
+        await self.on_transcript("Kevin", question_text)
+        await self._speak(
+            question_text,
+            source="question_replay",
+            caller_turn=caller_turn,
+            caller_committed_at=committed_at,
+        )
+        return True
 
     async def _speak_silence_close(self) -> None:
         async with self._response_lock:

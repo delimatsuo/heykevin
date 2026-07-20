@@ -158,6 +158,26 @@ def test_out_of_scope_declined_followup_wraps_without_trade_intake():
     assert action.allowed_slots == ()
 
 
+@pytest.mark.parametrize(
+    "callback_intent",
+    [CallbackIntent.REQUESTED, CallbackIntent.ACCEPTED],
+)
+def test_out_of_scope_confirmed_callback_wraps_without_trade_intake(callback_intent):
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Fixture Caller",
+        caller_confidence=1.0,
+    )
+    state.business_scope = BusinessScope.OUT_OF_SCOPE
+    state.callback_intent = callback_intent
+    state.callback_confirmation = CallbackConfirmation.CONFIRMED
+
+    action = plan_next_action(state)
+
+    assert action.name == ActionName.WRAP_UP
+    assert action.allowed_slots == ()
+
+
 def test_planner_does_not_repeat_callback_number_when_caller_id_is_missing():
     state = IntakeState.new(call_sid="CA_test")
     state.callback_intent = CallbackIntent.REQUESTED

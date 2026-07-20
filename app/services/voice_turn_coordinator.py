@@ -13,6 +13,8 @@ class TurnLifecycle(str, Enum):
     PLAYING = "playing"
     AWAITING_REPLY = "awaiting_reply"
     REPROMPTING = "reprompting"
+    AWAITING_PRESENCE = "awaiting_presence"
+    REPLAYING_QUESTION = "replaying_question"
     CLOSE_PENDING = "close_pending"
     ENDED = "ended"
 
@@ -44,6 +46,7 @@ class PlaybackReceipt:
 class CoordinatorOutcome:
     directive: CoordinatorDirective = CoordinatorDirective.NONE
     committed_slot: str = ""
+    played: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,13 +120,22 @@ class VoiceTurnCoordinator:
             return False
         if kind == "reprompt" and self.state != TurnLifecycle.REPROMPTING:
             return False
+        if kind == "question_replay" and self.state != TurnLifecycle.REPLAYING_QUESTION:
+            return False
         if kind == "silence_close" and self.state != TurnLifecycle.PLAYING:
             return False
         if expects_input and close_after_playback:
             raise ValueError("a turn cannot request input and close")
         if asked_slot and not expects_input:
             raise ValueError("asked_slot requires expects_input")
-        if kind not in {"greeting", "model", "fallback", "reprompt", "silence_close"}:
+        if kind not in {
+            "greeting",
+            "model",
+            "fallback",
+            "reprompt",
+            "question_replay",
+            "silence_close",
+        }:
             raise ValueError("unknown playback kind")
 
         self._contract = _PlaybackContract(
@@ -140,6 +152,21 @@ class VoiceTurnCoordinator:
             if kind == "reprompt"
             else TurnLifecycle.PLAYING
         )
+        return True
+
+    def begin_question_replay(self, caller_turn: int) -> bool:
+        """Authorize replay after the caller acknowledges a presence check."""
+        if (
+            self.state != TurnLifecycle.LISTENING
+            or caller_turn <= 0
+            or caller_turn < self._caller_turn
+            or self._reprompt_count != 1
+        ):
+            return False
+        self._caller_turn = caller_turn
+        self._contract = None
+        self._deadline = None
+        self.state = TurnLifecycle.REPLAYING_QUESTION
         return True
 
     def accepts_generated_turn(self, caller_turn: int) -> bool:
@@ -178,16 +205,23 @@ class VoiceTurnCoordinator:
         if contract.close_after_playback:
             self._deadline = None
             self.state = TurnLifecycle.CLOSE_PENDING
-            return CoordinatorOutcome(directive=CoordinatorDirective.HANGUP)
+            return CoordinatorOutcome(
+                directive=CoordinatorDirective.HANGUP,
+                played=True,
+            )
 
-        if contract.expects_input:
-            self.state = TurnLifecycle.AWAITING_REPLY
-            self._deadline = self._clock() + self._no_input_seconds
-            return CoordinatorOutcome(committed_slot=contract.asked_slot)
-
-        self._deadline = None
-        self.state = TurnLifecycle.LISTENING
-        return CoordinatorOutcome()
+        self.state = (
+            TurnLifecycle.AWAITING_PRESENCE
+            if contract.kind == "reprompt"
+            else TurnLifecycle.AWAITING_REPLY
+        )
+        if not contract.expects_input:
+            self._reprompt_count = 1
+        self._deadline = self._clock() + self._no_input_seconds
+        return CoordinatorOutcome(
+            committed_slot=contract.asked_slot if contract.expects_input else "",
+            played=True,
+        )
 
     def delivery_failed(self, response_turn: int) -> bool:
         contract = self._contract
@@ -200,14 +234,15 @@ class VoiceTurnCoordinator:
 
     def due_action(self) -> CoordinatorDirective:
         if (
-            self.state != TurnLifecycle.AWAITING_REPLY
+            self.state
+            not in {TurnLifecycle.AWAITING_REPLY, TurnLifecycle.AWAITING_PRESENCE}
             or self._deadline is None
             or self._clock() < self._deadline
         ):
             return CoordinatorDirective.NONE
 
         self._deadline = None
-        if self._reprompt_count == 0:
+        if self.state == TurnLifecycle.AWAITING_REPLY and self._reprompt_count == 0:
             self._reprompt_count = 1
             self.state = TurnLifecycle.REPROMPTING
             return CoordinatorDirective.REPROMPT

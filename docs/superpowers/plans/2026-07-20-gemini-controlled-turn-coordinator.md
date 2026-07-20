@@ -9,9 +9,9 @@ Implement a default-off, staging-only controlled path:
 `Deepgram final caller turn -> Gemini structured observation -> IntakeState -> DialoguePlanner -> server-rendered short turn -> semantic validation -> ElevenLabs TTS -> Twilio response_end receipt`
 
 Normal intake questions, safety guidance, presence checks, and closing copy are
-rendered by the application from the planned action. Gemini may realize only a
-bounded direct answer; its complete candidate still passes the same semantic
-gate before TTS. This keeps AI-based language understanding and scope
+rendered by the application from the planned action. Gemini may return only a
+bounded informational answer fragment; the application appends the exact
+server-owned planned question. This keeps AI-based language understanding and scope
 classification while removing the model's authority over question count,
 hangup, and safety wording.
 
@@ -21,7 +21,7 @@ This remains a Gemini architecture. The existing Claude/ElevenLabs pipeline is n
 
 - Environment: staging only.
 - Cohort: SHA-256 contractor label allowlist only; never log raw contractor IDs.
-- Model: exact stable `gemini-2.5-flash`, never a moving `latest` alias.
+- Model: exact stable `gemini-3.1-flash-lite`, never a moving `latest` alias.
 - Default: disabled.
 - Mode: Business only; Personal mode is excluded even when the account retains
   a Business subscription entitlement.
@@ -38,9 +38,11 @@ The application owns these states:
 |---|---|---|
 | `listening` | caller may speak | `generating` |
 | `generating` | committed caller turn | `playing`, `listening` on safe failure |
-| `playing` | validated text handed to TTS | `awaiting_reply`, `close_pending`, or `listening` after a valid `response_end` receipt; `listening` on caller barge-in |
-| `awaiting_reply` | a question's `response_end` mark resolved `played` | `listening` on caller activity, `reprompting` on first timeout, `playing` for silence close on second timeout |
-| `reprompting` | one deterministic presence check is being spoken | `awaiting_reply` only after its `response_end` mark resolves `played`; `listening` on caller activity |
+| `playing` | validated text handed to TTS | `awaiting_reply` for any non-closing turn or `close_pending` for a closing turn after a valid `response_end` receipt; `listening` on caller barge-in or failed delivery |
+| `awaiting_reply` | a non-closing turn's `response_end` mark resolved `played` | `listening` on caller activity; a played question enters `reprompting` on its first timeout, while a non-question statement proceeds to a receipt-gated silence close |
+| `reprompting` | one deterministic presence check is being spoken | `awaiting_presence` only after its `response_end` mark resolves `played`; `listening` on caller activity |
+| `awaiting_presence` | the presence check was fully played | `replaying_question` when the caller acknowledges presence, `listening` when the caller gives a substantive answer, or `playing` for silence close on timeout |
+| `replaying_question` | the caller acknowledged presence | `awaiting_reply` only after the exact original server-owned question's `response_end` mark resolves `played`; `listening` on caller barge-in or failed delivery |
 | `close_pending` | a closing turn was fully played | `ended` after the application invokes call completion |
 | `ended` | call completion accepted | none |
 
@@ -50,13 +52,12 @@ The application owns these states:
 
 The observation response contains only the fields accepted by `CallerObservation`. Unknown fields and invalid enum values fail validation.
 
-The optional direct-answer response contains:
-
-- `action`: exact server-planned `ActionName` value.
-- `expects_input`: exact `NextAction.question_required` value.
-- `asked_slot`: empty or the single allowlisted planned slot.
-- `spoken_text`: the complete text that may be sent to TTS.
-- `safety_complete`: required for safety guidance.
+The same observation response may include `direct_answer_text`. It must be a
+short informational fragment with no question, request, caller-directed
+imperative, phone number, closing, or policy-like directive. The application
+appends the server-owned question for the one planned slot, if any. There is no
+second serial model call or model repair call; invalid or incomplete answer
+content selects the deterministic complete fallback immediately.
 
 The model cannot select contractor IDs, phone numbers, tool arguments, side effects, or direct hangup. The application validates the complete candidate before TTS. One bounded repair is allowed; a second invalid result selects a deterministic complete fallback. Partial or token-limited output is never spoken. Normal intake and safety turns do not require this second model call.
 
@@ -65,7 +66,8 @@ The model cannot select contractor IDs, phone numbers, tool arguments, side effe
 - Ordinary turns: at most one interrogative clause, at most 16 words, and one planned question slot.
 - Closing turns: no question and no `expects_input`.
 - Question turns: exactly one question and the server-planned slot.
-- Safety turns: exempt from the ordinary word budget, must be marked complete, and must include immediate leave/avoid-danger and emergency/gas-utility direction for the detected hazard.
+- Safety turns: exact server-owned hazard templates, exempt from the ordinary
+  word budget and never model-authored.
 - Asked slots are committed only after the matching `response_end=played` receipt.
 - Closing is committed and the call is ended only after the matching `response_end=played` receipt.
 - `cleared`, `stale`, timeout, TTS errors, and mark-send errors recover to
@@ -74,6 +76,28 @@ The model cannot select contractor IDs, phone numbers, tool arguments, side effe
   question whose matching response-end receipt was played.
 - English and Spanish presence checks and silence closes are deterministic in
   the detected caller language for the initial cohort.
+- An affirmative answer to a presence check cannot satisfy the original intake
+  slot. Kevin replays the exact original question, then starts its answer timer
+  only after that replay is confirmed played.
+
+## Research basis
+
+- Google documents structured output as a way to constrain the syntax of model
+  output, while still requiring application-side semantic validation:
+  <https://ai.google.dev/gemini-api/docs/structured-output>.
+- Google's model catalog describes `gemini-3.1-flash-lite` as a stable,
+  low-latency model for simple extraction and confirms structured-output
+  support; the previous staging credential returned 404 for the old controlled
+  model: <https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite>.
+- Google documents `thinkingLevel: minimal` for latency-sensitive Gemini 3
+  work: <https://ai.google.dev/gemini-api/docs/generate-content/thinking>.
+- Twilio defines a returned `mark` as confirmation that prior media was played,
+  which is the lifecycle authority used here:
+  <https://www.twilio.com/docs/voice/media-streams/websocket-messages>.
+- LiveKit distinguishes controllable cascaded STT-LLM-TTS pipelines from
+  speech-to-speech models and exposes turn-handling controls explicitly:
+  <https://docs.livekit.io/agents/models/pipelines/> and
+  <https://docs.livekit.io/agents/logic/turns/>.
 
 ## Payload-safe telemetry
 

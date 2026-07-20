@@ -13,12 +13,16 @@ os.environ.setdefault("USER_PHONE", "+15555550101")
 from app.services.gemini_controlled_pipeline import (
     GeminiControlledPipeline,
     _PendingSpeechContract,
+    _is_presence_acknowledgement,
 )
-from app.services.gemini_controlled_turn import SpokenTurn, ValidatedTurn
+from app.services.gemini_controlled_turn import (
+    ControlledObservation,
+)
 from app.services.receptionist_state import (
     CallbackConfirmation,
     CallbackIntent,
     CallerObservation,
+    Intent,
     ServiceAction,
     Urgency,
 )
@@ -28,6 +32,22 @@ from app.services.voice_turn_coordinator import PlaybackReceipt, PlaybackStatus,
 
 async def _noop(*_args, **_kwargs):
     return None
+
+
+@pytest.mark.parametrize(
+    "caller_text",
+    ["Yes", "Yes, I'm here.", "I am still here", "Sí, aquí estoy", "Hello?"],
+)
+def test_presence_acknowledgement_accepts_only_transport_level_phrases(caller_text):
+    assert _is_presence_acknowledgement(caller_text) is True
+
+
+@pytest.mark.parametrize(
+    "caller_text",
+    ["Yes, that number is correct", "Repair the sink", "My name is Jamie"],
+)
+def test_presence_acknowledgement_preserves_substantive_answers(caller_text):
+    assert _is_presence_acknowledgement(caller_text) is False
 
 
 def _pipeline(*, on_call_complete=_noop) -> GeminiControlledPipeline:
@@ -222,6 +242,68 @@ async def test_presence_and_silence_close_follow_detected_spanish(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_deepgram_language_switch_updates_deterministic_recovery_language():
+    pipeline = _pipeline()
+
+    await pipeline._switch_language("es-US")
+
+    assert pipeline._language == "es"
+    assert pipeline._intake_state.language == "es"
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_presence_ack_replays_the_exact_last_played_question(monkeypatch):
+    pipeline = _pipeline()
+    coordinator = pipeline._turn_coordinator
+    question = "Is the number ending in 1-2-3-4 best for the callback?"
+    pipeline._last_played_question = (question, "callback_confirmation")
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    coordinator.resolve_playback(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    coordinator._deadline = 0
+    assert coordinator.due_action().value == "reprompt"
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    coordinator.resolve_playback(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    coordinator.caller_activity()
+    pipeline._presence_reply_pending = True
+    pipeline._caller_turn_number = 2
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+    await pipeline._handle_caller_speech("Yes", caller_turn=2, committed_at=1.0)
+
+    assert spoken == [question]
+    assert pipeline._pending_reply_slot == ""
+    assert pipeline._pending_speech_contract == _PendingSpeechContract(
+        expects_input=True,
+        asked_slot="callback_confirmation",
+        question_text=question,
+        kind="question_replay",
+    )
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_controller_plans_before_requesting_spoken_turn(monkeypatch):
     pipeline = _pipeline()
     events = []
@@ -229,26 +311,13 @@ async def test_live_controller_plans_before_requesting_spoken_turn(monkeypatch):
     class FakeGenerator:
         async def extract_observation(self, **_kwargs):
             events.append("observation")
-            return CallerObservation(
-                caller_name="Fixture Caller",
-                service_object="sink",
-                service_action=ServiceAction.REPAIR,
-                urgency=Urgency.ROUTINE,
-            )
-
-        async def generate_turn(self, *, action, **_kwargs):
-            events.append(f"plan:{action.name.value}")
-            slot = action.allowed_slots[0]
-            return ValidatedTurn(
-                SpokenTurn(
-                    action=action.name,
-                    expects_input=True,
-                    asked_slot=slot,
-                    spoken_text="How extensive is the sink issue?",
-                    safety_complete=False,
-                ),
-                repaired=False,
-                fallback=False,
+            return ControlledObservation(
+                facts=CallerObservation(
+                    caller_name="Fixture Caller",
+                    service_object="sink",
+                    service_action=ServiceAction.REPAIR,
+                    urgency=Urgency.ROUTINE,
+                )
             )
 
     async def fake_speak(*_args, **_kwargs):
@@ -269,4 +338,48 @@ async def test_live_controller_plans_before_requesting_spoken_turn(monkeypatch):
     ]
     assert pipeline._pending_speech_contract is not None
     assert pipeline._pending_speech_contract.asked_slot == "job_complexity"
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pricing_answer_uses_same_observation_call_then_server_question(monkeypatch):
+    pipeline = _pipeline()
+    events = []
+
+    async def extract_once(**_kwargs):
+        events.append("observation")
+        return ControlledObservation(
+            facts=CallerObservation(
+                intent=Intent.PRICING_QUESTION,
+                service_object="sink",
+                service_action=ServiceAction.REPAIR,
+            ),
+            direct_answer_text="Pricing depends on the work involved.",
+        )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "extract_observation", extract_once)
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "How much is a sink repair?",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert events == ["observation"]
+    assert spoken == [
+        "Pricing depends on the work involved. "
+        "Could you briefly describe how extensive the issue is?"
+    ]
+    assert pipeline._pending_speech_contract is not None
+    assert pipeline._pending_speech_contract.question_text == (
+        "Could you briefly describe how extensive the issue is?"
+    )
     await pipeline._http_client.aclose()

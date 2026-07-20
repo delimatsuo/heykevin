@@ -78,6 +78,7 @@ def test_reprompt_and_silence_close_each_wait_for_their_own_played_receipt():
     clock.now += 100
     assert coordinator.due_action() == CoordinatorDirective.NONE
     coordinator.resolve_playback(_receipt(2))
+    assert coordinator.state == TurnLifecycle.AWAITING_PRESENCE
     clock.now += 10
     assert coordinator.due_action() == CoordinatorDirective.CLOSE_FOR_SILENCE
 
@@ -95,6 +96,44 @@ def test_reprompt_and_silence_close_each_wait_for_their_own_played_receipt():
     assert coordinator.resolve_playback(
         _receipt(3)
     ).directive == CoordinatorDirective.NONE
+
+
+def test_presence_ack_replays_original_question_before_accepting_an_answer():
+    clock = _Clock()
+    coordinator = VoiceTurnCoordinator(no_input_seconds=10, clock=clock)
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    coordinator.resolve_playback(_receipt(1))
+    clock.now += 10
+    assert coordinator.due_action() == CoordinatorDirective.REPROMPT
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    coordinator.resolve_playback(_receipt(2))
+
+    coordinator.caller_activity()
+    assert coordinator.begin_question_replay(2)
+    assert coordinator.begin_playback(
+        response_turn=3,
+        caller_turn=2,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+        kind="question_replay",
+    )
+    outcome = coordinator.resolve_playback(_receipt(3))
+
+    assert outcome.committed_slot == "callback_confirmation"
+    assert coordinator.state == TurnLifecycle.AWAITING_REPLY
+    clock.now += 10
+    assert coordinator.due_action() == CoordinatorDirective.CLOSE_FOR_SILENCE
 
 
 @pytest.mark.parametrize(
@@ -189,3 +228,22 @@ def test_closing_turn_cannot_hang_up_before_matching_response_end_played():
     assert coordinator.resolve_playback(_receipt(6)).directive == CoordinatorDirective.NONE
     assert coordinator.resolve_playback(_receipt(7)).directive == CoordinatorDirective.HANGUP
     assert coordinator.state == TurnLifecycle.CLOSE_PENDING
+
+
+def test_nonclosing_statement_gets_receipt_gated_silence_close_without_reprompt():
+    clock = _Clock()
+    coordinator = VoiceTurnCoordinator(no_input_seconds=10, clock=clock)
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=False,
+    )
+
+    clock.now += 100
+    assert coordinator.due_action() == CoordinatorDirective.NONE
+    outcome = coordinator.resolve_playback(_receipt(1))
+    assert outcome.committed_slot == ""
+    assert coordinator.state == TurnLifecycle.AWAITING_REPLY
+    clock.now += 10
+    assert coordinator.due_action() == CoordinatorDirective.CLOSE_FOR_SILENCE

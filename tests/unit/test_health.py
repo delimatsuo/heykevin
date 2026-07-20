@@ -35,6 +35,6 @@ async def test_health_includes_deploy_identity_without_secrets(monkeypatch):
         "revision": "kevin-api-staging-00028-suv",
         "deploy_sha": "abc123def456",
         "gemini_controlled_pipeline_enabled": True,
-        "gemini_controlled_pipeline_version": "gemini-controlled-v1",
+        "gemini_controlled_pipeline_version": "gemini-controlled-v2",
         "gemini_controlled_tts_zero_retention_enabled": True,
     }

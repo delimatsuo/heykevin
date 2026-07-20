@@ -94,30 +94,78 @@ async def _send_twilio_clear(
     return True
 
 
+async def _clear_twilio_audio_with_playback_marks(
+    websocket: WebSocket,
+    *,
+    stream_sid: str,
+    playback_marks: "_TwilioPlaybackMarks",
+    call_sid: str,
+) -> bool:
+    """Invalidate receipts before the awaited clear can race an inbound mark."""
+    playback_marks.mark_pending_clear_requested()
+    cleared = await _send_twilio_clear(
+        websocket,
+        stream_sid=stream_sid,
+        call_sid=call_sid,
+    )
+    if cleared:
+        playback_marks.mark_pending_cleared()
+    return cleared
+
+
 async def _send_twilio_playback_mark(
     websocket: WebSocket,
     *,
     stream_sid: str,
     playback_marks: "_TwilioPlaybackMarks",
     turn: int,
+    epoch: int = 0,
+    phase: str = "first_media",
     call_sid: str,
 ) -> bool:
     """Request a Twilio transport receipt, not caller-heard latency evidence."""
     if not stream_sid:
+        logger.warning(
+            "voice_timing event=twilio_playback_mark_skipped call=%s "
+            "turn=%s epoch=%s phase=%s reason=missing_stream",
+            _call_label(call_sid),
+            turn,
+            epoch,
+            phase,
+        )
         return False
-    name = playback_marks.reserve(turn=turn)
+    name = playback_marks.reserve(turn=turn, epoch=epoch, phase=phase)
     if not name:
         return False
     try:
-        await websocket.send_json({
-            "event": "mark",
-            "streamSid": stream_sid,
-            "mark": {"name": name},
-        })
+        await asyncio.wait_for(
+            websocket.send_json({
+                "event": "mark",
+                "streamSid": stream_sid,
+                "mark": {"name": name},
+            }),
+            timeout=TWILIO_PLAYBACK_MARK_SEND_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        playback_marks.discard(name)
+        raise
+    except TimeoutError as error:
+        playback_marks.discard(name)
+        _log_safe_exception("twilio_playback_mark_send_timeout", error, call_sid)
+        return False
     except Exception as error:
         playback_marks.discard(name)
         _log_safe_exception("twilio_playback_mark_error", error, call_sid)
         return False
+    playback_marks.mark_sent(name)
+    logger.info(
+        "voice_timing event=twilio_playback_mark_sent call=%s "
+        "turn=%s epoch=%s phase=%s",
+        _call_label(call_sid),
+        turn,
+        epoch,
+        phase,
+    )
     return True
 
 
@@ -180,6 +228,9 @@ WS_MAX_MESSAGE_SIZE = 65_536
 MAX_MEDIA_INGRESS_AUDIO_BYTES = 96_000  # 12 seconds of 8 kHz mulaw
 MAX_MEDIA_INGRESS_AUDIO_CHUNKS = 600
 MAX_PENDING_TWILIO_PLAYBACK_MARKS = 32
+TWILIO_PLAYBACK_MARK_SEND_TIMEOUT_SECONDS = 1.0
+TWILIO_PLAYBACK_MARK_TIMEOUT_SECONDS = 30.0
+TWILIO_PLAYBACK_MARK_PHASES = frozenset({"first_media", "response_end"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,57 +243,183 @@ class _TwilioIngressEvent:
 @dataclass(slots=True)
 class _PendingPlaybackMark:
     turn: int
+    epoch: int
+    phase: str
     sent_at: float
+    clear_requested: bool = False
     cleared: bool = False
+    stale: bool = False
+    timeout_handle: asyncio.TimerHandle | None = None
 
 
 class _TwilioPlaybackMarks:
     """Bounded, payload-free Twilio transport receipts for played or cleared media."""
 
-    def __init__(self, *, call_sid: str, max_pending: int = MAX_PENDING_TWILIO_PLAYBACK_MARKS):
+    def __init__(
+        self,
+        *,
+        call_sid: str,
+        max_pending: int = MAX_PENDING_TWILIO_PLAYBACK_MARKS,
+        timeout_seconds: float = TWILIO_PLAYBACK_MARK_TIMEOUT_SECONDS,
+    ):
         self._call_sid = call_sid
         self._max_pending = max_pending
+        self._timeout_seconds = timeout_seconds
         self._pending: dict[str, _PendingPlaybackMark] = {}
+        self._latest_epoch_by_phase: dict[str, int] = {}
         self._sequence = 0
 
-    def reserve(self, *, turn: int) -> str | None:
+    def reserve(
+        self,
+        *,
+        turn: int,
+        epoch: int = 0,
+        phase: str = "first_media",
+    ) -> str | None:
         self._sequence += 1
-        name = f"response-{turn}-{self._sequence}"
-        return name if self.register(turn=turn, name=name) else None
+        name = f"playback-{self._sequence}"
+        return (
+            name
+            if self.register(turn=turn, epoch=epoch, phase=phase, name=name)
+            else None
+        )
 
-    def register(self, *, turn: int, name: str) -> bool:
+    def register(
+        self,
+        *,
+        turn: int,
+        name: str,
+        epoch: int = 0,
+        phase: str = "first_media",
+    ) -> bool:
+        if phase not in TWILIO_PLAYBACK_MARK_PHASES:
+            logger.warning(
+                "voice_timing event=twilio_playback_mark_skipped call=%s "
+                "turn=%s epoch=%s phase=unknown reason=invalid_phase",
+                _call_label(self._call_sid),
+                turn,
+                epoch,
+            )
+            return False
         if len(self._pending) >= self._max_pending:
             logger.warning(
                 "voice_timing event=twilio_playback_mark_skipped call=%s "
-                "reason=pending_limit pending=%s limit=%s",
+                "turn=%s epoch=%s phase=%s reason=pending_limit "
+                "pending=%s limit=%s",
                 _call_label(self._call_sid),
+                turn,
+                epoch,
+                phase,
                 len(self._pending),
                 self._max_pending,
             )
             return False
-        self._pending[name] = _PendingPlaybackMark(turn=turn, sent_at=time.monotonic())
+
+        previous_epoch = self._latest_epoch_by_phase.get(phase, -1)
+        if epoch > previous_epoch:
+            for pending in self._pending.values():
+                if pending.phase == phase and pending.epoch < epoch:
+                    pending.stale = True
+            self._latest_epoch_by_phase[phase] = epoch
+
+        pending = _PendingPlaybackMark(
+            turn=turn,
+            epoch=epoch,
+            phase=phase,
+            sent_at=time.monotonic(),
+            stale=epoch < previous_epoch,
+        )
+        self._pending[name] = pending
+        return True
+
+    def mark_sent(self, name: str) -> bool:
+        """Start the receipt timeout only after the mark frame was accepted."""
+        pending = self._pending.get(name)
+        if pending is None:
+            return False
+        pending.sent_at = time.monotonic()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            pending.timeout_handle = loop.call_later(
+                self._timeout_seconds,
+                self._expire,
+                name,
+            )
         return True
 
     def discard(self, name: str) -> None:
-        self._pending.pop(name, None)
+        pending = self._pending.pop(name, None)
+        if pending and pending.timeout_handle:
+            pending.timeout_handle.cancel()
 
     def mark_pending_cleared(self) -> None:
         for pending in self._pending.values():
             pending.cleared = True
 
+    def mark_pending_clear_requested(self) -> None:
+        for pending in self._pending.values():
+            pending.clear_requested = True
+
     def resolve(self, name: str) -> bool:
         pending = self._pending.pop(name, None)
         if pending is None:
+            logger.info(
+                "voice_timing event=twilio_playback_mark_ignored call=%s "
+                "reason=unknown_or_duplicate",
+                _call_label(self._call_sid),
+            )
             return False
+        if pending.timeout_handle:
+            pending.timeout_handle.cancel()
+        reason = "receipt"
+        if pending.cleared:
+            status = "cleared"
+        elif pending.clear_requested:
+            status = "stale"
+            reason = "clear_requested"
+        elif pending.stale:
+            status = "stale"
+        else:
+            status = "played"
+        self._log_resolved(pending, status=status, reason=reason)
+        return True
+
+    def _expire(self, name: str) -> None:
+        pending = self._pending.pop(name, None)
+        if pending is None:
+            return
+        self._log_resolved(pending, status="timeout")
+
+    def close(self) -> None:
+        """Invalidate unresolved receipts when the Twilio stream ends."""
+        pending_marks = list(self._pending.values())
+        self._pending.clear()
+        for pending in pending_marks:
+            if pending.timeout_handle:
+                pending.timeout_handle.cancel()
+            self._log_resolved(pending, status="stale", reason="stream_closed")
+
+    def _log_resolved(
+        self,
+        pending: _PendingPlaybackMark,
+        *,
+        status: str,
+        reason: str = "receipt",
+    ) -> None:
         logger.info(
             "voice_timing event=twilio_playback_mark_resolved call=%s "
-            "turn=%s status=%s media_to_mark_ms=%s",
+            "turn=%s epoch=%s phase=%s status=%s reason=%s media_to_mark_ms=%s",
             _call_label(self._call_sid),
             pending.turn,
-            "cleared" if pending.cleared else "played",
+            pending.epoch,
+            pending.phase,
+            status,
+            reason,
             max(0, round((time.monotonic() - pending.sent_at) * 1_000)),
         )
-        return True
 
 
 class _TwilioMediaIngress:
@@ -697,14 +874,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     async def on_clear_audio():
         """Clear Twilio's outbound audio buffer (used during barge-in)."""
         nonlocal stream_sid
-        cleared = await _send_twilio_clear(
+        return await _clear_twilio_audio_with_playback_marks(
             websocket,
             stream_sid=stream_sid or "",
+            playback_marks=playback_marks,
             call_sid=call_sid,
         )
-        if cleared:
-            playback_marks.mark_pending_cleared()
-        return cleared
 
     async def on_response_first_media_sent(turn: int):
         """Ask Twilio to acknowledge first-response media playout or clearing."""
@@ -713,6 +888,20 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             stream_sid=stream_sid or "",
             playback_marks=playback_marks,
             turn=turn,
+            epoch=turn,
+            phase="first_media",
+            call_sid=call_sid,
+        )
+
+    async def on_response_end_media_sent(turn: int):
+        """Observe whether Twilio plays or clears the complete model response."""
+        return await _send_twilio_playback_mark(
+            websocket,
+            stream_sid=stream_sid or "",
+            playback_marks=playback_marks,
+            turn=turn,
+            epoch=turn,
+            phase="response_end",
             call_sid=call_sid,
         )
 
@@ -852,6 +1041,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 on_transcript=on_transcript,
                 on_clear_audio=on_clear_audio,
                 on_response_first_media_sent=on_response_first_media_sent,
+                on_response_end_media_sent=on_response_end_media_sent,
                 on_call_complete=on_call_complete,
                 on_urgency_detected=on_urgency_detected,
                 call_sid=call_sid,
@@ -898,6 +1088,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     finally:
         await _cancel_task(ingress_task)
+        playback_marks.close()
 
         if pipeline:
             try:

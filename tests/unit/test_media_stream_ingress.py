@@ -18,6 +18,7 @@ os.environ.setdefault("USER_PHONE", "test-user-number")
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
 from app.webhooks.media_stream import (
+    _clear_twilio_audio_with_playback_marks,
     _send_twilio_playback_mark,
     _TwilioPlaybackMarks,
     _TwilioMediaIngress,
@@ -76,8 +77,18 @@ def test_twilio_playback_marks_are_bounded_and_classify_clear_without_names(capl
     )
     caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
 
-    assert marks.register(turn=7, name=private_mark_name)
-    assert marks.register(turn=8, name="response-8-overflow") is False
+    assert marks.register(
+        turn=7,
+        epoch=7,
+        phase="response_end",
+        name=private_mark_name,
+    )
+    assert marks.register(
+        turn=8,
+        epoch=8,
+        phase="response_end",
+        name="response-8-overflow",
+    ) is False
     marks.mark_pending_cleared()
     assert marks.resolve(private_mark_name)
 
@@ -85,6 +96,8 @@ def test_twilio_playback_marks_are_bounded_and_classify_clear_without_names(capl
     assert "voice_timing event=twilio_playback_mark_skipped" in messages
     assert "voice_timing event=twilio_playback_mark_resolved" in messages
     assert "turn=7" in messages
+    assert "epoch=7" in messages
+    assert "phase=response_end" in messages
     assert "status=cleared" in messages
     assert private_mark_name not in messages
     assert "CA_private_identifier" not in messages
@@ -108,19 +121,230 @@ async def test_twilio_playback_mark_is_sent_after_audio_with_opaque_name(caplog)
         stream_sid="stream-redacted",
         playback_marks=marks,
         turn=3,
+        epoch=3,
+        phase="response_end",
         call_sid="CA_private_identifier",
     )
 
     payload = websocket.payloads[0]
     assert payload["event"] == "mark"
-    assert payload["mark"]["name"].startswith("response-3-")
+    assert payload["mark"]["name"].startswith("playback-")
     assert marks.resolve(payload["mark"]["name"])
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=twilio_playback_mark_resolved" in messages
     assert "turn=3" in messages
+    assert "epoch=3" in messages
+    assert "phase=response_end" in messages
     assert "status=played" in messages
     assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playback_marks_classify_timeout_stale_and_duplicate_without_names(
+    caplog,
+):
+    marks = _TwilioPlaybackMarks(
+        call_sid="CA_private_identifier",
+        timeout_seconds=0.01,
+    )
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    stale_name = marks.reserve(turn=4, epoch=4, phase="response_end")
+    current_name = marks.reserve(turn=5, epoch=5, phase="response_end")
+    assert stale_name is not None
+    assert current_name is not None
+    assert marks.mark_sent(stale_name)
+    assert marks.mark_sent(current_name)
+    assert marks.resolve(stale_name)
+    assert marks.resolve(stale_name) is False
+
+    await asyncio.sleep(0.02)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "turn=4 epoch=4 phase=response_end status=stale" in messages
+    assert "reason=unknown_or_duplicate" in messages
+    assert "turn=5 epoch=5 phase=response_end status=timeout" in messages
+    assert stale_name not in messages
+    assert current_name not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_clear_invalidates_mark_before_awaited_send_can_resolve_it(caplog):
+    marks = _TwilioPlaybackMarks(call_sid="CA_private_identifier")
+    private_name = marks.reserve(turn=10, epoch=10, phase="response_end")
+    assert private_name is not None
+    assert marks.mark_sent(private_name)
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    class RacingWebSocket:
+        async def send_json(self, payload):
+            assert payload["event"] == "clear"
+            assert marks.resolve(private_name)
+
+    assert await _clear_twilio_audio_with_playback_marks(
+        RacingWebSocket(),
+        stream_sid="stream-redacted",
+        playback_marks=marks,
+        call_sid="CA_private_identifier",
+    )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "turn=10 epoch=10 phase=response_end status=stale" in messages
+    assert "reason=clear_requested" in messages
+    assert "status=played" not in messages
+    assert private_name not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_failed_twilio_clear_keeps_pending_mark_conservatively_stale(caplog):
+    marks = _TwilioPlaybackMarks(call_sid="CA_private_identifier")
+    private_name = marks.reserve(turn=11, epoch=11, phase="response_end")
+    assert private_name is not None
+    assert marks.mark_sent(private_name)
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    class FailingWebSocket:
+        async def send_json(self, _payload):
+            raise RuntimeError("private clear failure")
+
+    assert await _clear_twilio_audio_with_playback_marks(
+        FailingWebSocket(),
+        stream_sid="stream-redacted",
+        playback_marks=marks,
+        call_sid="CA_private_identifier",
+    ) is False
+    assert marks.resolve(private_name)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "turn=11 epoch=11 phase=response_end status=stale" in messages
+    assert "reason=clear_requested" in messages
+    assert "status=played" not in messages
+    assert "private clear failure" not in messages
+    assert private_name not in messages
+    assert "CA_private_identifier" not in messages
+
+
+def test_twilio_playback_marks_close_invalidates_pending_receipts(caplog):
+    marks = _TwilioPlaybackMarks(call_sid="CA_private_identifier")
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    private_name = marks.reserve(turn=9, epoch=9, phase="response_end")
+    assert private_name is not None
+    marks.close()
+    assert marks.resolve(private_name) is False
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "turn=9 epoch=9 phase=response_end status=stale" in messages
+    assert "reason=stream_closed" in messages
+    assert private_name not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playback_mark_send_failure_discards_timeout_and_error_payload(
+    caplog,
+):
+    private_error = "playback mark failed with private caller payload"
+
+    class FailingWebSocket:
+        async def send_json(self, _payload):
+            raise RuntimeError(private_error)
+
+    marks = _TwilioPlaybackMarks(
+        call_sid="CA_private_identifier",
+        timeout_seconds=0.01,
+    )
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    assert await _send_twilio_playback_mark(
+        FailingWebSocket(),
+        stream_sid="stream-redacted",
+        playback_marks=marks,
+        turn=6,
+        epoch=6,
+        phase="response_end",
+        call_sid="CA_private_identifier",
+    ) is False
+    await asyncio.sleep(0.02)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "media_event event=twilio_playback_mark_error" in messages
+    assert "status=timeout" not in messages
+    assert private_error not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playback_mark_send_timeout_is_bounded_and_discards_receipt(
+    monkeypatch,
+    caplog,
+):
+    private_payload = "private never-returning mark payload"
+
+    class HangingWebSocket:
+        async def send_json(self, _payload):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "app.webhooks.media_stream.TWILIO_PLAYBACK_MARK_SEND_TIMEOUT_SECONDS",
+        0.01,
+    )
+    marks = _TwilioPlaybackMarks(
+        call_sid="CA_private_identifier",
+        timeout_seconds=0.01,
+    )
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    started_at = time.monotonic()
+    assert await _send_twilio_playback_mark(
+        HangingWebSocket(),
+        stream_sid=private_payload,
+        playback_marks=marks,
+        turn=12,
+        epoch=12,
+        phase="response_end",
+        call_sid="CA_private_identifier",
+    ) is False
+    assert time.monotonic() - started_at < 0.2
+    assert marks._pending == {}
+    await asyncio.sleep(0.02)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "media_event event=twilio_playback_mark_send_timeout" in messages
+    assert "status=timeout" not in messages
+    assert private_payload not in messages
+    assert "CA_private_identifier" not in messages
+
+
+@pytest.mark.asyncio
+async def test_twilio_playback_mark_send_cancellation_discards_receipt_and_propagates():
+    send_started = asyncio.Event()
+
+    class HangingWebSocket:
+        async def send_json(self, _payload):
+            send_started.set()
+            await asyncio.Event().wait()
+
+    marks = _TwilioPlaybackMarks(call_sid="CA_private_identifier")
+    send_task = asyncio.create_task(_send_twilio_playback_mark(
+        HangingWebSocket(),
+        stream_sid="stream-redacted",
+        playback_marks=marks,
+        turn=13,
+        epoch=13,
+        phase="response_end",
+        call_sid="CA_private_identifier",
+    ))
+    await asyncio.wait_for(send_started.wait(), timeout=1)
+
+    send_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await send_task
+
+    assert marks._pending == {}
 
 
 @pytest.mark.asyncio

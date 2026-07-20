@@ -68,7 +68,8 @@ class GeminiPipeline:
     - stop() -> closes connection
 
     Same callbacks: on_audio_out, on_transcript, on_clear_audio,
-    on_response_first_media_sent, on_call_complete, on_urgency_detected.
+    on_response_first_media_sent, on_response_end_media_sent,
+    on_call_complete, on_urgency_detected.
     """
 
     URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
@@ -115,6 +116,7 @@ class GeminiPipeline:
         on_transcript: Callable[[str, str], Awaitable[None]],
         on_clear_audio: Optional[Callable[[], Awaitable[bool]]] = None,
         on_response_first_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
+        on_response_end_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
         on_call_complete: Optional[Callable[[], Awaitable[None]]] = None,
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
@@ -126,6 +128,7 @@ class GeminiPipeline:
         self.on_transcript = on_transcript
         self.on_clear_audio = on_clear_audio
         self.on_response_first_media_sent = on_response_first_media_sent
+        self.on_response_end_media_sent = on_response_end_media_sent
         self.on_call_complete = on_call_complete
         self.on_urgency_detected = on_urgency_detected
         self._call_sid = call_sid
@@ -189,6 +192,9 @@ class GeminiPipeline:
         self._audio_backlog_recoveries = 0
         self._audio_output_lock = asyncio.Lock()
         self._audio_epoch = 0
+        self._response_end_candidate: tuple[int, int] | None = None
+        self._last_response_media_sent: tuple[int, int] | None = None
+        self._last_response_end_mark_attempted_turn = -1
         self._last_usage_metrics: tuple[tuple[str, int], ...] | None = None
         self._provider_generation_complete_seen = False
         self._provider_generation_complete_logged = False
@@ -795,6 +801,9 @@ class GeminiPipeline:
                 # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
                     self._log_turn_complete_signal(server_content)
+                    completed_turn = self._response_turn_number
+                    completed_audio_epoch = self._audio_epoch
+                    completed_turn_had_audio = self._response_audio_turn_started
                     overflowed_turn = self._audio_backlog_overflowed
                     interrupted_turn = self._interrupt_speaking
                     if interrupted_turn:
@@ -831,6 +840,11 @@ class GeminiPipeline:
                             attempt=self._audio_backlog_recoveries,
                         )
                         continue
+                    if not interrupted_turn and completed_turn_had_audio:
+                        self._response_end_candidate = (
+                            completed_turn,
+                            completed_audio_epoch,
+                        )
                     said_goodbye = False
                     if not interrupted_turn:
                         said_goodbye = await self._flush_kevin_transcript(
@@ -838,6 +852,7 @@ class GeminiPipeline:
                         )
                         if self._response_first_audio_at > 0:
                             self._log_response_turn_latency("")
+                        await self._maybe_send_response_end_mark()
                     if said_goodbye:
                         await self._wait_for_audio_playout()
                         logger.info("Kevin said goodbye — ending call in 2 seconds")
@@ -1017,6 +1032,11 @@ class GeminiPipeline:
                             if self.on_call_complete:
                                 await self.on_call_complete()
                             return
+                        if response_turn:
+                            self._last_response_media_sent = (
+                                response_turn,
+                                audio_epoch,
+                            )
                         if not self._first_outbound_audio_logged:
                             self._first_outbound_audio_logged = True
                             self._log_voice_timing(
@@ -1076,8 +1096,60 @@ class GeminiPipeline:
                                         self._cumulative_outbound_audio_ms
                                     ),
                                 )
+                            await self._maybe_send_response_end_mark()
         except asyncio.CancelledError:
             pass
+
+    async def _maybe_send_response_end_mark(self) -> None:
+        """Request a receipt only after provider completion and final media send."""
+        candidate = self._response_end_candidate
+        if candidate is None:
+            return
+
+        turn, audio_epoch = candidate
+        if (
+            self._interrupt_speaking
+            or audio_epoch != self._audio_epoch
+            or turn < self._response_turn_number
+        ):
+            self._response_end_candidate = None
+            self._log_voice_timing(
+                "response_end_playback_mark_skipped",
+                turn=turn,
+                reason="stale_epoch",
+            )
+            return
+        if self._is_speaking or not self._audio_queue.empty():
+            return
+        if self._last_response_media_sent != candidate:
+            return
+        if turn <= self._last_response_end_mark_attempted_turn:
+            self._response_end_candidate = None
+            return
+
+        self._last_response_end_mark_attempted_turn = turn
+        self._response_end_candidate = None
+        if not self.on_response_end_media_sent:
+            self._log_voice_timing(
+                "response_end_playback_mark_skipped",
+                turn=turn,
+                reason="callback_missing",
+            )
+            return
+        try:
+            accepted = await self.on_response_end_media_sent(turn)
+        except Exception as error:
+            self._log_voice_timing(
+                "response_end_playback_mark_error",
+                turn=turn,
+                exception_type=type(error).__name__,
+            )
+            return
+        self._log_voice_timing(
+            "response_end_playback_mark_requested",
+            turn=turn,
+            accepted=accepted is not False,
+        )
 
     async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""

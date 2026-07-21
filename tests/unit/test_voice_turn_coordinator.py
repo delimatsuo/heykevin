@@ -165,6 +165,41 @@ def test_presence_context_requires_typed_acceptance_before_normal_generation():
     assert coordinator.state == TurnLifecycle.GENERATING
 
 
+def test_failure_recovery_authorizes_generation_and_presence_playback():
+    coordinator = VoiceTurnCoordinator()
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_failure_recovery(1)
+    assert coordinator.state == TurnLifecycle.GENERATING
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        kind="fallback",
+    )
+    coordinator.resolve_playback(_receipt(1))
+    coordinator._deadline = 0
+    assert coordinator.due_action() == CoordinatorDirective.REPROMPT
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    coordinator.resolve_playback(_receipt(2))
+    coordinator.caller_activity()
+    assert coordinator.begin_presence_resolution(2)
+
+    assert coordinator.begin_failure_recovery(2)
+    assert coordinator.state == TurnLifecycle.REPLAYING_QUESTION
+    assert coordinator.begin_playback(
+        response_turn=3,
+        caller_turn=2,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+        kind="question_replay",
+    )
+
+
 def test_owner_message_transition_replaces_active_question_contract():
     coordinator = VoiceTurnCoordinator()
     assert coordinator.begin_generation(1)

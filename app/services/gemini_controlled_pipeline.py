@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
+import time
 from typing import Awaitable, Callable, Optional
 
 from app.config import (
@@ -15,8 +16,9 @@ from app.config import (
     PRODUCTION_GCP_PROJECT_ID,
     settings,
 )
-from app.services.dialogue_planner import ActionName, plan_next_action
+from app.services.dialogue_planner import ActionName, NextAction, plan_next_action
 from app.services.gemini_controlled_turn import (
+    DirectAnswerKind,
     GEMINI_CONTROLLED_MODEL,
     GeminiControlledTurnGenerator,
     PresenceReplyKind,
@@ -27,17 +29,20 @@ from app.services.gemini_controlled_turn import (
     validate_spoken_turn,
 )
 from app.services.receptionist_state import (
+    BusinessScope,
     CallbackConfirmation,
     CallbackIntent,
     CallerObservation,
     IntakeState,
     Intent,
+    ServiceAction,
     Urgency,
 )
 from app.services.urgency import find_urgent_signal
 from app.services.voice_pipeline import (
     ELEVENLABS_MODEL_DEFAULT,
     VoicePipeline,
+    _log_voice_exception,
     _log_voice_event,
     _log_voice_timing,
 )
@@ -305,6 +310,33 @@ class GeminiControlledPipeline(VoicePipeline):
         """Bind answer-only facts to the slot whose question was audibly played."""
         authorized = observation
         if (
+            authorized.service_action == ServiceAction.UNKNOWN
+            and self._intake_state.service_action != ServiceAction.UNKNOWN
+        ):
+            authorized = replace(authorized, service_action=None)
+        request_changed = bool(
+            authorized.service_object
+            and self._intake_state.service_object
+            and authorized.service_object.casefold()
+            != self._intake_state.service_object.casefold()
+        ) or bool(
+            authorized.service_action is not None
+            and authorized.service_action != ServiceAction.UNKNOWN
+            and self._intake_state.service_action != ServiceAction.UNKNOWN
+            and authorized.service_action != self._intake_state.service_action
+        )
+        if (
+            self._intake_state.business_scope == BusinessScope.IN_SCOPE
+            and authorized.business_scope
+            in {BusinessScope.OUT_OF_SCOPE, BusinessScope.UNCLEAR}
+            and not request_changed
+        ):
+            authorized = replace(
+                authorized,
+                business_scope=None,
+                business_scope_reason=None,
+            )
+        if (
             observation.callback_confirmation is not None
             and observation.callback_confirmation != CallbackConfirmation.UNKNOWN
             and self._pending_reply_slot != "callback_confirmation"
@@ -317,6 +349,136 @@ class GeminiControlledPipeline(VoicePipeline):
             authorized = replace(authorized, callback_intent=None)
         self._pending_reply_slot = ""
         return authorized
+
+    @staticmethod
+    def _direct_scope_answer_action(
+        answer_kind: DirectAnswerKind | None,
+        planned_action: NextAction,
+    ) -> NextAction:
+        if answer_kind not in {
+            DirectAnswerKind.SCOPE_SUPPORTED,
+            DirectAnswerKind.SCOPE_REQUIRES_REVIEW,
+        } or planned_action.name == ActionName.SAFETY_GUIDANCE:
+            return planned_action
+        return NextAction(
+            name=ActionName.ANSWER_DIRECT_QUESTION,
+            reason="caller asked a direct service-scope question",
+            allowed_slots=(
+                planned_action.allowed_slots if planned_action.question_required else ()
+            ),
+            forbidden_slots=planned_action.forbidden_slots,
+            memory_facts_safe_to_use=planned_action.memory_facts_safe_to_use,
+            max_spoken_shape=(
+                "answer the service-scope question, then ask one allowed follow-up"
+                if planned_action.question_required
+                else "answer the service-scope question briefly"
+            ),
+            tool_calls_allowed=False,
+            question_required=planned_action.question_required,
+        )
+
+    async def _process_utterance(
+        self,
+        text: str,
+        *,
+        caller_turn: int | None = None,
+        committed_at: float | None = None,
+    ) -> None:
+        """Process one controlled turn and turn internal failures into a heard retry."""
+        resolved_turn = caller_turn or self._caller_turn_number
+        resolved_committed_at = committed_at or self._caller_turn_committed_at
+        async with self._response_lock:
+            _log_voice_timing(
+                "response_processing_started",
+                self._call_sid,
+                caller_turn=resolved_turn,
+                queue_wait_ms=(
+                    max(0, round((time.monotonic() - resolved_committed_at) * 1_000))
+                    if resolved_committed_at > 0
+                    else 0
+                ),
+                call_elapsed_ms=self._call_elapsed_ms(),
+            )
+            try:
+                await self._handle_caller_speech(
+                    text,
+                    caller_turn=resolved_turn,
+                    committed_at=resolved_committed_at,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                _log_voice_exception(
+                    "controlled_response_processing_failed",
+                    error,
+                    self._call_sid,
+                )
+                recovering_presence = (
+                    self._turn_coordinator.state == TurnLifecycle.RESOLVING_PRESENCE
+                )
+                if not self._turn_coordinator.begin_failure_recovery(resolved_turn):
+                    _log_voice_timing(
+                        "controlled_failure_recovery_suppressed",
+                        self._call_sid,
+                        caller_turn=resolved_turn,
+                        reason="invalid_lifecycle",
+                    )
+                    return
+                if recovering_presence:
+                    context = self._suspended_presence_context
+                    question = (
+                        (context.question_text, context.asked_slot)
+                        if context is not None
+                        else self._last_played_question
+                    )
+                    if question is None:
+                        question = (
+                            (
+                                "¿Puede repetirlo una vez más?"
+                                if self._intake_state.language.casefold().startswith("es")
+                                else "Could you say that one more time?"
+                            ),
+                            "",
+                        )
+                    message, asked_slot = question
+                    contract = _PendingSpeechContract(
+                        expects_input=True,
+                        asked_slot=asked_slot,
+                        question_text=message,
+                        kind="question_replay",
+                    )
+                    source = "question_replay"
+                    self._pending_reply_slot = ""
+                    self._suspended_presence_context = None
+                else:
+                    message = (
+                        "Lo siento, tuve un problema. ¿Puede repetirlo una vez más?"
+                        if self._intake_state.language.casefold().startswith("es")
+                        else (
+                            "I'm sorry, I had trouble with that. "
+                            "Could you say that one more time?"
+                        )
+                    )
+                    contract = _PendingSpeechContract(
+                        expects_input=True,
+                        kind="fallback",
+                    )
+                    source = "fallback"
+                self._pending_speech_contract = contract
+                _log_voice_timing(
+                    "controlled_failure_recovery_started",
+                    self._call_sid,
+                    caller_turn=resolved_turn,
+                    kind=contract.kind,
+                )
+                delivered = await self._speak(
+                    message,
+                    source=source,
+                    caller_turn=resolved_turn,
+                    caller_committed_at=resolved_committed_at,
+                )
+                if delivered:
+                    await self.on_transcript("Kevin", message)
 
     async def _handle_caller_speech(
         self,
@@ -432,9 +594,16 @@ class GeminiControlledPipeline(VoicePipeline):
             self._intake_state,
             require_caller_name=True,
         )
+        direct_answer_kind = controlled_observation.direct_answer_kind
+        if (
+            direct_answer_kind == DirectAnswerKind.SCOPE_SUPPORTED
+            and self._intake_state.business_scope != BusinessScope.IN_SCOPE
+        ):
+            direct_answer_kind = DirectAnswerKind.SCOPE_REQUIRES_REVIEW
+        action = self._direct_scope_answer_action(direct_answer_kind, action)
         if action.name == ActionName.ANSWER_DIRECT_QUESTION:
             validated = self._turn_generator.build_direct_turn(
-                answer_kind=controlled_observation.direct_answer_kind,
+                answer_kind=direct_answer_kind,
                 caller_text=caller_text,
                 state=self._intake_state,
                 action=action,
@@ -451,6 +620,14 @@ class GeminiControlledPipeline(VoicePipeline):
                 deterministic,
                 action=action,
                 caller_text=caller_text,
+            )
+            _log_voice_timing(
+                "controlled_server_turn_validation",
+                self._call_sid,
+                caller_turn=resolved_turn,
+                action=action.name.value,
+                reason=validation.value,
+                valid=validation == ValidationReason.VALID,
             )
             if validation != ValidationReason.VALID:
                 raise RuntimeError("server-owned spoken turn violated its contract")

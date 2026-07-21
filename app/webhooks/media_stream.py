@@ -769,6 +769,26 @@ def _active_call_fallback(call_sid: str, call_data: dict | None):
     )
 
 
+def _transcript_call_update(
+    transcript_lines: list[str],
+    *,
+    active_call,
+    call_started_at: float,
+) -> dict:
+    """Backfill listable call metadata when persisting the final transcript."""
+    update = {
+        "transcript": "\n".join(transcript_lines),
+        "timestamp": call_started_at,
+    }
+    if active_call is None:
+        return update
+    for field_name in ("contractor_id", "caller_phone", "caller_name"):
+        value = getattr(active_call, field_name, "")
+        if value:
+            update[field_name] = value
+    return update
+
+
 async def _resolve_active_call(call_sid: str, call_data: dict | None):
     """Load active call state without delaying an authenticated stream."""
     active_call = await get_active_call(call_sid)
@@ -1222,9 +1242,14 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             from app.db.calls import save_call
 
             try:
-                transcript_saved = await save_call(call_sid, {
-                    "transcript": "\n".join(transcript_lines),
-                })
+                transcript_saved = await save_call(
+                    call_sid,
+                    _transcript_call_update(
+                        transcript_lines,
+                        active_call=active_call,
+                        call_started_at=call_started_at,
+                    ),
+                )
             except Exception as error:
                 logger.error(
                     "Post-call transcript persistence raised: %s",

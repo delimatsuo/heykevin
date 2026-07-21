@@ -224,6 +224,24 @@ class VoiceTurnCoordinator:
             and caller_turn == self._caller_turn
         )
 
+    def begin_failure_recovery(self, caller_turn: int) -> bool:
+        """Authorize an audible retry without bypassing the active lifecycle."""
+        if (
+            caller_turn != self._caller_turn
+            or self.state
+            not in {TurnLifecycle.GENERATING, TurnLifecycle.RESOLVING_PRESENCE}
+        ):
+            return False
+        recovering_presence = self.state == TurnLifecycle.RESOLVING_PRESENCE
+        if recovering_presence and self._reprompt_count != 1:
+            return False
+        self._contract = None
+        self._deadline = None
+        self._presence_resolution_required = False
+        if recovering_presence:
+            self.state = TurnLifecycle.REPLAYING_QUESTION
+        return True
+
     def caller_activity(self) -> None:
         if self.state in {TurnLifecycle.CLOSE_PENDING, TurnLifecycle.ENDED}:
             return

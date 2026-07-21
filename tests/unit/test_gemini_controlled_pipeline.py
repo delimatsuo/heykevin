@@ -21,6 +21,7 @@ from app.services.gemini_controlled_turn import (
     PresenceReplyKind,
 )
 from app.services.receptionist_state import (
+    BusinessScope,
     CallbackConfirmation,
     CallbackIntent,
     CallerObservation,
@@ -553,4 +554,258 @@ async def test_pricing_answer_uses_same_observation_call_then_server_question(mo
     assert pipeline._pending_speech_contract.question_text == (
         "Could you briefly describe how extensive the issue is?"
     )
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scope_question_is_answered_before_the_next_intake_question(monkeypatch):
+    pipeline = _pipeline()
+
+    async def extract_once(**_kwargs):
+        return ControlledObservation(
+            facts=CallerObservation(
+                business_scope=BusinessScope.IN_SCOPE,
+                intent=Intent.SERVICE_REQUEST,
+                service_object="toilet",
+                service_action=ServiceAction.REPLACE,
+            ),
+            direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+        )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "extract_observation", extract_once)
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Do you replace toilets?",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert spoken == [
+        "Yes, this business handles that type of work. May I have your name?"
+    ]
+    assert pipeline._pending_speech_contract is not None
+    assert pipeline._pending_speech_contract.asked_slot == "caller_name"
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_established_scope_is_not_reclassified_without_a_changed_request():
+    pipeline = _pipeline()
+    pipeline._intake_state.business_scope = BusinessScope.IN_SCOPE
+    pipeline._intake_state.service_object = "toilet"
+    pipeline._intake_state.service_action = ServiceAction.REPLACE
+
+    authorized = pipeline._authorize_observation(
+        CallerObservation(
+            business_scope=BusinessScope.OUT_OF_SCOPE,
+            business_scope_reason="caller said there is no existing issue",
+            service_object="toilet",
+            service_action=ServiceAction.REPLACE,
+        )
+    )
+
+    assert authorized.business_scope is None
+    assert authorized.business_scope_reason is None
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_internal_turn_failure_produces_bounded_recovery_instead_of_silence(
+    monkeypatch,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    spoken = []
+
+    async def fail_after_generation(*_args, **_kwargs):
+        assert pipeline._turn_coordinator.begin_generation(1)
+        raise RuntimeError("synthetic renderer contract failure")
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline, "_handle_caller_speech", fail_after_generation)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+
+    await pipeline._process_utterance(
+        "There is no issue, I just want replacement.",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    recovery = "I'm sorry, I had trouble with that. Could you say that one more time?"
+    assert transcripts == [("Kevin", recovery)]
+    assert spoken == [recovery]
+    assert pipeline._pending_speech_contract is None
+    assert pipeline._turn_coordinator.state == TurnLifecycle.PLAYING
+    assert pipeline._turn_coordinator.current_response_turn == 1
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_presence_resolution_failure_replays_the_heard_question(monkeypatch):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    coordinator = pipeline._turn_coordinator
+    question = "Is the number ending in 1-2-3-4 best for the callback?"
+    pipeline._last_played_question = (question, "callback_confirmation")
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    coordinator._deadline = 0
+    assert coordinator.due_action().value == "reprompt"
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    pipeline._response_turn_number = 2
+    pipeline._mark_caller_activity()
+    pipeline._presence_reply_pending = False
+    assert coordinator.begin_presence_resolution(2)
+
+    async def fail_presence_resolution(*_args, **_kwargs):
+        raise RuntimeError("synthetic presence classification failure")
+
+    spoken = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline, "_handle_caller_speech", fail_presence_resolution)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+
+    await pipeline._process_utterance(
+        "Yes, I'm here.",
+        caller_turn=2,
+        committed_at=1.0,
+    )
+
+    assert spoken == [question]
+    assert transcripts == [("Kevin", question)]
+    assert coordinator.state == TurnLifecycle.PLAYING
+    assert coordinator.current_response_turn == 3
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stale_failure_does_not_claim_an_unheard_recovery(monkeypatch):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    spoken = []
+
+    async def fail_after_caller_activity(*_args, **_kwargs):
+        assert pipeline._turn_coordinator.begin_generation(1)
+        pipeline._turn_coordinator.caller_activity()
+        raise RuntimeError("synthetic stale turn")
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline, "_handle_caller_speech", fail_after_caller_activity)
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+
+    await pipeline._process_utterance(
+        "newer caller activity",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert transcripts == []
+    assert spoken == []
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_controlled_turn_does_not_start_failure_recovery(monkeypatch):
+    pipeline = _pipeline()
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    async def cancel_generation(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    pipeline.on_transcript = capture_transcript
+    monkeypatch.setattr(pipeline, "_handle_caller_speech", cancel_generation)
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline._process_utterance(
+            "superseded caller turn",
+            caller_turn=1,
+            committed_at=1.0,
+        )
+
+    assert transcripts == []
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_recovery_delivery_is_not_added_to_the_transcript(monkeypatch):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+
+    async def fail_after_generation(*_args, **_kwargs):
+        assert pipeline._turn_coordinator.begin_generation(1)
+        raise RuntimeError("synthetic renderer failure")
+
+    async def fail_base_speak(_self, _text, **_kwargs):
+        return False
+
+    monkeypatch.setattr(pipeline, "_handle_caller_speech", fail_after_generation)
+    monkeypatch.setattr(VoicePipeline, "_speak", fail_base_speak)
+
+    await pipeline._process_utterance(
+        "routine request",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert transcripts == []
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
     await pipeline._http_client.aclose()

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -553,6 +554,26 @@ def test_media_stream_awaits_durable_handoff_without_detached_post_call_tasks():
     assert "create_task(process_post_call" not in source
     assert "create_task(_post_call_extract" not in source
     assert "if transcript_saved and active_call" in source
+
+
+def test_transcript_persistence_backfills_listable_call_metadata():
+    update = media_stream._transcript_call_update(
+        ["Caller: routine request", "Kevin: thank you"],
+        active_call=SimpleNamespace(
+            contractor_id="contractor-test",
+            caller_phone="+15555550123",
+            caller_name="Fixture Caller",
+        ),
+        call_started_at=1234.5,
+    )
+
+    assert update == {
+        "transcript": "Caller: routine request\nKevin: thank you",
+        "timestamp": 1234.5,
+        "contractor_id": "contractor-test",
+        "caller_phone": "+15555550123",
+        "caller_name": "Fixture Caller",
+    }
 
 
 def test_startup_launches_pending_handoff_worker():

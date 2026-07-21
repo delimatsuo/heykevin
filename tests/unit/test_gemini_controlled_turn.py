@@ -32,7 +32,7 @@ from app.services.gemini_controlled_turn import (
     parse_observation,
     validate_spoken_turn,
 )
-from app.services.receptionist_state import IntakeState
+from app.services.receptionist_state import BusinessScope, IntakeState
 
 
 def _question_action(slot: str = "service_action") -> NextAction:
@@ -418,6 +418,63 @@ def test_direct_answer_and_server_owned_question_are_composed_without_second_cal
     )
 
 
+def test_scope_answer_and_server_owned_question_are_composed_without_second_call():
+    generator = GeminiControlledTurnGenerator(
+        api_key="secret-not-logged",
+        http_client=_FakeClient([]),
+        call_sid="CA_private",
+        receptionist_prompt="system",
+    )
+    result = generator.build_direct_turn(
+        answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+        caller_text="Do you replace toilets?",
+        state=IntakeState.new(call_sid="CA_private"),
+        action=NextAction(
+            name=ActionName.ANSWER_DIRECT_QUESTION,
+            reason="scope",
+            allowed_slots=("caller_name",),
+            question_required=True,
+        ),
+        caller_turn=1,
+    )
+
+    assert result.fallback is False
+    assert result.turn.spoken_text == (
+        "Yes, this business handles that type of work. May I have your name?"
+    )
+
+
+def test_out_of_scope_message_offer_satisfies_its_callback_contract():
+    state = IntakeState.new(
+        call_sid="CA_private",
+        caller_name="Known Caller",
+        caller_confidence=1.0,
+    )
+    state.business_scope = BusinessScope.OUT_OF_SCOPE
+    action = NextAction(
+        name=ActionName.DECLINE_OUT_OF_SCOPE,
+        reason="outside configured scope",
+        allowed_slots=("callback_preference",),
+        question_required=True,
+    )
+
+    turn = deterministic_spoken_fallback(
+        action=action,
+        state=state,
+        caller_text="I need work outside your trade.",
+    )
+
+    assert turn.spoken_text == (
+        "This business may not handle that work. "
+        "Would you like the owner to call you back?"
+    )
+    assert validate_spoken_turn(
+        turn,
+        action=action,
+        caller_text="I need work outside your trade.",
+    ) == ValidationReason.VALID
+
+
 @pytest.mark.asyncio
 async def test_greeting_translation_is_server_rendered_without_model_request():
     original = "Hi, this is Kevin. How can I help you?"
@@ -454,7 +511,12 @@ async def test_greeting_translation_is_server_rendered_without_model_request():
 
 def test_direct_answer_schema_allows_only_server_owned_answer_kinds():
     answer_schema = CONTROLLED_OBSERVATION_SCHEMA["properties"]["direct_answer_kind"]
-    assert answer_schema["enum"] == ["pricing_requires_review", None]
+    assert answer_schema["enum"] == [
+        "pricing_requires_review",
+        "scope_supported",
+        "scope_requires_review",
+        None,
+    ]
 
 
 def test_presence_schema_allows_only_typed_semantic_outcomes():

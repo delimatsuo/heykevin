@@ -76,7 +76,7 @@ def test_twilio_playback_marks_are_bounded_and_classify_clear_without_names(capl
     )
     caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
 
-    assert marks.register(turn=7, name=private_mark_name)
+    assert marks.register(turn=7, name=private_mark_name, phase="response_end")
     assert marks.register(turn=8, name="response-8-overflow") is False
     marks.mark_pending_cleared()
     assert marks.resolve(private_mark_name)
@@ -85,6 +85,7 @@ def test_twilio_playback_marks_are_bounded_and_classify_clear_without_names(capl
     assert "voice_timing event=twilio_playback_mark_skipped" in messages
     assert "voice_timing event=twilio_playback_mark_resolved" in messages
     assert "turn=7" in messages
+    assert "phase=response_end" in messages
     assert "status=cleared" in messages
     assert private_mark_name not in messages
     assert "CA_private_identifier" not in messages
@@ -108,6 +109,7 @@ async def test_twilio_playback_mark_is_sent_after_audio_with_opaque_name(caplog)
         stream_sid="stream-redacted",
         playback_marks=marks,
         turn=3,
+        phase="response_end",
         call_sid="CA_private_identifier",
     )
 
@@ -119,6 +121,7 @@ async def test_twilio_playback_mark_is_sent_after_audio_with_opaque_name(caplog)
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "voice_timing event=twilio_playback_mark_resolved" in messages
     assert "turn=3" in messages
+    assert "phase=response_end" in messages
     assert "status=played" in messages
     assert "CA_private_identifier" not in messages
 

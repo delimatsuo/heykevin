@@ -14,7 +14,7 @@ from typing import Callable, Awaitable, Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from app.config import settings
+from app.config import settings, staging_native_live_safety_controls_enabled
 from app.services.entitlements import effective_mode
 from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
@@ -65,7 +65,8 @@ class GeminiPipeline:
     - stop() -> closes connection
 
     Same callbacks: on_audio_out, on_transcript, on_clear_audio,
-    on_response_first_media_sent, on_call_complete, on_urgency_detected.
+    on_response_first_media_sent, on_response_end_media_sent, on_call_complete,
+    on_urgency_detected.
     """
 
     URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
@@ -99,6 +100,7 @@ class GeminiPipeline:
         on_transcript: Callable[[str, str], Awaitable[None]],
         on_clear_audio: Optional[Callable[[], Awaitable[bool]]] = None,
         on_response_first_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
+        on_response_end_media_sent: Optional[Callable[[int], Awaitable[object]]] = None,
         on_call_complete: Optional[Callable[[], Awaitable[None]]] = None,
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         call_sid: str = "",
@@ -110,6 +112,7 @@ class GeminiPipeline:
         self.on_transcript = on_transcript
         self.on_clear_audio = on_clear_audio
         self.on_response_first_media_sent = on_response_first_media_sent
+        self.on_response_end_media_sent = on_response_end_media_sent
         self.on_call_complete = on_call_complete
         self.on_urgency_detected = on_urgency_detected
         self._call_sid = call_sid
@@ -185,6 +188,8 @@ class GeminiPipeline:
         self._cumulative_inbound_audio_ms = 0
         self._cumulative_outbound_audio_ms = 0
         self._last_response_first_media_sent_turn = -1
+        self._response_end_mark_pending: tuple[int, int] | None = None
+        self._last_response_end_media_sent_turn = -1
 
         # Build system prompt from contractor config (reuse existing logic)
         mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
@@ -719,6 +724,7 @@ class GeminiPipeline:
                     self._invalidate_tool_task("barge_in")
                     self._interrupt_speaking = True
                     self._audio_epoch += 1
+                    self._response_end_mark_pending = None
                     self._assistant_instruction_pending = False
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
@@ -791,6 +797,14 @@ class GeminiPipeline:
                                 "audio_backlog_recovery_exhausted",
                                 attempts=self._audio_backlog_recoveries,
                             )
+                            if staging_native_live_safety_controls_enabled():
+                                self._log_voice_timing(
+                                    "terminal_action_suppressed",
+                                    turn=self._response_turn_number,
+                                    epoch=self._audio_epoch,
+                                    reason="staging_audio_backlog_safety",
+                                )
+                                continue
                             if self.on_call_complete:
                                 await self.on_call_complete()
                             return
@@ -806,18 +820,27 @@ class GeminiPipeline:
                         continue
                     said_goodbye = False
                     if not interrupted_turn:
+                        self._arm_response_end_playback_mark()
                         said_goodbye = await self._flush_kevin_transcript(
                             detect_goodbye=True
                         )
                         if self._response_first_audio_at > 0:
                             self._log_response_turn_latency("")
-                    if said_goodbye:
+                        await self._maybe_send_response_end_playback_mark()
+                    if said_goodbye and not staging_native_live_safety_controls_enabled():
                         await self._wait_for_audio_playout()
                         logger.info("Kevin said goodbye — ending call in 2 seconds")
                         await asyncio.sleep(2)
                         if self.on_call_complete:
                             await self.on_call_complete()
                         return
+                    if said_goodbye:
+                        self._log_voice_timing(
+                            "terminal_action_suppressed",
+                            turn=self._response_turn_number,
+                            epoch=self._audio_epoch,
+                            reason="staging_native_safety",
+                        )
 
                 # Handle tool calls
                 tool_call = data.get("toolCall", {})
@@ -1049,11 +1072,68 @@ class GeminiPipeline:
                                         self._cumulative_outbound_audio_ms
                                     ),
                                 )
+                            await self._maybe_send_response_end_playback_mark()
         except asyncio.CancelledError:
             pass
 
+    def _arm_response_end_playback_mark(self) -> None:
+        """Request a final receipt only after Gemini has completed an audio turn."""
+        if not self._response_audio_turn_started:
+            return
+        turn = self._response_turn_number
+        if turn <= self._last_response_end_media_sent_turn:
+            return
+        self._response_end_mark_pending = (turn, self._audio_epoch)
+        self._log_voice_timing(
+            "response_end_playback_mark_armed",
+            turn=turn,
+            epoch=self._audio_epoch,
+        )
+
+    async def _maybe_send_response_end_playback_mark(self) -> None:
+        """Send a receipt request after the final frame, never from local completion alone."""
+        pending = self._response_end_mark_pending
+        if pending is None:
+            return
+        turn, epoch = pending
+        if (
+            epoch != self._audio_epoch
+            or self._interrupt_speaking
+            or self._is_speaking
+            or not self._audio_queue.empty()
+        ):
+            return
+
+        self._response_end_mark_pending = None
+        self._last_response_end_media_sent_turn = turn
+        if self.on_response_end_media_sent is None:
+            self._log_voice_timing(
+                "response_end_playback_mark_skipped",
+                turn=turn,
+                epoch=epoch,
+                reason="callback_unavailable",
+            )
+            return
+        try:
+            accepted = await self.on_response_end_media_sent(turn)
+        except Exception as error:
+            self._log_voice_timing(
+                "response_end_playback_mark_error",
+                turn=turn,
+                epoch=epoch,
+                exception_type=type(error).__name__,
+            )
+            return
+        self._log_voice_timing(
+            "response_end_playback_mark_requested",
+            turn=turn,
+            epoch=epoch,
+            accepted=accepted is True,
+        )
+
     async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""
+        self._response_end_mark_pending = None
         dropped_chunks = 0
         while True:
             try:
@@ -1285,6 +1365,9 @@ class GeminiPipeline:
 
     def _build_gemini_tools(self) -> list:
         """Build Gemini-format tool definitions from contractor config."""
+        if staging_native_live_safety_controls_enabled():
+            self._log_voice_timing("live_tools_disabled", reason="staging_native_safety")
+            return []
         has_jobber = bool(self._contractor_config.get("jobber_access_token"))
         has_gcal = bool(self._contractor_config.get("google_calendar_access_token"))
 
@@ -1346,6 +1429,25 @@ class GeminiPipeline:
     ) -> None:
         """Execute tool calls; scheduled live calls pass an epoch explicitly."""
         websocket = websocket or self._ws
+        if staging_native_live_safety_controls_enabled():
+            self._log_voice_timing(
+                "tool_call_denied",
+                reason="staging_native_safety",
+                count=len(function_calls),
+            )
+            await websocket.send(json.dumps({
+                "tool_response": {
+                    "function_responses": [
+                        {
+                            "id": fc.get("id", ""),
+                            "name": fc.get("name", ""),
+                            "response": {"error": "Tools are unavailable for this call."},
+                        }
+                        for fc in function_calls
+                    ],
+                }
+            }))
+            return
         from app.services.voice_pipeline import VoicePipeline
 
         # Reuse VoicePipeline's _execute_tool — it has all the Jobber/Calendar logic

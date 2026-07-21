@@ -28,4 +28,7 @@ async def test_health_includes_deploy_identity_without_secrets(monkeypatch):
         "service": "kevin-api-staging",
         "revision": "kevin-api-staging-00028-suv",
         "deploy_sha": "abc123def456",
+        "gemini_live_staging_safety_controls_enabled": True,
+        "gemini_live_model_tools_enabled": False,
+        "gemini_live_automatic_terminal_actions_enabled": False,
     }

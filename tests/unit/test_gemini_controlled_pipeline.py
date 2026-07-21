@@ -16,8 +16,11 @@ from app.services.gemini_controlled_pipeline import (
     _PendingSpeechContract,
 )
 from app.services.gemini_controlled_turn import (
+    CallerTurnCompleteness,
     ControlledObservation,
     DirectAnswerKind,
+    DirectQuestionAssessment,
+    DirectQuestionTopic,
     PresenceReplyKind,
 )
 from app.services.receptionist_state import (
@@ -37,11 +40,16 @@ async def _noop(*_args, **_kwargs):
     return None
 
 
-def _pipeline(*, on_call_complete=_noop) -> GeminiControlledPipeline:
+def _pipeline(
+    *,
+    on_call_complete=_noop,
+    on_response_first_media_sent=None,
+) -> GeminiControlledPipeline:
     return GeminiControlledPipeline(
         on_audio_out=_noop,
         on_transcript=_noop,
         on_call_complete=on_call_complete,
+        on_response_first_media_sent=on_response_first_media_sent,
         call_sid="CA_private",
         contractor_config={
             "effective_mode": "business",
@@ -56,6 +64,15 @@ def _pipeline(*, on_call_complete=_noop) -> GeminiControlledPipeline:
 async def test_controlled_cohort_never_prefetches_crm_context():
     pipeline = _pipeline()
     assert pipeline._should_prefetch_jobber() is False
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_semantic_episode_fix_does_not_change_endpointing_or_output_pacing():
+    pipeline = _pipeline()
+
+    assert pipeline.DEEPGRAM_ENDPOINTING_MS == 400
+    assert pipeline.ELEVENLABS_PACING_RATIO == 0.9
     await pipeline._http_client.aclose()
 
 
@@ -518,15 +535,18 @@ async def test_pricing_answer_uses_same_observation_call_then_server_question(mo
     pipeline = _pipeline()
     events = []
 
-    async def extract_once(**_kwargs):
+    async def analyze_once(**_kwargs):
         events.append("observation")
-        return ControlledObservation(
-            facts=CallerObservation(
-                intent=Intent.PRICING_QUESTION,
-                service_object="sink",
-                service_action=ServiceAction.REPAIR,
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    intent=Intent.PRICING_QUESTION,
+                    service_object="sink",
+                    service_action=ServiceAction.REPAIR,
+                ),
+                direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
             ),
-            direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
+            DirectQuestionAssessment(topic=DirectQuestionTopic.PRICING),
         )
 
     spoken = []
@@ -535,7 +555,7 @@ async def test_pricing_answer_uses_same_observation_call_then_server_question(mo
         spoken.append(text)
         return True
 
-    monkeypatch.setattr(pipeline._turn_generator, "extract_observation", extract_once)
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_once)
     monkeypatch.setattr(pipeline, "_speak", capture_speak)
     pipeline._caller_turn_number = 1
 
@@ -561,15 +581,18 @@ async def test_pricing_answer_uses_same_observation_call_then_server_question(mo
 async def test_scope_question_is_answered_before_the_next_intake_question(monkeypatch):
     pipeline = _pipeline()
 
-    async def extract_once(**_kwargs):
-        return ControlledObservation(
-            facts=CallerObservation(
-                business_scope=BusinessScope.IN_SCOPE,
-                intent=Intent.SERVICE_REQUEST,
-                service_object="toilet",
-                service_action=ServiceAction.REPLACE,
+    async def analyze_once(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="toilet",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
             ),
-            direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
         )
 
     spoken = []
@@ -578,7 +601,7 @@ async def test_scope_question_is_answered_before_the_next_intake_question(monkey
         spoken.append(text)
         return True
 
-    monkeypatch.setattr(pipeline._turn_generator, "extract_observation", extract_once)
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_once)
     monkeypatch.setattr(pipeline, "_speak", capture_speak)
     pipeline._caller_turn_number = 1
 
@@ -593,6 +616,1039 @@ async def test_scope_question_is_answered_before_the_next_intake_question(monkey
     ]
     assert pipeline._pending_speech_contract is not None
     assert pipeline._pending_speech_contract.asked_slot == "caller_name"
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fragmented_scope_question_is_assembled_before_any_audio_or_state_commit(
+    monkeypatch,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    seen_texts = []
+
+    async def analyze_turn(**kwargs):
+        seen_texts.append(kwargs["caller_text"])
+        if len(seen_texts) == 1:
+            return (
+                ControlledObservation(facts=CallerObservation()),
+                DirectQuestionAssessment(
+                    topic=DirectQuestionTopic.SERVICE_SCOPE,
+                    completeness=CallerTurnCompleteness.INCOMPLETE,
+                ),
+            )
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    sent_audio = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        sent_audio.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech(
+        "Do you handle",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert sent_audio == []
+    assert transcripts == []
+    assert pipeline._intake_state.service_object == ""
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech(
+        "fixture replacement?",
+        caller_turn=2,
+        committed_at=2.0,
+    )
+
+    assert seen_texts == ["Do you handle", "Do you handle fixture replacement?"]
+    assert sent_audio == [
+        "Yes, this business handles that type of work. May I have your name?"
+    ]
+    assert transcripts == []
+    # Candidate state remains speculative until the first outbound media chunk.
+    assert pipeline._intake_state.service_object == "fixture"
+
+    await pipeline._on_response_first_media_sent(1)
+    assert transcripts == []
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    assert transcripts == []
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    assert transcripts == [
+        ("Kevin", "Yes, this business handles that type of work. May I have your name?")
+    ]
+    assert pipeline._intake_state.service_object == "fixture"
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_emergency_fragment_bypasses_semantic_deferral(monkeypatch):
+    pipeline = _pipeline()
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(facts=CallerObservation()),
+            DirectQuestionAssessment(
+                completeness=CallerTurnCompleteness.INCOMPLETE,
+            ),
+        )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "I smell a gas leak and",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert spoken
+    assert "leave the area now" in spoken[0].casefold()
+    assert pipeline._semantic_episode_settlement_task is None
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_semantic_episode_settles_with_one_heard_clarification(
+    monkeypatch,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    monkeypatch.setattr(pipeline, "SEMANTIC_EPISODE_SETTLEMENT_SECONDS", 0)
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(facts=CallerObservation()),
+            DirectQuestionAssessment(
+                completeness=CallerTurnCompleteness.INCOMPLETE,
+            ),
+        )
+
+    sent_audio = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        sent_audio.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech("Can you help with", caller_turn=1)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    message = "I'm sorry, could you finish your question?"
+    assert sent_audio == [message]
+    assert transcripts == []
+    await pipeline._on_response_first_media_sent(1)
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    assert transcripts == []
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    assert transcripts == [("Kevin", message)]
+    assert pipeline._last_played_question == (message, "")
+    assert pipeline._pending_reply_slot == ""
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_later_fragment_cancels_incomplete_episode_settlement(monkeypatch):
+    pipeline = _pipeline()
+    monkeypatch.setattr(pipeline, "SEMANTIC_EPISODE_SETTLEMENT_SECONDS", 60)
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(facts=CallerObservation()),
+            DirectQuestionAssessment(
+                completeness=CallerTurnCompleteness.INCOMPLETE,
+            ),
+        )
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech("Can you help with", caller_turn=1)
+    task = pipeline._semantic_episode_settlement_task
+    assert task is not None
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_settlement_presence_ack_replays_the_exact_settlement_question(monkeypatch):
+    pipeline = _pipeline()
+    coordinator = pipeline._turn_coordinator
+    message = "I'm sorry, could you finish your question?"
+
+    async def capture_base_speak(_self, _text, **_kwargs):
+        return True
+
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    assert coordinator.begin_generation(1)
+    assert coordinator.defer_generation(1)
+    assert coordinator.begin_semantic_settlement(1)
+    pipeline._pending_speech_contract = _PendingSpeechContract(
+        expects_input=True,
+        question_text=message,
+        kind="fallback",
+    )
+    await pipeline._speak(message, source="fallback", caller_turn=1)
+    pipeline._response_turn_number = 1
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    assert pipeline._last_played_question == (message, "")
+    assert coordinator.state == TurnLifecycle.AWAITING_REPLY
+
+    coordinator._deadline = 0
+    assert coordinator.due_action().value == "reprompt"
+    await pipeline._speak_presence_check()
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    pipeline._response_turn_number = 2
+    pipeline._mark_caller_activity()
+
+    async def acknowledge_presence(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(),
+                presence_reply_kind=PresenceReplyKind.ACKNOWLEDGEMENT,
+            ),
+            DirectQuestionAssessment(),
+        )
+
+    replayed = []
+
+    async def capture_replay(text, **_kwargs):
+        replayed.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", acknowledge_presence)
+    monkeypatch.setattr(pipeline, "_speak", capture_replay)
+    pipeline._caller_turn_number = 2
+    await pipeline._handle_caller_speech("Yes", caller_turn=2)
+
+    assert replayed == [message]
+    assert pipeline._pending_reply_slot == ""
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_stop_cancels_incomplete_episode_settlement(monkeypatch):
+    pipeline = _pipeline()
+    monkeypatch.setattr(pipeline, "SEMANTIC_EPISODE_SETTLEMENT_SECONDS", 60)
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(facts=CallerObservation()),
+            DirectQuestionAssessment(
+                completeness=CallerTurnCompleteness.INCOMPLETE,
+            ),
+        )
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech("Can you help with", caller_turn=1)
+    task = pipeline._semantic_episode_settlement_task
+    assert task is not None
+
+    await pipeline.stop()
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_unheard_presence_resolution_candidate_restores_replay_authority(
+    monkeypatch,
+):
+    pipeline = _pipeline()
+    coordinator = pipeline._turn_coordinator
+    question = "Is the number ending in 1-2-3-4 best for the callback?"
+    pipeline._last_played_question = (question, "callback_confirmation")
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    coordinator._deadline = 0
+    assert coordinator.due_action().value == "reprompt"
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(2, 2, "response_end", PlaybackStatus.PLAYED)
+    )
+    pipeline._response_turn_number = 2
+    pipeline._mark_caller_activity()
+
+    seen_texts = []
+
+    async def analyze_turn(**kwargs):
+        seen_texts.append(kwargs["caller_text"])
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    callback_confirmation=CallbackConfirmation.CONFIRMED,
+                ),
+                presence_reply_kind=PresenceReplyKind.SUBSTANTIVE,
+            ),
+            DirectQuestionAssessment(),
+        )
+
+    async def no_media_speak(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(pipeline, "_speak", no_media_speak)
+
+    pipeline._caller_turn_number = 2
+    await pipeline._handle_caller_speech("Yes", caller_turn=2)
+    assert coordinator.state == TurnLifecycle.GENERATING
+
+    pipeline._caller_turn_number = 3
+    pipeline._mark_caller_activity()
+    assert pipeline._presence_reply_pending is True
+    assert coordinator.state == TurnLifecycle.LISTENING
+    await pipeline._handle_caller_speech("the number is correct", caller_turn=3)
+
+    assert seen_texts == ["Yes", "Yes the number is correct"]
+    assert coordinator.state == TurnLifecycle.GENERATING
+    assert pipeline._intake_state.callback_confirmation == CallbackConfirmation.CONFIRMED
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owner_message_takeover_discards_an_incomplete_semantic_episode(
+    monkeypatch,
+):
+    pipeline = _pipeline()
+    monkeypatch.setattr(pipeline, "SEMANTIC_EPISODE_SETTLEMENT_SECONDS", 60)
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(facts=CallerObservation()),
+            DirectQuestionAssessment(
+                completeness=CallerTurnCompleteness.INCOMPLETE,
+            ),
+        )
+
+    spoken = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech("Can you help with", caller_turn=1)
+    assert pipeline._semantic_episode is not None
+
+    await pipeline._unavailable_now()
+
+    assert pipeline._semantic_episode is None
+    assert pipeline._semantic_episode_settlement_task is None
+    assert spoken
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+    assert pipeline._pending_reply_slot == "message_details"
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    assert pipeline._pending_reply_slot == "message_details"
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_superseded_zero_media_candidate_restores_state_and_transcript(monkeypatch):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    seen_texts = []
+
+    async def analyze_turn(**kwargs):
+        seen_texts.append(kwargs["caller_text"])
+        if len(seen_texts) == 1:
+            return (
+                ControlledObservation(
+                    facts=CallerObservation(
+                        intent=Intent.PRICING_QUESTION,
+                        service_object="fixture",
+                        service_action=ServiceAction.REPAIR,
+                    ),
+                    direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
+                ),
+                DirectQuestionAssessment(topic=DirectQuestionTopic.PRICING),
+            )
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    candidate_texts = []
+
+    async def no_media_speak(text, **_kwargs):
+        candidate_texts.append(text)
+        return None
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(pipeline, "_speak", no_media_speak)
+
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech("How much is it", caller_turn=1)
+    assert pipeline._intake_state.intent == Intent.PRICING_QUESTION
+    assert transcripts == []
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    assert pipeline._intake_state.intent == Intent.UNKNOWN
+    await pipeline._handle_caller_speech("for fixture replacement?", caller_turn=2)
+
+    assert seen_texts == [
+        "How much is it",
+        "How much is it for fixture replacement?",
+    ]
+    assert len(candidate_texts) == 2
+    assert transcripts == []
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_zero_media_delivery_drops_speculative_state_and_transcript(monkeypatch):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    async def no_media_base_speak(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", no_media_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech("Do you handle fixture replacement?", caller_turn=1)
+
+    assert pipeline._intake_state.service_object == ""
+    assert pipeline._conversation == []
+    assert transcripts == []
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mark_behavior", ["false", "error"])
+async def test_first_media_mark_request_failure_rolls_back_semantic_candidate(
+    monkeypatch,
+    mark_behavior,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    async def request_mark(_turn):
+        if mark_behavior == "error":
+            raise RuntimeError("mark request unavailable")
+        return False
+
+    pipeline = _pipeline(on_response_first_media_sent=request_mark)
+    pipeline.on_transcript = capture_transcript
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    async def capture_base_speak(self, _text, **_kwargs):
+        self._response_turn_number += 1
+        return await self.on_response_first_media_sent(self._response_turn_number)
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Do you handle fixture replacement?", caller_turn=1
+    )
+
+    assert pipeline._intake_state.service_object == ""
+    assert pipeline._semantic_episode is None
+    assert pipeline._semantic_episodes_by_response_turn == {}
+    assert pipeline._conversation == []
+    assert transcripts == []
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [PlaybackStatus.CLEARED, PlaybackStatus.STALE, PlaybackStatus.TIMEOUT],
+)
+async def test_unplayed_first_media_receipt_rolls_back_semantic_candidate(
+    monkeypatch,
+    status,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    async def capture_base_speak(_self, _text, **_kwargs):
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Do you handle fixture replacement?", caller_turn=1
+    )
+    await pipeline.on_playback_receipt(PlaybackReceipt(1, 1, "first_media", status))
+
+    assert pipeline._intake_state.service_object == ""
+    assert pipeline._semantic_episode is None
+    assert pipeline._semantic_episodes_by_response_turn == {}
+    assert pipeline._conversation == []
+    assert transcripts == []
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_caller_continuation_before_first_media_receipt_restores_candidate(
+    monkeypatch,
+):
+    pipeline = _pipeline()
+    seen_texts = []
+
+    async def analyze_turn(**kwargs):
+        seen_texts.append(kwargs["caller_text"])
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    async def capture_base_speak(_self, _text, **_kwargs):
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech("Do you handle", caller_turn=1)
+    await pipeline._on_response_first_media_sent(1)
+    pipeline._response_turn_number = 1
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech("fixture replacement?", caller_turn=2)
+
+    assert seen_texts == ["Do you handle", "Do you handle fixture replacement?"]
+    assert 1 not in pipeline._semantic_episodes_by_response_turn
+    assert pipeline._intake_state.service_object == "fixture"
+    assert pipeline._conversation == []
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [PlaybackStatus.CLEARED, PlaybackStatus.STALE, PlaybackStatus.TIMEOUT],
+)
+async def test_response_end_without_full_playout_never_publishes_semantic_transcript(
+    monkeypatch,
+    status,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    async def capture_base_speak(_self, _text, **_kwargs):
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Do you handle fixture replacement?", caller_turn=1
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    assert pipeline._intake_state.service_object == "fixture"
+    assert pipeline._conversation == []
+    assert transcripts == []
+
+    await pipeline.on_playback_receipt(PlaybackReceipt(1, 1, "response_end", status))
+
+    assert pipeline._intake_state.service_object == "fixture"
+    assert pipeline._conversation == []
+    assert transcripts == []
+    assert pipeline._turn_coordinator.state == TurnLifecycle.LISTENING
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_after_first_media_before_response_end_drops_transcript_claim(
+    monkeypatch,
+):
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    async def capture_base_speak(_self, _text, **_kwargs):
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Do you handle fixture replacement?", caller_turn=1
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    assert 1 in pipeline._pending_transcripts_by_response_turn
+
+    pipeline._response_turn_number = 1
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+
+    assert pipeline._pending_transcripts_by_response_turn == {}
+    assert pipeline._conversation == []
+    assert transcripts == []
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fragmented_scope_correction_cannot_publish_pricing_or_preempt_followup(
+    monkeypatch,
+):
+    """Redacted semantic equivalent of the live fragmented scope/correction trace."""
+    transcripts = []
+
+    async def capture_transcript(speaker, text):
+        transcripts.append((speaker, text))
+
+    pipeline = _pipeline()
+    pipeline.on_transcript = capture_transcript
+    analyses = []
+
+    async def analyze_turn(**kwargs):
+        analyses.append(kwargs["caller_text"])
+        fixtures = [
+            (
+                ControlledObservation(facts=CallerObservation()),
+                DirectQuestionAssessment(
+                    topic=DirectQuestionTopic.SERVICE_SCOPE,
+                    completeness=CallerTurnCompleteness.INCOMPLETE,
+                ),
+            ),
+            (
+                ControlledObservation(
+                    facts=CallerObservation(
+                        intent=Intent.PRICING_QUESTION,
+                        service_object="fixture",
+                        service_action=ServiceAction.REPLACE,
+                    ),
+                    direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
+                ),
+                DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+            ),
+            (
+                ControlledObservation(
+                    facts=CallerObservation(
+                        intent=Intent.PRICING_QUESTION,
+                        service_object="fixture",
+                        service_action=ServiceAction.REPLACE,
+                    ),
+                    direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
+                ),
+                DirectQuestionAssessment(topic=DirectQuestionTopic.PRICING),
+            ),
+            (
+                ControlledObservation(
+                    facts=CallerObservation(
+                        business_scope=BusinessScope.IN_SCOPE,
+                        intent=Intent.SERVICE_REQUEST,
+                        service_object="fixture",
+                        service_action=ServiceAction.REPLACE,
+                    ),
+                    direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+                ),
+                DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+            ),
+            (
+                ControlledObservation(
+                    facts=CallerObservation(caller_name="Caller"),
+                ),
+                DirectQuestionAssessment(),
+            ),
+        ]
+        return fixtures[len(analyses) - 1]
+
+    candidate_audio = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        candidate_audio.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech("Do you handle", caller_turn=1)
+    assert candidate_audio == []
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech("fixture replacement?", caller_turn=2)
+    await pipeline._on_response_first_media_sent(1)
+    pipeline._response_turn_number = 1
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "response_end", PlaybackStatus.PLAYED)
+    )
+
+    pipeline._caller_turn_number = 3
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech("Actually, do you handle", caller_turn=3)
+    # The candidate is deliberately not promoted: this is the zero-media
+    # supersession that previously leaked an incorrect pricing answer.
+    assert "pricing" not in " ".join(text for _, text in transcripts).casefold()
+
+    pipeline._response_turn_number = 2
+    pipeline._caller_turn_number = 4
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech("fixture replacement?", caller_turn=4)
+    await pipeline._on_response_first_media_sent(3)
+    pipeline._response_turn_number = 3
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(3, 3, "first_media", PlaybackStatus.PLAYED)
+    )
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(3, 3, "response_end", PlaybackStatus.PLAYED)
+    )
+
+    pipeline._caller_turn_number = 5
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech("My name is Caller", caller_turn=5)
+
+    assert analyses == [
+        "Do you handle",
+        "Do you handle fixture replacement?",
+        "Actually, do you handle",
+        "Actually, do you handle fixture replacement?",
+        "My name is Caller",
+    ]
+    assert "pricing" not in " ".join(text for _, text in transcripts).casefold()
+    assert any("handles that type of work" in text for _, text in transcripts)
+    assert pipeline._turn_coordinator.state == TurnLifecycle.PLAYING
+    assert pipeline._turn_coordinator.current_response_turn == 4
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_direct_question_topic_disagreement_never_speaks_pricing(monkeypatch):
+    pipeline = _pipeline()
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    intent=Intent.PRICING_QUESTION,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Does your business handle fixture replacement?",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+
+    assert spoken
+    assert "pricing" not in spoken[0].casefold()
+    assert spoken[0].startswith("I can't confirm that service")
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_direct_question_assessment_never_falls_back_to_pricing(
+    monkeypatch,
+):
+    pipeline = _pipeline()
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    intent=Intent.PRICING_QUESTION,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPAIR,
+                ),
+                direct_answer_kind=DirectAnswerKind.PRICING_REQUIRES_REVIEW,
+            ),
+            DirectQuestionAssessment(),
+        )
+
+    spoken = []
+
+    async def capture_speak(text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(pipeline, "_speak", capture_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech("How much is it?", caller_turn=1)
+
+    assert spoken == ["Could you briefly describe how extensive the issue is?"]
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_after_first_media_starts_a_new_semantic_episode(monkeypatch):
+    pipeline = _pipeline()
+    seen_texts = []
+
+    async def analyze_turn(**kwargs):
+        seen_texts.append(kwargs["caller_text"])
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    service_object="fixture",
+                    service_action=ServiceAction.REPAIR,
+                )
+            ),
+            DirectQuestionAssessment(),
+        )
+
+    async def capture_base_speak(_self, _text, **_kwargs):
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+
+    pipeline._caller_turn_number = 1
+    await pipeline._handle_caller_speech("The fixture is leaking.", caller_turn=1)
+    await pipeline._on_response_first_media_sent(1)
+    await pipeline.on_playback_receipt(
+        PlaybackReceipt(1, 1, "first_media", PlaybackStatus.PLAYED)
+    )
+    pipeline._response_turn_number = 1
+
+    pipeline._caller_turn_number = 2
+    pipeline._mark_caller_activity()
+    await pipeline._handle_caller_speech("Actually, it is a drain.", caller_turn=2)
+
+    assert seen_texts == ["The fixture is leaking.", "Actually, it is a drain."]
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_semantic_episode_bound_starts_a_fresh_episode(monkeypatch):
+    pipeline = _pipeline()
+    monkeypatch.setattr(pipeline, "MAX_SEMANTIC_EPISODE_FRAGMENTS", 1)
+
+    first = pipeline._begin_or_extend_semantic_episode(
+        caller_text="First independent question.",
+        caller_turn=1,
+        committed_at=1.0,
+    )
+    pipeline._intake_state.intent = Intent.SERVICE_REQUEST
+
+    second = pipeline._begin_or_extend_semantic_episode(
+        caller_text="Second independent question.",
+        caller_turn=2,
+        committed_at=2.0,
+    )
+
+    assert second is not first
+    assert second.fragments == ["Second independent question."]
+    assert pipeline._intake_state.intent == Intent.UNKNOWN
     await pipeline._http_client.aclose()
 
 

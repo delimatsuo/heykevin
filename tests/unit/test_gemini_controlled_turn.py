@@ -19,6 +19,10 @@ from app.services.gemini_controlled_pipeline import (
     require_controlled_provider,
 )
 from app.services.gemini_controlled_turn import (
+    CallerTurnCompleteness,
+    DIRECT_QUESTION_ASSESSMENT_SCHEMA,
+    DirectQuestionAssessment,
+    DirectQuestionTopic,
     GEMINI_CONTROLLED_MODEL,
     CONTROLLED_OBSERVATION_SCHEMA,
     DirectAnswerKind,
@@ -29,6 +33,7 @@ from app.services.gemini_controlled_turn import (
     ValidationReason,
     deterministic_spoken_fallback,
     parse_controlled_observation,
+    parse_direct_question_assessment,
     parse_observation,
     validate_spoken_turn,
 )
@@ -72,6 +77,25 @@ def test_model_cannot_return_free_form_direct_answer_text():
 
     with pytest.raises(RuntimeError, match=ValidationReason.INVALID_SCHEMA.value):
         parse_controlled_observation(payload)
+
+
+def test_direct_question_assessment_is_typed_and_cannot_carry_free_form_speech():
+    assert DIRECT_QUESTION_ASSESSMENT_SCHEMA["required"] == ["topic", "completeness"]
+    assert parse_direct_question_assessment(
+        {"topic": "service_scope", "completeness": "incomplete"}
+    ) == DirectQuestionAssessment(
+        topic=DirectQuestionTopic.SERVICE_SCOPE,
+        completeness=CallerTurnCompleteness.INCOMPLETE,
+    )
+
+    with pytest.raises(RuntimeError, match=ValidationReason.INVALID_SCHEMA.value):
+        parse_direct_question_assessment(
+            {
+                "topic": "pricing",
+                "completeness": "complete",
+                "spoken_text": "Pricing is $10.",
+            }
+        )
 
 
 @pytest.mark.parametrize(

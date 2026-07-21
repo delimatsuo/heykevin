@@ -18,7 +18,10 @@ from app.config import (
 )
 from app.services.dialogue_planner import ActionName, NextAction, plan_next_action
 from app.services.gemini_controlled_turn import (
+    CallerTurnCompleteness,
     DirectAnswerKind,
+    DirectQuestionAssessment,
+    DirectQuestionTopic,
     GEMINI_CONTROLLED_MODEL,
     GeminiControlledTurnGenerator,
     PresenceReplyKind,
@@ -49,6 +52,7 @@ from app.services.voice_pipeline import (
 from app.services.voice_turn_coordinator import (
     CoordinatorDirective,
     PlaybackReceipt,
+    PlaybackStatus,
     TurnLifecycle,
     VoiceTurnCoordinator,
 )
@@ -140,10 +144,29 @@ class _PresenceContext:
     asked_slot: str = ""
 
 
+@dataclass(slots=True)
+class _CallerSemanticEpisode:
+    """One caller thought, which can span several transport-level commits."""
+
+    revision: int
+    fragments: list[str]
+    caller_turn: int
+    committed_at: float
+    intake_state_snapshot: IntakeState
+    pending_reply_slot_snapshot: str
+    presence_reply_pending_snapshot: bool
+    suspended_presence_context_snapshot: _PresenceContext | None
+    response_turn: int | None = None
+    assistant_text: str = ""
+
+
 class GeminiControlledPipeline(VoicePipeline):
     """Deepgram -> controlled Gemini text -> ElevenLabs, guarded to staging."""
 
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 0.25
+    MAX_SEMANTIC_EPISODE_FRAGMENTS = 6
+    MAX_SEMANTIC_EPISODE_CHARS = 480
+    SEMANTIC_EPISODE_SETTLEMENT_SECONDS = 2.5
 
     def __init__(
         self,
@@ -159,11 +182,12 @@ class GeminiControlledPipeline(VoicePipeline):
         caller_phone: str = "",
         call_started_at: Optional[float] = None,
     ) -> None:
+        self._downstream_first_media_sent = on_response_first_media_sent
         super().__init__(
             on_audio_out=on_audio_out,
             on_transcript=on_transcript,
             on_clear_audio=on_clear_audio,
-            on_response_first_media_sent=on_response_first_media_sent,
+            on_response_first_media_sent=self._on_response_first_media_sent,
             on_response_end_media_sent=on_response_end_media_sent,
             on_call_complete=on_call_complete,
             on_urgency_detected=on_urgency_detected,
@@ -201,6 +225,273 @@ class GeminiControlledPipeline(VoicePipeline):
         self._last_played_question: tuple[str, str] | None = None
         self._playback_question_candidates: dict[int, tuple[str, str]] = {}
         self._active_generation_task: asyncio.Task | None = None
+        self._semantic_episode: _CallerSemanticEpisode | None = None
+        self._semantic_episode_revision = 0
+        self._semantic_episodes_by_response_turn: dict[int, _CallerSemanticEpisode] = {}
+        self._semantic_episode_settlement_task: asyncio.Task | None = None
+        self._pending_transcripts_by_response_turn: dict[int, str] = {}
+
+    def _begin_or_extend_semantic_episode(
+        self,
+        *,
+        caller_text: str,
+        caller_turn: int,
+        committed_at: float,
+    ) -> _CallerSemanticEpisode:
+        episode = self._semantic_episode
+        if episode is not None and (
+            len(episode.fragments) >= self.MAX_SEMANTIC_EPISODE_FRAGMENTS
+            or len(" ".join(episode.fragments)) + len(caller_text)
+            > self.MAX_SEMANTIC_EPISODE_CHARS
+        ):
+            self._discard_semantic_episode(reason="episode_bound")
+            episode = None
+        if episode is None:
+            self._semantic_episode_revision += 1
+            episode = _CallerSemanticEpisode(
+                revision=self._semantic_episode_revision,
+                fragments=[caller_text],
+                caller_turn=caller_turn,
+                committed_at=committed_at,
+                intake_state_snapshot=IntakeState.from_dict(self._intake_state.to_dict()),
+                pending_reply_slot_snapshot=self._pending_reply_slot,
+                presence_reply_pending_snapshot=self._presence_reply_pending,
+                suspended_presence_context_snapshot=self._suspended_presence_context,
+            )
+            self._semantic_episode = episode
+            return episode
+
+        episode.fragments.append(caller_text)
+        episode.caller_turn = caller_turn
+        episode.committed_at = committed_at
+        episode.response_turn = None
+        episode.assistant_text = ""
+        return episode
+
+    def _cancel_semantic_episode_settlement(self) -> None:
+        task = self._semantic_episode_settlement_task
+        self._semantic_episode_settlement_task = None
+        if (
+            task is not None
+            and not task.done()
+            and task is not asyncio.current_task()
+        ):
+            task.cancel()
+
+    def _restore_semantic_episode(
+        self,
+        *,
+        reason: str,
+        restore_presence_authority: bool = False,
+    ) -> None:
+        """Discard speculative state while retaining fragments for the next commit."""
+        episode = self._semantic_episode
+        if episode is None:
+            return
+        if episode.response_turn is not None:
+            self._semantic_episodes_by_response_turn.pop(episode.response_turn, None)
+        self._intake_state = IntakeState.from_dict(episode.intake_state_snapshot.to_dict())
+        self._pending_reply_slot = episode.pending_reply_slot_snapshot
+        self._presence_reply_pending = episode.presence_reply_pending_snapshot
+        self._suspended_presence_context = episode.suspended_presence_context_snapshot
+        self._pending_speech_contract = None
+        episode.response_turn = None
+        episode.assistant_text = ""
+        presence_restored = False
+        if restore_presence_authority and episode.presence_reply_pending_snapshot:
+            presence_restored = self._turn_coordinator.restore_unplayed_presence_resolution(
+                episode.caller_turn
+            )
+        _log_voice_timing(
+            "controlled_semantic_episode_reset",
+            self._call_sid,
+            episode_revision=episode.revision,
+            caller_turn=episode.caller_turn,
+            fragments=len(episode.fragments),
+            reason=reason,
+            presence_restored=presence_restored,
+        )
+
+    def _discard_semantic_episode(self, *, reason: str) -> None:
+        episode = self._semantic_episode
+        if episode is None:
+            return
+        self._restore_semantic_episode(reason=reason)
+        self._semantic_episode = None
+
+    async def _on_response_first_media_sent(self, response_turn: int) -> object:
+        """Request a first-media mark without treating it as a playback receipt."""
+        if self._downstream_first_media_sent is not None:
+            try:
+                accepted = await self._downstream_first_media_sent(response_turn)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._fail_first_media_delivery(
+                    response_turn=response_turn,
+                    reason="first_media_mark_error",
+                )
+                _log_voice_exception(
+                    "controlled_first_media_mark_error",
+                    error,
+                    self._call_sid,
+                )
+                return False
+            if accepted is False:
+                self._fail_first_media_delivery(
+                    response_turn=response_turn,
+                    reason="first_media_mark_rejected",
+                )
+            return accepted
+        return None
+
+    def _promote_semantic_episode_after_first_media_receipt(
+        self,
+        *,
+        response_turn: int,
+    ) -> None:
+        episode = self._semantic_episodes_by_response_turn.pop(response_turn, None)
+        if episode is None:
+            return
+        if self._semantic_episode is episode:
+            self._semantic_episode = None
+        self._cancel_semantic_episode_settlement()
+        if episode.assistant_text:
+            self._pending_transcripts_by_response_turn[response_turn] = (
+                episode.assistant_text
+            )
+        _log_voice_timing(
+            "controlled_semantic_episode_promoted",
+            self._call_sid,
+            episode_revision=episode.revision,
+            caller_turn=episode.caller_turn,
+            fragments=len(episode.fragments),
+            response_turn=response_turn,
+            receipt="first_media_played",
+        )
+
+    def _fail_first_media_delivery(
+        self,
+        *,
+        response_turn: int,
+        reason: str,
+    ) -> None:
+        episode = self._semantic_episodes_by_response_turn.get(response_turn)
+        if episode is not None:
+            if self._semantic_episode is episode:
+                self._discard_semantic_episode(reason=reason)
+            else:
+                self._semantic_episodes_by_response_turn.pop(response_turn, None)
+        self._pending_transcripts_by_response_turn.pop(response_turn, None)
+        recovered = self._turn_coordinator.delivery_failed(response_turn)
+        if episode is None:
+            return
+        _log_voice_timing(
+            "controlled_semantic_episode_rollback",
+            self._call_sid,
+            episode_revision=episode.revision,
+            caller_turn=episode.caller_turn,
+            response_turn=response_turn,
+            reason=reason,
+            recovered=recovered,
+        )
+
+    def _rollback_semantic_episode_after_failed_first_media_receipt(
+        self,
+        *,
+        response_turn: int,
+        status: PlaybackStatus,
+    ) -> None:
+        self._fail_first_media_delivery(
+            response_turn=response_turn,
+            reason=f"first_media_{status.value}",
+        )
+
+    async def _publish_transcript_after_response_end(
+        self,
+        *,
+        response_turn: int,
+    ) -> None:
+        transcript_text = self._pending_transcripts_by_response_turn.pop(
+            response_turn,
+            "",
+        )
+        if not transcript_text:
+            return
+        self._conversation.append({"role": "assistant", "content": transcript_text})
+        if len(self._conversation) > 30:
+            self._conversation = self._conversation[-30:]
+        try:
+            await self.on_transcript("Kevin", transcript_text)
+        except Exception as error:
+            _log_voice_exception(
+                "controlled_transcript_after_response_end_failed",
+                error,
+                self._call_sid,
+            )
+
+    def _schedule_semantic_episode_settlement(
+        self,
+        *,
+        episode_revision: int,
+        caller_turn: int,
+    ) -> None:
+        self._cancel_semantic_episode_settlement()
+        self._semantic_episode_settlement_task = asyncio.create_task(
+            self._settle_incomplete_semantic_episode(
+                episode_revision=episode_revision,
+                caller_turn=caller_turn,
+            )
+        )
+
+    async def _settle_incomplete_semantic_episode(
+        self,
+        *,
+        episode_revision: int,
+        caller_turn: int,
+    ) -> None:
+        """Ask for one completion only if the caller thought remains unfinished."""
+        try:
+            await asyncio.sleep(self.SEMANTIC_EPISODE_SETTLEMENT_SECONDS)
+            async with self._response_lock:
+                episode = self._semantic_episode
+                if (
+                    episode is None
+                    or episode.revision != episode_revision
+                    or episode.caller_turn != caller_turn
+                    or episode.assistant_text
+                    or self._caller_turn_number != caller_turn
+                ):
+                    return
+                if not self._turn_coordinator.begin_semantic_settlement(caller_turn):
+                    return
+                message = (
+                    "Lo siento, ¿puede terminar su pregunta?"
+                    if self._intake_state.language.casefold().startswith("es")
+                    else "I'm sorry, could you finish your question?"
+                )
+                self._pending_speech_contract = _PendingSpeechContract(
+                    expects_input=True,
+                    question_text=message,
+                    kind="fallback",
+                )
+                _log_voice_timing(
+                    "controlled_semantic_episode_settlement_started",
+                    self._call_sid,
+                    episode_revision=episode_revision,
+                    caller_turn=caller_turn,
+                )
+                await self._speak(
+                    message,
+                    source="fallback",
+                    caller_turn=caller_turn,
+                    transcript_after_response_end=message,
+                )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._semantic_episode_settlement_task is asyncio.current_task():
+                self._semantic_episode_settlement_task = None
 
     def _log_cohort_configuration(self) -> None:
         _log_voice_timing(
@@ -246,6 +537,17 @@ class GeminiControlledPipeline(VoicePipeline):
     def _mark_caller_activity(self):
         state_before_activity = self._turn_coordinator.state
         current_response_turn = self._turn_coordinator.current_response_turn
+        self._cancel_semantic_episode_settlement()
+        if self._semantic_episode is not None:
+            # A later transport commit before first outbound media continues the
+            # same caller thought. Revert any candidate facts or transcript
+            # intent before its task is cancelled, then assemble the next commit.
+            self._restore_semantic_episode(
+                reason="caller_continuation",
+                restore_presence_authority=True,
+            )
+        if current_response_turn is not None:
+            self._pending_transcripts_by_response_turn.pop(current_response_turn, None)
         if state_before_activity in {
             TurnLifecycle.REPROMPTING,
             TurnLifecycle.AWAITING_PRESENCE,
@@ -377,6 +679,60 @@ class GeminiControlledPipeline(VoicePipeline):
             question_required=planned_action.question_required,
         )
 
+    def _reconcile_direct_answer_kind(
+        self,
+        *,
+        extracted_kind: DirectAnswerKind | None,
+        assessment: DirectQuestionAssessment,
+    ) -> DirectAnswerKind | None:
+        """Require independent semantic authority before any direct answer is spoken."""
+        if assessment.topic == DirectQuestionTopic.PRICING:
+            resolved = DirectAnswerKind.PRICING_REQUIRES_REVIEW
+        elif assessment.topic == DirectQuestionTopic.SERVICE_SCOPE:
+            resolved = (
+                DirectAnswerKind.SCOPE_SUPPORTED
+                if self._intake_state.business_scope == BusinessScope.IN_SCOPE
+                else DirectAnswerKind.SCOPE_REQUIRES_REVIEW
+            )
+        else:
+            resolved = None
+        _log_voice_timing(
+            "controlled_direct_answer_reconciled",
+            self._call_sid,
+            extracted_kind=extracted_kind.value if extracted_kind else "none",
+            assessment_topic=assessment.topic.value,
+            resolved_kind=resolved.value if resolved else "none",
+            mismatch=(
+                extracted_kind is not None
+                and resolved is not None
+                and extracted_kind != resolved
+            ),
+        )
+        return resolved
+
+    @staticmethod
+    def _safe_direct_answer_fallback_action(action: NextAction) -> NextAction:
+        """Never turn an unverified direct-answer intent into a pricing statement."""
+        if action.question_required and action.allowed_slots:
+            return NextAction(
+                name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
+                reason="direct-question semantics were not independently established",
+                allowed_slots=action.allowed_slots[:1],
+                forbidden_slots=action.forbidden_slots,
+                memory_facts_safe_to_use=action.memory_facts_safe_to_use,
+                max_spoken_shape="ask one concise clarifying question",
+                tool_calls_allowed=False,
+                question_required=True,
+            )
+        return NextAction(
+            name=ActionName.TAKE_MESSAGE,
+            reason="direct-question semantics were not independently established",
+            forbidden_slots=action.forbidden_slots,
+            memory_facts_safe_to_use=action.memory_facts_safe_to_use,
+            max_spoken_shape="acknowledge the message without asserting an answer",
+            tool_calls_allowed=False,
+        )
+
     async def _process_utterance(
         self,
         text: str,
@@ -413,6 +769,7 @@ class GeminiControlledPipeline(VoicePipeline):
                     error,
                     self._call_sid,
                 )
+                self._discard_semantic_episode(reason="generation_failure")
                 recovering_presence = (
                     self._turn_coordinator.state == TurnLifecycle.RESOLVING_PRESENCE
                 )
@@ -497,6 +854,12 @@ class GeminiControlledPipeline(VoicePipeline):
                 reason="stale_caller_turn",
             )
             return
+        episode = self._begin_or_extend_semantic_episode(
+            caller_text=caller_text,
+            caller_turn=resolved_turn,
+            committed_at=resolved_committed_at,
+        )
+        semantic_text = " ".join(episode.fragments)
         presence_context = (
             self._suspended_presence_context
             if self._presence_reply_pending
@@ -509,16 +872,32 @@ class GeminiControlledPipeline(VoicePipeline):
             else self._turn_coordinator.begin_generation(resolved_turn)
         )
         if not begin_accepted:
+            self._discard_semantic_episode(reason="generation_not_accepted")
             return
         self._active_generation_task = asyncio.current_task()
         try:
-            controlled_observation = await self._turn_generator.extract_observation(
-                caller_text=caller_text,
-                state=self._intake_state,
-                caller_turn=resolved_turn,
-                presence_check_active=presence_context is not None,
-                suspended_slot=presence_context.asked_slot if presence_context else "",
-            )
+            analyze_turn = getattr(self._turn_generator, "analyze_caller_turn", None)
+            if analyze_turn is not None:
+                controlled_observation, direct_assessment = await analyze_turn(
+                    caller_text=semantic_text,
+                    state=self._intake_state,
+                    caller_turn=resolved_turn,
+                    presence_check_active=presence_context is not None,
+                    suspended_slot=(
+                        presence_context.asked_slot if presence_context else ""
+                    ),
+                )
+            else:
+                controlled_observation = await self._turn_generator.extract_observation(
+                    caller_text=semantic_text,
+                    state=self._intake_state,
+                    caller_turn=resolved_turn,
+                    presence_check_active=presence_context is not None,
+                    suspended_slot=(
+                        presence_context.asked_slot if presence_context else ""
+                    ),
+                )
+                direct_assessment = DirectQuestionAssessment()
         finally:
             if self._active_generation_task is asyncio.current_task():
                 self._active_generation_task = None
@@ -529,6 +908,29 @@ class GeminiControlledPipeline(VoicePipeline):
                 caller_turn=resolved_turn,
                 reason="caller_activity",
             )
+            return
+
+        urgent_signal = find_urgent_signal(semantic_text)
+        if (
+            presence_context is None
+            and direct_assessment.completeness == CallerTurnCompleteness.INCOMPLETE
+            and not urgent_signal
+        ):
+            self._restore_semantic_episode(reason="incomplete_semantic_turn")
+            deferred = self._turn_coordinator.defer_generation(resolved_turn)
+            _log_voice_timing(
+                "controlled_semantic_episode_deferred",
+                self._call_sid,
+                episode_revision=episode.revision,
+                caller_turn=resolved_turn,
+                fragments=len(episode.fragments),
+                deferred=deferred,
+            )
+            if deferred:
+                self._schedule_semantic_episode_settlement(
+                    episode_revision=episode.revision,
+                    caller_turn=resolved_turn,
+                )
             return
 
         if presence_context is not None:
@@ -572,7 +974,6 @@ class GeminiControlledPipeline(VoicePipeline):
             self._suspended_presence_context = None
 
         observation = self._authorize_observation(controlled_observation.facts)
-        urgent_signal = find_urgent_signal(caller_text)
         if urgent_signal:
             observation = CallerObservation(
                 language=observation.language,
@@ -594,17 +995,17 @@ class GeminiControlledPipeline(VoicePipeline):
             self._intake_state,
             require_caller_name=True,
         )
-        direct_answer_kind = controlled_observation.direct_answer_kind
-        if (
-            direct_answer_kind == DirectAnswerKind.SCOPE_SUPPORTED
-            and self._intake_state.business_scope != BusinessScope.IN_SCOPE
-        ):
-            direct_answer_kind = DirectAnswerKind.SCOPE_REQUIRES_REVIEW
+        direct_answer_kind = self._reconcile_direct_answer_kind(
+            extracted_kind=controlled_observation.direct_answer_kind,
+            assessment=direct_assessment,
+        )
         action = self._direct_scope_answer_action(direct_answer_kind, action)
+        if action.name == ActionName.ANSWER_DIRECT_QUESTION and direct_answer_kind is None:
+            action = self._safe_direct_answer_fallback_action(action)
         if action.name == ActionName.ANSWER_DIRECT_QUESTION:
             validated = self._turn_generator.build_direct_turn(
                 answer_kind=direct_answer_kind,
-                caller_text=caller_text,
+                caller_text=semantic_text,
                 state=self._intake_state,
                 action=action,
                 caller_turn=resolved_turn,
@@ -614,12 +1015,12 @@ class GeminiControlledPipeline(VoicePipeline):
             deterministic = deterministic_spoken_fallback(
                 action=action,
                 state=self._intake_state,
-                caller_text=caller_text,
+                caller_text=semantic_text,
             )
             validation = validate_spoken_turn(
                 deterministic,
                 action=action,
-                caller_text=caller_text,
+                caller_text=semantic_text,
             )
             _log_voice_timing(
                 "controlled_server_turn_validation",
@@ -668,9 +1069,7 @@ class GeminiControlledPipeline(VoicePipeline):
             close_after_playback=action.name == ActionName.WRAP_UP,
             kind="fallback" if validated.fallback else "model",
         )
-        self._conversation.append({"role": "assistant", "content": spoken.spoken_text})
-        if len(self._conversation) > 30:
-            self._conversation = self._conversation[-30:]
+        episode.assistant_text = spoken.spoken_text
         _log_voice_event(
             "assistant_response_ready",
             self._call_sid,
@@ -680,7 +1079,6 @@ class GeminiControlledPipeline(VoicePipeline):
             repaired=validated.repaired,
             fallback=validated.fallback,
         )
-        await self.on_transcript("Kevin", spoken.spoken_text)
         await self._speak(
             spoken.spoken_text,
             source=source,
@@ -695,6 +1093,7 @@ class GeminiControlledPipeline(VoicePipeline):
         source: str = "runtime",
         caller_turn: int | None = None,
         caller_committed_at: float | None = None,
+        transcript_after_response_end: str = "",
     ):
         resolved_caller_turn = caller_turn or self._caller_turn_number
         contract = self._pending_speech_contract
@@ -728,6 +1127,19 @@ class GeminiControlledPipeline(VoicePipeline):
                 reason="stale_turn",
             )
             return None
+        episode = self._semantic_episode
+        if (
+            episode is not None
+            and episode.caller_turn == resolved_caller_turn
+            and episode.assistant_text
+            and source in {"deterministic", "fallback", "model"}
+        ):
+            episode.response_turn = response_turn
+            self._semantic_episodes_by_response_turn[response_turn] = episode
+        if transcript_after_response_end:
+            self._pending_transcripts_by_response_turn[response_turn] = (
+                transcript_after_response_end
+            )
         if contract.question_text:
             self._playback_question_candidates[response_turn] = (
                 contract.question_text,
@@ -741,7 +1153,14 @@ class GeminiControlledPipeline(VoicePipeline):
         )
         if delivered is False:
             self._playback_question_candidates.pop(response_turn, None)
+            self._pending_transcripts_by_response_turn.pop(response_turn, None)
             recovered = self._turn_coordinator.delivery_failed(response_turn)
+            episode = self._semantic_episodes_by_response_turn.get(response_turn)
+            if episode is not None and self._semantic_episode is episode:
+                self._restore_semantic_episode(
+                    reason="zero_outbound_media",
+                    restore_presence_authority=True,
+                )
             _log_voice_timing(
                 "controlled_delivery_failed",
                 self._call_sid,
@@ -752,6 +1171,20 @@ class GeminiControlledPipeline(VoicePipeline):
 
     async def on_playback_receipt(self, receipt: PlaybackReceipt) -> None:
         current_response_turn = self._turn_coordinator.current_response_turn
+        if (
+            receipt.phase == "first_media"
+            and receipt.turn == current_response_turn
+            and receipt.epoch == current_response_turn
+        ):
+            if receipt.status == PlaybackStatus.PLAYED:
+                self._promote_semantic_episode_after_first_media_receipt(
+                    response_turn=receipt.turn,
+                )
+            else:
+                self._rollback_semantic_episode_after_failed_first_media_receipt(
+                    response_turn=receipt.turn,
+                    status=receipt.status,
+                )
         outcome = self._turn_coordinator.resolve_playback(receipt)
         question_candidate = None
         if (
@@ -776,6 +1209,17 @@ class GeminiControlledPipeline(VoicePipeline):
         if outcome.played and question_candidate:
             self._last_played_question = question_candidate
         if (
+            receipt.phase == "response_end"
+            and receipt.turn == current_response_turn
+            and receipt.epoch == current_response_turn
+        ):
+            if receipt.status == PlaybackStatus.PLAYED:
+                await self._publish_transcript_after_response_end(
+                    response_turn=receipt.turn,
+                )
+            else:
+                self._pending_transcripts_by_response_turn.pop(receipt.turn, None)
+        if (
             outcome.played
             and self._turn_coordinator.state == TurnLifecycle.AWAITING_PRESENCE
         ):
@@ -783,6 +1227,13 @@ class GeminiControlledPipeline(VoicePipeline):
         if outcome.directive == CoordinatorDirective.HANGUP and self.on_call_complete:
             await self.on_call_complete()
             self._turn_coordinator.mark_ended()
+
+    async def stop(self):
+        self._cancel_semantic_episode_settlement()
+        self._semantic_episode = None
+        self._semantic_episodes_by_response_turn.clear()
+        self._pending_transcripts_by_response_turn.clear()
+        await super().stop()
 
     async def _silence_check_loop(self):
         try:
@@ -860,9 +1311,11 @@ class GeminiControlledPipeline(VoicePipeline):
 
     async def _unavailable_now(self):
         """Replace any pending question with one receipt-gated message request."""
+        self._cancel_semantic_episode_settlement()
         async with self._response_lock:
             if self._unavailable_said:
                 return
+            self._discard_semantic_episode(reason="owner_message_takeover")
             if not self._turn_coordinator.begin_owner_message():
                 _log_voice_timing(
                     "controlled_owner_message_suppressed",

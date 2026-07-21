@@ -224,6 +224,47 @@ class VoiceTurnCoordinator:
             and caller_turn == self._caller_turn
         )
 
+    def defer_generation(self, caller_turn: int) -> bool:
+        """Return to listening when a caller fragment is not a complete thought.
+
+        No spoken turn, slot, or close is authorized by a deferred generation.
+        The next physical caller fragment may start a new generation for the same
+        semantic episode.
+        """
+        if self.state != TurnLifecycle.GENERATING or caller_turn != self._caller_turn:
+            return False
+        self._contract = None
+        self._deadline = None
+        self.state = TurnLifecycle.LISTENING
+        return True
+
+    def begin_semantic_settlement(self, caller_turn: int) -> bool:
+        """Authorize one clarification after an unfinished caller thought settles."""
+        if (
+            self.state != TurnLifecycle.LISTENING
+            or caller_turn != self._caller_turn
+            or self._presence_resolution_required
+        ):
+            return False
+        self._contract = None
+        self._deadline = None
+        self.state = TurnLifecycle.GENERATING
+        return True
+
+    def restore_unplayed_presence_resolution(self, caller_turn: int) -> bool:
+        """Restore the replay gate when a substantive presence candidate was unheard."""
+        if (
+            self.state not in {TurnLifecycle.GENERATING, TurnLifecycle.LISTENING}
+            or caller_turn != self._caller_turn
+        ):
+            return False
+        self._contract = None
+        self._deadline = None
+        self._reprompt_count = 1
+        self._presence_resolution_required = True
+        self.state = TurnLifecycle.LISTENING
+        return True
+
     def begin_failure_recovery(self, caller_turn: int) -> bool:
         """Authorize an audible retry without bypassing the active lifecycle."""
         if (

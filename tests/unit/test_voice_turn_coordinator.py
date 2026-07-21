@@ -258,7 +258,6 @@ def test_caller_activity_cancels_stale_generation_and_no_input_deadline():
         caller_turn=1,
         expects_input=True,
     ) is False
-
     assert coordinator.begin_generation(2)
     assert coordinator.begin_playback(
         response_turn=2,
@@ -270,6 +269,63 @@ def test_caller_activity_cancels_stale_generation_and_no_input_deadline():
     clock.now += 30
     assert coordinator.state == TurnLifecycle.LISTENING
     assert coordinator.due_action() == CoordinatorDirective.NONE
+
+
+def test_incomplete_semantic_fragment_returns_to_listening_without_authorizing_speech():
+    coordinator = VoiceTurnCoordinator()
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.defer_generation(1) is True
+    assert coordinator.state == TurnLifecycle.LISTENING
+    assert coordinator.current_response_turn is None
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+    ) is False
+    assert coordinator.begin_generation(2) is True
+
+
+def test_semantic_settlement_authorizes_one_clarification_from_a_deferred_turn():
+    coordinator = VoiceTurnCoordinator()
+
+    assert coordinator.begin_generation(1)
+    assert coordinator.defer_generation(1)
+    assert coordinator.begin_semantic_settlement(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        kind="fallback",
+    )
+
+
+def test_unplayed_presence_resolution_can_be_restored_for_a_continuation():
+    coordinator = VoiceTurnCoordinator()
+    assert coordinator.begin_generation(1)
+    assert coordinator.begin_playback(
+        response_turn=1,
+        caller_turn=1,
+        expects_input=True,
+        asked_slot="callback_confirmation",
+    )
+    coordinator.resolve_playback(_receipt(1))
+    coordinator._deadline = 0
+    assert coordinator.due_action() == CoordinatorDirective.REPROMPT
+    assert coordinator.begin_playback(
+        response_turn=2,
+        caller_turn=1,
+        expects_input=True,
+        kind="reprompt",
+    )
+    coordinator.resolve_playback(_receipt(2))
+    coordinator.caller_activity()
+    assert coordinator.begin_presence_resolution(2)
+    assert coordinator.accept_presence_answer(2)
+
+    assert coordinator.restore_unplayed_presence_resolution(2)
+    assert coordinator.state == TurnLifecycle.LISTENING
+    assert coordinator.begin_presence_resolution(3)
 
 
 def test_older_caller_turn_cannot_restart_after_a_newer_turn():

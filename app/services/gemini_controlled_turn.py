@@ -34,6 +34,7 @@ GEMINI_GENERATE_URL = (
     f"{GEMINI_CONTROLLED_MODEL}:generateContent"
 )
 MAX_ORDINARY_WORDS = 16
+MAX_DIRECT_ANSWER_WORDS = 20
 MAX_SAFETY_WORDS = 80
 _QUESTION_CLAUSE_PATTERN = re.compile(
     r"(?:^|[.!?;:]\s+|\b(?:and|or)\s+)"
@@ -341,8 +342,14 @@ def validate_spoken_turn(
     if action.name == ActionName.SAFETY_GUIDANCE:
         if not _safety_is_complete(turn, caller_text=caller_text):
             return ValidationReason.SAFETY_INCOMPLETE
-    elif len(re.findall(r"\b[\w'-]+\b", turn.spoken_text)) > MAX_ORDINARY_WORDS:
-        return ValidationReason.TOO_LONG
+    else:
+        max_words = (
+            MAX_DIRECT_ANSWER_WORDS
+            if action.name == ActionName.ANSWER_DIRECT_QUESTION
+            else MAX_ORDINARY_WORDS
+        )
+        if len(re.findall(r"\b[\w'-]+\b", turn.spoken_text)) > max_words:
+            return ValidationReason.TOO_LONG
 
     return ValidationReason.VALID
 
@@ -543,6 +550,7 @@ def deterministic_spoken_fallback(
     action: NextAction,
     state: IntakeState,
     caller_text: str,
+    direct_answer_kind: DirectAnswerKind | None = None,
 ) -> SpokenTurn:
     slot = action.allowed_slots[0] if action.question_required else ""
     spanish = state.language.casefold().startswith("es")
@@ -583,10 +591,29 @@ def deterministic_spoken_fallback(
             else "This business may not handle that work. May I have your name?"
         )
     elif action.name == ActionName.ANSWER_DIRECT_QUESTION:
-        answer = (
-            "El precio depende del alcance del trabajo."
-            if spanish
-            else "Pricing depends on the work involved."
+        answer = {
+            DirectAnswerKind.PRICING_REQUIRES_REVIEW: (
+                "El precio depende del alcance del trabajo."
+                if spanish
+                else "Pricing depends on the work involved."
+            ),
+            DirectAnswerKind.SCOPE_SUPPORTED: (
+                "Sí, este negocio realiza ese tipo de trabajo."
+                if spanish
+                else "Yes, this business handles that type of work."
+            ),
+            DirectAnswerKind.SCOPE_REQUIRES_REVIEW: (
+                "No puedo confirmar ese servicio."
+                if spanish
+                else "I can't confirm that service."
+            ),
+        }.get(
+            direct_answer_kind,
+            (
+                "El precio depende del alcance del trabajo."
+                if spanish
+                else "Pricing depends on the work involved."
+            ),
         )
         text = f"{answer} {prompt}" if prompt else answer
     elif action.name == ActionName.TAKE_MESSAGE:
@@ -846,6 +873,7 @@ class GeminiControlledTurnGenerator:
             action=action,
             state=state,
             caller_text=caller_text,
+            direct_answer_kind=answer_kind,
         )
         fallback_reason = validate_spoken_turn(
             fallback,

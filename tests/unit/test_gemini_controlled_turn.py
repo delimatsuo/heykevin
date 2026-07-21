@@ -11,6 +11,7 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15555550100")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("USER_PHONE", "+15555550101")
 
+import app.services.gemini_controlled_turn as controlled_turn
 from app.services.dialogue_planner import ActionName, NextAction
 from app.services.gemini_controlled_pipeline import (
     ControlledPipelineUnavailable,
@@ -466,6 +467,68 @@ def test_scope_answer_and_server_owned_question_are_composed_without_second_call
     assert result.turn.spoken_text == (
         "Yes, this business handles that type of work. May I have your name?"
     )
+
+
+def test_scope_answer_with_follow_up_uses_the_direct_answer_budget():
+    generator = GeminiControlledTurnGenerator(
+        api_key="secret-not-logged",
+        http_client=_FakeClient([]),
+        call_sid="CA_private",
+        receptionist_prompt="system",
+    )
+
+    result = generator.build_direct_turn(
+        answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+        caller_text="Does the business handle fixture replacement?",
+        state=IntakeState.new(call_sid="CA_private"),
+        action=NextAction(
+            name=ActionName.ANSWER_DIRECT_QUESTION,
+            reason="scope",
+            allowed_slots=("job_complexity",),
+            question_required=True,
+        ),
+        caller_turn=1,
+    )
+
+    assert result.fallback is False
+    assert result.turn.spoken_text == (
+        "Yes, this business handles that type of work. "
+        "Could you briefly describe how extensive the issue is?"
+    )
+
+
+def test_direct_answer_fallback_preserves_resolved_scope_semantics(monkeypatch):
+    generator = GeminiControlledTurnGenerator(
+        api_key="secret-not-logged",
+        http_client=_FakeClient([]),
+        call_sid="CA_private",
+        receptionist_prompt="system",
+    )
+    validation_results = iter((ValidationReason.TOO_LONG, ValidationReason.VALID))
+    monkeypatch.setattr(
+        controlled_turn,
+        "validate_spoken_turn",
+        lambda *_args, **_kwargs: next(validation_results),
+    )
+
+    result = generator.build_direct_turn(
+        answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+        caller_text="Does the business handle fixture replacement?",
+        state=IntakeState.new(call_sid="CA_private"),
+        action=NextAction(
+            name=ActionName.ANSWER_DIRECT_QUESTION,
+            reason="scope",
+            allowed_slots=("caller_name",),
+            question_required=True,
+        ),
+        caller_turn=1,
+    )
+
+    assert result.fallback is True
+    assert result.turn.spoken_text == (
+        "Yes, this business handles that type of work. May I have your name?"
+    )
+    assert "pricing" not in result.turn.spoken_text.casefold()
 
 
 def test_out_of_scope_message_offer_satisfies_its_callback_contract():

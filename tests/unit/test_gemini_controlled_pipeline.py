@@ -11,6 +11,7 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15555550100")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("USER_PHONE", "+15555550101")
 
+from app.services.dialogue_planner import ActionName, NextAction
 from app.services.gemini_controlled_pipeline import (
     GeminiControlledPipeline,
     _PendingSpeechContract,
@@ -1586,6 +1587,57 @@ async def test_unavailable_direct_question_assessment_never_falls_back_to_pricin
     await pipeline._handle_caller_speech("How much is it?", caller_turn=1)
 
     assert spoken == ["Could you briefly describe how extensive the issue is?"]
+    await pipeline._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scope_question_with_complexity_followup_never_falls_back_to_pricing(
+    monkeypatch,
+):
+    pipeline = _pipeline()
+
+    async def analyze_turn(**_kwargs):
+        return (
+            ControlledObservation(
+                facts=CallerObservation(
+                    business_scope=BusinessScope.IN_SCOPE,
+                    intent=Intent.SERVICE_REQUEST,
+                    service_object="fixture",
+                    service_action=ServiceAction.REPLACE,
+                ),
+                direct_answer_kind=DirectAnswerKind.SCOPE_SUPPORTED,
+            ),
+            DirectQuestionAssessment(topic=DirectQuestionTopic.SERVICE_SCOPE),
+        )
+
+    spoken = []
+
+    async def capture_base_speak(_self, text, **_kwargs):
+        spoken.append(text)
+        return True
+
+    monkeypatch.setattr(pipeline._turn_generator, "analyze_caller_turn", analyze_turn)
+    monkeypatch.setattr(
+        "app.services.gemini_controlled_pipeline.plan_next_action",
+        lambda *_args, **_kwargs: NextAction(
+            name=ActionName.ASK_ONE_CLARIFYING_QUESTION,
+            reason="need complexity",
+            allowed_slots=("job_complexity",),
+            question_required=True,
+        ),
+    )
+    monkeypatch.setattr(VoicePipeline, "_speak", capture_base_speak)
+    pipeline._caller_turn_number = 1
+
+    await pipeline._handle_caller_speech(
+        "Does the business handle fixture replacement?", caller_turn=1
+    )
+
+    assert spoken == [
+        "Yes, this business handles that type of work. "
+        "Could you briefly describe how extensive the issue is?"
+    ]
+    assert "pricing" not in spoken[0].casefold()
     await pipeline._http_client.aclose()
 
 

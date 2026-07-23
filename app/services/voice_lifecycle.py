@@ -23,8 +23,16 @@ class VoiceSensitivity(str, Enum):
 class VoiceEventKind(str, Enum):
     RESPONSE_AUTHORIZED = "response_authorized"
     SEMANTIC_ACT_CONFIRMED = "semantic_act_confirmed"
+    TTS_BOUND = "tts_bound"
+    PLAYOUT_BOUND = "playout_bound"
     TRANSPORT_RESOLVED = "transport_resolved"
+    PLAYOUT_PARTIAL = "playout_partial"
+    PLAYOUT_CLEARED = "playout_cleared"
+    PLAYOUT_INTERRUPTED = "playout_interrupted"
+    PLAYOUT_RECONNECTED = "playout_reconnected"
     CALLER_PLAYBACK_OBSERVED = "caller_playback_observed"
+    ACT_FAILED = "act_failed"
+    ACT_TIMED_OUT = "act_timed_out"
 
 
 class VoiceSemanticActKind(str, Enum):
@@ -32,6 +40,14 @@ class VoiceSemanticActKind(str, Enum):
     QUESTION = "question"
     SAFETY = "safety"
     ACKNOWLEDGEMENT = "acknowledgement"
+    PRESENCE_CHECK = "presence_check"
+    REPAIR = "repair"
+    CLOSING = "closing"
+    REPEAT = "repeat"
+    SLOWER_SPEECH = "slower_speech"
+    LONGER_WAIT = "longer_wait"
+    OPT_OUT = "opt_out"
+    VOICEMAIL = "voicemail"
 
 
 class VoiceCommandKind(str, Enum):
@@ -76,13 +92,31 @@ class VoiceSessionBinding:
 
 @dataclass(frozen=True, slots=True)
 class VoicePayload:
+    """Payload-safe lifecycle facts; correlation IDs are application-minted opaque IDs.
+
+    They must not be derived from or copied into provider/Twilio payloads or telemetry.
+    """
+
     ordinal: int | None = None
     duration_ms: int | None = None
+    text_digest: str | None = None
+    audio_id: str | None = None
+    playout_id: str | None = None
 
     def __post_init__(self) -> None:
         for name, value in (("ordinal", self.ordinal), ("duration_ms", self.duration_ms)):
             if value is not None:
                 _nonnegative(value, name)
+        if self.text_digest is not None and (
+            not isinstance(self.text_digest, str)
+            or len(self.text_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.text_digest)
+        ):
+            raise ValueError("text_digest is invalid")
+        for name in ("audio_id", "playout_id"):
+            value = getattr(self, name)
+            if value is not None:
+                _identifier(value, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +157,7 @@ class VoiceEvent:
         payload = data["payload"]
         if not isinstance(binding, dict) or set(binding) != {"environment", "contractor_binding", "call_binding", "stream_binding", "epoch"}:
             raise ValueError("invalid voice event binding")
-        if not isinstance(payload, dict) or set(payload) - {"ordinal", "duration_ms"}:
+        if not isinstance(payload, dict) or set(payload) - {"ordinal", "duration_ms", "text_digest", "audio_id", "playout_id"}:
             raise ValueError("invalid voice event payload")
         return cls(
             schema_version=data["schema_version"],
@@ -175,7 +209,7 @@ class VoiceLifecycle:
         self.binding = binding
         self._sequence = -1
         self._at_ms = -1
-        self._acts: dict[str, tuple[VoiceEventKind, str, str, VoiceSemanticActKind]] = {}
+        self._acts: dict[str, tuple[VoiceEventKind, str, str, VoiceSemanticActKind, str | None, str | None, str | None]] = {}
         self._commands: dict[str, VoiceCommand] = {}
         self.rejected_event_count = 0
         self.idempotent_command_count = 0
@@ -188,8 +222,16 @@ class VoiceLifecycle:
         required_source = {
             VoiceEventKind.RESPONSE_AUTHORIZED: VoiceSource.LOCAL_AUTHORITATIVE,
             VoiceEventKind.SEMANTIC_ACT_CONFIRMED: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.TTS_BOUND: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.PLAYOUT_BOUND: VoiceSource.LOCAL_AUTHORITATIVE,
             VoiceEventKind.TRANSPORT_RESOLVED: VoiceSource.TWILIO_AUTHENTICATED,
+            VoiceEventKind.PLAYOUT_PARTIAL: VoiceSource.TWILIO_AUTHENTICATED,
+            VoiceEventKind.PLAYOUT_CLEARED: VoiceSource.TWILIO_AUTHENTICATED,
+            VoiceEventKind.PLAYOUT_INTERRUPTED: VoiceSource.TWILIO_AUTHENTICATED,
+            VoiceEventKind.PLAYOUT_RECONNECTED: VoiceSource.LOCAL_AUTHORITATIVE,
             VoiceEventKind.CALLER_PLAYBACK_OBSERVED: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.ACT_FAILED: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.ACT_TIMED_OUT: VoiceSource.LOCAL_AUTHORITATIVE,
         }[event.kind]
         if event.source is not required_source:
             self.rejected_event_count += 1
@@ -197,19 +239,58 @@ class VoiceLifecycle:
         prior_record = self._acts.get(event.semantic_act_id)
         prior = prior_record[0] if prior_record is not None else None
         expected = {
-            VoiceEventKind.RESPONSE_AUTHORIZED: None,
-            VoiceEventKind.SEMANTIC_ACT_CONFIRMED: VoiceEventKind.RESPONSE_AUTHORIZED,
-            VoiceEventKind.TRANSPORT_RESOLVED: VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
-            VoiceEventKind.CALLER_PLAYBACK_OBSERVED: VoiceEventKind.TRANSPORT_RESOLVED,
+            VoiceEventKind.RESPONSE_AUTHORIZED: set(),
+            VoiceEventKind.SEMANTIC_ACT_CONFIRMED: {VoiceEventKind.RESPONSE_AUTHORIZED},
+            VoiceEventKind.TTS_BOUND: {VoiceEventKind.SEMANTIC_ACT_CONFIRMED},
+            VoiceEventKind.PLAYOUT_BOUND: {VoiceEventKind.TTS_BOUND, VoiceEventKind.PLAYOUT_RECONNECTED},
+            VoiceEventKind.TRANSPORT_RESOLVED: {VoiceEventKind.PLAYOUT_BOUND},
+            VoiceEventKind.PLAYOUT_PARTIAL: {VoiceEventKind.PLAYOUT_BOUND},
+            VoiceEventKind.PLAYOUT_CLEARED: {VoiceEventKind.PLAYOUT_BOUND},
+            VoiceEventKind.PLAYOUT_INTERRUPTED: {VoiceEventKind.PLAYOUT_BOUND},
+            VoiceEventKind.PLAYOUT_RECONNECTED: {VoiceEventKind.PLAYOUT_BOUND},
+            VoiceEventKind.CALLER_PLAYBACK_OBSERVED: {VoiceEventKind.TRANSPORT_RESOLVED},
+            VoiceEventKind.ACT_FAILED: {VoiceEventKind.RESPONSE_AUTHORIZED, VoiceEventKind.SEMANTIC_ACT_CONFIRMED, VoiceEventKind.TTS_BOUND, VoiceEventKind.PLAYOUT_BOUND, VoiceEventKind.TRANSPORT_RESOLVED},
+            VoiceEventKind.ACT_TIMED_OUT: {VoiceEventKind.RESPONSE_AUTHORIZED, VoiceEventKind.SEMANTIC_ACT_CONFIRMED, VoiceEventKind.TTS_BOUND, VoiceEventKind.PLAYOUT_BOUND, VoiceEventKind.TRANSPORT_RESOLVED},
         }[event.kind]
-        if prior is not expected:
+        if (prior is None and expected) or (prior is not None and prior not in expected):
             self.rejected_event_count += 1
             return False
-        if prior_record is not None and prior_record[1:] != (event.input_turn_id, event.generation_id, event.semantic_act_kind):
+        if prior_record is not None and prior_record[1:4] != (event.input_turn_id, event.generation_id, event.semantic_act_kind):
             self.rejected_event_count += 1
             return False
+        if event.kind is VoiceEventKind.TTS_BOUND:
+            if event.payload.text_digest is None or event.payload.audio_id is None or event.payload.playout_id is not None:
+                self.rejected_event_count += 1
+                return False
+        if event.kind is VoiceEventKind.PLAYOUT_BOUND:
+            if event.payload.text_digest is None or event.payload.audio_id is None or event.payload.playout_id is None:
+                self.rejected_event_count += 1
+                return False
+            if prior_record is None or prior_record[4:6] != (event.payload.text_digest, event.payload.audio_id):
+                self.rejected_event_count += 1
+                return False
+        if event.kind in {VoiceEventKind.TRANSPORT_RESOLVED, VoiceEventKind.PLAYOUT_PARTIAL, VoiceEventKind.PLAYOUT_CLEARED, VoiceEventKind.PLAYOUT_INTERRUPTED, VoiceEventKind.PLAYOUT_RECONNECTED, VoiceEventKind.CALLER_PLAYBACK_OBSERVED}:
+            if event.payload.text_digest is None or event.payload.audio_id is None or event.payload.playout_id is None or prior_record is None or prior_record[4:7] != (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id):
+                self.rejected_event_count += 1
+                return False
+        if event.kind in {VoiceEventKind.ACT_FAILED, VoiceEventKind.ACT_TIMED_OUT} and prior_record is not None and prior_record[4] is not None:
+            if (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id) != prior_record[4:7]:
+                self.rejected_event_count += 1
+                return False
         self._sequence, self._at_ms = event.sequence, event.at_ms
-        self._acts[event.semantic_act_id] = (event.kind, event.input_turn_id, event.generation_id, event.semantic_act_kind)
+        payload = event.payload
+        prior_text = prior_record[4] if prior_record is not None else None
+        prior_audio = prior_record[5] if prior_record is not None else None
+        prior_playout = prior_record[6] if prior_record is not None else None
+        self._acts[event.semantic_act_id] = (
+            event.kind,
+            event.input_turn_id,
+            event.generation_id,
+            event.semantic_act_kind,
+            payload.text_digest if payload.text_digest is not None else prior_text,
+            payload.audio_id if payload.audio_id is not None else prior_audio,
+            payload.playout_id if payload.playout_id is not None else prior_playout,
+        )
         if event.kind is VoiceEventKind.CALLER_PLAYBACK_OBSERVED and event.semantic_act_kind is VoiceSemanticActKind.QUESTION:
             self.pending_question_active = True
         return True

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "development_only": true,
+  "plans": [
+    {
+      "plan_id": "answer_then_question",
+      "acts": [
+        {"kind": "answer", "text": "Yes, we can help with that."},
+        {"kind": "question", "text": "What service do you need?", "question_slot": "service"}
+      ]
+    },
+    {
+      "plan_id": "safety_complete",
+      "acts": [
+        {"kind": "safety", "text": "If there is immediate danger, call emergency services now."}
+      ]
+    }
+  ]
+}

@@ -630,6 +630,16 @@ must not be stored in the repository.
 
 ### Task 1.3: Instrument the native control without changing behavior
 
+**Current execution boundary:** Until the Stage 2 isolated ingress/authentication
+contract and a staff-plus-security exact-diff review exist, this task is limited
+to the pre-implementation boundary in
+`docs/voice-native-control-instrumentation-boundary.md`. It does **not** authorize
+an edit to `gemini_pipeline.py`, `media_stream.py`, or any production-shaped route.
+The later implementation must use a new isolated bakeoff adapter and prove, with
+deterministic negative tests, that enabling the default-off measurement path does
+not change controller commands, timers, callbacks, provider calls, media writes,
+or terminal behavior.
+
 **Files:**
 
 - Update `app/services/gemini_pipeline.py`.

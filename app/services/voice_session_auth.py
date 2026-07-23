@@ -665,6 +665,7 @@ class VoiceSessionAuthenticator:
         if (
             verified is None
             or verified.ingress is not IngressKind.TOKEN_ISSUER
+            or verified.canonical_endpoint_id != "bakeoff_https"
             or verified.provider_account_digest != binding.provider_account_digest
             or verified.call_digest != binding.expected_call_digest
         ):

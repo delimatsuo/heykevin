@@ -71,8 +71,13 @@ class _EnvelopeVerifier:
 
 
 class _SignatureVerifier:
-    def __init__(self, callback_request: VerifiedTelephonyRequest | None = None) -> None:
+    def __init__(
+        self,
+        callback_request: VerifiedTelephonyRequest | None = None,
+        issuer_request: VerifiedTelephonyRequest | None = None,
+    ) -> None:
         self.callback_request = callback_request
+        self.issuer_request = issuer_request
         self.urls: list[str] = []
 
     def verify(self, *, canonical_url: str, request: object) -> VerifiedTelephonyRequest | None:
@@ -84,7 +89,9 @@ class _SignatureVerifier:
                 IngressKind.CALLBACK, canonical_endpoint_id="bakeoff_https"
             )
         if canonical_url.endswith("issuer"):
-            return _request(IngressKind.TOKEN_ISSUER, canonical_endpoint_id="bakeoff_https")
+            return self.issuer_request or _request(
+                IngressKind.TOKEN_ISSUER, canonical_endpoint_id="bakeoff_https"
+            )
         return _request()
 
 
@@ -96,10 +103,14 @@ class _CallAttestor:
         return self.call if result == "created" else None
 
 
-def _facade(binding: ExecutionBinding, request: VerifiedTelephonyRequest | None = None):
+def _facade(
+    binding: ExecutionBinding,
+    request: VerifiedTelephonyRequest | None = None,
+    issuer_request: VerifiedTelephonyRequest | None = None,
+):
     store = InMemoryVoiceAuthStore()
     envelope = _EnvelopeVerifier(binding)
-    signature = _SignatureVerifier(request)
+    signature = _SignatureVerifier(request, issuer_request)
     app = VoiceSessionAuthenticator(
         store=store, envelope_verifier=envelope, signature_verifier=signature,
         call_attestor=_CallAttestor(_call(binding)),
@@ -242,3 +253,48 @@ def test_facade_rejects_wrong_canonical_scheme():
             signature_verifier=_SignatureVerifier(), call_attestor=_CallAttestor(_call(binding)),
             canonical_urls={IngressKind.MEDIA_STREAM: "https://wrong.example/media"},
         )
+
+
+def test_issuer_rejects_cross_account_call_and_concurrent_replay():
+    binding = _binding()
+    cross_account = _request(
+        IngressKind.TOKEN_ISSUER,
+        provider_account_digest=_digest("9"),
+        canonical_endpoint_id="bakeoff_https",
+    )
+    app, _, _, _ = _facade(binding, issuer_request=cross_account)
+    assert app.register_verified_execution("approved", now_ms=1) == binding
+    assert app.bind_attested_call(binding, control_plane_result="created", now_ms=2)
+    assert app.issue_verified_capability(binding, untrusted_request="signed", now_ms=3, ttl_ms=10) is None
+
+    wrong_call = _request(
+        IngressKind.TOKEN_ISSUER,
+        call_digest=_digest("8"),
+        canonical_endpoint_id="bakeoff_https",
+    )
+    app, _, _, _ = _facade(binding, issuer_request=wrong_call)
+    assert app.register_verified_execution("approved", now_ms=1) == binding
+    assert app.bind_attested_call(binding, control_plane_result="created", now_ms=2)
+    assert app.issue_verified_capability(binding, untrusted_request="signed", now_ms=3, ttl_ms=10) is None
+
+    wrong_endpoint = _request(
+        IngressKind.TOKEN_ISSUER, canonical_endpoint_id="bakeoff_wss"
+    )
+    app, _, _, _ = _facade(binding, issuer_request=wrong_endpoint)
+    assert app.register_verified_execution("approved", now_ms=1) == binding
+    assert app.bind_attested_call(binding, control_plane_result="created", now_ms=2)
+    assert app.issue_verified_capability(binding, untrusted_request="signed", now_ms=3, ttl_ms=10) is None
+
+    app, _, _, _ = _facade(binding)
+    assert app.register_verified_execution("approved", now_ms=1) == binding
+    assert app.bind_attested_call(binding, control_plane_result="created", now_ms=2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        issued = list(
+            executor.map(
+                lambda _: app.issue_verified_capability(
+                    binding, untrusted_request="signed", now_ms=3, ttl_ms=10
+                ),
+                range(2),
+            )
+        )
+    assert sum(capability is not None for capability in issued) == 1

@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "authorization_status": "template_only",
+  "environment": "bakeoff",
+  "candidate": {
+    "arm": "B1",
+    "revision": "revision_1",
+    "source_sha": "0000000000000000000000000000000000000000",
+    "manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "custody_references": {
+    "immutable_approval_envelope": "REPLACE_WITH_IMMUTABLE_APPROVAL_REFERENCE",
+    "sealed_manifest_store": "REPLACE_WITH_IMMUTABLE_MANIFEST_CUSTODY_REFERENCE",
+    "sealed_run_validation": "REPLACE_WITH_PRE_EXECUTION_VALIDATION_RECEIPT_REFERENCE"
+  },
+  "execution_principal": {
+    "resource": "REPLACE_WITH_NONPRODUCTION_EXECUTION_PRINCIPAL_REFERENCE",
+    "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+    "production_denied_probe": "REPLACE_WITH_DENIED_PRODUCTION_ACCESS_RECEIPT_REFERENCE"
+  },
+  "telephony": {
+    "account": "REPLACE_WITH_NONPRODUCTION_TELEPHONY_ACCOUNT_REFERENCE",
+    "subaccount": "REPLACE_WITH_NONPRODUCTION_TELEPHONY_SUBACCOUNT_REFERENCE",
+    "source_number_pool": "REPLACE_WITH_NONPRODUCTION_SOURCE_POOL_REFERENCE",
+    "destination_number_pool": "REPLACE_WITH_NONPRODUCTION_DESTINATION_POOL_REFERENCE",
+    "callback_domain": "REPLACE_WITH_NONPRODUCTION_CALLBACK_DOMAIN_REFERENCE",
+    "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+    "isolation_proof": "REPLACE_WITH_TELEPHONY_ISOLATION_AND_DENY_PROBE_RECEIPT_REFERENCE"
+  },
+  "provider_adapters": {
+    "native_voice": {
+      "project_or_account": "REPLACE_WITH_NONPRODUCTION_PROVIDER_ACCOUNT_REFERENCE",
+      "region": "REPLACE_WITH_APPROVED_REGION_REFERENCE",
+      "endpoint": "REPLACE_WITH_APPROVED_ENDPOINT_REFERENCE",
+      "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+      "privacy_posture": "REPLACE_WITH_RETENTION_TRAINING_TRACING_RECORDING_CACHE_ATTESTATION_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_PROVIDER_DELETION_RESIDUE_REFERENCE"
+    },
+    "speech_to_text": {
+      "project_or_account": "REPLACE_WITH_NONPRODUCTION_PROVIDER_ACCOUNT_REFERENCE",
+      "region": "REPLACE_WITH_APPROVED_REGION_REFERENCE",
+      "endpoint": "REPLACE_WITH_APPROVED_ENDPOINT_REFERENCE",
+      "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+      "privacy_posture": "REPLACE_WITH_RETENTION_TRAINING_TRACING_RECORDING_CACHE_ATTESTATION_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_PROVIDER_DELETION_RESIDUE_REFERENCE"
+    },
+    "text_generation": {
+      "project_or_account": "REPLACE_WITH_NONPRODUCTION_PROVIDER_ACCOUNT_REFERENCE",
+      "region": "REPLACE_WITH_APPROVED_REGION_REFERENCE",
+      "endpoint": "REPLACE_WITH_APPROVED_ENDPOINT_REFERENCE",
+      "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+      "privacy_posture": "REPLACE_WITH_RETENTION_TRAINING_TRACING_RECORDING_CACHE_ATTESTATION_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_PROVIDER_DELETION_RESIDUE_REFERENCE"
+    },
+    "text_to_speech": {
+      "project_or_account": "REPLACE_WITH_NONPRODUCTION_PROVIDER_ACCOUNT_REFERENCE",
+      "region": "REPLACE_WITH_APPROVED_REGION_REFERENCE",
+      "endpoint": "REPLACE_WITH_APPROVED_ENDPOINT_REFERENCE",
+      "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+      "privacy_posture": "REPLACE_WITH_RETENTION_TRAINING_TRACING_RECORDING_CACHE_ATTESTATION_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_PROVIDER_DELETION_RESIDUE_REFERENCE"
+    },
+    "conversation_relay": {
+      "project_or_account": "REPLACE_WITH_NONPRODUCTION_PROVIDER_ACCOUNT_REFERENCE",
+      "region": "REPLACE_WITH_APPROVED_REGION_REFERENCE",
+      "endpoint": "REPLACE_WITH_APPROVED_ENDPOINT_REFERENCE",
+      "credential": "REPLACE_WITH_SECRET_MANAGER_REFERENCE_ONLY",
+      "privacy_posture": "REPLACE_WITH_RETENTION_TRAINING_TRACING_RECORDING_CACHE_ATTESTATION_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_PROVIDER_DELETION_RESIDUE_REFERENCE"
+    }
+  },
+  "state_and_evidence_stores": {
+    "auth_token_store": {
+      "resource": "REPLACE_WITH_NONPRODUCTION_AUTH_STORE_REFERENCE",
+      "principal_or_credential": "REPLACE_WITH_LEAST_PRIVILEGED_CREDENTIAL_REFERENCE",
+      "isolation_proof": "REPLACE_WITH_IAM_AND_DENY_PROBE_RECEIPT_REFERENCE",
+      "ttl": "REPLACE_WITH_APPROVED_TTL_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_DELETION_RESIDUE_REFERENCE"
+    },
+    "firestore": {
+      "resource": "REPLACE_WITH_NONPRODUCTION_FIRESTORE_REFERENCE",
+      "principal_or_credential": "REPLACE_WITH_LEAST_PRIVILEGED_CREDENTIAL_REFERENCE",
+      "isolation_proof": "REPLACE_WITH_IAM_AND_DENY_PROBE_RECEIPT_REFERENCE",
+      "ttl": "REPLACE_WITH_APPROVED_TTL_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_DELETION_RESIDUE_REFERENCE"
+    },
+    "rtdb": {
+      "resource": "REPLACE_WITH_NONPRODUCTION_RTDB_REFERENCE",
+      "principal_or_credential": "REPLACE_WITH_LEAST_PRIVILEGED_CREDENTIAL_REFERENCE",
+      "isolation_proof": "REPLACE_WITH_IAM_AND_DENY_PROBE_RECEIPT_REFERENCE",
+      "ttl": "REPLACE_WITH_APPROVED_TTL_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_DELETION_RESIDUE_REFERENCE"
+    },
+    "logging_and_evidence": {
+      "resource": "REPLACE_WITH_ENCRYPTED_NONPRODUCTION_LOG_AND_EVIDENCE_REFERENCE",
+      "principal_or_credential": "REPLACE_WITH_LEAST_PRIVILEGED_CREDENTIAL_REFERENCE",
+      "isolation_proof": "REPLACE_WITH_IAM_AND_DENY_PROBE_RECEIPT_REFERENCE",
+      "ttl": "REPLACE_WITH_APPROVED_TTL_REFERENCE",
+      "deletion_residue_receipt": "REPLACE_WITH_POST_WINDOW_DELETION_RESIDUE_REFERENCE"
+    },
+    "kms": {
+      "resource": "REPLACE_WITH_NONPRODUCTION_ENCRYPTION_KEY_REFERENCE",
+      "principal_or_credential": "REPLACE_WITH_LEAST_PRIVILEGED_CREDENTIAL_REFERENCE",
+      "isolation_proof": "REPLACE_WITH_IAM_AND_DENY_PROBE_RECEIPT_REFERENCE"
+    }
+  },
+  "canonical_endpoint_references": {
+    "token_issuer_https": "REPLACE_WITH_APPROVED_CANONICAL_HTTPS_REFERENCE",
+    "media_stream_wss": "REPLACE_WITH_APPROVED_CANONICAL_WSS_REFERENCE",
+    "conversation_relay_wss": "REPLACE_WITH_APPROVED_CANONICAL_WSS_REFERENCE",
+    "reconnect_wss": "REPLACE_WITH_APPROVED_CANONICAL_WSS_REFERENCE",
+    "callback_https": "REPLACE_WITH_APPROVED_CANONICAL_HTTPS_REFERENCE"
+  },
+  "cap_configuration": {
+    "configuration_reference": "REPLACE_WITH_SEALED_PER_WINDOW_CAP_CONFIGURATION_REFERENCE",
+    "max_requests": 0,
+    "max_concurrency": 0,
+    "max_duration_seconds": 0,
+    "max_bytes": 0,
+    "max_audio_seconds": 0,
+    "max_retries": 0,
+    "max_output_tokens": 0,
+    "max_spend_minor_units": 0
+  },
+  "disabled_features": {
+    "tools": true,
+    "writes": true,
+    "notifications": true,
+    "transfers": true,
+    "terminal_actions": true,
+    "request_response_logging": true,
+    "tracing": true,
+    "recording": true,
+    "data_sharing": true,
+    "session_resumption": true,
+    "provider_cache": true
+  }
+}

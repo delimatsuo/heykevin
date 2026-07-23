@@ -259,12 +259,20 @@ repair, and closure separately:
 planned
   -> generation_started
   -> audio_started
-  -> delivery_acknowledged | partial | cancelled | failed
+  -> transport_resolved | partial | cancelled | failed
+  -> caller_playback_observed | playback_inferred | observation_unavailable
 ```
 
-`delivery_acknowledged` means the expected semantic act was confirmed in generated
-content and its final media receipt was resolved as played. It does not mean the
-human heard, understood, or accepted it.
+`transport_resolved` means that a provider or Twilio transport receipt resolved the
+bounded media buffer. It is not called `played`, does not mean the caller heard,
+understood, or accepted anything, and cannot by itself arm silence or authorize
+closure. `caller_playback_observed` is evidence from the sealed caller-side audio
+harness that the expected audio reached the caller-side telephone stream; it still
+does not prove human understanding or acceptance. `playback_inferred` is a
+preregistered conservative no-response deadline after `transport_resolved` for an
+operational runtime without real-time caller-side observation. It is recorded as an
+inference, remains cancellable by new caller activity, and never establishes a
+caller-heard claim.
 
 The authoritative semantic-confirmation source is candidate-specific but sealed
 before execution:
@@ -300,14 +308,22 @@ context, promise work, transfer a call, or trigger closure.
 1. Reserve one `QuestionIntent(slot, turn, act_id)` before generating speech.
 2. Generate at most one question in that response.
 3. Confirm that the expected question was semantically present.
-4. Transition to `delivery_acknowledged` only after its final playout receipt.
-5. Arm the first silence timer only after delivery acknowledgement.
+4. Record `transport_resolved` only after its final transport receipt. In the
+   qualified harness, record `caller_playback_observed` only from caller-side
+   audio; never infer it from a mark, generated text, or provider completion.
+5. Arm the first silence timer after `caller_playback_observed` in a qualified
+   harness. A runtime without that observation may use only the preregistered
+   conservative `playback_inferred` deadline; it cannot claim the question was
+   heard and must remain cancellable by any newer caller activity.
 6. Any caller activity cancels the timer.
 7. On the first timeout, issue one natural presence check as its own semantic act.
-8. Arm a second timer only after the presence check is delivered.
+8. Arm a second timer only after the presence check has caller-side observation or
+   the same conservative, explicitly inferred deadline.
 9. On the second timeout, plan a closing act.
-10. End the call only after the closing act is delivered and no newer caller
-    activity, pending question, tool result, or owner action supersedes it.
+10. End the call only after the closing act has caller-side observation or the
+    same conservative, explicitly inferred deadline, and no newer caller activity,
+    pending question, tool result, or owner action supersedes it. Transport
+    resolution alone can never authorize terminal action.
 
 A goodbye phrase, provider completion signal, or playback mark alone can never end
 the call.
@@ -455,9 +471,12 @@ The matrix also assigns each later assertion to exactly one evidence tier:
 4. closed-loop consenting-participant acceptance.
 
 **Gate:** No candidate adapter is built past a cheap interface stub when a required
-selectable capability is `unavailable`. B2 remains a control-only arm unless the
-probe validates a response-correlated normal-playback receipt against caller-side
-audio. The shared lifecycle is never weakened to keep an arm selectable.
+selectable capability is `unavailable`. Every selectable arm must pass the
+caller-side probe for its response-correlated playback evidence and conservative
+runtime alternative; no transport receipt is promoted to caller playback. B2
+remains a control-only arm unless that probe validates a response-correlated
+normal-playback receipt against caller-side audio. The shared lifecycle is never
+weakened to keep an arm selectable.
 
 ### Task 0.2: Write the bakeoff ADR
 
@@ -504,16 +523,21 @@ The annex must contain:
 6. The command capability and side-effect matrix.
 7. Abuse, concurrency, message-size, retry, duration, and spend budgets.
 8. Stop, rollback, credential-revocation, task-drain, and residue-audit procedures.
-9. Trusted provider-execution signer roles and quorum, approval-envelope custody,
-   nonce consumption, immutable storage, and production-deny controls.
+9. Trusted provider-execution signer roles and quorum, signer-key provenance,
+   algorithm and key identifiers, verification trust store, rotation/revocation,
+   approval-envelope immutable custody and access control, nonce consumption,
+   explicit no-self-approval/no-break-glass execution, and production-deny
+   controls.
 10. Rater and participant access, consent, withdrawal, encryption/key custody,
     cache/derivative deletion, and residue-receipt procedures.
 
-**Gate:** Provider execution is blocked until every matrix field has a reviewed
-answer. Unknown retention or enabled provider request/response logging, data
-sharing, or tracing is a no-go, not a waiver. Any approved session resumption or
-provider cache is synthetic-only, retention-pinned, and covered by a before/after
-residue audit.
+**Gate:** Provider execution is blocked until every matrix field has a reviewed,
+source-pinned, and executable answer with an owner, expiry/recheck date, and
+residue-verification method. Unknown or unverified retention, training/data
+sharing, tracing, region, account isolation, deletion, or enabled provider
+request/response logging is a no-go, not a waiver. Any approved session resumption
+or provider cache is synthetic-only, retention-pinned, and covered by a
+before/after residue audit.
 
 ### Task 0.4: Reconcile release gates
 
@@ -661,13 +685,14 @@ These controls land before any provider-connected bakeoff.
 
 **Files:**
 
-- Update `app/webhooks/media_stream.py` and the incoming-call token issuer.
 - Create `app/services/voice_session_auth.py` and
   `tests/unit/test_voice_session_auth.py` for the provider-neutral signature,
   active-execution, token-store, and binding contract.
 - Define the interfaces consumed by the bakeoff-only Media Streams,
   ConversationRelay, token-issuer, and callback routes. Task 4.7 creates and
-  mounts those isolated routes; Task 2.1 does not create a second entrypoint.
+  mounts those isolated routes. Task 2.1 must not edit `app/webhooks/media_stream.py`,
+  the production-shaped token issuer, or any live route; a winner-specific,
+  separately reviewed integration plan owns such changes.
 - Add focused authentication/race tests.
 
 Every Media Streams, ConversationRelay, capability-probe, sealed-window, and
@@ -689,8 +714,10 @@ Require:
   enforces one issuance per call epoch. Replaying the signed request cannot mint a
   fresh token;
 - Twilio request-signature verification against the configured canonical external
-  `wss` URL before WebSocket acceptance. Forwarded host/protocol values are
-  rejected unless produced by an explicitly allowlisted trusted proxy;
+  `wss` URL before WebSocket acceptance. The Task-0.1 matrix pins Twilio's
+  official canonical HTTP and WebSocket signature construction separately.
+  Forwarded host/protocol values are rejected unless produced by an explicitly
+  allowlisted trusted proxy; no authority is inferred from client-supplied headers;
 - after signature validation, acceptance only into `AUTH_PENDING`, with one
   provider-documented logical setup envelope bounded by frame count, bytes, and
   monotonic timeout. Any media, duplicate setup, or excess frame rejects the
@@ -963,7 +990,10 @@ passed with `--approval`:
   one-use-consumption record;
 - trusted signer identities and independent role signatures satisfying the sealed
   quorum policy, including staff, security/privacy, and conversation-product
-  approval with no unresolved P1. One identity cannot satisfy multiple roles.
+  approval with no unresolved P1. One identity cannot satisfy multiple roles;
+  the envelope also binds signer-key provenance, algorithm, key ID, verification
+  trust-store version, rotation/revocation status, immutable-custody policy, and
+  an explicit no-self-approval/no-break-glass-execution assertion.
 
 The runner must be dry-run-only by default. Before credential resolution, DNS,
 socket creation, or provider construction it locally verifies the envelope
@@ -984,7 +1014,8 @@ resolved credential have no production permissions.
 
 A provider-connected mode requires an explicit `--execute-provider` flag plus the
 matching envelope. Tests must prove that unsigned, forged, wrong-role,
-insufficient-quorum, altered, expired, replayed, self-approved, credential-swapped,
+insufficient-quorum, altered, expired, replayed, self-approved, revoked-key,
+unknown-trust-store, break-glass, credential-swapped,
 secondary-credential-swapped, dependency-omitted, destination-mismatched, or
 production-bound envelopes fail at the earliest possible boundary. Invalid local
 authorization fails before secret resolution or network access.
@@ -1324,11 +1355,14 @@ eligibility, or side effects.
 
 - the reserved `QuestionIntent` created before speech;
 - transition to active `pending_question` only after authoritative semantic
-  confirmation plus played delivery acknowledgement;
-- first silence timer arm/cancel after the question is delivered;
-- one presence-check act and its completed delivery;
+  confirmation plus `caller_playback_observed` in a qualified harness, or the
+  preregistered, explicitly inferred and cancellable `playback_inferred` fallback;
+- first silence timer arm/cancel only after that observation or inferred fallback,
+  never after `transport_resolved` alone;
+- one presence-check act and the same observation-or-inference lifecycle;
 - second silence timer and closing-act proposal;
-- terminal authorization only after closing delivery and no newer activity;
+- terminal authorization only after the closing act follows the same
+  observation-or-inference lifecycle and no newer activity;
 - caller activity, owner pickup/decline, interruption, reconnect, voicemail, and
   supersession;
 - failed-turn classification, one authorized repair/fallback, bounded dead-air,
@@ -1345,7 +1379,8 @@ Test first for:
 
 - identical state/plan/speech/call transitions across all candidate adapters;
 - reservation before speech and pending-question activation only after semantic
-  confirmation plus played acknowledgement;
+  confirmation plus the required caller-side observation or conservative inferred
+  fallback, never transport resolution alone;
 - no timer after partial, cleared, failed, or interrupted questions;
 - first-timer arm, caller-activity cancellation, one delivered presence check,
   second timer, delivered closure, and exactly-once termination;
@@ -1620,8 +1655,9 @@ For each arm, probe only the unresolved Task-0.1 protocol facts:
   account/project/subaccount/region before that dependency is contacted;
 - input-finality and pre-response-permit ordering;
 - generation completion/cancellation/failure;
-- authoritative played, partial, clear, and failed-delivery signals correlated to
-  caller-side audio;
+- transport resolution, partial, clear, and failed-delivery signals correlated to
+  caller-side audio, plus proof whether caller playback can be observed or only
+  conservatively inferred;
 - caller activity, interruption, audible stop, reconnect, and epoch invalidation;
 - proof that no media/provider work begins before ingress authentication.
 
@@ -1632,9 +1668,11 @@ caller-side capture cannot satisfy a capability gate.
 Freeze source, model, prompts, configuration, capability mappings, and provider
 versions after the probe. A failed capability may eliminate an arm or leave it as
 a clearly labeled observational control. It cannot be patched during a sealed
-window. Specifically, B2 is ineligible for weighted selection unless the probe
-proves a real-time response-correlated normal-playback completion receipt that can
-safely drive pending-question, silence, and terminal lifecycles.
+window. Every arm is ineligible for weighted selection unless the probe proves its
+caller-side playback evidence and conservative operational alternative can safely
+drive pending-question, silence, and terminal lifecycles. Specifically, B2 remains
+control-only unless it proves a real-time response-correlated normal-playback
+receipt distinguishable from transport resolution.
 
 **Gate:** The capability matrix contains direct evidence for every required
 selectable protocol fact, the residue audit passes, and all selected arms are

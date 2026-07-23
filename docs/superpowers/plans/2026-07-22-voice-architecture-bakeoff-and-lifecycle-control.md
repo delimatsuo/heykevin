@@ -15,6 +15,8 @@ brief without ending mid-thought, answers the caller's question before asking on
 follow-up, recovers naturally from silence, handles interruption correctly, and
 never lets model wording authorize a side effect or hangup.
 
+Related decision record: [ADR 0002](../../adr/0002-voice-architecture-bakeoff.md).
+
 **Primary decision:** Stop using `max_output_tokens` as the normal conversation
 length control. Treat any hard output ceiling as a runaway guardrail: a ceiling hit
 is a failed turn that requires explicit recovery, never an accepted response. Run a

@@ -1769,8 +1769,19 @@ Stream the allowlisted event file directly to the aggregate evaluator:
 
 ```bash
 python scripts/evaluate_voice_architecture_bakeoff.py \
+  --arm "$BAKEOFF_ARM" \
+  --revision "$BAKEOFF_REVISION" \
+  --source-sha "$BAKEOFF_SOURCE_SHA" \
+  --manifest-digest "$BAKEOFF_MANIFEST_DIGEST" \
+  --expected-sessions "$BAKEOFF_EXPECTED_SESSIONS" \
+  --expected-turns "$BAKEOFF_EXPECTED_TURNS" \
   < /approved/ephemeral/window-1/allowlisted-events.ndjson
 ```
+
+The six `BAKEOFF_*` values are supplied from the separately approved immutable
+window manifest, rather than inferred from the event stream. This command emits
+aggregate results only and fails closed when the cohort is incomplete or does
+not exactly match that manifest.
 
 Then:
 

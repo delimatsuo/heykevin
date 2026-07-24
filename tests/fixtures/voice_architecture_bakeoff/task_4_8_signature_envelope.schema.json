@@ -1,0 +1,469 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Task 4.8 Non-Executable Signature Envelope Review Package",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "unsigned_review",
+        "signed_external_review_required"
+      ]
+    },
+    "execution_supported": {
+      "const": false
+    },
+    "evidence_tier": {
+      "const": "bounded_connected_probe"
+    },
+    "arm": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "A",
+            "B1",
+            "B2",
+            "C"
+          ]
+        }
+      ]
+    },
+    "source_sha": {
+      "$ref": "#/$defs/nullable_sha"
+    },
+    "manifest_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "resource_inventory_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "privacy_attestations_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "capability_contract_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "approved_pstn_source_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "approved_pstn_destination_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "evidence_kms_key_version_ref": {
+      "$ref": "#/$defs/nullable_ref"
+    },
+    "nonce_consumption_policy_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "nonce_consumption_record_ref": {
+      "$ref": "#/$defs/nullable_ref"
+    },
+    "active_execution_binding_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "findings_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "unresolved_p1_count": {
+      "$ref": "#/$defs/nullable_zero"
+    },
+    "artifact_digests": {
+      "$ref": "#/$defs/artifact_digests"
+    },
+    "caps": {
+      "$ref": "#/$defs/caps"
+    },
+    "disabled_features": {
+      "$ref": "#/$defs/disabled_features"
+    },
+    "custody": {
+      "$ref": "#/$defs/custody"
+    },
+    "trust_store": {
+      "$ref": "#/$defs/trust_store"
+    },
+    "approval_id": {
+      "$ref": "#/$defs/nullable_ref"
+    },
+    "nonce": {
+      "$ref": "#/$defs/nullable_ref"
+    },
+    "issued_at_ms": {
+      "$ref": "#/$defs/nullable_timestamp"
+    },
+    "expires_at_ms": {
+      "$ref": "#/$defs/nullable_timestamp"
+    },
+    "signers": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/signer"
+      }
+    },
+    "envelope_self_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "execution_supported",
+    "evidence_tier",
+    "arm",
+    "source_sha",
+    "manifest_digest",
+    "resource_inventory_digest",
+    "privacy_attestations_digest",
+    "capability_contract_digest",
+    "approved_pstn_source_digest",
+    "approved_pstn_destination_digest",
+    "evidence_kms_key_version_ref",
+    "nonce_consumption_policy_digest",
+    "nonce_consumption_record_ref",
+    "active_execution_binding_digest",
+    "findings_digest",
+    "unresolved_p1_count",
+    "artifact_digests",
+    "caps",
+    "disabled_features",
+    "custody",
+    "trust_store",
+    "approval_id",
+    "nonce",
+    "issued_at_ms",
+    "expires_at_ms",
+    "signers",
+    "envelope_self_digest"
+  ],
+  "$defs": {
+    "nullable_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^ref_[A-Za-z0-9_-]{1,156}$"
+        }
+      ]
+    },
+    "nullable_digest": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "nullable_sha": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      ]
+    },
+    "nullable_timestamp": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    },
+    "nullable_cap": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    },
+    "nullable_zero": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "const": 0
+        }
+      ]
+    },
+    "artifact_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "corpus": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "setup": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "configuration": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "security_annex": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "caller_ux": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "gate_validator": {
+          "$ref": "#/$defs/nullable_digest"
+        }
+      },
+      "required": [
+        "corpus",
+        "setup",
+        "configuration",
+        "evaluator",
+        "security_annex",
+        "caller_ux",
+        "gate_validator"
+      ]
+    },
+    "caps": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "attempts": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "calls": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "bytes": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "audio_ms": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "retries": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "tokens": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "cost_minor_units": {
+          "$ref": "#/$defs/nullable_cap"
+        },
+        "artifact_ttl_ms": {
+          "$ref": "#/$defs/nullable_cap"
+        }
+      },
+      "required": [
+        "requests",
+        "attempts",
+        "calls",
+        "concurrency",
+        "duration_ms",
+        "bytes",
+        "audio_ms",
+        "retries",
+        "tokens",
+        "cost_minor_units",
+        "artifact_ttl_ms"
+      ]
+    },
+    "disabled_features": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "const": true
+        },
+        "writes": {
+          "const": true
+        },
+        "notifications": {
+          "const": true
+        },
+        "terminal_actions": {
+          "const": true
+        },
+        "transfers": {
+          "const": true
+        },
+        "recording": {
+          "const": true
+        },
+        "tracing": {
+          "const": true
+        },
+        "data_sharing": {
+          "const": true
+        },
+        "request_response_logging": {
+          "const": true
+        },
+        "session_resumption": {
+          "const": true
+        },
+        "provider_cache": {
+          "const": true
+        }
+      },
+      "required": [
+        "tools",
+        "writes",
+        "notifications",
+        "terminal_actions",
+        "transfers",
+        "recording",
+        "tracing",
+        "data_sharing",
+        "request_response_logging",
+        "session_resumption",
+        "provider_cache"
+      ]
+    },
+    "custody": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "immutable_envelope_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "immutable_manifest_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "nonce_store_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "active_execution_store_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "residue_receipt_sink_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        }
+      },
+      "required": [
+        "immutable_envelope_ref",
+        "immutable_manifest_ref",
+        "nonce_store_ref",
+        "active_execution_store_ref",
+        "residue_receipt_sink_ref"
+      ]
+    },
+    "trust_store": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "rotation_status_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "revocation_status_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "immutable_custody_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "no_self_approval": {
+          "const": true
+        },
+        "no_break_glass": {
+          "const": true
+        }
+      },
+      "required": [
+        "version_ref",
+        "policy_digest",
+        "algorithm",
+        "rotation_status_ref",
+        "revocation_status_ref",
+        "immutable_custody_ref",
+        "no_self_approval",
+        "no_break_glass"
+      ]
+    },
+    "signer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "staff",
+            "security_privacy",
+            "conversation_product"
+          ]
+        },
+        "identity_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "key_id": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "public_key_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "revocation_status_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "detached_signature_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "signature_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "review_decision": {
+          "enum": [
+            "pending",
+            "approved"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "identity_ref",
+        "key_id",
+        "public_key_ref",
+        "revocation_status_ref",
+        "detached_signature_ref",
+        "signature_digest",
+        "review_decision"
+      ]
+    }
+  },
+  "x-execution": "unsupported"
+}

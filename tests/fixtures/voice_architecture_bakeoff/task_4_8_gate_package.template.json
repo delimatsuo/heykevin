@@ -1,0 +1,2965 @@
+{
+  "package_version": 1,
+  "package_status": "preparation_only",
+  "execution_supported": false,
+  "resource_inventory": {
+    "schema_version": 1,
+    "status": "preparation_only",
+    "environment": "bakeoff_nonproduction",
+    "production_denylist_digest": null,
+    "resources": [
+      {
+        "resource_id": "execution_principal",
+        "kind": "identity",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "telephony",
+        "kind": "telephony",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "native_voice",
+        "kind": "provider",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "speech_to_text",
+        "kind": "provider",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "text_generation",
+        "kind": "provider",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "text_to_speech",
+        "kind": "provider",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "conversation_relay",
+        "kind": "provider",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "auth_token_store",
+        "kind": "state_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "firestore",
+        "kind": "state_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "rtdb",
+        "kind": "state_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "logging_evidence",
+        "kind": "evidence_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "kms",
+        "kind": "key_management",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "immutable_custody",
+        "kind": "immutable_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "nonce_store",
+        "kind": "state_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "active_execution_store",
+        "kind": "state_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "trust_store",
+        "kind": "trust_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "credential_broker",
+        "kind": "credential_broker",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "residue_receipt_sink",
+        "kind": "evidence_store",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "telephony_control_plane",
+        "kind": "control_plane",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "native_voice_control_plane",
+        "kind": "control_plane",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "speech_to_text_control_plane",
+        "kind": "control_plane",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "text_generation_control_plane",
+        "kind": "control_plane",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "text_to_speech_control_plane",
+        "kind": "control_plane",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      },
+      {
+        "resource_id": "conversation_relay_control_plane",
+        "kind": "control_plane",
+        "selection_status": "not_selected",
+        "provider_ref": null,
+        "product_ref": null,
+        "api_version_ref": null,
+        "account_region_ref": null,
+        "workload_destination_allowlist_ref": null,
+        "control_plane_destination_allowlist_ref": null,
+        "credential_ref": null,
+        "identity_ref": null,
+        "isolation_proof_ref": null,
+        "residue_procedure_ref": null
+      }
+    ],
+    "arm_dependencies": {
+      "A": [
+        "execution_principal",
+        "telephony",
+        "telephony_control_plane",
+        "native_voice",
+        "native_voice_control_plane",
+        "auth_token_store",
+        "nonce_store",
+        "active_execution_store",
+        "firestore",
+        "rtdb",
+        "logging_evidence",
+        "kms",
+        "immutable_custody",
+        "trust_store",
+        "credential_broker",
+        "residue_receipt_sink"
+      ],
+      "B1": [
+        "execution_principal",
+        "telephony",
+        "telephony_control_plane",
+        "speech_to_text",
+        "speech_to_text_control_plane",
+        "text_generation",
+        "text_generation_control_plane",
+        "text_to_speech",
+        "text_to_speech_control_plane",
+        "auth_token_store",
+        "nonce_store",
+        "active_execution_store",
+        "firestore",
+        "rtdb",
+        "logging_evidence",
+        "kms",
+        "immutable_custody",
+        "trust_store",
+        "credential_broker",
+        "residue_receipt_sink"
+      ],
+      "B2": [
+        "execution_principal",
+        "telephony",
+        "telephony_control_plane",
+        "conversation_relay",
+        "conversation_relay_control_plane",
+        "text_generation",
+        "text_generation_control_plane",
+        "auth_token_store",
+        "nonce_store",
+        "active_execution_store",
+        "firestore",
+        "rtdb",
+        "logging_evidence",
+        "kms",
+        "immutable_custody",
+        "trust_store",
+        "credential_broker",
+        "residue_receipt_sink"
+      ],
+      "C": [
+        "execution_principal",
+        "telephony",
+        "telephony_control_plane",
+        "native_voice",
+        "native_voice_control_plane",
+        "auth_token_store",
+        "nonce_store",
+        "active_execution_store",
+        "firestore",
+        "rtdb",
+        "logging_evidence",
+        "kms",
+        "immutable_custody",
+        "trust_store",
+        "credential_broker",
+        "residue_receipt_sink"
+      ]
+    },
+    "probe_contracts": [
+      {
+        "arm": "A",
+        "fact": "dependency_identity_attestation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "input_finality",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "pre_response_permit",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "generation_completed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "generation_cancelled",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "generation_failed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "transport_resolved",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "transport_partial",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "transport_cleared",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "transport_failed_delivery",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "caller_playback_classification",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "caller_activity",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "interruption",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "audible_stop",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "reconnect",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "epoch_invalidation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "A",
+        "fact": "pre_auth_no_provider_work",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "dependency_identity_attestation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "input_finality",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "pre_response_permit",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "generation_completed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "generation_cancelled",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "generation_failed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "transport_resolved",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "transport_partial",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "transport_cleared",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "transport_failed_delivery",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "caller_playback_classification",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "caller_activity",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "interruption",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "audible_stop",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "reconnect",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "epoch_invalidation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B1",
+        "fact": "pre_auth_no_provider_work",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "dependency_identity_attestation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "input_finality",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "pre_response_permit",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "generation_completed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "generation_cancelled",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "generation_failed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "transport_resolved",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "transport_partial",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "transport_cleared",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "transport_failed_delivery",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "caller_playback_classification",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "caller_activity",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "interruption",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "audible_stop",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "reconnect",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "epoch_invalidation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "pre_auth_no_provider_work",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "B2",
+        "fact": "response_correlated_normal_playback_receipt",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "dependency_identity_attestation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "input_finality",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "pre_response_permit",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "generation_completed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "generation_cancelled",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "generation_failed",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "transport_resolved",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "transport_partial",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "transport_cleared",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "transport_failed_delivery",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "caller_playback_classification",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "caller_activity",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "interruption",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "audible_stop",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": true,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "reconnect",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "epoch_invalidation",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      },
+      {
+        "arm": "C",
+        "fact": "pre_auth_no_provider_work",
+        "status": "unresolved",
+        "synthetic_fixture_digest": null,
+        "capability_mapping_ref": null,
+        "evidence_sink_ref": null,
+        "caller_audio_correlation_required": false,
+        "correlation_contract_ref": null
+      }
+    ]
+  },
+  "privacy_attestations": {
+    "schema_version": 1,
+    "status": "preparation_only",
+    "attestations": [
+      {
+        "resource_id": "execution_principal",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "telephony",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "native_voice",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "speech_to_text",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "text_generation",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "text_to_speech",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "conversation_relay",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "auth_token_store",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "firestore",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "rtdb",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "logging_evidence",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "kms",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "immutable_custody",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "nonce_store",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "active_execution_store",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "trust_store",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "credential_broker",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "residue_receipt_sink",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "telephony_control_plane",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "native_voice_control_plane",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "speech_to_text_control_plane",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "text_generation_control_plane",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "text_to_speech_control_plane",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      },
+      {
+        "resource_id": "conversation_relay_control_plane",
+        "status": "missing",
+        "provider_api_ref": null,
+        "account_region_ref": null,
+        "evidence_source_class": null,
+        "evidence_ref": null,
+        "evidence_digest": null,
+        "observed_at_ms": null,
+        "expires_at_ms": null,
+        "owner_ref": null,
+        "residue_verification_ref": null,
+        "deletion_procedure_ref": null,
+        "settings": {
+          "request_response_logging": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "training_data_sharing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "tracing": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "recording": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "cache_resumption": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "retention": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "region": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "abuse_monitoring": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "deletion": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "dpa": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          },
+          "subprocessors": {
+            "state": "unknown",
+            "evidence_ref": null,
+            "evidence_digest": null
+          }
+        }
+      }
+    ]
+  },
+  "signature_envelope": {
+    "schema_version": 1,
+    "status": "unsigned_review",
+    "execution_supported": false,
+    "evidence_tier": "bounded_connected_probe",
+    "arm": null,
+    "source_sha": null,
+    "manifest_digest": null,
+    "resource_inventory_digest": null,
+    "privacy_attestations_digest": null,
+    "capability_contract_digest": null,
+    "approved_pstn_source_digest": null,
+    "approved_pstn_destination_digest": null,
+    "evidence_kms_key_version_ref": null,
+    "nonce_consumption_policy_digest": null,
+    "nonce_consumption_record_ref": null,
+    "active_execution_binding_digest": null,
+    "findings_digest": null,
+    "unresolved_p1_count": null,
+    "artifact_digests": {
+      "corpus": null,
+      "setup": null,
+      "configuration": null,
+      "evaluator": null,
+      "security_annex": null,
+      "caller_ux": null,
+      "gate_validator": null
+    },
+    "caps": {
+      "requests": null,
+      "attempts": null,
+      "calls": null,
+      "concurrency": null,
+      "duration_ms": null,
+      "bytes": null,
+      "audio_ms": null,
+      "retries": null,
+      "tokens": null,
+      "cost_minor_units": null,
+      "artifact_ttl_ms": null
+    },
+    "disabled_features": {
+      "tools": true,
+      "writes": true,
+      "notifications": true,
+      "terminal_actions": true,
+      "transfers": true,
+      "recording": true,
+      "tracing": true,
+      "data_sharing": true,
+      "request_response_logging": true,
+      "session_resumption": true,
+      "provider_cache": true
+    },
+    "custody": {
+      "immutable_envelope_ref": null,
+      "immutable_manifest_ref": null,
+      "nonce_store_ref": null,
+      "active_execution_store_ref": null,
+      "residue_receipt_sink_ref": null
+    },
+    "trust_store": {
+      "version_ref": null,
+      "policy_digest": null,
+      "algorithm": "ed25519",
+      "rotation_status_ref": null,
+      "revocation_status_ref": null,
+      "immutable_custody_ref": null,
+      "no_self_approval": true,
+      "no_break_glass": true
+    },
+    "approval_id": null,
+    "nonce": null,
+    "issued_at_ms": null,
+    "expires_at_ms": null,
+    "signers": [
+      {
+        "role": "staff",
+        "identity_ref": null,
+        "key_id": null,
+        "public_key_ref": null,
+        "revocation_status_ref": null,
+        "detached_signature_ref": null,
+        "signature_digest": null,
+        "review_decision": "pending"
+      },
+      {
+        "role": "security_privacy",
+        "identity_ref": null,
+        "key_id": null,
+        "public_key_ref": null,
+        "revocation_status_ref": null,
+        "detached_signature_ref": null,
+        "signature_digest": null,
+        "review_decision": "pending"
+      },
+      {
+        "role": "conversation_product",
+        "identity_ref": null,
+        "key_id": null,
+        "public_key_ref": null,
+        "revocation_status_ref": null,
+        "detached_signature_ref": null,
+        "signature_digest": null,
+        "review_decision": "pending"
+      }
+    ],
+    "envelope_self_digest": null
+  },
+  "review_digest": null
+}

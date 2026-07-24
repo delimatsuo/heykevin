@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Task 4.8 Non-Executable Privacy Attestation Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "preparation_only",
+        "attested_external_review_required"
+      ]
+    },
+    "attestations": {
+      "type": "array",
+      "minItems": 24,
+      "maxItems": 24,
+      "items": {
+        "$ref": "#/$defs/attestation"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "attestations"
+  ],
+  "$defs": {
+    "nullable_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^ref_[A-Za-z0-9_-]{1,156}$"
+        }
+      ]
+    },
+    "nullable_digest": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "nullable_timestamp": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "unknown",
+            "disabled",
+            "approved_bounded"
+          ]
+        },
+        "evidence_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        }
+      },
+      "required": [
+        "state",
+        "evidence_ref",
+        "evidence_digest"
+      ]
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_response_logging": {
+          "$ref": "#/$defs/setting"
+        },
+        "training_data_sharing": {
+          "$ref": "#/$defs/setting"
+        },
+        "tracing": {
+          "$ref": "#/$defs/setting"
+        },
+        "recording": {
+          "$ref": "#/$defs/setting"
+        },
+        "cache_resumption": {
+          "$ref": "#/$defs/setting"
+        },
+        "retention": {
+          "$ref": "#/$defs/setting"
+        },
+        "region": {
+          "$ref": "#/$defs/setting"
+        },
+        "abuse_monitoring": {
+          "$ref": "#/$defs/setting"
+        },
+        "deletion": {
+          "$ref": "#/$defs/setting"
+        },
+        "dpa": {
+          "$ref": "#/$defs/setting"
+        },
+        "subprocessors": {
+          "$ref": "#/$defs/setting"
+        }
+      },
+      "required": [
+        "request_response_logging",
+        "training_data_sharing",
+        "tracing",
+        "recording",
+        "cache_resumption",
+        "retention",
+        "region",
+        "abuse_monitoring",
+        "deletion",
+        "dpa",
+        "subprocessors"
+      ]
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource_id": {
+          "enum": [
+            "execution_principal",
+            "telephony",
+            "native_voice",
+            "speech_to_text",
+            "text_generation",
+            "text_to_speech",
+            "conversation_relay",
+            "auth_token_store",
+            "firestore",
+            "rtdb",
+            "logging_evidence",
+            "kms",
+            "immutable_custody",
+            "nonce_store",
+            "active_execution_store",
+            "trust_store",
+            "credential_broker",
+            "residue_receipt_sink",
+            "telephony_control_plane",
+            "native_voice_control_plane",
+            "speech_to_text_control_plane",
+            "text_generation_control_plane",
+            "text_to_speech_control_plane",
+            "conversation_relay_control_plane"
+          ]
+        },
+        "status": {
+          "enum": [
+            "missing",
+            "attested_external_review_required"
+          ]
+        },
+        "provider_api_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "account_region_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "evidence_source_class": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "control_plane_api",
+                "signed_configuration_export",
+                "signed_provider_evidence"
+              ]
+            }
+          ]
+        },
+        "evidence_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/nullable_timestamp"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/nullable_timestamp"
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "residue_verification_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "deletion_procedure_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "settings": {
+          "$ref": "#/$defs/settings"
+        }
+      },
+      "required": [
+        "resource_id",
+        "status",
+        "provider_api_ref",
+        "account_region_ref",
+        "evidence_source_class",
+        "evidence_ref",
+        "evidence_digest",
+        "observed_at_ms",
+        "expires_at_ms",
+        "owner_ref",
+        "residue_verification_ref",
+        "deletion_procedure_ref",
+        "settings"
+      ]
+    }
+  },
+  "x-execution": "unsupported"
+}

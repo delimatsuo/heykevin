@@ -309,3 +309,30 @@ class VoiceLifecycle:
             return True
         self._commands[command.idempotency_key] = command
         return True
+
+    def accepts_caller_playback(self, event: VoiceEvent) -> bool:
+        """Return true only for this lifecycle's already accepted caller receipt."""
+        record = self._acts.get(event.semantic_act_id)
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.CALLER_PLAYBACK_OBSERVED
+            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
+            and record is not None
+            and record[0] is VoiceEventKind.CALLER_PLAYBACK_OBSERVED
+            and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
+            and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
+        )
+
+    def accepts_transport_resolution(self, event: VoiceEvent) -> bool:
+        record = self._acts.get(event.semantic_act_id)
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.TRANSPORT_RESOLVED
+            and event.source is VoiceSource.TWILIO_AUTHENTICATED
+            and record is not None
+            and record[0] in {VoiceEventKind.TRANSPORT_RESOLVED, VoiceEventKind.CALLER_PLAYBACK_OBSERVED}
+            and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
+            and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
+        )

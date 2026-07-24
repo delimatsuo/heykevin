@@ -8,6 +8,8 @@ import subprocess
 import sys
 import time
 
+from scripts.voice_bakeoff_caller import development_harness_manifest
+
 
 _SCRIPT = Path("scripts/run_voice_architecture_bakeoff.py")
 _SPEC = importlib.util.spec_from_file_location("bakeoff_runner", _SCRIPT)
@@ -44,10 +46,14 @@ def _approval() -> dict[str, object]:
 
 
 def _manifest(template_only: bool = False) -> dict[str, object]:
+    seed = "9" * 64
     manifest = {
         "authorization_status": "template_only" if template_only else "sealed",
         "environment": "bakeoff",
         "candidate": {"arm": "B1", "source_sha": "a" * 40, "dependency_inventory_digest": "0" * 64},
+        "caller_harness": development_harness_manifest(
+            sealed_seed_digest=seed,
+        ),
     }
     return manifest
 
@@ -209,6 +215,10 @@ def test_all_offline_candidate_adapters_are_registered_without_importing_them():
         "a" * 40,
         now_ms=1_000,
     )[0]
+    assert (
+        runner._OFFLINE_HARNESS
+        == "scripts/voice_bakeoff_caller.py:run_offline_self_check"
+    )
 
 
 def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path):

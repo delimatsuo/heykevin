@@ -11,6 +11,11 @@ import subprocess
 import time
 from pathlib import Path
 
+try:
+    from scripts.voice_bakeoff_caller import run_offline_self_check
+except ModuleNotFoundError:
+    from voice_bakeoff_caller import run_offline_self_check
+
 
 _MAX_FILE_BYTES = 131_072
 _SCHEMA_PATH = Path("tests/fixtures/voice_architecture_bakeoff/provider_approval.schema.json")
@@ -53,6 +58,7 @@ _OFFLINE_ADAPTERS = {
     "B2": "app.services.voice_candidates.conversation_relay:ConversationRelayAdapter",
     "C": "app.services.voice_candidates.manual_native:ManualNativeAdapter",
 }
+_OFFLINE_HARNESS = "scripts/voice_bakeoff_caller.py:run_offline_self_check"
 
 
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -189,7 +195,10 @@ def main() -> int:
         root = Path(__file__).resolve().parents[1]
         source_sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
         manifest_bytes = args.manifest.read_bytes()
-        errors = validate(_load(args.approval), _load(args.manifest), args.arm, source_sha, schema=_load(root / _SCHEMA_PATH), manifest_digest=_manifest_digest_bytes(manifest_bytes))
+        manifest = _load(args.manifest)
+        errors = validate(_load(args.approval), manifest, args.arm, source_sha, schema=_load(root / _SCHEMA_PATH), manifest_digest=_manifest_digest_bytes(manifest_bytes))
+        if not errors and not run_offline_self_check(arm=args.arm, manifest=manifest):
+            errors.append("offline caller harness self-check failed")
     except (OSError, ValueError, json.JSONDecodeError):
         errors = ["invalid local input"]
     verdict = "blocked_external_verification_required" if not errors else "rejected_local_preflight"

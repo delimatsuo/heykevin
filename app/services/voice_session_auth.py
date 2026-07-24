@@ -24,7 +24,8 @@ class IngressKind(str, Enum):
     MEDIA_STREAM = "media_stream"
     CONVERSATION_RELAY = "conversation_relay"
     CAPABILITY_PROBE = "capability_probe"
-    CALLBACK = "callback"
+    STATUS_CALLBACK = "status_callback"
+    EVIDENCE_CALLBACK = "evidence_callback"
     RECONNECT = "reconnect"
 
 
@@ -77,6 +78,11 @@ class PreAuthFrameKind(str, Enum):
     SETUP = "setup"
     MEDIA = "media"
     OTHER = "other"
+
+
+class CallbackPurpose(str, Enum):
+    STATUS = "status"
+    EVIDENCE = "evidence"
 
 
 def _digest(value: object, name: str) -> str:
@@ -253,6 +259,21 @@ class VoiceAuthStore(Protocol):
 
     def register_execution(self, binding: ExecutionBinding, *, now_ms: int) -> bool: ...
 
+    def accepts_active_execution(
+        self,
+        binding: ExecutionBinding,
+        *,
+        now_ms: int,
+    ) -> bool: ...
+
+    def claim_active_execution(
+        self,
+        binding: ExecutionBinding,
+        *,
+        runtime_claim_digest: str,
+        now_ms: int,
+    ) -> bool: ...
+
     def bind_attested_call(
         self, binding: ExecutionBinding, *, attested_call: AttestedCall, now_ms: int
     ) -> bool: ...
@@ -280,7 +301,13 @@ class VoiceAuthStore(Protocol):
     ) -> AuthResult: ...
 
     def issue_callback_capability(
-        self, binding: ExecutionBinding, *, stream_digest: str, now_ms: int, ttl_ms: int
+        self,
+        binding: ExecutionBinding,
+        *,
+        stream_digest: str,
+        purpose: CallbackPurpose,
+        now_ms: int,
+        ttl_ms: int,
     ) -> IssuedCapability | None: ...
 
     def authorize_callback(
@@ -301,6 +328,7 @@ class VoiceAuthStore(Protocol):
 @dataclass(slots=True)
 class _Record:
     binding: ExecutionBinding
+    runtime_claim_digest: str | None = None
     attested_call_bound: bool = False
     token_digest: str | None = None
     token_expires_at_ms: int | None = None
@@ -311,6 +339,7 @@ class _Record:
     stream_digest: str | None = None
     callback_uses: int = 0
     callback_digest: str | None = None
+    callback_purpose: CallbackPurpose | None = None
     callback_expires_at_ms: int | None = None
     revoked: bool = False
 
@@ -331,6 +360,42 @@ class InMemoryVoiceAuthStore:
             if now_ms >= binding.expires_at_ms or binding in self._records:
                 return False
             self._records[binding] = _Record(binding=binding)
+            return True
+
+    def accepts_active_execution(
+        self,
+        binding: ExecutionBinding,
+        *,
+        now_ms: int,
+    ) -> bool:
+        with self._lock:
+            record, failure = self._active_record(binding, now_ms)
+            return record is not None and failure is None
+
+    def claim_active_execution(
+        self,
+        binding: ExecutionBinding,
+        *,
+        runtime_claim_digest: str,
+        now_ms: int,
+    ) -> bool:
+        try:
+            runtime_claim_digest = _digest(
+                runtime_claim_digest,
+                "runtime_claim_digest",
+            )
+        except ValueError:
+            return False
+        with self._lock:
+            record, failure = self._active_record(binding, now_ms)
+            if (
+                record is None
+                or failure is not None
+                or record.runtime_claim_digest is not None
+                or record.state is not AuthState.UNTRUSTED_HANDSHAKE
+            ):
+                return False
+            record.runtime_claim_digest = runtime_claim_digest
             return True
 
     def bind_attested_call(
@@ -468,7 +533,11 @@ class InMemoryVoiceAuthStore:
             failure = self._request_failure(record, binding, request)
             if failure is not None:
                 return AuthResult(AuthState.REJECTED, failure)
-            if request.ingress is not IngressKind.CALLBACK or record.state is not AuthState.AUTHENTICATED:
+            purpose = {
+                IngressKind.STATUS_CALLBACK: CallbackPurpose.STATUS,
+                IngressKind.EVIDENCE_CALLBACK: CallbackPurpose.EVIDENCE,
+            }.get(request.ingress)
+            if purpose is None or record.state is not AuthState.AUTHENTICATED:
                 return AuthResult(AuthState.REJECTED, AuthFailure.DISALLOWED_INGRESS)
             try:
                 stream_digest = _digest(stream_digest, "stream_digest")
@@ -483,9 +552,13 @@ class InMemoryVoiceAuthStore:
                 record.callback_digest, _token_digest(protected_capability)
             ):
                 return AuthResult(AuthState.REJECTED, AuthFailure.CALLBACK_INVALID)
-            self._clear_callback(record)
-            if record.stream_digest != stream_digest:
+            if (
+                record.stream_digest != stream_digest
+                or record.callback_purpose is not purpose
+            ):
+                self._clear_callback(record)
                 return AuthResult(AuthState.REJECTED, AuthFailure.BINDING_MISMATCH)
+            self._clear_callback(record)
             if record.callback_uses >= binding.max_callback_uses:
                 self._reject(record)
                 record.revoked = True
@@ -494,9 +567,17 @@ class InMemoryVoiceAuthStore:
             return AuthResult(AuthState.AUTHENTICATED)
 
     def issue_callback_capability(
-        self, binding: ExecutionBinding, *, stream_digest: str, now_ms: int, ttl_ms: int
+        self,
+        binding: ExecutionBinding,
+        *,
+        stream_digest: str,
+        purpose: CallbackPurpose,
+        now_ms: int,
+        ttl_ms: int,
     ) -> IssuedCapability | None:
         _positive_int(ttl_ms, "ttl_ms")
+        if not isinstance(purpose, CallbackPurpose):
+            return None
         with self._lock:
             record, failure = self._active_record(binding, now_ms)
             if (
@@ -512,6 +593,7 @@ class InMemoryVoiceAuthStore:
                 return None
             token = secrets.token_urlsafe(32)
             record.callback_digest = _token_digest(token)
+            record.callback_purpose = purpose
             record.callback_expires_at_ms = now_ms + ttl_ms
             return IssuedCapability(protected_token=token, expires_at_ms=now_ms + ttl_ms)
 
@@ -550,7 +632,10 @@ class InMemoryVoiceAuthStore:
                 return False
             self._reject(old_record)
             old_record.revoked = True
-            self._records[new_binding] = _Record(binding=new_binding)
+            self._records[new_binding] = _Record(
+                binding=new_binding,
+                runtime_claim_digest=old_record.runtime_claim_digest,
+            )
             return True
 
     def _active_record(
@@ -582,7 +667,12 @@ class InMemoryVoiceAuthStore:
             return AuthFailure.BINDING_MISMATCH
         expected_endpoint = (
             "bakeoff_https"
-            if request.ingress in {IngressKind.CALLBACK, IngressKind.TOKEN_ISSUER}
+            if request.ingress
+            in {
+                IngressKind.STATUS_CALLBACK,
+                IngressKind.EVIDENCE_CALLBACK,
+                IngressKind.TOKEN_ISSUER,
+            }
             else "bakeoff_wss"
         )
         if request.canonical_endpoint_id != expected_endpoint:
@@ -600,6 +690,7 @@ class InMemoryVoiceAuthStore:
     @staticmethod
     def _clear_callback(record: _Record) -> None:
         record.callback_digest = None
+        record.callback_purpose = None
         record.callback_expires_at_ms = None
 
 
@@ -626,7 +717,11 @@ class VoiceSessionAuthenticator:
             IngressKind.CAPABILITY_PROBE,
             IngressKind.RECONNECT,
         }
-        required = wss_ingress | {IngressKind.TOKEN_ISSUER, IngressKind.CALLBACK}
+        required = wss_ingress | {
+            IngressKind.TOKEN_ISSUER,
+            IngressKind.STATUS_CALLBACK,
+            IngressKind.EVIDENCE_CALLBACK,
+        }
         if set(canonical_urls) != required or any(
             not isinstance(url, str)
             or not url.startswith("wss://" if ingress in wss_ingress else "https://")
@@ -644,6 +739,27 @@ class VoiceSessionAuthenticator:
         if binding is None or not self._store.register_execution(binding, now_ms=now_ms):
             return None
         return binding
+
+    def accepts_active_execution(
+        self,
+        binding: ExecutionBinding,
+        *,
+        now_ms: int,
+    ) -> bool:
+        return self._store.accepts_active_execution(binding, now_ms=now_ms)
+
+    def claim_active_execution(
+        self,
+        binding: ExecutionBinding,
+        *,
+        runtime_claim_digest: str,
+        now_ms: int,
+    ) -> bool:
+        return self._store.claim_active_execution(
+            binding,
+            runtime_claim_digest=runtime_claim_digest,
+            now_ms=now_ms,
+        )
 
     def bind_attested_call(
         self, binding: ExecutionBinding, *, control_plane_result: object, now_ms: int
@@ -707,10 +823,20 @@ class VoiceSessionAuthenticator:
         return self._store.consume_setup(binding, setup, now_ms=now_ms)
 
     def issue_callback_capability(
-        self, binding: ExecutionBinding, *, stream_digest: str, now_ms: int, ttl_ms: int
+        self,
+        binding: ExecutionBinding,
+        *,
+        stream_digest: str,
+        purpose: CallbackPurpose,
+        now_ms: int,
+        ttl_ms: int,
     ) -> IssuedCapability | None:
         return self._store.issue_callback_capability(
-            binding, stream_digest=stream_digest, now_ms=now_ms, ttl_ms=ttl_ms
+            binding,
+            stream_digest=stream_digest,
+            purpose=purpose,
+            now_ms=now_ms,
+            ttl_ms=ttl_ms,
         )
 
     def authorize_verified_callback(
@@ -719,16 +845,21 @@ class VoiceSessionAuthenticator:
         *,
         untrusted_request: object,
         stream_digest: str,
+        purpose: CallbackPurpose,
         protected_capability: str,
         now_ms: int,
     ) -> AuthResult:
-        canonical_url = self._canonical_urls.get(IngressKind.CALLBACK)
+        ingress = {
+            CallbackPurpose.STATUS: IngressKind.STATUS_CALLBACK,
+            CallbackPurpose.EVIDENCE: IngressKind.EVIDENCE_CALLBACK,
+        }.get(purpose)
+        canonical_url = self._canonical_urls.get(ingress) if ingress is not None else None
         if canonical_url is None:
             return AuthResult(AuthState.REJECTED, AuthFailure.NONCANONICAL_ENDPOINT)
         verified = self._signature_verifier.verify(
             canonical_url=canonical_url, request=untrusted_request
         )
-        if verified is None or verified.ingress is not IngressKind.CALLBACK:
+        if verified is None or verified.ingress is not ingress:
             return AuthResult(AuthState.REJECTED, AuthFailure.SIGNATURE_INVALID)
         return self._store.authorize_callback(
             binding,

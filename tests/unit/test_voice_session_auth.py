@@ -8,6 +8,7 @@ from app.services.voice_session_auth import (
     AttestedCall,
     AuthFailure,
     AuthState,
+    CallbackPurpose,
     CandidateArm,
     EvidenceTier,
     ExecutionBinding,
@@ -84,9 +85,15 @@ class _SignatureVerifier:
         self.urls.append(canonical_url)
         if request != "signed":
             return None
-        if canonical_url.endswith("callback"):
+        if canonical_url.endswith("status"):
             return self.callback_request or _request(
-                IngressKind.CALLBACK, canonical_endpoint_id="bakeoff_https"
+                IngressKind.STATUS_CALLBACK,
+                canonical_endpoint_id="bakeoff_https",
+            )
+        if canonical_url.endswith("evidence"):
+            return self.callback_request or _request(
+                IngressKind.EVIDENCE_CALLBACK,
+                canonical_endpoint_id="bakeoff_https",
             )
         if canonical_url.endswith("issuer"):
             return self.issuer_request or _request(
@@ -120,7 +127,8 @@ def _facade(
             IngressKind.CAPABILITY_PROBE: "wss://configured.example/probe",
             IngressKind.RECONNECT: "wss://configured.example/reconnect",
             IngressKind.TOKEN_ISSUER: "https://configured.example/issuer",
-            IngressKind.CALLBACK: "https://configured.example/callback",
+            IngressKind.STATUS_CALLBACK: "https://configured.example/status",
+            IngressKind.EVIDENCE_CALLBACK: "https://configured.example/evidence",
         },
     )
     return app, store, envelope, signature
@@ -206,18 +214,33 @@ def test_concurrent_setup_has_exactly_one_authenticated_winner():
 
 def test_callback_capability_is_bound_one_time_and_revoked():
     binding = _binding()
-    callback_request = _request(IngressKind.CALLBACK, canonical_endpoint_id="bakeoff_https")
+    callback_request = _request(
+        IngressKind.STATUS_CALLBACK,
+        canonical_endpoint_id="bakeoff_https",
+    )
     app, _, _, _ = _facade(binding, callback_request)
     _authenticated(app, binding)
-    capability = app.issue_callback_capability(binding, stream_digest=_digest("2"), now_ms=6, ttl_ms=10)
+    capability = app.issue_callback_capability(
+        binding,
+        stream_digest=_digest("2"),
+        purpose=CallbackPurpose.STATUS,
+        now_ms=6,
+        ttl_ms=10,
+    )
     assert capability is not None
-    assert app.authorize_verified_callback(binding, untrusted_request="signed", stream_digest=_digest("3"), protected_capability=capability.protected_token, now_ms=7).failure is AuthFailure.BINDING_MISMATCH
-    replacement = app.issue_callback_capability(binding, stream_digest=_digest("2"), now_ms=7, ttl_ms=10)
+    assert app.authorize_verified_callback(binding, untrusted_request="signed", stream_digest=_digest("3"), purpose=CallbackPurpose.STATUS, protected_capability=capability.protected_token, now_ms=7).failure is AuthFailure.BINDING_MISMATCH
+    replacement = app.issue_callback_capability(
+        binding,
+        stream_digest=_digest("2"),
+        purpose=CallbackPurpose.STATUS,
+        now_ms=7,
+        ttl_ms=10,
+    )
     assert replacement is not None
-    assert app.authorize_verified_callback(binding, untrusted_request="signed", stream_digest=_digest("2"), protected_capability=replacement.protected_token, now_ms=7).authenticated
-    assert app.issue_callback_capability(binding, stream_digest=_digest("2"), now_ms=7, ttl_ms=10) is None
+    assert app.authorize_verified_callback(binding, untrusted_request="signed", stream_digest=_digest("2"), purpose=CallbackPurpose.STATUS, protected_capability=replacement.protected_token, now_ms=7).authenticated
+    assert app.issue_callback_capability(binding, stream_digest=_digest("2"), purpose=CallbackPurpose.STATUS, now_ms=7, ttl_ms=10) is None
     app.revoke(binding)
-    assert app.authorize_verified_callback(binding, untrusted_request="signed", stream_digest=_digest("2"), protected_capability=capability.protected_token, now_ms=8).state is AuthState.REJECTED
+    assert app.authorize_verified_callback(binding, untrusted_request="signed", stream_digest=_digest("2"), purpose=CallbackPurpose.STATUS, protected_capability=capability.protected_token, now_ms=8).state is AuthState.REJECTED
 
 
 def test_closed_schema_caps_and_token_redaction():

@@ -108,6 +108,129 @@ def test_semantic_confirmation_verifier_rejects_raw_and_noncanonical_events():
     )
 
 
+def test_response_authorization_verifier_requires_the_exact_current_receipt():
+    lifecycle = VoiceLifecycle(binding=_binding())
+    response = _event(VoiceEventKind.RESPONSE_AUTHORIZED, 1)
+    assert not lifecycle.accepts_response_authorization(response)
+    assert lifecycle.ingest(response)
+    assert lifecycle.accepts_response_authorization(response)
+    assert not lifecycle.accepts_response_authorization(
+        _event(
+            VoiceEventKind.RESPONSE_AUTHORIZED,
+            2,
+            semantic_act_kind=VoiceSemanticActKind.CLOSING,
+        )
+    )
+    assert lifecycle.ingest(_event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 2))
+    assert not lifecycle.accepts_response_authorization(response)
+
+
+def test_observational_input_generation_and_session_lifecycles_are_closed():
+    lifecycle = VoiceLifecycle(binding=_binding())
+    observations = (
+        _event(
+            VoiceEventKind.INPUT_ACTIVITY_STARTED,
+            1,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+        ),
+        _event(
+            VoiceEventKind.INPUT_ACTIVITY_ENDED,
+            2,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+        ),
+        _event(
+            VoiceEventKind.INPUT_TURN_FINAL,
+            3,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+            payload=VoicePayload(text_digest="a" * 64),
+        ),
+        _event(
+            VoiceEventKind.RESPONSE_AUTHORIZED,
+            4,
+        ),
+        _event(
+            VoiceEventKind.GENERATION_STARTED,
+            5,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        ),
+        _event(
+            VoiceEventKind.TEXT_SEGMENT_EMITTED,
+            6,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+            payload=VoicePayload(text_digest="b" * 64),
+        ),
+        _event(
+            VoiceEventKind.GENERATION_COMPLETED,
+            7,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        ),
+        _event(
+            VoiceEventKind.PROVIDER_TURN_COMPLETED,
+            8,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        ),
+        _event(
+            VoiceEventKind.SESSION_GO_AWAY,
+            9,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        ),
+        _event(
+            VoiceEventKind.SESSION_RESUMED,
+            10,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        ),
+    )
+    assert all(lifecycle.ingest(event) for event in observations)
+    assert not lifecycle.ingest(
+        _event(
+            VoiceEventKind.INPUT_TURN_PARTIAL,
+            11,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        )
+    )
+    assert not lifecycle.ingest(
+        _event(
+            VoiceEventKind.TEXT_SEGMENT_EMITTED,
+            12,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+            payload=VoicePayload(text_digest="c" * 64),
+        )
+    )
+
+
+def test_observational_events_reject_wrong_provenance_and_payload_shape():
+    lifecycle = VoiceLifecycle(binding=_binding())
+    assert not lifecycle.ingest(
+        _event(
+            VoiceEventKind.GENERATION_STARTED,
+            1,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+        )
+    )
+    assert lifecycle.ingest(_event(VoiceEventKind.RESPONSE_AUTHORIZED, 2))
+    assert lifecycle.ingest(
+        _event(
+            VoiceEventKind.GENERATION_STARTED,
+            3,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        )
+    )
+    assert not lifecycle.ingest(
+        _event(
+            VoiceEventKind.TEXT_SEGMENT_EMITTED,
+            4,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        )
+    )
+    assert not lifecycle.ingest(
+        _event(
+            VoiceEventKind.AUDIO_FRAME_GENERATED,
+            5,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        )
+    )
+
+
 def test_command_rejects_wrong_binding_expiry_and_idempotency_collision():
     lifecycle = VoiceLifecycle(binding=_binding())
     sequence = _playout_chain(lifecycle)

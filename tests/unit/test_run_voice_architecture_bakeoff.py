@@ -193,6 +193,24 @@ def test_runner_contains_no_network_or_credential_imports():
     }
 
 
+def test_all_offline_candidate_adapters_are_registered_without_importing_them():
+    assert runner._OFFLINE_ADAPTERS == {
+        "A": "app.services.voice_candidates.native_gemini:NativeGeminiAdapter",
+        "B1": "app.services.voice_candidates.chained_streaming:ChainedStreamingAdapter",
+        "B2": "app.services.voice_candidates.conversation_relay:ConversationRelayAdapter",
+        "C": "app.services.voice_candidates.manual_native:ManualNativeAdapter",
+    }
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    assert "not registered" in runner.validate(
+        approval,
+        manifest,
+        "unknown",
+        "a" * 40,
+        now_ms=1_000,
+    )[0]
+
+
 def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path):
     source_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True

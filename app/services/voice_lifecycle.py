@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 VOICE_SCHEMA_VERSION = 1
@@ -21,7 +21,21 @@ class VoiceSensitivity(str, Enum):
 
 
 class VoiceEventKind(str, Enum):
+    INPUT_ACTIVITY_STARTED = "input_activity_started"
+    INPUT_ACTIVITY_ENDED = "input_activity_ended"
+    INPUT_TURN_PARTIAL = "input_turn_partial"
+    INPUT_TURN_FINAL = "input_turn_final"
     RESPONSE_AUTHORIZED = "response_authorized"
+    GENERATION_STARTED = "generation_started"
+    TEXT_SEGMENT_EMITTED = "text_segment_emitted"
+    AUDIO_FRAME_GENERATED = "audio_frame_generated"
+    GENERATION_COMPLETED = "generation_completed"
+    GENERATION_CANCELLED = "generation_cancelled"
+    PROVIDER_TURN_COMPLETED = "provider_turn_completed"
+    SESSION_DISCONNECTED = "session_disconnected"
+    SESSION_REESTABLISHED = "session_reestablished"
+    SESSION_RESUMED = "session_resumed"
+    SESSION_GO_AWAY = "session_go_away"
     SEMANTIC_ACT_CONFIRMED = "semantic_act_confirmed"
     TTS_BOUND = "tts_bound"
     PLAYOUT_BOUND = "playout_bound"
@@ -204,13 +218,77 @@ class VoiceCommand:
         _nonnegative(self.arguments[0][1], "timeout_ms")
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceTimeoutIntent:
+    """Sequence-free timeout fact for canonical coordinator materialization."""
+
+    binding: VoiceSessionBinding
+    input_turn_id: str
+    generation_id: str
+    semantic_act_id: str
+    semantic_act_kind: VoiceSemanticActKind
+    payload: VoicePayload = VoicePayload()
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.binding, VoiceSessionBinding)
+            or not isinstance(self.semantic_act_kind, VoiceSemanticActKind)
+            or not isinstance(self.payload, VoicePayload)
+        ):
+            raise ValueError("invalid timeout intent binding")
+        for name in ("input_turn_id", "generation_id", "semantic_act_id"):
+            _identifier(getattr(self, name), name)
+
+    def event(self, *, sequence: int, at_ms: int) -> VoiceEvent:
+        return VoiceEvent(
+            schema_version=VOICE_SCHEMA_VERSION,
+            kind=VoiceEventKind.ACT_TIMED_OUT,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            sensitivity=VoiceSensitivity.OPERATIONAL,
+            binding=self.binding,
+            sequence=sequence,
+            at_ms=at_ms,
+            input_turn_id=self.input_turn_id,
+            generation_id=self.generation_id,
+            semantic_act_id=self.semantic_act_id,
+            semantic_act_kind=self.semantic_act_kind,
+            payload=self.payload,
+        )
+
+
+@runtime_checkable
+class VoiceTimeoutAuthority(Protocol):
+    """Adapter-owned authority required before a timeout can become canonical."""
+
+    def authorizes_timeout(
+        self,
+        intent: VoiceTimeoutIntent,
+        *,
+        now_ms: int,
+    ) -> bool: ...
+
+    def accept_timeout(
+        self,
+        event: VoiceEvent,
+        *,
+        lifecycle: "VoiceLifecycle",
+    ) -> bool: ...
+
+
 class VoiceLifecycle:
     def __init__(self, *, binding: VoiceSessionBinding) -> None:
         self.binding = binding
         self._sequence = -1
         self._at_ms = -1
         self._acts: dict[str, tuple[VoiceEventKind, str, str, VoiceSemanticActKind, str | None, str | None, str | None]] = {}
+        self._input_states: dict[str, VoiceEventKind] = {}
+        self._generation_states: dict[
+            tuple[str, str, str, VoiceSemanticActKind], VoiceEventKind
+        ] = {}
+        self._session_state: VoiceEventKind | None = None
+        self._response_authorizations: dict[str, VoiceEvent] = {}
         self._semantic_confirmations: dict[str, VoiceEvent] = {}
+        self._act_terminals: dict[str, VoiceEvent] = {}
         self._commands: dict[str, VoiceCommand] = {}
         self.rejected_event_count = 0
         self.idempotent_command_count = 0
@@ -221,7 +299,21 @@ class VoiceLifecycle:
             self.rejected_event_count += 1
             return False
         required_source = {
+            VoiceEventKind.INPUT_ACTIVITY_STARTED: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.INPUT_ACTIVITY_ENDED: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.INPUT_TURN_PARTIAL: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.INPUT_TURN_FINAL: VoiceSource.PROVIDER_UNTRUSTED,
             VoiceEventKind.RESPONSE_AUTHORIZED: VoiceSource.LOCAL_AUTHORITATIVE,
+            VoiceEventKind.GENERATION_STARTED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.TEXT_SEGMENT_EMITTED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.AUDIO_FRAME_GENERATED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.GENERATION_COMPLETED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.GENERATION_CANCELLED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.PROVIDER_TURN_COMPLETED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.SESSION_DISCONNECTED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.SESSION_REESTABLISHED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.SESSION_RESUMED: VoiceSource.PROVIDER_UNTRUSTED,
+            VoiceEventKind.SESSION_GO_AWAY: VoiceSource.PROVIDER_UNTRUSTED,
             VoiceEventKind.SEMANTIC_ACT_CONFIRMED: VoiceSource.LOCAL_AUTHORITATIVE,
             VoiceEventKind.TTS_BOUND: VoiceSource.LOCAL_AUTHORITATIVE,
             VoiceEventKind.PLAYOUT_BOUND: VoiceSource.LOCAL_AUTHORITATIVE,
@@ -237,6 +329,12 @@ class VoiceLifecycle:
         if event.source is not required_source:
             self.rejected_event_count += 1
             return False
+        if event.kind in _OBSERVATIONAL_EVENT_KINDS:
+            if not self._ingest_observation(event):
+                self.rejected_event_count += 1
+                return False
+            self._sequence, self._at_ms = event.sequence, event.at_ms
+            return True
         prior_record = self._acts.get(event.semantic_act_id)
         prior = prior_record[0] if prior_record is not None else None
         expected = {
@@ -292,8 +390,12 @@ class VoiceLifecycle:
             payload.audio_id if payload.audio_id is not None else prior_audio,
             payload.playout_id if payload.playout_id is not None else prior_playout,
         )
+        if event.kind is VoiceEventKind.RESPONSE_AUTHORIZED:
+            self._response_authorizations[event.semantic_act_id] = event
         if event.kind is VoiceEventKind.SEMANTIC_ACT_CONFIRMED:
             self._semantic_confirmations[event.semantic_act_id] = event
+        if event.kind in {VoiceEventKind.ACT_FAILED, VoiceEventKind.ACT_TIMED_OUT}:
+            self._act_terminals[event.semantic_act_id] = event
         if event.kind is VoiceEventKind.CALLER_PLAYBACK_OBSERVED and event.semantic_act_kind is VoiceSemanticActKind.QUESTION:
             self.pending_question_active = True
         return True
@@ -353,3 +455,173 @@ class VoiceLifecycle:
             and record[0] is VoiceEventKind.SEMANTIC_ACT_CONFIRMED
             and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
         )
+
+    def accepts_response_authorization(self, event: VoiceEvent) -> bool:
+        """Return true only for the exact current authorization receipt."""
+        record = self._acts.get(event.semantic_act_id)
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.RESPONSE_AUTHORIZED
+            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
+            and self._response_authorizations.get(event.semantic_act_id) == event
+            and record is not None
+            and record[0] is VoiceEventKind.RESPONSE_AUTHORIZED
+            and record[1:4]
+            == (
+                event.input_turn_id,
+                event.generation_id,
+                event.semantic_act_kind,
+            )
+        )
+
+    def accepts_act_timeout(self, event: VoiceEvent) -> bool:
+        """Return true only for the exact timeout accepted by this reducer."""
+        record = self._acts.get(event.semantic_act_id)
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.ACT_TIMED_OUT
+            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
+            and self._act_terminals.get(event.semantic_act_id) == event
+            and record is not None
+            and record[0] is VoiceEventKind.ACT_TIMED_OUT
+            and record[1:4]
+            == (
+                event.input_turn_id,
+                event.generation_id,
+                event.semantic_act_kind,
+            )
+        )
+
+    def next_position(self, *, at_ms: int) -> tuple[int, int]:
+        """Allocate the next monotonic position without mutating the reducer."""
+        return self._sequence + 1, max(self._at_ms, _nonnegative(at_ms, "at_ms"))
+
+    def _ingest_observation(self, event: VoiceEvent) -> bool:
+        if event.kind in _INPUT_EVENT_KINDS:
+            prior = self._input_states.get(event.input_turn_id)
+            if event.kind is VoiceEventKind.INPUT_ACTIVITY_STARTED:
+                allowed = prior in {
+                    None,
+                    VoiceEventKind.INPUT_ACTIVITY_ENDED,
+                    VoiceEventKind.INPUT_TURN_PARTIAL,
+                }
+            elif event.kind is VoiceEventKind.INPUT_ACTIVITY_ENDED:
+                allowed = prior is VoiceEventKind.INPUT_ACTIVITY_STARTED
+            elif event.kind is VoiceEventKind.INPUT_TURN_PARTIAL:
+                allowed = prior is not VoiceEventKind.INPUT_TURN_FINAL
+            else:
+                allowed = prior is not VoiceEventKind.INPUT_TURN_FINAL
+            if not allowed or event.payload.audio_id is not None or event.payload.playout_id is not None:
+                return False
+            self._input_states[event.input_turn_id] = event.kind
+            return True
+        if event.kind in _GENERATION_EVENT_KINDS:
+            authorization = self._acts.get(event.semantic_act_id)
+            if (
+                authorization is None
+                or authorization[1:4]
+                != (
+                    event.input_turn_id,
+                    event.generation_id,
+                    event.semantic_act_kind,
+                )
+                or authorization[0]
+                not in {
+                    VoiceEventKind.RESPONSE_AUTHORIZED,
+                    VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+                    VoiceEventKind.TTS_BOUND,
+                    VoiceEventKind.PLAYOUT_BOUND,
+                    VoiceEventKind.TRANSPORT_RESOLVED,
+                }
+            ):
+                return False
+            key = (
+                event.input_turn_id,
+                event.generation_id,
+                event.semantic_act_id,
+                event.semantic_act_kind,
+            )
+            prior = self._generation_states.get(key)
+            allowed_prior = {
+                VoiceEventKind.GENERATION_STARTED: {None},
+                VoiceEventKind.TEXT_SEGMENT_EMITTED: {
+                    VoiceEventKind.GENERATION_STARTED,
+                    VoiceEventKind.TEXT_SEGMENT_EMITTED,
+                },
+                VoiceEventKind.AUDIO_FRAME_GENERATED: {
+                    VoiceEventKind.GENERATION_STARTED,
+                    VoiceEventKind.AUDIO_FRAME_GENERATED,
+                },
+                VoiceEventKind.GENERATION_COMPLETED: {
+                    VoiceEventKind.GENERATION_STARTED,
+                    VoiceEventKind.TEXT_SEGMENT_EMITTED,
+                    VoiceEventKind.AUDIO_FRAME_GENERATED,
+                },
+                VoiceEventKind.GENERATION_CANCELLED: {
+                    VoiceEventKind.GENERATION_STARTED,
+                    VoiceEventKind.TEXT_SEGMENT_EMITTED,
+                    VoiceEventKind.AUDIO_FRAME_GENERATED,
+                },
+                VoiceEventKind.PROVIDER_TURN_COMPLETED: {
+                    VoiceEventKind.GENERATION_COMPLETED,
+                },
+            }[event.kind]
+            if prior not in allowed_prior:
+                return False
+            if event.kind is VoiceEventKind.TEXT_SEGMENT_EMITTED and event.payload.text_digest is None:
+                return False
+            if event.kind is VoiceEventKind.AUDIO_FRAME_GENERATED and event.payload.audio_id is None:
+                return False
+            self._generation_states[key] = event.kind
+            return True
+        prior = self._session_state
+        allowed_prior = {
+            VoiceEventKind.SESSION_DISCONNECTED: {
+                None,
+                VoiceEventKind.SESSION_REESTABLISHED,
+                VoiceEventKind.SESSION_RESUMED,
+            },
+            VoiceEventKind.SESSION_REESTABLISHED: {
+                VoiceEventKind.SESSION_DISCONNECTED,
+            },
+            VoiceEventKind.SESSION_GO_AWAY: {
+                None,
+                VoiceEventKind.SESSION_REESTABLISHED,
+                VoiceEventKind.SESSION_RESUMED,
+            },
+            VoiceEventKind.SESSION_RESUMED: {
+                VoiceEventKind.SESSION_GO_AWAY,
+                VoiceEventKind.SESSION_DISCONNECTED,
+            },
+        }[event.kind]
+        if prior not in allowed_prior:
+            return False
+        self._session_state = event.kind
+        return True
+
+
+_INPUT_EVENT_KINDS = {
+    VoiceEventKind.INPUT_ACTIVITY_STARTED,
+    VoiceEventKind.INPUT_ACTIVITY_ENDED,
+    VoiceEventKind.INPUT_TURN_PARTIAL,
+    VoiceEventKind.INPUT_TURN_FINAL,
+}
+_GENERATION_EVENT_KINDS = {
+    VoiceEventKind.GENERATION_STARTED,
+    VoiceEventKind.TEXT_SEGMENT_EMITTED,
+    VoiceEventKind.AUDIO_FRAME_GENERATED,
+    VoiceEventKind.GENERATION_COMPLETED,
+    VoiceEventKind.GENERATION_CANCELLED,
+    VoiceEventKind.PROVIDER_TURN_COMPLETED,
+}
+_SESSION_EVENT_KINDS = {
+    VoiceEventKind.SESSION_DISCONNECTED,
+    VoiceEventKind.SESSION_REESTABLISHED,
+    VoiceEventKind.SESSION_RESUMED,
+    VoiceEventKind.SESSION_GO_AWAY,
+}
+_OBSERVATIONAL_EVENT_KINDS = (
+    _INPUT_EVENT_KINDS | _GENERATION_EVENT_KINDS | _SESSION_EVENT_KINDS
+)

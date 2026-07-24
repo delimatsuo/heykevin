@@ -47,6 +47,12 @@ _ARM_ROLES = {
     "B2": {"telephony", "conversation_relay", "text_generation"},
     "C": {"telephony", "native_voice"},
 }
+_OFFLINE_ADAPTERS = {
+    "A": "app.services.voice_candidates.native_gemini:NativeGeminiAdapter",
+    "B1": "app.services.voice_candidates.chained_streaming:ChainedStreamingAdapter",
+    "B2": "app.services.voice_candidates.conversation_relay:ConversationRelayAdapter",
+    "C": "app.services.voice_candidates.manual_native:ManualNativeAdapter",
+}
 
 
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -106,6 +112,8 @@ def _dependency_inventory_digest(dependencies: object) -> str:
 def validate(approval: dict[str, object], manifest: dict[str, object], arm: str, source_sha: str, now_ms: int | None = None, schema: dict[str, object] | None = None, manifest_digest: str | None = None) -> list[str]:
     required = {"approval_id", "nonce", "issued_at_ms", "expires_at_ms", "self_digest", "environment", "arm", "source_sha", "manifest_digest", "dependency_inventory_digest", "artifact_digests", "dependencies", "caps", "disabled_features", "custody_references", "trust_metadata", "signatures"}
     errors = []
+    if arm not in _OFFLINE_ADAPTERS:
+        errors.append("candidate adapter is not registered")
     if manifest_digest is None:
         manifest_digest = _manifest_digest_bytes(json.dumps(manifest, separators=(",", ":")).encode("utf-8"))
     if schema is not None:

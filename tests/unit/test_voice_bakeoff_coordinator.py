@@ -13,6 +13,7 @@ from app.services.voice_lifecycle import (
     VoiceSensitivity,
     VoiceSessionBinding,
     VoiceSource,
+    VoiceTimeoutIntent,
 )
 from app.services.voice_speech_control import (
     SemanticAct,
@@ -326,6 +327,7 @@ def test_semantic_confirmation_rejects_wrong_act_binding_and_advanced_receipt():
     )
     assert coordinator.calls.phase is SilencePhase.QUESTION_RESERVED
 
+
     other_binding = VoiceSessionBinding(
         "bakeoff",
         "tenant_1",
@@ -380,3 +382,67 @@ def test_semantic_confirmation_rejects_wrong_act_binding_and_advanced_receipt():
         sequence=2,
     )
     assert coordinator.calls.phase is SilencePhase.QUESTION_RESERVED
+
+
+def test_timeout_materialization_allocates_canonical_position_after_later_events():
+    coordinator = _coordinator()
+    lifecycle = coordinator.calls.voice_lifecycle
+    response = _event(VoiceEventKind.RESPONSE_AUTHORIZED, 10, act_id="act_timeout")
+    assert lifecycle.ingest(response)
+    assert lifecycle.ingest(
+        _event(
+            VoiceEventKind.SESSION_GO_AWAY,
+            20,
+            act_id="session_fact",
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        )
+    )
+    intent = VoiceTimeoutIntent(
+        binding=_binding(),
+        input_turn_id="turn_1",
+        generation_id="generation_1",
+        semantic_act_id="act_timeout",
+        semantic_act_kind=VoiceSemanticActKind.QUESTION,
+    )
+
+    class _Authority:
+        def __init__(self, pending: VoiceTimeoutIntent) -> None:
+            self.pending = pending
+
+        def authorizes_timeout(
+            self,
+            candidate: VoiceTimeoutIntent,
+            *,
+            now_ms: int,
+        ) -> bool:
+            return candidate is self.pending and now_ms >= 15
+
+        def accept_timeout(
+            self,
+            event: VoiceEvent,
+            *,
+            lifecycle: VoiceLifecycle,
+        ) -> bool:
+            if not lifecycle.accepts_act_timeout(event):
+                return False
+            self.pending = None
+            return True
+
+    authority = _Authority(intent)
+    first = coordinator.materialize_timeout(
+        intent=intent,
+        authority=authority,
+        at_ms=15,
+    )
+    assert first is not None
+    assert first.sequence == 21
+    assert first.at_ms == 20
+    assert lifecycle.accepts_act_timeout(first)
+    assert (
+        coordinator.materialize_timeout(
+            intent=intent,
+            authority=authority,
+            at_ms=16,
+        )
+        is None
+    )

@@ -1,12 +1,15 @@
 """Tests for the fail-closed, dry-run-only approval preflight."""
 
 import ast
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
 import time
+
+import pytest
 
 from scripts.voice_bakeoff_caller import development_harness_manifest
 
@@ -196,6 +199,390 @@ def test_runner_contains_no_network_or_credential_imports():
         for imported in imports
         if imported.split(".")[0]
         in {"socket", "requests", "http", "boto", "google", "secretmanager"}
+    }
+
+
+_OFFLINE_SOURCE_PATHS = {
+    "scripts.run_voice_architecture_bakeoff": _SCRIPT,
+    "scripts.voice_bakeoff_caller": Path("scripts/voice_bakeoff_caller.py"),
+}
+_OFFLINE_APPROVED_SOURCE_DIGESTS = {
+    "scripts.run_voice_architecture_bakeoff": (
+        "f6ac01248f69be65e3f171507500972c917af2016431aaf4e370fd2c39ee7b05"
+    ),
+    "scripts.voice_bakeoff_caller": (
+        "a4f2aab9e95bd27048dbec60268c109fee3362ee6a2fd6f33f77dc31d1f70c1b"
+    ),
+}
+_OFFLINE_ALLOWED_IMPORTS = {
+    "scripts.run_voice_architecture_bakeoff": {
+        ("from", "__future__", "annotations", ""),
+        ("import", "argparse", "", ""),
+        ("import", "hashlib", "", ""),
+        ("import", "json", "", ""),
+        ("import", "re", "", ""),
+        ("import", "subprocess", "", ""),
+        ("import", "time", "", ""),
+        ("from", "pathlib", "Path", ""),
+        (
+            "from",
+            "scripts.voice_bakeoff_caller",
+            "run_offline_self_check",
+            "",
+        ),
+        ("from", "voice_bakeoff_caller", "run_offline_self_check", ""),
+    },
+    "scripts.voice_bakeoff_caller": {
+        ("from", "__future__", "annotations", ""),
+        ("import", "hashlib", "", ""),
+        ("import", "json", "", ""),
+        ("import", "random", "", ""),
+        ("import", "secrets", "", ""),
+        ("import", "tempfile", "", ""),
+        ("import", "threading", "", ""),
+        ("from", "collections.abc", "Callable", ""),
+        ("from", "collections.abc", "Iterable", ""),
+        ("from", "dataclasses", "dataclass", ""),
+        ("from", "dataclasses", "field", ""),
+        ("from", "pathlib", "Path", ""),
+        ("from", "typing", "Protocol", ""),
+        (
+            "from",
+            "cryptography.hazmat.primitives.ciphers.aead",
+            "AESGCM",
+            "",
+        ),
+    },
+}
+_OFFLINE_ALLOWED_GETATTR = {
+    "scripts.run_voice_architecture_bakeoff": [],
+    "scripts.voice_bakeoff_caller": sorted(
+        [
+            ast.dump(
+                ast.parse(expression, mode="eval").body,
+                include_attributes=False,
+            )
+            for expression in (
+                "getattr(current, name)",
+                "getattr(current, name)",
+                "getattr(self._caps, name)",
+                "getattr(self._usage, name)",
+            )
+        ]
+    ),
+}
+_OFFLINE_ALLOWED_FILE_IO = {
+    "scripts.run_voice_architecture_bakeoff": sorted(
+        [
+            ast.dump(
+                ast.parse(expression, mode="eval").body,
+                include_attributes=False,
+            )
+            for expression in (
+                "path.stat()",
+                'path.read_text(encoding="utf-8")',
+                "args.manifest.read_bytes()",
+            )
+        ]
+    ),
+    "scripts.voice_bakeoff_caller": sorted(
+        [
+            ast.dump(
+                ast.parse(expression, mode="eval").body,
+                include_attributes=False,
+            )
+            for expression in (
+                "path.write_bytes(encrypted)",
+                "path.read_bytes()",
+            )
+        ]
+    ),
+}
+
+
+def _resolved_from_module(module_name: str, node: ast.ImportFrom) -> str:
+    if node.level == 0:
+        return node.module or ""
+    package = module_name.split(".")[:-1]
+    keep = len(package) - (node.level - 1)
+    prefix = package[: max(keep, 0)]
+    if node.module:
+        prefix.extend(node.module.split("."))
+    return ".".join(prefix)
+
+
+def _import_contract(
+    module_name: str,
+    tree: ast.AST,
+) -> tuple[
+    set[tuple[str, str, str, str]],
+    set[str],
+]:
+    records: set[tuple[str, str, str, str]] = set()
+    local_dependencies: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                records.add(("import", alias.name, "", alias.asname or ""))
+                if alias.name.startswith("scripts."):
+                    local_dependencies.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            base = _resolved_from_module(module_name, node)
+            for alias in node.names:
+                records.add(("from", base, alias.name, alias.asname or ""))
+            if base == "voice_bakeoff_caller":
+                local_dependencies.add("scripts.voice_bakeoff_caller")
+            elif base.startswith("scripts."):
+                local_dependencies.add(base)
+    return records, local_dependencies
+
+
+def _offline_firewall_errors(
+    overrides: dict[str, str] | None = None,
+) -> list[str]:
+    source_overrides = overrides or {}
+    errors: list[str] = []
+    package_initializers = {
+        path.parent / "__init__.py"
+        for path in _OFFLINE_SOURCE_PATHS.values()
+        if (path.parent / "__init__.py").exists()
+    }
+    if package_initializers:
+        errors.append("unapproved package initializer")
+    pending = ["scripts.run_voice_architecture_bakeoff"]
+    visited: set[str] = set()
+    while pending:
+        module_name = pending.pop()
+        if module_name in visited:
+            continue
+        visited.add(module_name)
+        path = _OFFLINE_SOURCE_PATHS.get(module_name)
+        if path is None:
+            errors.append(f"unapproved local dependency: {module_name}")
+            continue
+        source = source_overrides.get(
+            module_name,
+            path.read_text(encoding="utf-8"),
+        )
+        if (
+            hashlib.sha256(source.encode("utf-8")).hexdigest()
+            != _OFFLINE_APPROVED_SOURCE_DIGESTS[module_name]
+        ):
+            errors.append(f"source digest mismatch: {module_name}")
+        tree = ast.parse(source)
+        records, dependencies = _import_contract(module_name, tree)
+        if records != _OFFLINE_ALLOWED_IMPORTS[module_name]:
+            errors.append(f"import contract mismatch: {module_name}")
+        pending.extend(dependencies - visited)
+
+        forbidden_names = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id
+            in {
+                "__import__",
+                "compile",
+                "eval",
+                "exec",
+                "globals",
+                "locals",
+                "open",
+                "vars",
+            }
+        }
+        if forbidden_names:
+            errors.append(f"forbidden builtin call: {module_name}")
+
+        forbidden_attributes = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {
+                "create_connection",
+                "create_subprocess_exec",
+                "create_subprocess_shell",
+                "entry_points",
+                "getenv",
+                "import_module",
+                "load_module",
+                "open_connection",
+                "popen",
+                "system",
+                "urlopen",
+            }
+        }
+        if forbidden_attributes:
+            errors.append(f"forbidden dynamic or authority call: {module_name}")
+
+        if any(
+            isinstance(node, ast.Name) and node.id == "__builtins__"
+            for node in ast.walk(tree)
+        ):
+            errors.append(f"forbidden builtins reference: {module_name}")
+
+        getattr_calls = sorted(
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+        )
+        if getattr_calls != _OFFLINE_ALLOWED_GETATTR[module_name]:
+            errors.append(f"getattr contract mismatch: {module_name}")
+
+        file_io_calls = sorted(
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {
+                "open",
+                "read_bytes",
+                "read_text",
+                "stat",
+                "write_bytes",
+                "write_text",
+            }
+        )
+        if file_io_calls != _OFFLINE_ALLOWED_FILE_IO[module_name]:
+            errors.append(f"filesystem I/O contract mismatch: {module_name}")
+
+        subprocess_references = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == "subprocess"
+        ]
+        if module_name == "scripts.run_voice_architecture_bakeoff":
+            subprocess_calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "subprocess"
+            ]
+            expected = ast.parse(
+                'subprocess.check_output('
+                '["git", "-C", str(root), "rev-parse", "HEAD"], text=True'
+                ")",
+                mode="eval",
+            ).body
+            if (
+                len(subprocess_calls) != 1
+                or len(subprocess_references) != 1
+                or ast.dump(subprocess_calls[0], include_attributes=False)
+                != ast.dump(expected, include_attributes=False)
+            ):
+                errors.append("subprocess contract mismatch")
+        elif subprocess_references:
+            errors.append(f"subprocess reference outside runner: {module_name}")
+    return errors
+
+
+def test_runner_and_reachable_offline_harness_have_no_execution_escape_hatches():
+    assert _offline_firewall_errors() == []
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    (
+        "from socket import create_connection",
+        "from subprocess import run\nrun(['true'])",
+        "import subprocess as sp\nsp.run(['true'])",
+        "import os\nos.system('true')",
+        "import asyncio\nasyncio.open_connection('localhost', 1)",
+        "from .provider import Client",
+        (
+            "from importlib import import_module as load\n"
+            "load('scripts.provider_execution')"
+        ),
+        "import os\nos.getenv('PROVIDER_API_KEY')",
+        "from google.cloud import secretmanager",
+        "getattr(subprocess, 'run')(['true'])",
+        "subprocess.__dict__['run'](['true'])",
+        "__builtins__['__import__']('socket')",
+        "__builtins__['__import__']('subprocess').run(['true'])",
+        "getattr(__builtins__, '__import__')('socket')",
+        "Path('.env').read_text()",
+        "Path('/proc/self/environ').read_bytes()",
+        "getattr(Path('.env'), 'read_text')()",
+        "open('.env').read()",
+    ),
+)
+def test_offline_ast_firewall_rejects_mutated_authority_paths(snippet: str):
+    module_name = "scripts.run_voice_architecture_bakeoff"
+    mutated = (
+        _OFFLINE_SOURCE_PATHS[module_name].read_text(encoding="utf-8")
+        + "\n"
+        + snippet
+        + "\n"
+    )
+    assert _offline_firewall_errors({module_name: mutated})
+
+
+def test_execute_provider_is_rejected_before_inputs_or_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    contacts: list[str] = []
+
+    def forbidden_contact(*args: object, **kwargs: object) -> None:
+        contacts.append("contact")
+        raise AssertionError("provider execution refusal must happen during parsing")
+
+    monkeypatch.setattr(runner, "_load", forbidden_contact)
+    monkeypatch.setattr(runner.subprocess, "check_output", forbidden_contact)
+    monkeypatch.setattr(runner, "run_offline_self_check", forbidden_contact)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            "must_not_be_read.json",
+            "--approval",
+            "must_not_be_read.json",
+            "--dry-run",
+            "--execute-provider",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        runner.main()
+    assert exc.value.code == 2
+    assert contacts == []
+
+
+def test_repository_templates_remain_nonexecuting_and_unsealed():
+    schema = json.loads(
+        Path(
+            "tests/fixtures/voice_architecture_bakeoff/provider_approval.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        Path("tests/fixtures/voice_architecture_bakeoff/manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert schema["x-execution"] == "unsupported"
+    assert manifest["authorization_status"] == "template_only"
+    assert manifest["cap_configuration"] == {
+        "configuration_reference": (
+            "REPLACE_WITH_SEALED_PER_WINDOW_CAP_CONFIGURATION_REFERENCE"
+        ),
+        "max_requests": 0,
+        "max_concurrency": 0,
+        "max_duration_seconds": 0,
+        "max_bytes": 0,
+        "max_audio_seconds": 0,
+        "max_retries": 0,
+        "max_output_tokens": 0,
+        "max_spend_minor_units": 0,
     }
 
 

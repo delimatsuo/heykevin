@@ -396,10 +396,10 @@ class ExecutionCapLedger:
             current = self._usage
             if (
                 any(
-                    getattr(current, name) + requested[name] >= getattr(self._caps, name)
+                    getattr(current, name) + requested[name] > getattr(self._caps, name)
                     for name in self._CUMULATIVE_FIELDS
                 )
-                or current.concurrency + 1 >= self._caps.concurrency
+                or current.concurrency + 1 > self._caps.concurrency
             ):
                 return False
             self._usage = HarnessUsage(

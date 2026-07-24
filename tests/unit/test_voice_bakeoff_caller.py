@@ -127,17 +127,14 @@ def test_pcmu_evidence_is_encrypted_round_trip_and_teardown_removes_residue(
 @pytest.mark.parametrize(
     ("changes", "run_changes"),
     (
-        ({"requests": 1}, {}),
-        ({"calls": 1}, {}),
-        ({"duration_ms": 161}, {}),
-        ({"byte_count": 480}, {}),
-        ({"audio_ms": 60}, {}),
-        ({"retries": 1}, {"retry_count": 1}),
-        ({"concurrency": 1}, {}),
-        ({"cost_minor_units": 1}, {}),
+        ({"duration_ms": 160}, {}),
+        ({"byte_count": 479}, {}),
+        ({"audio_ms": 59}, {}),
+        ({"retries": 1}, {"retry_count": 2}),
+        ({"cost_minor_units": 1}, {"cost_minor_units": 2}),
     ),
 )
-def test_every_cap_fails_on_contact_and_tears_down(
+def test_oversized_usage_fails_before_contact_and_tears_down(
     tmp_path: Path,
     changes: dict[str, int],
     run_changes: dict[str, int],
@@ -157,6 +154,28 @@ def test_every_cap_fails_on_contact_and_tears_down(
             **run_changes,
         )
     assert not root.exists()
+
+
+def test_usage_exactly_at_every_cap_is_allowed(tmp_path: Path):
+    caps = HarnessCaps(
+        requests=1,
+        calls=1,
+        duration_ms=161,
+        byte_count=480,
+        audio_ms=60,
+        retries=1,
+        concurrency=1,
+        cost_minor_units=1,
+    )
+    summary = OfflineCallerHarness(caps=caps, plan=_plan()).run(
+        arm="A",
+        scenario_id=development_schedule().scenario_id,
+        evidence=_store(tmp_path),
+        retry_count=1,
+    )
+    assert summary.duration_ms == caps.duration_ms
+    assert summary.byte_count == caps.byte_count
+    assert summary.audio_ms == caps.audio_ms
 
 
 def test_stop_trigger_cancels_and_tears_down_without_raw_retention(tmp_path: Path):
@@ -199,7 +218,7 @@ def test_stop_trigger_cancels_and_tears_down_without_raw_retention(tmp_path: Pat
 def test_window_caps_accumulate_across_candidate_runs_and_include_playback(
     tmp_path: Path,
 ):
-    caps = replace(_CAPS, calls=3, requests=3, duration_ms=400)
+    caps = replace(_CAPS, calls=2, requests=2, duration_ms=322)
     harness = OfflineCallerHarness(caps=caps, plan=_plan())
     for arm in ("A", "B1"):
         harness.run(
@@ -240,7 +259,7 @@ def test_two_normal_overlapping_runs_do_not_abort_each_other(tmp_path: Path):
 
     sessions = OfflineSessionController()
     harness = OfflineCallerHarness(
-        caps=replace(_CAPS, concurrency=3),
+        caps=replace(_CAPS, concurrency=2),
         plan=_plan(),
         stop_requested=synchronize_segments,
         session_controller=sessions,

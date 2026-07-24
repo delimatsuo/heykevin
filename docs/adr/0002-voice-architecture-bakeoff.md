@@ -41,6 +41,36 @@ arms are then scored 30% semantic task success, 20% caller-heard completeness,
 15% latency, 15% interruption/silence/reconnect, 10% language parity, 5% security,
 and 5% operations/cost. No winner on insufficient evidence or any hard-gate failure.
 
+### Pinned caller-heard interruption boundary
+
+Before any capability probe, the hard eligibility threshold for ground-truth
+intentional caller-speech onset to the last audible assistant sample is pinned at
+p95 at most 750 ms and maximum 1,000 ms. The interval begins at speech onset in
+the caller-side capture and ends at the final assistant sample in caller-side
+PCMU. Every manifest-labeled intentional interruption is measured. Labeled
+backchannels and noise are negative controls and must produce zero false clears.
+
+The threshold is an owner/product engineering rejection budget, not a number
+derived from ITU-T and not a claim that the delay is imperceptible or
+human-equivalent. Its explicit component allocations are p95 at most 250 ms and
+maximum 500 ms from intentional interruption to Twilio `clear`, plus p95 at most
+500 ms and maximum 500 ms from clear to the last caller-audible queued sample.
+The directly measured end-to-end 750/1,000 ms gate governs; component percentiles
+cannot substitute for it.
+
+ITU-T G.114 provides context only: highly interactive speech can be affected at
+delays well below its 400 ms one-way network-planning upper bound:
+<https://www.itu.int/dms_pubrec/itu-t/rec/g/T-REC-G.114-200305-I!!SUM-HTM-E.htm>.
+It does not establish this assistant-interruption cutoff. The later closed-loop
+window independently applies an absolute perceived-talk-over `no_winner` gate in
+addition to comparison measures.
+
+This threshold cannot be weakened after this decision or after candidate evidence
+is visible. If caller-side recording is not separately authorized for a
+participant window, the timing gate is evaluated only in the approved synthetic
+technical windows; participant reports cannot substitute for the caller-audio
+measurement.
+
 ## Control and custody
 
 Provider execution requires a separately signed, immutable, one-use envelope:

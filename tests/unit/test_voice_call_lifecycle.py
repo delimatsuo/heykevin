@@ -1,6 +1,6 @@
 """Deterministic tests for the revision-bound bakeoff call lifecycle."""
 
-from app.services.voice_call_lifecycle import CallIntentKind, CallLifecycle, PlaybackEvidence, SilencePhase
+from app.services.voice_call_lifecycle import CallIntentKind, CallLifecycle, PlaybackEvidence, QuestionIntent, SilencePhase
 from app.services.voice_lifecycle import VoiceEvent, VoiceEventKind, VoiceLifecycle, VoicePayload, VoiceSemanticActKind, VoiceSensitivity, VoiceSessionBinding, VoiceSource
 
 
@@ -20,18 +20,24 @@ def _receipt(lifecycle: VoiceLifecycle, act_id: str, kind: VoiceSemanticActKind,
         return VoiceEvent(kind=kind, sequence=start + offset, at_ms=at_ms, payload=payload, source=source, **{key: value for key, value in values.items() if key != "source"})
     digest = "a" * 64
     payload = VoicePayload(text_digest=digest, audio_id="audio_1", playout_id="playout_1")
-    assert lifecycle.ingest(event(VoiceEventKind.RESPONSE_AUTHORIZED, 0))
-    assert lifecycle.ingest(event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 1))
-    assert lifecycle.ingest(event(VoiceEventKind.TTS_BOUND, 2, VoicePayload(text_digest=digest, audio_id="audio_1")))
-    assert lifecycle.ingest(event(VoiceEventKind.PLAYOUT_BOUND, 3, payload))
-    receipt = event(VoiceEventKind.TRANSPORT_RESOLVED, 4, payload)
+    prior = lifecycle._acts.get(act_id)
+    offset = 0
+    if prior is None:
+        assert lifecycle.ingest(event(VoiceEventKind.RESPONSE_AUTHORIZED, 0))
+        assert lifecycle.ingest(event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 1))
+        offset = 2
+    else:
+        assert prior[0] is VoiceEventKind.SEMANTIC_ACT_CONFIRMED
+    assert lifecycle.ingest(event(VoiceEventKind.TTS_BOUND, offset, VoicePayload(text_digest=digest, audio_id="audio_1")))
+    assert lifecycle.ingest(event(VoiceEventKind.PLAYOUT_BOUND, offset + 1, payload))
+    receipt = event(VoiceEventKind.TRANSPORT_RESOLVED, offset + 2, payload)
     assert lifecycle.ingest(receipt)
-    lifecycle._test_sequence = start + 5
+    lifecycle._test_sequence = start + offset + 3
     if not playback:
         return receipt
-    receipt = event(VoiceEventKind.CALLER_PLAYBACK_OBSERVED, 5, payload)
+    receipt = event(VoiceEventKind.CALLER_PLAYBACK_OBSERVED, offset + 3, payload)
     assert lifecycle.ingest(receipt)
-    lifecycle._test_sequence = start + 6
+    lifecycle._test_sequence = start + offset + 4
     return receipt
 
 
@@ -41,8 +47,33 @@ def _observed(call: CallLifecycle, *, event_id: str, sequence: int, act_id: str,
 
 
 def _start(lifecycle: CallLifecycle):
-    assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_1", sequence=1, at_ms=0, act_id="question_1")
-    assert lifecycle.semantic_confirmed(binding=_binding(), event_id="confirm_1", sequence=2, at_ms=1, act_id="question_1")
+    question = QuestionIntent(slot="service", turn_id="turn_1", act_id="question_1")
+    assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_1", sequence=1, at_ms=0, question=question)
+    response = _confirmation_event(VoiceEventKind.RESPONSE_AUTHORIZED, 1)
+    confirmation = _confirmation_event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 2)
+    assert lifecycle.voice_lifecycle.ingest(response)
+    assert lifecycle.voice_lifecycle.ingest(confirmation)
+    lifecycle.voice_lifecycle._test_sequence = 3
+    assert lifecycle.semantic_confirmed(event_id="confirm_1", sequence=2, event=confirmation)
+
+
+def _confirmation_event(kind: VoiceEventKind, sequence: int, **changes: object) -> VoiceEvent:
+    values = {
+        "schema_version": 1,
+        "kind": kind,
+        "source": VoiceSource.LOCAL_AUTHORITATIVE,
+        "sensitivity": VoiceSensitivity.OPERATIONAL,
+        "binding": _binding(),
+        "sequence": sequence,
+        "at_ms": sequence,
+        "input_turn_id": "turn_1",
+        "generation_id": "generation_1",
+        "semantic_act_id": "question_1",
+        "semantic_act_kind": VoiceSemanticActKind.QUESTION,
+        "payload": VoicePayload(),
+    }
+    values.update(changes)
+    return VoiceEvent(**values)
 
 
 def test_transport_is_not_an_activation_api_but_observed_playback_is():
@@ -52,6 +83,25 @@ def test_transport_is_not_an_activation_api_but_observed_playback_is():
     assert lifecycle.playback(binding=_binding(), event_id="forged_1", sequence=3, act_id="question_1", evidence=PlaybackEvidence.CALLER_PLAYBACK_OBSERVED, at_ms=2) == ()
     arm = _observed(lifecycle, event_id="playback_1", sequence=3, act_id="question_1", kind=VoiceSemanticActKind.QUESTION, at_ms=2)
     assert arm[0].kind is CallIntentKind.ARM_TIMER and arm[0].deadline_ms == 12
+
+
+def test_question_reservation_rejects_invalid_intent_without_consuming_state():
+    lifecycle = _lifecycle()
+    assert not lifecycle.reserve_question(
+        binding=_binding(),
+        event_id="invalid_question",
+        sequence=100,
+        at_ms=100,
+        question=object(),
+    )
+    assert lifecycle.phase is SilencePhase.IDLE
+    assert lifecycle.reserve_question(
+        binding=_binding(),
+        event_id="valid_question",
+        sequence=1,
+        at_ms=0,
+        question=QuestionIntent("service", "turn_1", "question_1"),
+    )
 
 
 def test_presence_closing_and_terminal_each_require_their_own_playback_evidence():
@@ -111,17 +161,26 @@ def test_activity_returns_to_ready_state_for_a_later_question():
     _start(lifecycle)
     _observed(lifecycle, event_id="playback_1", sequence=3, act_id="question_1", kind=VoiceSemanticActKind.QUESTION, at_ms=2)
     lifecycle.cancel(binding=_binding(), event_id="activity_1", sequence=4, at_ms=3)
-    assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_2", sequence=5, at_ms=4, act_id="question_2")
-    assert lifecycle.semantic_confirmed(binding=_binding(), event_id="confirm_2", sequence=6, at_ms=5, act_id="question_2")
+    assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_2", sequence=5, at_ms=4, question=QuestionIntent("service", "turn_1", "question_2"))
+    response = _confirmation_event(VoiceEventKind.RESPONSE_AUTHORIZED, 100, semantic_act_id="question_2", at_ms=4)
+    confirmation = _confirmation_event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 101, semantic_act_id="question_2", at_ms=5)
+    assert lifecycle.voice_lifecycle.ingest(response)
+    assert lifecycle.voice_lifecycle.ingest(confirmation)
+    lifecycle.voice_lifecycle._test_sequence = 102
+    assert lifecycle.semantic_confirmed(event_id="confirm_2", sequence=6, event=confirmation)
     assert _observed(lifecycle, event_id="playback_2", sequence=7, act_id="question_2", kind=VoiceSemanticActKind.QUESTION, at_ms=6)[0].kind is CallIntentKind.ARM_TIMER
 
 
-def test_transport_evidence_expires_on_cancellation_and_act_reuse():
+def test_transport_evidence_expires_on_cancellation_and_cannot_cross_acts():
     lifecycle = _lifecycle()
     _start(lifecycle)
     transport = _receipt(lifecycle.voice_lifecycle, "question_1", VoiceSemanticActKind.QUESTION, 2, playback=False)
     assert lifecycle.transport_resolved(event_id="transport_1", sequence=3, event=transport)
     lifecycle.cancel(binding=_binding(), event_id="activity_1", sequence=4, at_ms=3)
-    assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_2", sequence=5, at_ms=4, act_id="question_1")
-    assert lifecycle.semantic_confirmed(binding=_binding(), event_id="confirm_2", sequence=6, at_ms=5, act_id="question_1")
-    assert lifecycle.playback(binding=_binding(), event_id="infer_stale", sequence=7, act_id="question_1", evidence=PlaybackEvidence.PLAYBACK_INFERRED, inference_id="infer_1", transport_id="playout_1", at_ms=10) == ()
+    assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_2", sequence=5, at_ms=4, question=QuestionIntent("service", "turn_1", "question_2"))
+    response = _confirmation_event(VoiceEventKind.RESPONSE_AUTHORIZED, 100, semantic_act_id="question_2", at_ms=4)
+    confirmation = _confirmation_event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 101, semantic_act_id="question_2", at_ms=5)
+    assert lifecycle.voice_lifecycle.ingest(response)
+    assert lifecycle.voice_lifecycle.ingest(confirmation)
+    assert lifecycle.semantic_confirmed(event_id="confirm_2", sequence=6, event=confirmation)
+    assert lifecycle.playback(binding=_binding(), event_id="infer_stale", sequence=7, act_id="question_2", evidence=PlaybackEvidence.PLAYBACK_INFERRED, inference_id="infer_1", transport_id="playout_1", at_ms=10) == ()

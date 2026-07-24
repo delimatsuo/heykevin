@@ -132,6 +132,58 @@ def test_caller_activity_releases_question_reservation_for_a_new_plan():
     assert control.reserve(second, _authorization())[1].reservation_id is not None
 
 
+def test_pristine_batch_rollback_releases_every_reservation_atomically():
+    control = SpeechControl(_policy())
+    plan = SpokenPlan(
+        plan_id="rollback",
+        acts=(
+            SemanticAct(SemanticActKind.ANSWER, "Yes."),
+            SemanticAct(
+                SemanticActKind.QUESTION,
+                "What service do you need?",
+                question_slot="service",
+            ),
+        ),
+    )
+    reserved = control.reserve(plan, _authorization())
+    assert control.rollback_reservation(reserved)
+    assert control.reserve(plan, _authorization()) == reserved
+
+
+def test_reservation_rollback_refuses_to_erase_advanced_evidence():
+    control = SpeechControl(_policy())
+    reserved = control.reserve(
+        SpokenPlan(
+            plan_id="advanced",
+            acts=(SemanticAct(SemanticActKind.ANSWER, "Yes."),),
+        ),
+        _authorization(),
+    )
+    assert control.authorize_text(reserved[0].act_id, reserved[0].text)
+    assert not control.rollback_reservation(reserved)
+
+
+def test_reservation_rollback_rejects_partial_or_duplicated_batches():
+    control = SpeechControl(_policy())
+    reserved = control.reserve(
+        SpokenPlan(
+            plan_id="batch",
+            acts=(
+                SemanticAct(SemanticActKind.ANSWER, "Yes."),
+                SemanticAct(
+                    SemanticActKind.QUESTION,
+                    "What service do you need?",
+                    question_slot="service",
+                ),
+            ),
+        ),
+        _authorization(),
+    )
+    assert not control.rollback_reservation(reserved[:1])
+    assert not control.rollback_reservation((reserved[0], reserved[0]))
+    assert control.rollback_reservation(reserved)
+
+
 def test_cancellation_stale_epoch_and_single_recoverable_repair_preserve_facts():
     control = SpeechControl(_policy())
     plan = SpokenPlan(

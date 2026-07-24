@@ -91,6 +91,23 @@ def test_act_order_is_per_act_and_question_only():
     assert not lifecycle.pending_question_active
 
 
+def test_semantic_confirmation_verifier_rejects_raw_and_noncanonical_events():
+    lifecycle = VoiceLifecycle(binding=_binding())
+    response = _event(VoiceEventKind.RESPONSE_AUTHORIZED, 1)
+    confirmation = _event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 2)
+    assert not lifecycle.accepts_semantic_confirmation(confirmation)
+    assert lifecycle.ingest(response)
+    assert lifecycle.ingest(confirmation)
+    assert lifecycle.accepts_semantic_confirmation(confirmation)
+    assert not lifecycle.accepts_semantic_confirmation(
+        _event(
+            VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+            3,
+            at_ms=30,
+        )
+    )
+
+
 def test_command_rejects_wrong_binding_expiry_and_idempotency_collision():
     lifecycle = VoiceLifecycle(binding=_binding())
     sequence = _playout_chain(lifecycle)

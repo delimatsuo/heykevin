@@ -209,6 +209,7 @@ class SpeechControl:
             raise ValueError("speech policy is invalid")
         self.policy = policy
         self._records: dict[str, _Record] = {}
+        self._reservation_batches: set[tuple[str, ...]] = set()
         self._reserved_slots: set[tuple[VoiceSessionBinding, str]] = set()
         self._repairs: set[tuple[VoiceSessionBinding, str]] = set()
 
@@ -247,7 +248,45 @@ class SpeechControl:
             )
             self._records[act_id] = _Record(reserved=entry, question_slot=act.question_slot)
             reserved.append(entry)
-        return tuple(reserved)
+        batch = tuple(reserved)
+        self._reservation_batches.add(tuple(item.act_id for item in batch))
+        return batch
+
+    def rollback_reservation(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        """Atomically remove one still-pristine reservation batch.
+
+        The bakeoff coordinator uses this only when CallLifecycle rejects the
+        matching question reservation. Once any act has advanced, rollback fails
+        closed instead of erasing lifecycle evidence.
+        """
+        if not isinstance(reserved, tuple) or not reserved:
+            return False
+        act_ids = tuple(item.act_id for item in reserved if isinstance(item, ReservedSpeech))
+        if len(act_ids) != len(reserved) or len(set(act_ids)) != len(act_ids) or act_ids not in self._reservation_batches:
+            return False
+        records: list[_Record] = []
+        for item in reserved:
+            record = self._records.get(item.act_id)
+            if (
+                record is None
+                or record.reserved != item
+                or record.authorized
+                or record.cancelled
+                or record.audio is not None
+                or record.playout is not None
+                or record.streamed_text
+                or (record.reserved.binding, item.act_id) in self._repairs
+            ):
+                return False
+            records.append(record)
+        for record in records:
+            self._records.pop(record.reserved.act_id)
+            if record.question_slot is not None:
+                self._reserved_slots.discard(
+                    (record.reserved.binding, record.question_slot)
+                )
+        self._reservation_batches.discard(act_ids)
+        return True
 
     def authorize_text(self, act_id: str, text: str) -> bool:
         record = self._records.get(act_id)

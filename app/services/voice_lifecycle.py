@@ -210,6 +210,7 @@ class VoiceLifecycle:
         self._sequence = -1
         self._at_ms = -1
         self._acts: dict[str, tuple[VoiceEventKind, str, str, VoiceSemanticActKind, str | None, str | None, str | None]] = {}
+        self._semantic_confirmations: dict[str, VoiceEvent] = {}
         self._commands: dict[str, VoiceCommand] = {}
         self.rejected_event_count = 0
         self.idempotent_command_count = 0
@@ -291,6 +292,8 @@ class VoiceLifecycle:
             payload.audio_id if payload.audio_id is not None else prior_audio,
             payload.playout_id if payload.playout_id is not None else prior_playout,
         )
+        if event.kind is VoiceEventKind.SEMANTIC_ACT_CONFIRMED:
+            self._semantic_confirmations[event.semantic_act_id] = event
         if event.kind is VoiceEventKind.CALLER_PLAYBACK_OBSERVED and event.semantic_act_kind is VoiceSemanticActKind.QUESTION:
             self.pending_question_active = True
         return True
@@ -335,4 +338,18 @@ class VoiceLifecycle:
             and record[0] in {VoiceEventKind.TRANSPORT_RESOLVED, VoiceEventKind.CALLER_PLAYBACK_OBSERVED}
             and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
             and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
+        )
+
+    def accepts_semantic_confirmation(self, event: VoiceEvent) -> bool:
+        """Return true only for the exact confirmation accepted by this reducer."""
+        record = self._acts.get(event.semantic_act_id)
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.SEMANTIC_ACT_CONFIRMED
+            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
+            and self._semantic_confirmations.get(event.semantic_act_id) == event
+            and record is not None
+            and record[0] is VoiceEventKind.SEMANTIC_ACT_CONFIRMED
+            and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
         )

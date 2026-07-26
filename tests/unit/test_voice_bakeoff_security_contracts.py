@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields, replace
 import hashlib
 from pathlib import Path
+from threading import Event
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -29,6 +30,7 @@ from app.services.voice_bakeoff_security_contracts import (
     EvidenceKind,
     EvidenceResult,
     EvidenceRoutingContract,
+    ExecutionControlStore,
     ExecutionSecuritySaga,
     InMemoryExecutionControlStore,
     InMemoryPayloadSafeRouter,
@@ -40,6 +42,7 @@ from app.services.voice_bakeoff_security_contracts import (
     PreAuthAcknowledgementSigner,
     PreAuthAcknowledgementVerifier,
     PreAuthActivationGrant,
+    PreAuthTokenStore,
     PreAuthState,
     RevocationReason,
     SignedApproval,
@@ -283,6 +286,91 @@ def _stores(
         token_factory=token_factory,
     )
     return control, preauth, ExecutionSecuritySaga(control=control, preauth=preauth)
+
+
+class _DurableControlDouble(ExecutionControlStore):
+    """Nominal adapter double; it delegates but exposes no record internals."""
+
+    def __init__(self, inner: InMemoryExecutionControlStore) -> None:
+        self.inner = inner
+        self.admitted_approvals: list[object] = []
+        self.session_token_digests: list[str] = []
+
+    def admit(self, approval, *, now_ms, activation_ttl_ms):
+        self.admitted_approvals.append(approval)
+        return self.inner.admit(
+            approval,
+            now_ms=now_ms,
+            activation_ttl_ms=activation_ttl_ms,
+        )
+
+    def finalize(self, acknowledgement, *, now_ms):
+        return self.inner.finalize(acknowledgement, now_ms=now_ms)
+
+    def authorizes_session(
+        self,
+        *,
+        control_ref,
+        preauth_ref,
+        binding_digest,
+        token_digest,
+        now_ms,
+    ):
+        self.session_token_digests.append(token_digest)
+        return self.inner.authorizes_session(
+            control_ref=control_ref,
+            preauth_ref=preauth_ref,
+            binding_digest=binding_digest,
+            token_digest=token_digest,
+            now_ms=now_ms,
+        )
+
+    def revoke(self, control_ref, *, reason, now_ms):
+        return self.inner.revoke(control_ref, reason=reason, now_ms=now_ms)
+
+
+class _DurablePreAuthDouble(PreAuthTokenStore):
+    """Nominal adapter double; it receives grants/proofs but not approvals."""
+
+    def __init__(self, inner: InMemoryPreAuthTokenStore) -> None:
+        self.inner = inner
+        self.activation_grants: list[object] = []
+        self.activation_proofs: list[object] = []
+
+    def activate(self, grant, *, now_ms, token_ttl_ms):
+        self.activation_grants.append(grant)
+        return self.inner.activate(
+            grant,
+            now_ms=now_ms,
+            token_ttl_ms=token_ttl_ms,
+        )
+
+    def confirm_control_active(self, proof, *, now_ms):
+        self.activation_proofs.append(proof)
+        return self.inner.confirm_control_active(proof, now_ms=now_ms)
+
+    def recover_activation(self, grant):
+        return self.inner.recover_activation(grant)
+
+    def consume(
+        self,
+        preauth_ref,
+        *,
+        control_ref,
+        binding_digest,
+        protected_token,
+        now_ms,
+    ):
+        return self.inner.consume(
+            preauth_ref,
+            control_ref=control_ref,
+            binding_digest=binding_digest,
+            protected_token=protected_token,
+            now_ms=now_ms,
+        )
+
+    def revoke(self, preauth_ref, *, reason, now_ms):
+        return self.inner.revoke(preauth_ref, reason=reason, now_ms=now_ms)
 
 
 def test_three_role_ed25519_verification_and_closed_trust_policy():
@@ -855,6 +943,220 @@ def test_concurrent_token_consumption_has_exactly_one_winner():
             )
         )
     assert sum(results) == 1
+
+
+def test_saga_accepts_nominal_durable_store_doubles_without_cross_store_leaks():
+    verified, _, _, provenance_verifier = _verified()
+    control, preauth, _ = _stores(
+        provenance_verifier=provenance_verifier,
+        token_factory=lambda: "d" * 32,
+    )
+    durable_control = _DurableControlDouble(control)
+    durable_preauth = _DurablePreAuthDouble(preauth)
+    saga = ExecutionSecuritySaga(
+        control=durable_control,
+        preauth=durable_preauth,
+    )
+
+    session = saga.admit_and_activate(
+        verified,
+        now_ms=6,
+        activation_ttl_ms=20,
+        token_ttl_ms=10,
+    )
+    assert session is not None
+    assert len(durable_control.admitted_approvals) == 1
+    assert len(durable_preauth.activation_grants) == 1
+    assert not hasattr(durable_preauth.activation_grants[0], "nonce")
+    assert not hasattr(durable_preauth.activation_grants[0], "signatures")
+    assert not hasattr(durable_preauth.activation_grants[0], "trust_snapshot")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda _: saga.consume(
+                    session,
+                    protected_token=session.issued_token.protected_token,
+                    now_ms=7,
+                ),
+                range(4),
+            )
+        )
+    assert sum(results) == 1
+    assert durable_control.session_token_digests == [
+        session.issued_token.token_digest
+    ] * 4
+    assert session.issued_token.protected_token not in (
+        durable_control.session_token_digests
+    )
+
+    result = saga.teardown(
+        session,
+        reason=RevocationReason.TEARDOWN,
+        now_ms=8,
+    )
+    assert result.preauth_revoked and result.control_revoked
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "raises"),
+    (
+        ("activate", True),
+        ("finalize", False),
+        ("finalize", True),
+        ("confirm", False),
+        ("confirm", True),
+    ),
+)
+def test_nominal_durable_store_doubles_preserve_failure_compensation(
+    failure_point,
+    raises,
+):
+    verified, _, _, provenance_verifier = _verified()
+    control, preauth, _ = _stores(
+        provenance_verifier=provenance_verifier,
+        token_factory=lambda: "g" * 32,
+    )
+    durable_control = _DurableControlDouble(control)
+    durable_preauth = _DurablePreAuthDouble(preauth)
+    saga = ExecutionSecuritySaga(
+        control=durable_control,
+        preauth=durable_preauth,
+    )
+
+    if raises:
+        def replacement(*args, **kwargs):
+            raise RuntimeError(f"{failure_point} unavailable")
+    else:
+        def replacement(*args, **kwargs):
+            return False
+
+    if failure_point == "activate":
+        durable_preauth.activate = replacement  # type: ignore[method-assign]
+    elif failure_point == "finalize":
+        durable_control.finalize = replacement  # type: ignore[method-assign]
+    else:
+        durable_preauth.confirm_control_active = replacement  # type: ignore[method-assign]
+
+    assert saga.admit_and_activate(
+        verified,
+        now_ms=6,
+        activation_ttl_ms=20,
+        token_ttl_ms=10,
+    ) is None
+    assert control.only_record_state(now_ms=7) is ControlState.REVOKED
+    if failure_point == "activate":
+        assert preauth.record_count == 0
+    else:
+        assert preauth.only_record_state(now_ms=7) is PreAuthState.REVOKED
+
+
+def test_saga_recovers_committed_preauth_activation_after_lost_reply():
+    verified, _, _, provenance_verifier = _verified()
+    control, preauth, _ = _stores(
+        provenance_verifier=provenance_verifier,
+        token_factory=lambda: "h" * 32,
+    )
+    durable_control = _DurableControlDouble(control)
+    durable_preauth = _DurablePreAuthDouble(preauth)
+    saga = ExecutionSecuritySaga(
+        control=durable_control,
+        preauth=durable_preauth,
+    )
+    original_activate = durable_preauth.activate
+
+    def commit_then_raise(*args, **kwargs):
+        assert original_activate(*args, **kwargs) is not None
+        raise RuntimeError("preauth reply lost after commit")
+
+    durable_preauth.activate = commit_then_raise  # type: ignore[method-assign]
+
+    assert saga.admit_and_activate(
+        verified,
+        now_ms=6,
+        activation_ttl_ms=20,
+        token_ttl_ms=10,
+    ) is None
+    assert control.only_record_state(now_ms=7) is ControlState.REVOKED
+    assert preauth.only_record_state(now_ms=7) is PreAuthState.REVOKED
+
+
+def test_shared_durable_preauth_fences_consume_against_other_saga_teardown():
+    class InterleavingPreAuthDouble(_DurablePreAuthDouble):
+        def __init__(self, inner):
+            super().__init__(inner)
+            self.consume_entered = Event()
+            self.release_consume = Event()
+
+        def consume(
+            self,
+            preauth_ref,
+            *,
+            control_ref,
+            binding_digest,
+            protected_token,
+            now_ms,
+        ):
+            self.consume_entered.set()
+            assert self.release_consume.wait(timeout=1)
+            return super().consume(
+                preauth_ref,
+                control_ref=control_ref,
+                binding_digest=binding_digest,
+                protected_token=protected_token,
+                now_ms=now_ms,
+            )
+
+    verified, _, _, provenance_verifier = _verified()
+    control, preauth, _ = _stores(
+        provenance_verifier=provenance_verifier,
+        token_factory=lambda: "i" * 32,
+    )
+    durable_control = _DurableControlDouble(control)
+    durable_preauth = InterleavingPreAuthDouble(preauth)
+    consumer_saga = ExecutionSecuritySaga(
+        control=durable_control,
+        preauth=durable_preauth,
+    )
+    teardown_saga = ExecutionSecuritySaga(
+        control=durable_control,
+        preauth=durable_preauth,
+    )
+    session = consumer_saga.admit_and_activate(
+        verified,
+        now_ms=6,
+        activation_ttl_ms=20,
+        token_ttl_ms=10,
+    )
+    assert session is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        consume = executor.submit(
+            consumer_saga.consume,
+            session,
+            protected_token=session.issued_token.protected_token,
+            now_ms=7,
+        )
+        assert durable_preauth.consume_entered.wait(timeout=1)
+        teardown = teardown_saga.teardown(
+            session,
+            reason=RevocationReason.TEARDOWN,
+            now_ms=7,
+        )
+        durable_preauth.release_consume.set()
+        assert not consume.result(timeout=1)
+
+    assert teardown.preauth_revoked and teardown.control_revoked
+
+
+def test_saga_rejects_non_nominal_store_types():
+    _, preauth, _ = _stores(provenance_verifier=_verified()[3])
+    control, _, _ = _stores(provenance_verifier=_verified()[3])
+
+    with pytest.raises(ValueError, match="control store"):
+        ExecutionSecuritySaga(control=object(), preauth=preauth)
+    with pytest.raises(ValueError, match="preauth store"):
+        ExecutionSecuritySaga(control=control, preauth=object())
 
 
 def test_cross_session_splicing_and_single_side_revocation_fail_closed():

@@ -1229,7 +1229,54 @@ class _ControlRecord:
     revocation_reason: RevocationReason | None = None
 
 
-class InMemoryExecutionControlStore:
+class ExecutionControlStore:
+    """Narrow nominal interface for offline control-store adapter readiness.
+
+    Adapters must atomically consume one approval/nonce/binding epoch, enforce
+    expiry and bindings, keep finalization/revocation idempotent, and fail closed
+    on unavailable storage. This interface does not prove durable storage,
+    distinct principals, or Task 4.8 execution readiness.
+    """
+
+    def admit(
+        self,
+        approval: VerifiedApproval,
+        *,
+        now_ms: int,
+        activation_ttl_ms: int,
+    ) -> AdmissionBundle | None:
+        raise NotImplementedError
+
+    def finalize(
+        self,
+        acknowledgement: PreAuthActivationAcknowledgement,
+        *,
+        now_ms: int,
+    ) -> ControlActivationProof | None:
+        raise NotImplementedError
+
+    def authorizes_session(
+        self,
+        *,
+        control_ref: str,
+        preauth_ref: str,
+        binding_digest: str,
+        token_digest: str,
+        now_ms: int,
+    ) -> bool:
+        raise NotImplementedError
+
+    def revoke(
+        self,
+        control_ref: str,
+        *,
+        reason: RevocationReason,
+        now_ms: int,
+    ) -> bool:
+        raise NotImplementedError
+
+
+class InMemoryExecutionControlStore(ExecutionControlStore):
     """Atomic, offline model of nonce and active-execution control metadata."""
 
     def __init__(
@@ -1595,8 +1642,64 @@ class _PreAuthRecord:
     revocation_reason: RevocationReason | None = None
 
 
-class InMemoryPreAuthTokenStore:
-    """Physically separate, digest-only model of pre-auth token custody."""
+class PreAuthTokenStore:
+    """Narrow nominal interface for offline pre-auth adapter readiness.
+
+    Adapters must preserve grant/proof bindings, one-use consumption, expiry,
+    idempotent confirmation/revocation, and fail-closed storage errors. They
+    must reconcile a committed activation by grant ID without returning a token
+    and linearize consume versus revoke across all saga instances. This interface
+    does not prove physical separation, distinct principals, durable custody, or
+    Task 4.8 execution readiness.
+    """
+
+    def activate(
+        self,
+        grant: PreAuthActivationGrant,
+        *,
+        now_ms: int,
+        token_ttl_ms: int,
+    ) -> PreAuthActivation | None:
+        raise NotImplementedError
+
+    def confirm_control_active(
+        self,
+        proof: ControlActivationProof,
+        *,
+        now_ms: int,
+    ) -> bool:
+        raise NotImplementedError
+
+    def recover_activation(
+        self,
+        grant: PreAuthActivationGrant,
+    ) -> PreAuthActivationAcknowledgement | None:
+        """Return only a prior activation acknowledgement for this exact grant."""
+        raise NotImplementedError
+
+    def consume(
+        self,
+        preauth_ref: str,
+        *,
+        control_ref: str,
+        binding_digest: str,
+        protected_token: str,
+        now_ms: int,
+    ) -> bool:
+        raise NotImplementedError
+
+    def revoke(
+        self,
+        preauth_ref: str,
+        *,
+        reason: RevocationReason,
+        now_ms: int,
+    ) -> bool:
+        raise NotImplementedError
+
+
+class InMemoryPreAuthTokenStore(PreAuthTokenStore):
+    """Digest-only offline model of a separately owned pre-auth store."""
 
     def __init__(
         self,
@@ -1772,6 +1875,22 @@ class InMemoryPreAuthTokenStore:
             record.version += 1
             return True
 
+    def recover_activation(
+        self,
+        grant: PreAuthActivationGrant,
+    ) -> PreAuthActivationAcknowledgement | None:
+        """Reconcile a committed activation without repeating token disclosure."""
+        if not isinstance(grant, PreAuthActivationGrant):
+            return None
+        with self._lock:
+            preauth_ref = self._grant_index.get(grant.grant_id_digest)
+            if preauth_ref is None:
+                return None
+            record = self._records.get(preauth_ref)
+            if record is None or not self._record_matches_grant(record, grant):
+                return None
+            return self._acknowledgements.get(preauth_ref)
+
     def state(self, preauth_ref: str, *, now_ms: int) -> PreAuthState | None:
         with self._lock:
             record = self._records.get(preauth_ref)
@@ -1898,9 +2017,15 @@ class ExecutionSecuritySaga:
     def __init__(
         self,
         *,
-        control: InMemoryExecutionControlStore,
-        preauth: InMemoryPreAuthTokenStore,
+        control: ExecutionControlStore,
+        preauth: PreAuthTokenStore,
     ) -> None:
+        if not isinstance(control, ExecutionControlStore):
+            raise ValueError("control store must implement the closed interface")
+        if not isinstance(preauth, PreAuthTokenStore):
+            raise ValueError("preauth store must implement the closed interface")
+        if control is preauth:
+            raise ValueError("control and preauth stores must be distinct")
         self._control = control
         self._preauth = preauth
         self._lock = threading.RLock()
@@ -1932,9 +2057,14 @@ class ExecutionSecuritySaga:
         except Exception:
             activation = None
         if activation is None or activation.issued_token is None:
+            preauth_ref = (
+                activation.acknowledgement.preauth_ref
+                if activation is not None
+                else self._recover_preauth_ref(bundle.grant)
+            )
             self._compensate(
                 control_ref=bundle.receipt.control_ref,
-                preauth_ref=None,
+                preauth_ref=preauth_ref,
                 reason=RevocationReason.ACTIVATION_FAILED,
                 now_ms=now_ms,
             )
@@ -1975,6 +2105,18 @@ class ExecutionSecuritySaga:
             binding_digest=bundle.receipt.binding_digest,
             issued_token=activation.issued_token,
         )
+
+    def _recover_preauth_ref(
+        self,
+        grant: PreAuthActivationGrant,
+    ) -> str | None:
+        try:
+            acknowledgement = self._preauth.recover_activation(grant)
+        except Exception:
+            return None
+        if not isinstance(acknowledgement, PreAuthActivationAcknowledgement):
+            return None
+        return acknowledgement.preauth_ref
 
     def _compensate(
         self,

@@ -45,8 +45,12 @@ class Task48GateReport:
 
 _BLOCKING_GATES = (
     BlockingGate(
-        "independent_signature_quorum",
-        "Requires the configured approval policy and separate custody before execution can begin.",
+        "sealed_owner_authorization",
+        "Requires a source-pinned, one-use owner authorization record and separate custody before execution can begin.",
+    ),
+    BlockingGate(
+        "independent_technical_review",
+        "Requires an independent technical review with no unresolved P1; advisory review cannot authorize execution.",
     ),
     BlockingGate(
         "physically_separate_preauth_store",

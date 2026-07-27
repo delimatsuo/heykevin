@@ -48,7 +48,8 @@ def test_report_states_all_blocking_controls_without_authorizing_execution() -> 
         "provider_and_pstn_must_remain_blocked",
     )
     assert [gate.gate_id for gate in report.blocking_gates] == [
-        "independent_signature_quorum",
+        "sealed_owner_authorization",
+        "independent_technical_review",
         "physically_separate_preauth_store",
         "identity_and_credential_broker",
         "durable_trust_and_revocation_store",

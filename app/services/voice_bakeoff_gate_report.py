@@ -10,6 +10,11 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import re
 
+from app.services.voice_bakeoff_preauth_reference import (
+    PreAuthReferenceError,
+    validate_preauth_store_reference,
+)
+
 
 _SOURCE_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _PACKAGE_STATUSES = {
@@ -35,6 +40,7 @@ class Task48GateReport:
     package_status: str
     advisory_review_status: str
     owner_approval_status: str
+    preauth_reference_status: str
     execution_status: str
     required_pre_network_controls: tuple[str, ...]
     blocking_gates: tuple[BlockingGate, ...]
@@ -109,12 +115,24 @@ def build_task_4_8_gate_report(
     else:
         raise GateReportError("package source SHA does not match report source")
 
+    preauth_reference = package.get("preauth_store_reference")
+    preauth_reference_status = "not_recorded"
+    if preauth_reference is not None:
+        if not isinstance(preauth_reference, Mapping):
+            raise GateReportError("pre-auth reference is invalid")
+        try:
+            validate_preauth_store_reference(preauth_reference)
+        except PreAuthReferenceError as error:
+            raise GateReportError("pre-auth reference is invalid") from error
+        preauth_reference_status = "reference_only_observed"
+
     return Task48GateReport(
         report_source_sha=source_sha,
         package_source_binding=package_source_binding,
         package_status=package_status,
         advisory_review_status="advisory_only",
         owner_approval_status="not_recorded",
+        preauth_reference_status=preauth_reference_status,
         execution_status="not_authorized",
         required_pre_network_controls=(
             "credential_resolution_must_remain_blocked",

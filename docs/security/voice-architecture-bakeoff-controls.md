@@ -128,6 +128,27 @@ Offline cap accounting treats a declared maximum as inclusive: a reservation
 exactly at the cap is allowed, and cap plus one is rejected atomically. This local
 behavior does not prove a future provider-side quota or spend control.
 
+## Reference-only pre-auth control-store observation
+
+The tracked
+`tests/fixtures/voice_architecture_bakeoff/task_4_8_gate_package.template.json`
+contains a closed, payload-safe snapshot of an **administratively separate** GCP
+project and a dedicated Firestore Native database in `us-central1`. It records
+only opaque references and the bounded control-plane posture: pessimistic
+concurrency, App Engine and point-in-time recovery disabled, deletion protection
+disabled, one-hour version retention, free tier, and no user-managed service
+accounts listed at observation time. Preparation made zero document writes; the
+record deliberately does not claim a database-wide document scan.
+
+This snapshot is a prerequisite reference, not a satisfied execution gate. It
+does not establish an independent root of trust, credential broker, durable
+trust/revocation store, immutable custody, provider account, workload identity,
+or permission to contact a provider or PSTN. Google-managed service agents and
+broader standard control-plane APIs may exist; neither fact is evidence of a
+workload or a provider integration. The gate report can surface the snapshot only
+as `reference_only_observed` and remains `not_authorized` with every blocker
+present.
+
 ## Gates that keep Task 3.4 and Task 4.8 blocked
 
 The following do not exist in this slice and cannot be inferred from protocols,
@@ -135,8 +156,10 @@ templates, or passing offline tests:
 
 - concrete provider-specific launcher, credential broker, attestors, adapters,
   evidence reader, residue auditor, or connected denial probes;
-- dedicated nonproduction Twilio/provider accounts, principals, destinations,
-  KMS keys, auth store, evidence sink, or credential inventory;
+- an execution-ready dedicated nonproduction Twilio/provider account, principal,
+  destination, token-store implementation, evidence sink, or credential
+  inventory; the reference-only Firestore observation does not supply any of
+  these;
 - cryptographic signer keys, current trust store, immutable custody service, or
   durable atomic nonce store;
 - provider account/region/privacy attestations and verified deletion procedures;

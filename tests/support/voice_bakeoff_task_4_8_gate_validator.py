@@ -209,6 +209,7 @@ _TOP_LEVEL_KEYS = {
     "package_version",
     "package_status",
     "execution_supported",
+    "preauth_store_reference",
     "resource_inventory",
     "privacy_attestations",
     "signature_envelope",
@@ -336,6 +337,37 @@ _TECHNICAL_REVIEW_KEYS = {
     "unresolved_p1_count",
     "advisory_only",
 }
+_PREAUTH_REFERENCE_KEYS = {
+    "schema_version",
+    "status",
+    "isolation_scope",
+    "project_ref",
+    "database_ref",
+    "region",
+    "database_type",
+    "concurrency_mode",
+    "app_engine_integration",
+    "point_in_time_recovery",
+    "delete_protection",
+    "version_retention_seconds",
+    "free_tier",
+    "no_user_managed_service_accounts_listed",
+    "documents_written_by_preparation",
+    "document_readback",
+    "observed_at_ms",
+    "limitations",
+    "observation_digest",
+}
+_PREAUTH_LIMITATIONS = (
+    "not_an_independent_root_of_trust",
+    "not_a_credential_broker",
+    "not_a_durable_trust_or_revocation_store",
+    "not_immutable_custody",
+    "does_not_prove_database_empty",
+    "does_not_authorize_execution",
+)
+_PREAUTH_PROJECT_REFERENCE = "ref_preauth_project_inventory_private_20260727"
+_PREAUTH_DATABASE_REFERENCE = "ref_preauth_database_inventory_private_20260727"
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +444,47 @@ def _mapping(
         errors.append(code)
         return None
     return value
+
+
+def _preauth_reference_is_valid(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != _PREAUTH_REFERENCE_KEYS:
+        return False
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["status"] != "reference_only_observed"
+        or value["isolation_scope"] != "administratively_separate_project"
+        or value["region"] != "us-central1"
+        or value["database_type"] != "FIRESTORE_NATIVE"
+        or value["concurrency_mode"] != "PESSIMISTIC"
+        or value["app_engine_integration"] != "DISABLED"
+        or value["point_in_time_recovery"] != "DISABLED"
+        or value["delete_protection"] != "DELETE_PROTECTION_DISABLED"
+        or value["version_retention_seconds"] != 3600
+        or value["free_tier"] is not True
+        or value["no_user_managed_service_accounts_listed"] is not True
+        or type(value["documents_written_by_preparation"]) is not int
+        or value["documents_written_by_preparation"] != 0
+        or value["document_readback"] != "not_performed"
+        or type(value["observed_at_ms"]) is not int
+        or value["observed_at_ms"] < 1
+        or not isinstance(value["limitations"], list)
+        or tuple(value["limitations"]) != _PREAUTH_LIMITATIONS
+    ):
+        return False
+    if (
+        value["project_ref"] != _PREAUTH_PROJECT_REFERENCE
+        or value["database_ref"] != _PREAUTH_DATABASE_REFERENCE
+    ):
+        return False
+    if not _is_digest(value["observation_digest"]):
+        return False
+    observed = {
+        key: value[key]
+        for key in sorted(value)
+        if key != "observation_digest"
+    }
+    return value["observation_digest"] == canonical_digest(observed)
 
 
 def _validate_resource_inventory(
@@ -847,6 +920,8 @@ def validate_gate_package(package: object) -> PreparationResult:
         errors.append("package.status")
     if root["execution_supported"] is not False:
         errors.append("package.execution_supported")
+    if not _preauth_reference_is_valid(root["preauth_store_reference"]):
+        errors.append("preauth_store_reference.invalid")
     _validate_resource_inventory(root["resource_inventory"], errors=errors)
     _validate_privacy_attestations(root["privacy_attestations"], errors=errors)
     _validate_signature_envelope(

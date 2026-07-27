@@ -42,6 +42,7 @@ def test_report_states_all_blocking_controls_without_authorizing_execution() -> 
     assert report.execution_status == "not_authorized"
     assert report.advisory_review_status == "advisory_only"
     assert report.owner_approval_status == "not_recorded"
+    assert report.preauth_reference_status == "reference_only_observed"
     assert report.required_pre_network_controls == (
         "credential_resolution_must_remain_blocked",
         "networking_must_remain_blocked",
@@ -103,6 +104,7 @@ def test_cli_is_read_only_and_reports_current_source(
     assert payload["report_source_sha"] == "d" * 40
     assert payload["execution_status"] == "not_authorized"
     assert payload["owner_approval_status"] == "not_recorded"
+    assert payload["preauth_reference_status"] == "reference_only_observed"
 
 
 def test_cli_rejects_invalid_local_package_without_exposing_payload(
@@ -139,6 +141,7 @@ def test_cli_source_binding_refuses_modified_or_untracked_helpers(
         if "ls-files" in command:
             return (
                 "app/services/voice_bakeoff_gate_report.py\\n"
+                "app/services/voice_bakeoff_preauth_reference.py\\n"
                 "scripts/report_voice_bakeoff_gate.py\\n"
             )
         if "status" in command:
@@ -165,13 +168,25 @@ def test_report_refuses_specific_package_with_mismatched_source() -> None:
         build_task_4_8_gate_report(package=package, source_sha="a" * 40)
 
 
+def test_report_refuses_tampered_preauth_reference_without_relaxing_gates() -> None:
+    package = deepcopy(_template())
+    reference = package["preauth_store_reference"]
+    assert isinstance(reference, dict)
+    reference["project_ref"] = "hk-voice-bakeoff-preauth-iso"
+
+    with pytest.raises(GateReportError, match="pre-auth reference"):
+        build_task_4_8_gate_report(package=package, source_sha="a" * 40)
+
+
 def test_report_module_and_cli_have_no_execution_or_network_capability() -> None:
     report_path = _ROOT / "app/services/voice_bakeoff_gate_report.py"
+    reference_path = _ROOT / "app/services/voice_bakeoff_preauth_reference.py"
     cli_path = _ROOT / "scripts/report_voice_bakeoff_gate.py"
     report_source = report_path.read_text(encoding="utf-8")
+    reference_source = reference_path.read_text(encoding="utf-8")
     cli_source = cli_path.read_text(encoding="utf-8")
 
-    for source in (report_source, cli_source):
+    for source in (report_source, reference_source, cli_source):
         assert "--execute-provider" not in source
         assert "provider_execution" not in source
         assert "socket" not in source
@@ -187,6 +202,25 @@ def test_report_module_and_cli_have_no_execution_or_network_capability() -> None
         for alias in node.names
     }
     assert imported_modules == {"argparse", "json", "subprocess"}
+    reference_tree = ast.parse(reference_source)
+    reference_imports = {
+        (node.module or "", alias.name)
+        for node in ast.walk(reference_tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    } | {
+        ("", alias.name)
+        for node in ast.walk(reference_tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert reference_imports == {
+        ("__future__", "annotations"),
+        ("collections.abc", "Mapping"),
+        ("", "hashlib"),
+        ("", "json"),
+        ("", "re"),
+    }
     assert "voice_bakeoff_gate_report" not in (
         _ROOT / "app/main.py"
     ).read_text(encoding="utf-8")

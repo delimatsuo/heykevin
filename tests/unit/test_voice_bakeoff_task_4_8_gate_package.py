@@ -368,6 +368,7 @@ def test_template_is_explicitly_nonexecutable_and_incomplete():
     assert package["package_status"] == "preparation_only"
     assert package["execution_supported"] is False
     assert package["signature_envelope"]["status"] == "unsigned_review"
+    assert package["preauth_store_reference"]["status"] == "reference_only_observed"
     assert result.verdict == "preparation_incomplete"
     assert result.errors
     verdict_type = get_type_hints(validator.PreparationResult)["verdict"]
@@ -663,10 +664,28 @@ def test_template_contains_no_secret_raw_account_or_phone_material():
         "phone_number",
         "account_id",
     }
+    preauth_reference = package["preauth_store_reference"]
+    assert isinstance(preauth_reference, dict)
+    assert {
+        preauth_reference["project_ref"],
+        preauth_reference["database_ref"],
+    } == {
+        "ref_preauth_project_inventory_private_20260727",
+        "ref_preauth_database_inventory_private_20260727",
+    }
     for path, value in _walk_leaf_paths(package):
-        assert not prohibited_keys.intersection(
-            str(part) for part in path
-        )
+        assert not prohibited_keys.intersection(str(part) for part in path)
+        if path[:1] == ("preauth_store_reference",):
+            leaf_key = path[-1]
+            if leaf_key in {"project_ref", "database_ref"}:
+                assert value in {
+                    "ref_preauth_project_inventory_private_20260727",
+                    "ref_preauth_database_inventory_private_20260727",
+                }
+            if leaf_key == "observation_digest":
+                assert isinstance(value, str)
+                assert re.fullmatch(r"[0-9a-f]{64}", value)
+            continue
         leaf_key = path[-1]
         if isinstance(leaf_key, str) and (
             leaf_key.endswith("_ref") or leaf_key.endswith("_digest")

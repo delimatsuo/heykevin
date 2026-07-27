@@ -27,6 +27,11 @@ This slice is reviewed relative to
 No `app/**`, package initializer, dependency or lock file, CI, deployment,
 environment, routing, provider schema, manifest, or unrelated script/test edit is
 permitted in Task 3.4A. The untracked handoff files are excluded from staging.
+That historical Task 3.4A scope does not govern the separately reviewed Task 4.8
+offline-only execution-firewall contract below, which adds exactly
+`app/services/voice_bakeoff_execution_firewall_contracts.py` and its focused unit
+test. It is not connected to the runner or application and does not modify the
+Task 3.4A dry-run behavior.
 The current runner and harness sources are digest-pinned. Their exact AST import,
 dynamic-call, `getattr`, and filesystem-I/O contracts reject additions of
 provider/network/credential SDKs, dynamic loading, builtins indirection,
@@ -148,6 +153,30 @@ broader standard control-plane APIs may exist; neither fact is evidence of a
 workload or a provider integration. The gate report can surface the snapshot only
 as `reference_only_observed` and remains `not_authorized` with every blocker
 present.
+
+## Offline execution-firewall model
+
+`app/services/voice_bakeoff_execution_firewall_contracts.py` is a stdlib-only,
+unwired model for a future execution firewall. It binds a declared,
+digest-only production destination and identity denylist to a source-pinned
+approval projection, an isolated nonproduction scope, and a metadata-only
+broker-policy request. The grant carries the exact approved dependency-binding
+digest, its canonical destination set, and the dependency and
+credential-reference digests, so a future adapter cannot exchange its bound
+endpoint/account/privacy constraints for a same-named dependency. Every member
+of that destination set is checked against the declared production denylist.
+Domain-typed digests prevent substitution between those fields; unknown,
+expired, revoked, lower-generation, or digest-changed policy state fails closed.
+Its resolver is stateless and repeatable: it returns only a bounded metadata
+grant, never a credential, token, endpoint, workload request, nonce transition,
+or execution permit.
+
+The model is defense in depth, not evidence that the production denylist is
+complete or that a broker exists. It has no runtime composition path, external
+policy authority, identity attestation, IAM enforcement, credential store,
+network access, or provider integration. A later connected implementation must
+establish those controls independently and must not treat this offline model or
+its tests as Task 4.8 authorization.
 
 ## Gates that keep Task 3.4 and Task 4.8 blocked
 

@@ -188,8 +188,8 @@ class _CachedDocument:
     backend_version: str | None
 
 
-class _AbortTransaction(RuntimeError):
-    """Internal callback signal that forces the injected runner to roll back."""
+class FirestoreTransactionAbort(RuntimeError):
+    """Callback signal that forces a runner rollback without a committed value."""
 
 
 def _encode_record(record: StoredRecord, *, version: int) -> dict[str, object]:
@@ -413,11 +413,11 @@ class FirestoreTransactionPort(TransactionPort):
                     )
                 )
             except TransactionAborted as error:
-                raise _AbortTransaction() from error
+                raise FirestoreTransactionAbort() from error
 
         try:
             result = self._runner.run_transaction(attempt)
-        except _AbortTransaction:
+        except FirestoreTransactionAbort:
             return TransactionResult(status=TransactionStatus.ABORTED)
         except Exception:
             return TransactionResult(status=TransactionStatus.UNKNOWN)

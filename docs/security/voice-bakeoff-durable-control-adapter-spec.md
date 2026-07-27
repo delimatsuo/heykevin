@@ -109,6 +109,17 @@ The only future vendor-specific code belongs behind a Firestore
 import Firestore, Google authentication, environment/settings, filesystem,
 process, socket, or provider modules.
 
+The unmounted Google-specific transaction runner may hold one composite
+client-plus-attestation capability only. It must validate the injected client's
+non-default project/database target against an immutable target-attestation
+value at construction and before every client-facing operation. That value binds
+the exact control scope/root to the target and carries an opaque source reference
+for the mapping; it is not a self-verifying trust claim. The runner retains the
+raw client privately and exposes only the closed runner interface.
+The runner is the sole retry owner and may use only transaction document reads,
+exists-false creates, and update-time-fenced replacements. It may not use blind
+sets, merge, batches, deletes, queries, lists, or cross-database operations.
+
 The future composition root may construct one adapter per store only after the
 sealed gate is satisfied. It must inject:
 

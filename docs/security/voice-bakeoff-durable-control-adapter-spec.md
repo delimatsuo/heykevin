@@ -73,7 +73,7 @@ document paths under one dedicated root:
 | Trust pin | `trust_pins/current` | generation, snapshot digest, and CAS token advance monotonically; root-key fingerprint and persistence reference remain immutable in this CAS path |
 | Consumed nonce | `consumed_nonces/{nonce_digest}` | create-once; never deleted before the envelope expiry plus residue audit |
 | Consumed approval | `consumed_approvals/{approval_id_digest}` | create-once; points to the same reservation/binding as the nonce |
-| Binding epoch | `binding_epochs/{binding_digest}/{epoch}` | each `(binding_digest, epoch)` pair points to one compatible reservation |
+| Binding epoch | `binding_epochs/{binding_digest}/epochs/{epoch}` | each `(binding_digest, epoch)` pair points to one compatible reservation |
 | Reservation | `reservations/{control_ref}` | state transition is pending -> active/revoked/expired only; binding, approval, nonce, and epoch are immutable after creation |
 | Revocation receipt | `revocations/{control_ref}` | idempotent reason/time/terminal-state evidence only |
 

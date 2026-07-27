@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 
 _MAX_FILE_BYTES = 131_072
 _SCHEMA_PATH = Path("tests/fixtures/voice_architecture_bakeoff/provider_approval.schema.json")
-_REQUIRED_ROLES = {"staff", "security_privacy", "conversation_product"}
+_AUTHORIZATION_MODEL = "sole_owner"
 _RISKY_FEATURES = {
     "tools",
     "writes",
@@ -88,15 +88,19 @@ def _identifier(value: object) -> bool:
 
 
 def _canonical_digest(value: dict[str, object]) -> str:
-    def signature_metadata(item: object) -> object:
+    def owner_authorization_metadata(item: object) -> object:
         if not isinstance(item, dict):
-            return {"invalid_signature_entry": True}
-        return {name: item[name] for name in sorted(item) if name != "signature"}
+            return {"invalid_owner_authorization": True}
+        return {
+            name: item[name]
+            for name in sorted(item)
+            if name != "signature"
+        }
 
     material = {
         key: (
-            [signature_metadata(item) for item in item_value]
-            if key == "signatures" and isinstance(item_value, list)
+            owner_authorization_metadata(item_value)
+            if key == "owner_authorization"
             else item_value
         )
         for key, item_value in value.items()
@@ -116,7 +120,7 @@ def _dependency_inventory_digest(dependencies: object) -> str:
 
 
 def validate(approval: dict[str, object], manifest: dict[str, object], arm: str, source_sha: str, now_ms: int | None = None, schema: dict[str, object] | None = None, manifest_digest: str | None = None) -> list[str]:
-    required = {"approval_id", "nonce", "issued_at_ms", "expires_at_ms", "self_digest", "environment", "arm", "source_sha", "manifest_digest", "dependency_inventory_digest", "artifact_digests", "dependencies", "caps", "disabled_features", "custody_references", "trust_metadata", "signatures"}
+    required = {"approval_id", "nonce", "issued_at_ms", "expires_at_ms", "self_digest", "environment", "arm", "source_sha", "manifest_digest", "dependency_inventory_digest", "artifact_digests", "dependencies", "caps", "disabled_features", "custody_references", "trust_metadata", "authorization_model", "owner_authorization", "technical_review"}
     errors = []
     if arm not in _OFFLINE_ADAPTERS:
         errors.append("candidate adapter is not registered")
@@ -128,7 +132,7 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
             or set(schema.get("required", [])) != required
             or set(schema.get("properties", [])) != required
             or schema.get("additionalProperties") is not False
-            or set(schema.get("x-required-roles", [])) != _REQUIRED_ROLES
+            or schema.get("x-authorization-model") != _AUTHORIZATION_MODEL
             or schema.get("x-execution") != "unsupported"
         ):
             errors.append("approval schema contract mismatch")
@@ -154,11 +158,43 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
         errors.append("dependency inventory binding mismatch")
     if not _digest(approval.get("self_digest")) or approval.get("self_digest") != _canonical_digest(approval):
         errors.append("approval self digest mismatch")
-    signatures = approval.get("signatures")
-    if not isinstance(signatures, list) or len(signatures) != 3 or {item.get("role") for item in signatures if isinstance(item, dict)} != _REQUIRED_ROLES:
-        errors.append("required approval roles missing")
-    elif len({item.get("identity") for item in signatures if isinstance(item, dict)}) != len(signatures):
-        errors.append("approval identities must be distinct")
+    if approval.get("authorization_model") != _AUTHORIZATION_MODEL:
+        errors.append("authorization model invalid")
+    owner_authorization = approval.get("owner_authorization")
+    if (
+        not isinstance(owner_authorization, dict)
+        or set(owner_authorization)
+        != {"role", "identity", "key_id", "algorithm", "signature"}
+        or owner_authorization.get("role") != "owner"
+        or any(
+            not isinstance(owner_authorization.get(key), str)
+            or not owner_authorization[key]
+            for key in ("identity", "key_id", "signature")
+        )
+        or owner_authorization.get("algorithm") != "ed25519"
+    ):
+        errors.append("owner authorization invalid")
+    technical_review = approval.get("technical_review")
+    if (
+        not isinstance(technical_review, dict)
+        or set(technical_review)
+        != {
+            "review_digest",
+            "provenance_ref",
+            "source_sha",
+            "manifest_digest",
+            "unresolved_p1_count",
+            "advisory_only",
+        }
+        or not _digest(technical_review.get("review_digest"))
+        or not _identifier(technical_review.get("provenance_ref"))
+        or technical_review.get("source_sha") != approval.get("source_sha")
+        or technical_review.get("manifest_digest") != approval.get("manifest_digest")
+        or type(technical_review.get("unresolved_p1_count")) is not int
+        or technical_review["unresolved_p1_count"] != 0
+        or technical_review.get("advisory_only") is not True
+    ):
+        errors.append("technical review receipt invalid")
     caps = approval.get("caps")
     if not isinstance(caps, dict) or set(caps) != _CAPS or any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in caps.values()):
         errors.append("caps must be positive integers")
@@ -179,8 +215,6 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
     current_ms = int(time.time() * 1000) if now_ms is None else now_ms
     if isinstance(approval.get("issued_at_ms"), bool) or not isinstance(approval.get("issued_at_ms"), int) or isinstance(approval.get("expires_at_ms"), bool) or not isinstance(approval.get("expires_at_ms"), int) or approval["issued_at_ms"] >= approval["expires_at_ms"] or approval["expires_at_ms"] <= current_ms:
         errors.append("approval is expired or timestamps invalid")
-    if any(not isinstance(item, dict) or set(item) != {"role", "identity", "key_id", "algorithm", "signature"} or not all(isinstance(item.get(key), str) and item[key] for key in ("identity", "key_id", "algorithm", "signature")) for item in signatures if isinstance(signatures, list)):
-        errors.append("unsigned signature record")
     return errors
 
 

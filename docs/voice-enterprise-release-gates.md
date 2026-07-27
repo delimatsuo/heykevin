@@ -32,8 +32,9 @@ or production authorization.
   terminal action.
 - Require pre-media ingress authentication, a dedicated nonproduction identity,
   no production reachability, privacy-setting attestation, payload-safe logs,
-  one-use multi-role approval, revision/source/configuration/manifest/evaluator
-  digests, and caller-side evidence for every selectable arm.
+  one-use sole-owner authorization after independent advisory review with no
+  unresolved P1, revision/source/configuration/manifest/evaluator digests, and
+  caller-side evidence for every selectable arm.
 - A runtime without caller-side observation may use only a preregistered,
   cancellable conservative playback inference; transport resolution alone cannot
   arm a silence timer or authorize closure.

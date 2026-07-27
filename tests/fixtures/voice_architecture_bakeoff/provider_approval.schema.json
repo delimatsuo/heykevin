@@ -20,7 +20,9 @@
     "disabled_features": {"type": "object"},
     "custody_references": {"type": "object"},
     "trust_metadata": {"type": "object"},
-    "signatures": {"type": "array"}
+    "authorization_model": {"const": "sole_owner"},
+    "owner_authorization": {"type": "object"},
+    "technical_review": {"type": "object"}
   },
   "required": [
     "approval_id",
@@ -39,8 +41,10 @@
     "disabled_features",
     "custody_references",
     "trust_metadata",
-    "signatures"
+    "authorization_model",
+    "owner_authorization",
+    "technical_review"
   ],
-  "x-required-roles": ["staff", "security_privacy", "conversation_product"],
+  "x-authorization-model": "sole_owner",
   "x-execution": "unsupported"
 }

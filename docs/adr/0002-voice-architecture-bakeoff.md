@@ -73,10 +73,11 @@ measurement.
 
 ## Control and custody
 
-Provider execution requires a separately signed, immutable, one-use envelope:
-three independent roles, named signer-key provenance/algorithm/key ID/trust-store,
-rotation/revocation, no self-approval or break-glass, pinned nonproduction
-identities and destinations, strict caps, and production-deny technical isolation.
+Provider execution requires a separately owner-signed, immutable, one-use envelope:
+a single closed owner key, named signer-key provenance/algorithm/key ID/trust-store,
+rotation/revocation, no break-glass, a mandatory advisory technical-review receipt
+with no unresolved P1, pinned nonproduction identities and destinations, strict caps,
+and production-deny technical isolation.
 Unknown retention, data sharing, tracing, recording, cache, region, or deletion is
 a no-go.
 

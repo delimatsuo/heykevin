@@ -176,19 +176,18 @@ def _complete_review_package() -> dict[str, Any]:
     envelope["nonce"] = _ref("nonce")
     envelope["issued_at_ms"] = 10_000
     envelope["expires_at_ms"] = 11_000
-    for signer in envelope["signers"]:
-        role = signer["role"]
-        signer["identity_ref"] = _ref("signer_identity", role)
-        signer["key_id"] = _ref("signer_key", role)
-        signer["public_key_ref"] = _ref("signer_public_key", role)
-        signer["revocation_status_ref"] = _ref(
-            "signer_revocation", role
-        )
-        signer["detached_signature_ref"] = _ref(
-            "signer_signature", role
-        )
-        signer["signature_digest"] = _digest(f"signature:{role}")
-        signer["review_decision"] = "approved"
+    owner = envelope["owner_authorization"]
+    owner["identity_ref"] = _ref("owner_identity")
+    owner["key_id"] = _ref("owner_key")
+    owner["public_key_ref"] = _ref("owner_public_key")
+    owner["revocation_status_ref"] = _ref("owner_revocation")
+    owner["detached_signature_ref"] = _ref("owner_signature")
+    owner["signature_digest"] = _digest("owner-signature")
+    owner["authorization_decision"] = "approved"
+    technical_review = envelope["technical_review"]
+    technical_review["review_digest"] = _digest("technical-review")
+    technical_review["provenance_ref"] = _ref("technical_review")
+    technical_review["unresolved_p1_count"] = 0
     envelope["envelope_self_digest"] = validator.signature_payload_digest(
         envelope
     )
@@ -555,18 +554,21 @@ def test_every_required_placeholder_is_independently_blocking():
         "extra_resource_field",
         "extra_probe_contract",
         "extra_attestation",
-        "reused_signer_identity",
-        "reused_signer_key_id",
-        "reused_signer_public_key",
-        "duplicate_signer_role",
+        "invalid_authorization_model",
+        "invalid_owner_role",
+        "missing_owner_signature",
+        "technical_review_unresolved_p1",
+        "technical_review_false_p1_count",
+        "technical_review_not_advisory",
+        "legacy_signers",
         "unresolved_p1",
     ],
 )
-def test_closed_inventories_and_distinct_approval_roles(mutation: str):
+def test_closed_inventories_owner_authorization_and_technical_review(mutation: str):
     package = _complete_review_package()
     inventory = package["resource_inventory"]
     privacy = package["privacy_attestations"]
-    signers = package["signature_envelope"]["signers"]
+    envelope = package["signature_envelope"]
     if mutation == "extra_resource":
         inventory["resources"].append(deepcopy(inventory["resources"][0]))
     elif mutation == "missing_resource":
@@ -579,14 +581,20 @@ def test_closed_inventories_and_distinct_approval_roles(mutation: str):
         )
     elif mutation == "extra_attestation":
         privacy["attestations"].append(deepcopy(privacy["attestations"][0]))
-    elif mutation == "reused_signer_identity":
-        signers[1]["identity_ref"] = signers[0]["identity_ref"]
-    elif mutation == "reused_signer_key_id":
-        signers[1]["key_id"] = signers[0]["key_id"]
-    elif mutation == "reused_signer_public_key":
-        signers[1]["public_key_ref"] = signers[0]["public_key_ref"]
-    elif mutation == "duplicate_signer_role":
-        signers[1]["role"] = signers[0]["role"]
+    elif mutation == "invalid_authorization_model":
+        envelope["authorization_model"] = "quorum"
+    elif mutation == "invalid_owner_role":
+        envelope["owner_authorization"]["role"] = "staff"
+    elif mutation == "missing_owner_signature":
+        envelope["owner_authorization"]["signature_digest"] = None
+    elif mutation == "technical_review_unresolved_p1":
+        envelope["technical_review"]["unresolved_p1_count"] = 1
+    elif mutation == "technical_review_false_p1_count":
+        envelope["technical_review"]["unresolved_p1_count"] = False
+    elif mutation == "technical_review_not_advisory":
+        envelope["technical_review"]["advisory_only"] = False
+    elif mutation == "legacy_signers":
+        envelope["signers"] = []
     elif mutation == "unresolved_p1":
         package["signature_envelope"]["unresolved_p1_count"] = 1
     result = validator.validate_gate_package(package)
@@ -622,8 +630,9 @@ def test_canonical_digests_ignore_mapping_order_and_detect_mutation():
             "evidence_source_class",
         ),
         ("signature_envelope", "arm"),
-        ("signature_envelope", "signers", 0, "role"),
-        ("signature_envelope", "signers", 0, "identity_ref"),
+        ("signature_envelope", "owner_authorization", "role"),
+        ("signature_envelope", "owner_authorization", "identity_ref"),
+        ("signature_envelope", "technical_review", "review_digest"),
     ],
 )
 def test_malformed_json_values_fail_closed_without_validator_exceptions(

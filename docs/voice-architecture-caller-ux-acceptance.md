@@ -12,10 +12,10 @@ outside this contract.
 
 ## Seal prerequisites
 
-Before sealing, the owner and the independent staff-architecture,
-security/privacy, and conversation-product reviewers must approve this exact
-contract with no unresolved P1. The sealed digest must bind every capability
-probe, technical window, participant window, evaluator, and approval envelope.
+Before sealing, the sole owner must authorize this exact contract after an
+independent technical review records no unresolved P1. The review is advisory and
+cannot authorize execution. The sealed digest must bind every capability probe,
+technical window, participant window, evaluator, and approval envelope.
 
 The following remain open and prevent sealing:
 

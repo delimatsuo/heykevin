@@ -41,11 +41,9 @@ _OPAQUE_REF_CHARACTERS = frozenset(
 
 
 class SignerRole(str, enum.Enum):
-    """Independent roles required to approve a connected bakeoff."""
+    """The sole owner role allowed to authorize a connected bakeoff."""
 
-    STAFF = "staff"
-    SECURITY_PRIVACY = "security_privacy"
-    CONVERSATION_PRODUCT = "conversation_product"
+    OWNER = "owner"
 
 
 class ApprovalArm(str, enum.Enum):
@@ -282,7 +280,7 @@ class TrustSnapshot:
     effective_at_ms: int
     expires_at_ms: int
     signers: tuple[TrustedSignerKey, ...]
-    no_self_approval: bool
+    sole_owner_authorization: bool
     no_break_glass: bool
     root_signature: bytes = dataclasses.field(repr=False)
 
@@ -299,7 +297,7 @@ class TrustSnapshot:
         required_roles = frozenset(SignerRole)
         roles = [signer.role for signer in self.signers]
         if len(self.signers) != len(required_roles) or frozenset(roles) != required_roles:
-            raise ValueError("trust snapshot requires exactly the three signer roles")
+            raise ValueError("trust snapshot requires exactly one owner signer")
         identities = {signer.identity_ref for signer in self.signers}
         key_ids = {signer.key_id for signer in self.signers}
         public_keys = {signer.public_key for signer in self.signers}
@@ -308,9 +306,9 @@ class TrustSnapshot:
             or len(key_ids) != len(required_roles)
             or len(public_keys) != len(required_roles)
         ):
-            raise ValueError("trust signers must use distinct identities and keys")
-        if not self.no_self_approval or not self.no_break_glass:
-            raise ValueError("trust policy must forbid self approval and break glass")
+            raise ValueError("trust owner signer must use one identity and key")
+        if not self.sole_owner_authorization or not self.no_break_glass:
+            raise ValueError("trust policy must require sole owner authorization and forbid break glass")
         if not isinstance(self.root_signature, bytes) or len(
             self.root_signature
         ) != 64:
@@ -335,7 +333,7 @@ class TrustSnapshot:
             "generation": self.generation,
             "immutable_custody_ref": self.immutable_custody_ref,
             "no_break_glass": self.no_break_glass,
-            "no_self_approval": self.no_self_approval,
+            "sole_owner_authorization": self.sole_owner_authorization,
             "policy_digest": self.policy_digest,
             "signer_set_digest": self.signer_set_digest,
             "version_ref": self.version_ref,
@@ -388,7 +386,7 @@ class TrustSnapshotRootVerifier:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DetachedApprovalSignature:
-    """Detached role/key binding and Ed25519 signature."""
+    """Detached owner/key binding and Ed25519 signature."""
 
     role: SignerRole
     identity_ref: str
@@ -402,6 +400,41 @@ class DetachedApprovalSignature:
         _require_ref(self.key_id, "key_id")
         if not isinstance(self.signature, bytes) or len(self.signature) != 64:
             raise ValueError("signature must be a raw Ed25519 signature")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TechnicalReviewReceipt:
+    """Mandatory advisory review bound into an owner authorization."""
+
+    review_digest: str
+    provenance_ref: str
+    reviewed_payload_digest: str
+    reviewed_binding_digest: str
+    unresolved_p1_count: int
+    advisory_only: bool
+
+    def __post_init__(self) -> None:
+        _require_digest(self.review_digest, "review_digest")
+        _require_ref(self.provenance_ref, "provenance_ref")
+        _require_digest(self.reviewed_payload_digest, "reviewed_payload_digest")
+        _require_digest(self.reviewed_binding_digest, "reviewed_binding_digest")
+        if (
+            type(self.unresolved_p1_count) is not int
+            or self.unresolved_p1_count != 0
+        ):
+            raise ValueError("technical review must have no unresolved P1")
+        if self.advisory_only is not True:
+            raise ValueError("technical review must remain advisory-only")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "advisory_only": self.advisory_only,
+            "provenance_ref": self.provenance_ref,
+            "review_digest": self.review_digest,
+            "reviewed_binding_digest": self.reviewed_binding_digest,
+            "reviewed_payload_digest": self.reviewed_payload_digest,
+            "unresolved_p1_count": self.unresolved_p1_count,
+        }
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -420,6 +453,7 @@ class SignedApproval:
     issued_at_ms: int
     expires_at_ms: int
     caps: ApprovalCaps
+    technical_review: TechnicalReviewReceipt
     signatures: tuple[DetachedApprovalSignature, ...]
 
     def __post_init__(self) -> None:
@@ -444,6 +478,13 @@ class SignedApproval:
         )
         if not isinstance(self.caps, ApprovalCaps):
             raise ValueError("caps must be ApprovalCaps")
+        if not isinstance(self.technical_review, TechnicalReviewReceipt):
+            raise ValueError("technical_review must be a closed receipt")
+        if (
+            self.technical_review.reviewed_payload_digest != self.payload_digest
+            or self.technical_review.reviewed_binding_digest != self.binding_digest
+        ):
+            raise ValueError("technical review must bind the approval payload and source manifest")
         if not isinstance(self.signatures, tuple) or any(
             not isinstance(signature, DetachedApprovalSignature)
             for signature in self.signatures
@@ -464,6 +505,7 @@ def _approval_message_value(approval: SignedApproval) -> dict[str, object]:
         "nonce_digest": approval.nonce_digest,
         "payload_digest": approval.payload_digest,
         "signer_set_digest": approval.signer_set_digest,
+        "technical_review": approval.technical_review.canonical_value(),
         "trust_snapshot_digest": approval.trust_snapshot_digest,
     }
 
@@ -491,6 +533,7 @@ class VerifiedApproval:
     issued_at_ms: int
     expires_at_ms: int
     caps: ApprovalCaps
+    technical_review: TechnicalReviewReceipt
     verification_proof: bytes = dataclasses.field(repr=False)
 
     def __post_init__(self) -> None:
@@ -506,6 +549,13 @@ class VerifiedApproval:
             _require_digest(getattr(self, field_name), field_name)
         if self.caps_digest != self.caps.caps_digest:
             raise ValueError("caps_digest must match the canonical caps")
+        if not isinstance(self.technical_review, TechnicalReviewReceipt):
+            raise ValueError("verified technical_review must be a closed receipt")
+        if (
+            self.technical_review.reviewed_payload_digest != self.payload_digest
+            or self.technical_review.reviewed_binding_digest != self.binding_digest
+        ):
+            raise ValueError("verified technical review must bind the approval payload and source manifest")
         if self.environment != "bakeoff":
             raise ValueError("verified environment must be bakeoff")
         if not isinstance(self.arm, ApprovalArm):
@@ -535,6 +585,7 @@ class VerifiedApproval:
             "nonce_digest": self.nonce_digest,
             "payload_digest": self.payload_digest,
             "signer_set_digest": self.signer_set_digest,
+            "technical_review": self.technical_review.canonical_value(),
             "trust_snapshot_digest": self.trust_snapshot_digest,
         }
 
@@ -804,6 +855,7 @@ class OfflineApprovalVerifier:
             issued_at_ms=approval.issued_at_ms,
             expires_at_ms=approval.expires_at_ms,
             caps=approval.caps,
+            technical_review=approval.technical_review,
             verification_proof=b"\x00" * 64,
         )
         return self._provenance_signer.issue(unsigned_verified)

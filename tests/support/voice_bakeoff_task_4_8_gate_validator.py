@@ -168,7 +168,7 @@ PRIVACY_SETTINGS = {
     "dpa": "approved_bounded",
     "subprocessors": "approved_bounded",
 }
-SIGNER_ROLES = ("staff", "security_privacy", "conversation_product")
+AUTHORIZATION_MODEL = "sole_owner"
 ARTIFACT_DIGEST_KEYS = (
     "corpus",
     "setup",
@@ -298,7 +298,9 @@ _SIGNATURE_ENVELOPE_KEYS = {
     "nonce",
     "issued_at_ms",
     "expires_at_ms",
-    "signers",
+    "authorization_model",
+    "owner_authorization",
+    "technical_review",
     "envelope_self_digest",
 }
 _CUSTODY_KEYS = {
@@ -315,10 +317,10 @@ _TRUST_STORE_KEYS = {
     "rotation_status_ref",
     "revocation_status_ref",
     "immutable_custody_ref",
-    "no_self_approval",
+    "sole_owner_authorization",
     "no_break_glass",
 }
-_SIGNER_KEYS = {
+_OWNER_AUTHORIZATION_KEYS = {
     "role",
     "identity_ref",
     "key_id",
@@ -326,7 +328,13 @@ _SIGNER_KEYS = {
     "revocation_status_ref",
     "detached_signature_ref",
     "signature_digest",
-    "review_decision",
+    "authorization_decision",
+}
+_TECHNICAL_REVIEW_KEYS = {
+    "review_digest",
+    "provenance_ref",
+    "unresolved_p1_count",
+    "advisory_only",
 }
 
 
@@ -361,18 +369,12 @@ def signature_payload_digest(envelope: Mapping[str, object]) -> str:
         if key == "envelope_self_digest":
             continue
         value = envelope[key]
-        if key == "signers" and isinstance(value, list):
-            material[key] = [
-                {
-                    signer_key: signer[signer_key]
-                    for signer_key in sorted(signer)
-                    if signer_key
-                    not in {"detached_signature_ref", "signature_digest"}
-                }
-                if isinstance(signer, Mapping)
-                else signer
-                for signer in value
-            ]
+        if key == "owner_authorization" and isinstance(value, Mapping):
+            material[key] = {
+                owner_key: value[owner_key]
+                for owner_key in sorted(value)
+                if owner_key not in {"detached_signature_ref", "signature_digest"}
+            }
         else:
             material[key] = value
     return canonical_digest(material)
@@ -752,7 +754,7 @@ def _validate_signature_envelope(
         if trust_store["algorithm"] != "ed25519":
             errors.append("signature_envelope.algorithm")
         if (
-            trust_store["no_self_approval"] is not True
+            trust_store["sole_owner_authorization"] is not True
             or trust_store["no_break_glass"] is not True
         ):
             errors.append("signature_envelope.trust_policy")
@@ -782,54 +784,45 @@ def _validate_signature_envelope(
     ):
         errors.append("signature_envelope.timestamps")
 
-    signers = envelope["signers"]
-    identities: list[object] = []
-    key_ids: list[object] = []
-    public_key_refs: list[object] = []
-    roles: set[object] = set()
-    if not isinstance(signers, list) or len(signers) != len(SIGNER_ROLES):
-        errors.append("signature_envelope.signers")
-    else:
-        for item in signers:
-            signer = _mapping(
-                item,
-                expected_keys=_SIGNER_KEYS,
-                code="signer.schema",
-                errors=errors,
-            )
-            if signer is None:
-                continue
-            role = signer["role"]
-            identity = signer["identity_ref"]
-            if isinstance(role, str):
-                roles.add(role)
-            if isinstance(identity, str):
-                identities.append(identity)
-            if isinstance(signer["key_id"], str):
-                key_ids.append(signer["key_id"])
-            if isinstance(signer["public_key_ref"], str):
-                public_key_refs.append(signer["public_key_ref"])
-            for key in (
-                "identity_ref",
-                "key_id",
-                "public_key_ref",
-                "revocation_status_ref",
-                "detached_signature_ref",
-            ):
-                if not _is_ref(signer[key]):
-                    errors.append(f"signer.{signer['role']}.{key}")
-            if not _is_digest(signer["signature_digest"]):
-                errors.append(f"signer.{signer['role']}.signature_digest")
-            if signer["review_decision"] != "approved":
-                errors.append(f"signer.{signer['role']}.review_decision")
-        if roles != set(SIGNER_ROLES):
-            errors.append("signature_envelope.signer_roles")
-        if len(identities) != len(set(identities)):
-            errors.append("signature_envelope.signer_identity_reuse")
-        if len(key_ids) != len(set(key_ids)):
-            errors.append("signature_envelope.signer_key_id_reuse")
-        if len(public_key_refs) != len(set(public_key_refs)):
-            errors.append("signature_envelope.signer_public_key_reuse")
+    if envelope["authorization_model"] != AUTHORIZATION_MODEL:
+        errors.append("signature_envelope.authorization_model")
+    owner = _mapping(
+        envelope["owner_authorization"],
+        expected_keys=_OWNER_AUTHORIZATION_KEYS,
+        code="owner_authorization.schema",
+        errors=errors,
+    )
+    if owner is not None:
+        if owner["role"] != "owner":
+            errors.append("owner_authorization.role")
+        for key in (
+            "identity_ref",
+            "key_id",
+            "public_key_ref",
+            "revocation_status_ref",
+            "detached_signature_ref",
+        ):
+            if not _is_ref(owner[key]):
+                errors.append(f"owner_authorization.{key}")
+        if not _is_digest(owner["signature_digest"]):
+            errors.append("owner_authorization.signature_digest")
+        if owner["authorization_decision"] != "approved":
+            errors.append("owner_authorization.decision")
+
+    technical_review = _mapping(
+        envelope["technical_review"],
+        expected_keys=_TECHNICAL_REVIEW_KEYS,
+        code="technical_review.schema",
+        errors=errors,
+    )
+    if technical_review is not None and (
+        not _is_digest(technical_review["review_digest"])
+        or not _is_ref(technical_review["provenance_ref"])
+        or type(technical_review["unresolved_p1_count"]) is not int
+        or technical_review["unresolved_p1_count"] != 0
+        or technical_review["advisory_only"] is not True
+    ):
+        errors.append("technical_review.invalid")
 
     if (
         not _is_digest(envelope["envelope_self_digest"])
@@ -878,6 +871,7 @@ def validate_gate_package(package: object) -> PreparationResult:
 
 
 __all__ = [
+    "AUTHORIZATION_MODEL",
     "ARM_DEPENDENCIES",
     "ARTIFACT_DIGEST_KEYS",
     "B2_ONLY_PROBE_FACTS",
@@ -889,7 +883,6 @@ __all__ = [
     "PROBE_FACTS_BY_ARM",
     "PreparationResult",
     "RESOURCE_IDS",
-    "SIGNER_ROLES",
     "canonical_digest",
     "review_digest",
     "signature_payload_digest",

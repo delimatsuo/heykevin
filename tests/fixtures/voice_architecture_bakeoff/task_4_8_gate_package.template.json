@@ -2920,45 +2920,30 @@
       "rotation_status_ref": null,
       "revocation_status_ref": null,
       "immutable_custody_ref": null,
-      "no_self_approval": true,
+      "sole_owner_authorization": true,
       "no_break_glass": true
     },
     "approval_id": null,
     "nonce": null,
     "issued_at_ms": null,
     "expires_at_ms": null,
-    "signers": [
-      {
-        "role": "staff",
-        "identity_ref": null,
-        "key_id": null,
-        "public_key_ref": null,
-        "revocation_status_ref": null,
-        "detached_signature_ref": null,
-        "signature_digest": null,
-        "review_decision": "pending"
-      },
-      {
-        "role": "security_privacy",
-        "identity_ref": null,
-        "key_id": null,
-        "public_key_ref": null,
-        "revocation_status_ref": null,
-        "detached_signature_ref": null,
-        "signature_digest": null,
-        "review_decision": "pending"
-      },
-      {
-        "role": "conversation_product",
-        "identity_ref": null,
-        "key_id": null,
-        "public_key_ref": null,
-        "revocation_status_ref": null,
-        "detached_signature_ref": null,
-        "signature_digest": null,
-        "review_decision": "pending"
-      }
-    ],
+    "authorization_model": "sole_owner",
+    "owner_authorization": {
+      "role": "owner",
+      "identity_ref": null,
+      "key_id": null,
+      "public_key_ref": null,
+      "revocation_status_ref": null,
+      "detached_signature_ref": null,
+      "signature_digest": null,
+      "authorization_decision": "pending"
+    },
+    "technical_review": {
+      "review_digest": null,
+      "provenance_ref": null,
+      "unresolved_p1_count": null,
+      "advisory_only": true
+    },
     "envelope_self_digest": null
   },
   "review_digest": null

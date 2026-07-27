@@ -48,6 +48,7 @@ from app.services.voice_bakeoff_security_contracts import (
     SignedApproval,
     SignedCustodyLockAttestation,
     SignerRole,
+    TechnicalReviewReceipt,
     TrustSnapshot,
     TrustGenerationPin,
     TrustGenerationPinStore,
@@ -59,11 +60,7 @@ from app.services.voice_bakeoff_security_contracts import (
 
 
 _SOURCE = Path("app/services/voice_bakeoff_security_contracts.py")
-_ROLES = (
-    SignerRole.STAFF,
-    SignerRole.SECURITY_PRIVACY,
-    SignerRole.CONVERSATION_PRODUCT,
-)
+_ROLES = (SignerRole.OWNER,)
 _TRUST_ROOT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
@@ -122,7 +119,7 @@ def _trust_material(
             effective_at_ms=snapshot_valid_from_ms,
             expires_at_ms=snapshot_expires_at_ms,
             signers=signers,
-            no_self_approval=True,
+            sole_owner_authorization=True,
             no_break_glass=True,
             root_signature=b"\x00" * 64,
         )),
@@ -191,6 +188,14 @@ def _signed_approval(
         issued_at_ms=issued_at_ms,
         expires_at_ms=expires_at_ms,
         caps=_caps(),
+        technical_review=TechnicalReviewReceipt(
+            review_digest=_digest("technical-review"),
+            provenance_ref="ref_technical_review",
+            reviewed_payload_digest=_digest("payload"),
+            reviewed_binding_digest=_digest(binding),
+            unresolved_p1_count=0,
+            advisory_only=True,
+        ),
         signatures=(),
     )
     message = approval_signature_message(unsigned)
@@ -373,7 +378,7 @@ class _DurablePreAuthDouble(PreAuthTokenStore):
         return self.inner.revoke(preauth_ref, reason=reason, now_ms=now_ms)
 
 
-def test_three_role_ed25519_verification_and_closed_trust_policy():
+def test_sole_owner_ed25519_verification_and_closed_trust_policy():
     snapshot, private_keys = _trust_material()
     approval = _signed_approval(snapshot, private_keys)
     verifier, _ = _verifier_for(snapshot)
@@ -386,12 +391,55 @@ def test_three_role_ed25519_verification_and_closed_trust_policy():
     assert verified.caps == _caps()
     assert verified.caps_digest == _caps().caps_digest
 
-    duplicate = replace(
-        snapshot.signers[1],
-        identity_ref=snapshot.signers[0].identity_ref,
+    with pytest.raises(ValueError, match="exactly one owner"):
+        replace(snapshot, signers=(snapshot.signers[0], snapshot.signers[0]))
+
+
+def test_technical_review_receipt_is_mandatory_advisory_and_p1_free():
+    assert {role.value for role in SignerRole} == {"owner"}
+
+    with pytest.raises(ValueError, match="unresolved P1"):
+        TechnicalReviewReceipt(
+            review_digest=_digest("review"),
+            provenance_ref="ref_technical_review",
+            reviewed_payload_digest=_digest("payload"),
+            reviewed_binding_digest=_digest("binding"),
+            unresolved_p1_count=1,
+            advisory_only=True,
+        )
+    with pytest.raises(ValueError, match="advisory-only"):
+        TechnicalReviewReceipt(
+            review_digest=_digest("review"),
+            provenance_ref="ref_technical_review",
+            reviewed_payload_digest=_digest("payload"),
+            reviewed_binding_digest=_digest("binding"),
+            unresolved_p1_count=0,
+            advisory_only=False,
+        )
+
+
+def test_technical_review_receipt_binds_payload_and_survives_verified_provenance():
+    snapshot, private_keys = _trust_material()
+    approval = _signed_approval(snapshot, private_keys)
+    verifier, provenance_verifier = _verifier_for(snapshot)
+    verified = verifier.verify(approval, snapshot, now_ms=5)
+
+    assert verified is not None
+    assert verified.technical_review == approval.technical_review
+    assert provenance_verifier.verify(verified)
+    assert not provenance_verifier.verify(
+        replace(
+            verified,
+            technical_review=replace(
+                verified.technical_review,
+                review_digest=_digest("replayed-review"),
+            ),
+        )
     )
-    with pytest.raises(ValueError, match="distinct"):
-        replace(snapshot, signers=(snapshot.signers[0], duplicate, snapshot.signers[2]))
+    with pytest.raises(ValueError, match="approval payload and source manifest"):
+        replace(approval, payload_digest=_digest("different-payload"))
+    with pytest.raises(ValueError, match="approval payload and source manifest"):
+        replace(approval, binding_digest=_digest("different-binding"))
 
 
 def test_approval_arm_wire_values_match_the_existing_four_arm_gate():
@@ -401,7 +449,14 @@ def test_approval_arm_wire_values_match_the_existing_four_arm_gate():
 @pytest.mark.parametrize(
     "mutation",
     (
-        lambda value: replace(value, payload_digest=_digest("tampered")),
+        lambda value: replace(
+            value,
+            payload_digest=_digest("tampered"),
+            technical_review=replace(
+                value.technical_review,
+                reviewed_payload_digest=_digest("tampered"),
+            ),
+        ),
         lambda value: replace(
             value,
             signatures=(
@@ -416,16 +471,17 @@ def test_approval_arm_wire_values_match_the_existing_four_arm_gate():
                 *value.signatures[1:],
             ),
         ),
+        lambda value: replace(value, signatures=()),
         lambda value: replace(
             value,
-            signatures=(
-                replace(value.signatures[0], role=SignerRole.SECURITY_PRIVACY),
-                *value.signatures[1:],
+            technical_review=replace(
+                value.technical_review,
+                review_digest=_digest("tampered-review"),
             ),
         ),
     ),
 )
-def test_trust_verifier_rejects_payload_signature_key_and_role_tampering(mutation):
+def test_trust_verifier_rejects_payload_signature_key_review_and_owner_tampering(mutation):
     snapshot, private_keys = _trust_material()
     approval = _signed_approval(snapshot, private_keys)
     verifier, _ = _verifier_for(snapshot)
@@ -453,7 +509,7 @@ def test_trust_windows_revocation_and_old_snapshot_replay_fail_closed():
         now_ms=5,
     ) is None
 
-    revoked, keys = _trust_material(revoked_role=SignerRole.STAFF)
+    revoked, keys = _trust_material(revoked_role=SignerRole.OWNER)
     verifier, _ = _verifier_for(revoked)
     assert verifier.verify(
         _signed_approval(revoked, keys),
@@ -505,9 +561,9 @@ def test_approval_must_be_valid_at_issuance_and_verification_time():
     assert verifier.verify(valid, snapshot, now_ms=25) is not None
 
 
-def test_scheduled_signer_revocation_bounds_approval_and_later_admission():
+def test_scheduled_owner_revocation_bounds_approval_and_later_admission():
     snapshot, private_keys = _trust_material(
-        revoked_role=SignerRole.STAFF
+        revoked_role=SignerRole.OWNER
     )
     verifier, provenance_verifier = _verifier_for(snapshot)
     long_lived = _signed_approval(

@@ -1,9 +1,9 @@
 # Voice Architecture Bakeoff and Lifecycle Control Plan
 
 > **Status:** Documentation-only architecture plan amended after formal panel
-> review on 2026-07-22. This exact file does not authorize implementation until
-> staff-architecture, security/privacy, and conversation-product reviewers approve
-> it with no unresolved P1.
+> review on 2026-07-22. This exact file does not authorize implementation until a
+> sole owner records source-bound authorization after advisory technical review with
+> no unresolved P1.
 > Baseline: `origin/main` at
 > `6dc3013df78070cd60871febb1a541977ea4c3b3` on 2026-07-22. This plan does
 > not by itself authorize production, provider connection, customer/incidental
@@ -142,8 +142,9 @@ solution.
    technical selection, and closed-loop caller validation. Evidence from an
    earlier tier cannot substitute for a later tier.
 8. Permit no provider execution from a self-asserted document. Execution requires
-   authenticated multi-role approval, one-use authorization, and technical proof
-   that the resolved identity cannot reach production.
+   sole-owner authorization after an independent advisory technical review with no
+   unresolved P1, one-use authorization, and technical proof that the resolved
+   identity cannot reach production.
 9. Treat failed-turn repair, caller-heard interruption, false barge-in, and
    accessibility support boundaries as shared lifecycle requirements rather than
    provider-specific prompt behavior.
@@ -438,9 +439,9 @@ git diff --stat origin/main...codex/voice-response-length-192-recovery
 git diff --check
 ```
 
-**Gate:** Staff architecture, security/privacy, and conversation-product reviewers
-approve the artifact matrix with no unresolved P1. Only an approved `reuse_*`
-entry may alter a later task's create-versus-modify decision.
+**Gate:** An advisory technical review records no unresolved P1, then the sole owner
+authorizes the artifact matrix. Only an approved `reuse_*` entry may alter a later
+task's create-versus-modify decision.
 
 ### Task 0.1: Pin provider capabilities and evidence classes
 
@@ -501,8 +502,8 @@ The ADR must pin:
 - go/no-go and evidence-integrity rules;
 - the fact that a bakeoff result does not authorize production.
 
-**Gate:** Independent staff, security/privacy, and conversation-product reviewers
-must approve the ADR with no unresolved P1.
+**Gate:** An independent technical review must record no unresolved P1 before the
+sole owner authorizes the ADR.
 
 ### Task 0.3: Write the security/privacy control annex
 
@@ -525,11 +526,11 @@ The annex must contain:
 6. The command capability and side-effect matrix.
 7. Abuse, concurrency, message-size, retry, duration, and spend budgets.
 8. Stop, rollback, credential-revocation, task-drain, and residue-audit procedures.
-9. Trusted provider-execution signer roles and quorum, signer-key provenance,
+9. A trusted sole-owner provider-execution signature, signer-key provenance,
    algorithm and key identifiers, verification trust store, rotation/revocation,
+   an envelope-bound advisory technical-review receipt with no unresolved P1,
    approval-envelope immutable custody and access control, nonce consumption,
-   explicit no-self-approval/no-break-glass execution, and production-deny
-   controls.
+   explicit no-break-glass execution, and production-deny controls.
 10. Rater and participant access, consent, withdrawal, encryption/key custody,
     cache/derivative deletion, and residue-receipt procedures.
 
@@ -1000,16 +1001,16 @@ passed with `--approval`:
 - artifact TTL and residue-audit destination;
 - approval ID, envelope self-digest, nonce, issuance time, expiry, and atomic
   one-use-consumption record;
-- trusted signer identities and independent role signatures satisfying the sealed
-  quorum policy, including staff, security/privacy, and conversation-product
-  approval with no unresolved P1. One identity cannot satisfy multiple roles;
-  the envelope also binds signer-key provenance, algorithm, key ID, verification
-  trust-store version, rotation/revocation status, immutable-custody policy, and
-  an explicit no-self-approval/no-break-glass-execution assertion.
+- one trusted sole-owner signature plus a mandatory envelope-bound advisory
+  technical-review receipt with no unresolved P1; the receipt cannot authorize a
+  run. The envelope also binds signer-key provenance, algorithm, key ID,
+  verification trust-store version, rotation/revocation status, immutable-custody
+  policy, and an explicit no-break-glass-execution assertion.
 
 The runner must be dry-run-only by default. Before credential resolution, DNS,
 socket creation, or provider construction it locally verifies the envelope
-signature/quorum, immutable-store provenance, self-digest, nonce, expiry, source
+sole-owner signature and advisory-review receipt, immutable-store provenance,
+self-digest, nonce, expiry, source
 and artifact digests, candidate, complete dependency list, bounds, destination
 allowlists, and immutable production denylist. It then atomically consumes the
 nonce and creates the bounded Task-2.1 active-execution record before any PSTN or
@@ -1025,9 +1026,9 @@ dependencies and credential substitution. The execution principal and every
 resolved credential have no production permissions.
 
 A provider-connected mode requires an explicit `--execute-provider` flag plus the
-matching envelope. Tests must prove that unsigned, forged, wrong-role,
-insufficient-quorum, altered, expired, replayed, self-approved, revoked-key,
-unknown-trust-store, break-glass, credential-swapped,
+matching envelope. Tests must prove that unsigned, forged, wrong-owner,
+missing-or-non-advisory review, unresolved-P1 review, altered, expired, replayed,
+revoked-key, unknown-trust-store, break-glass, credential-swapped,
 secondary-credential-swapped, dependency-omitted, destination-mismatched, or
 production-bound envelopes fail at the earliest possible boundary. Invalid local
 authorization fails before secret resolution or network access.
@@ -1081,9 +1082,9 @@ command metric cannot stand in for caller-heard behavior. The contract makes no
 claim that TTY, RTT, DTMF, or any language/access mode absent from its finite matrix
 is supported.
 
-**Gate:** Staff-architecture, security/privacy, and conversation-product reviewers
-approve the exact contract with no unresolved P1. Its digest is bound into every
-capability-probe, sealed-window, evaluator, and approval envelope.
+**Gate:** An advisory technical review records no unresolved P1 before the sole
+owner authorizes the exact contract. Its digest is bound into every capability-probe,
+sealed-window, evaluator, and approval envelope.
 
 ---
 
@@ -1903,9 +1904,8 @@ privacy/residue/deletion results, cost totals, stop events, and a candidate
 eligibility decision. It contains no transcript, audio, phone, raw
 provider/Twilio/internal ID, credential, participant identity, or customer data.
 
-**Gate:** Staff architecture, security/privacy, and conversation-product reviewers
-approve the aggregate package and residue audit with no unresolved P1 before a
-selection ADR is written.
+**Gate:** An advisory technical review records no unresolved P1 before the sole
+owner authorizes the aggregate package and residue audit for a selection ADR.
 
 ---
 
@@ -1967,13 +1967,13 @@ review; it may not merge historical worktrees wholesale.
 
 ### Task 6.3: Approve the integration plan
 
-Obtain independent staff-architecture, security/privacy, and conversation-product
-reviews of the exact design and implementation-plan files. Resolve every P1 in the
-documents and re-review the corrected exact files.
+Obtain an independent technical review of the exact design and implementation-plan
+files. Resolve every P1 in the documents and re-review the corrected exact files;
+the sole owner remains the authorization authority.
 
-**Gate:** Until all three reviewers approve with no unresolved P1, live imports,
-routing changes, feature flags, staging, real-caller use, and production remain
-prohibited.
+**Gate:** Until an independent advisory technical review records no unresolved P1
+and the sole owner authorizes the exact integration plan, live imports, routing
+changes, feature flags, staging, real-caller use, and production remain prohibited.
 
 ---
 
@@ -2095,8 +2095,8 @@ The first implementation slice after this plan is approved is deliberately narro
    branches; reuse nothing until the matrix is approved.
 2. Write the provider-capability matrix, ADR 0002, security/privacy control annex,
    and caller-UX acceptance contract.
-3. Re-review the audit and all four documents with staff, security/privacy, and
-   conversation-product reviewers.
+3. Re-review the audit and all four documents with an independent technical panel,
+   then record sole-owner authorization if no P1 remains.
 4. Implement only the versioned lifecycle types, payload-safe telemetry projection,
    and aggregate evaluator with tests.
 5. Instrument the native control without controller wiring or behavior changes.

@@ -101,7 +101,7 @@ semantic-act adjudication independent.
 | 3.1 Privacy-approved corpus manifest | Replay fixtures and controlled unit inputs are development fixtures. They are not consented PCMU corpus data, finite language contract, holdout store, or rights/retention manifest. | `not_implemented` | Create a synthetic-first manifest and external holdout custody. Do not repurpose staging or historical caller data. |
 | 3.2 Development and sealed evaluation tiers | Controlled tests and replay are development-only. No sealed windows, per-language denominators, power/precision rules, or external holdout freeze are present. | `not_implemented` | Implement the tier separation exactly as planned. |
 | 3.3 Caller-heard audio evaluation | Native/controlled branches have Twilio mark timing and ordinary unit assertions, but no caller-side PCMU harness, blinded rater protocol, fluent-language rater rule, or encrypted evidence custody. | `not_implemented` | Build the caller-side evidence path and adjudication protocol before treating any candidate as eligible. |
-| 3.4 Signed provider-execution approval | Historical feature flags and staging health fields are not a signed quorum, one-use approval envelope, immutable store, per-dependency attestation, or active execution record. | `not_implemented` | Implement the envelope/runner contract. Do not turn existing environment flags into authorization. |
+| 3.4 Signed provider-execution approval | Historical feature flags and staging health fields are not a sealed sole-owner authorization, one-use approval envelope, immutable store, per-dependency attestation, or active execution record. | `not_implemented` | Implement the envelope/runner contract. Do not turn existing environment flags into authorization. |
 | 3.5 Caller-UX acceptance contract | Controlled coordinator tests cover questions, silence, failures, and recovery in mocks. They do not define the sealed failure taxonomy, caller-heard interruption thresholds, accessibility contract, consenting-participant protocol, or no-winner rule. In particular, those mocks do not prove caller-heard direct-answer ordering/relevance, safety-content completeness, language match/code-switching, or safe unsupported-language/accessibility fallback. | `not_implemented` | Write the exact caller-UX acceptance contract before capability probing. |
 
 ## 7. Stage 4 classification matrix
@@ -147,10 +147,11 @@ The following are rejected for reuse as an implementation unit:
 No `reuse_*` classification in this audit changes any create-versus-modify decision
 yet. It authorizes no copy, cherry-pick, import, fixture port, configuration change,
 or deployment change. An item can be considered later only after the Stage 0
-three-role gate approves its exact source files, removed ownership/import boundary,
-new target files/tests, and deterministic plus negative verification. The next work
+sole-owner authorization is bound to an advisory technical review with no unresolved
+P1, its exact source files, removed ownership/import boundary, new target
+files/tests, and deterministic plus negative verification. The next work
 is Task 0.1 through Task 0.4 documentation only: the provider
 capability matrix, bakeoff ADR, security/privacy control annex, caller-UX
 acceptance contract, and reconciled release gates. Those exact files, together with
-this audit, require staff-architecture, security/privacy, and conversation-product
-approval with no unresolved P1 before Stage 1 code begins.
+this audit, require sole-owner authorization after advisory technical review with no
+unresolved P1 before Stage 1 code begins.

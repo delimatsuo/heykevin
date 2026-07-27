@@ -100,9 +100,9 @@ Future connected execution requires all of the following, in this irreversible
 order:
 
 1. verify canonical envelope encoding and self-digest;
-2. cryptographically verify distinct staff, security/privacy, and
-   conversation-product signatures against a provenance-pinned, current,
-   non-revoked trust store;
+2. cryptographically verify the sole owner's signature against a provenance-pinned,
+   current, non-revoked trust store, and verify the envelope-bound advisory
+   technical-review receipt has trustworthy provenance and no unresolved P1;
 3. prove immutable custody and exact source, manifest, artifact, configuration,
    evaluator, dependency, destination, and cap bindings;
 4. atomically consume the durable one-use nonce and create the active execution
@@ -142,9 +142,10 @@ templates, or passing offline tests:
 - provider account/region/privacy attestations and verified deletion procedures;
 - a clean exact-SHA worktree with the complete executable bundle and dependency
   digests;
-- explicit owner approval, three distinct role signatures, and a just-in-time
-  one-use envelope bound to that exact bundle.
+- a sealed sole-owner authorization following an advisory technical review with no
+  unresolved P1, and a just-in-time one-use envelope bound to that exact bundle.
 
-Those controls require a fresh exact-SHA three-role review and a later explicit
-user instruction. Until then, a successful local preflight returns
+Those controls require a fresh exact-SHA advisory technical review with no
+unresolved P1 and a later sealed sole-owner authorization. Until then, a successful
+local preflight returns
 `blocked_external_verification_required`; it never returns an execution permit.

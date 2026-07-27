@@ -38,11 +38,22 @@ def _approval() -> dict[str, object]:
         "disabled_features": {key: True for key in runner._RISKY_FEATURES},
         "custody_references": {"immutable": "reference"},
         "trust_metadata": {"trust_store": "reference"},
-        "signatures": [
-            {"role": "staff", "identity": "staff_1", "key_id": "key_1", "algorithm": "ed25519", "signature": "detached_1"},
-            {"role": "security_privacy", "identity": "security_1", "key_id": "key_2", "algorithm": "ed25519", "signature": "detached_2"},
-            {"role": "conversation_product", "identity": "product_1", "key_id": "key_3", "algorithm": "ed25519", "signature": "detached_3"},
-        ],
+        "authorization_model": "sole_owner",
+        "owner_authorization": {
+            "role": "owner",
+            "identity": "owner_1",
+            "key_id": "key_1",
+            "algorithm": "ed25519",
+            "signature": "detached_1",
+        },
+        "technical_review": {
+            "review_digest": "d" * 64,
+            "provenance_ref": "technical_review_1",
+            "source_sha": "a" * 40,
+            "manifest_digest": "0" * 64,
+            "unresolved_p1_count": 0,
+            "advisory_only": True,
+        },
     }
     value["self_digest"] = runner._canonical_digest(value)
     return value
@@ -72,6 +83,7 @@ def _bound_approval(manifest: dict[str, object]) -> dict[str, object]:
     approval["manifest_digest"] = runner._manifest_digest_bytes(
         __import__("json").dumps(manifest, separators=(",", ":")).encode("utf-8")
     )
+    approval["technical_review"]["manifest_digest"] = approval["manifest_digest"]
     _resign(approval)
     return approval
 
@@ -80,6 +92,7 @@ def _rebind_manifest(approval: dict[str, object], manifest: dict[str, object]) -
     approval["manifest_digest"] = runner._manifest_digest_bytes(
         __import__("json").dumps(manifest, separators=(",", ":")).encode("utf-8")
     )
+    approval["technical_review"]["manifest_digest"] = approval["manifest_digest"]
     _resign(approval)
 
 
@@ -88,7 +101,7 @@ def test_valid_shape_still_requires_external_verification():
     assert runner.validate(_bound_approval(manifest), manifest, "B1", "a" * 40, now_ms=1_000) == []
 
 
-def test_rejects_template_wrong_binding_digest_roles_caps_and_risky_features():
+def test_rejects_template_wrong_binding_digest_authorization_caps_and_risky_features():
     manifest = _manifest()
     approval = _bound_approval(manifest)
     assert "template manifest" in runner.validate(approval, _manifest(True), "B1", "a" * 40)[0]
@@ -100,9 +113,39 @@ def test_rejects_template_wrong_binding_digest_roles_caps_and_risky_features():
     assert "self digest" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
     manifest = _manifest()
     approval = _bound_approval(manifest)
-    approval["signatures"] = [{"role": "staff", "identity": "same"}] * 3
+    approval["owner_authorization"] = {"role": "owner", "identity": "same"}
     _resign(approval)
-    assert "roles" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    assert "owner authorization" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    approval["technical_review"]["unresolved_p1_count"] = 1
+    _resign(approval)
+    assert "technical review" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    approval["technical_review"]["unresolved_p1_count"] = False
+    _resign(approval)
+    assert "technical review" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    approval["technical_review"]["source_sha"] = "f" * 40
+    _resign(approval)
+    assert "technical review" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    approval["technical_review"]["manifest_digest"] = "f" * 64
+    _resign(approval)
+    assert "technical review" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    approval["authorization_model"] = "quorum"
+    _resign(approval)
+    assert "authorization model" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
+    manifest = _manifest()
+    approval = _bound_approval(manifest)
+    approval["signatures"] = []
+    _resign(approval)
+    assert "schema mismatch" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
     manifest = _manifest()
     approval = _bound_approval(manifest)
     approval["caps"] = {"requests": 0}
@@ -115,14 +158,14 @@ def test_rejects_template_wrong_binding_digest_roles_caps_and_risky_features():
     assert "risky" in runner.validate(approval, manifest, "B1", "a" * 40)[0]
 
 
-def test_rejects_expired_unsigned_and_altered_manifest():
+def test_rejects_expired_invalid_owner_authorization_and_altered_manifest():
     manifest = _manifest()
     approval = _bound_approval(manifest)
     assert "expired" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=2_000)[0]
     approval = _bound_approval(manifest)
-    approval["signatures"][0].pop("signature")
+    approval["owner_authorization"].pop("signature")
     _resign(approval)
-    assert "unsigned" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
+    assert "owner authorization" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
     approval = _bound_approval(manifest)
     manifest["candidate"]["arm"] = "A"
     assert "manifest" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
@@ -151,7 +194,7 @@ def test_rejects_nonclosed_sets_duplicate_dependencies_and_environment_mismatch(
     assert "manifest status" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
 
 
-def test_rejects_inventory_mismatch_and_mutated_signer_metadata():
+def test_rejects_inventory_mismatch_and_mutated_authorization_metadata():
     manifest = _manifest()
     approval = _bound_approval(manifest)
     approval["dependency_inventory_digest"] = "d" * 64
@@ -159,13 +202,13 @@ def test_rejects_inventory_mismatch_and_mutated_signer_metadata():
     assert "inventory" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
 
     approval = _bound_approval(manifest)
-    approval["signatures"][0]["key_id"] = "other_key"
+    approval["owner_authorization"]["key_id"] = "other_key"
     assert "self digest" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
 
     approval = _bound_approval(manifest)
-    approval["signatures"] = ["invalid"] * 3
+    approval["owner_authorization"] = "invalid"
     _resign(approval)
-    assert "roles" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
+    assert "owner authorization" in runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)[0]
 
 
 def test_b2_requires_text_generation_dependency():
@@ -208,7 +251,7 @@ _OFFLINE_SOURCE_PATHS = {
 }
 _OFFLINE_APPROVED_SOURCE_DIGESTS = {
     "scripts.run_voice_architecture_bakeoff": (
-        "f6ac01248f69be65e3f171507500972c917af2016431aaf4e370fd2c39ee7b05"
+        "12756f6defdcc0c45f88921b3f12221db0ad4d858cc7e637f91b809ce9632272"
     ),
     "scripts.voice_bakeoff_caller": (
         "a4f2aab9e95bd27048dbec60268c109fee3362ee6a2fd6f33f77dc31d1f70c1b"
@@ -618,11 +661,13 @@ def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path)
     approval["issued_at_ms"] = int(time.time() * 1000)
     approval["expires_at_ms"] = approval["issued_at_ms"] + 60_000
     approval["source_sha"] = source_sha
+    approval["technical_review"]["source_sha"] = source_sha
     approval["dependency_inventory_digest"] = runner._dependency_inventory_digest(approval["dependencies"])
     manifest["candidate"]["dependency_inventory_digest"] = approval["dependency_inventory_digest"]
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
     approval["manifest_digest"] = runner._manifest_digest_bytes(manifest_path.read_bytes())
+    approval["technical_review"]["manifest_digest"] = approval["manifest_digest"]
     _resign(approval)
     approval_path = tmp_path / "approval.json"
     approval_path.write_text(json.dumps(approval, separators=(",", ":")), encoding="utf-8")

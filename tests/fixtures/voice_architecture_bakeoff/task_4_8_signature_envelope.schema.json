@@ -100,13 +100,14 @@
     "expires_at_ms": {
       "$ref": "#/$defs/nullable_timestamp"
     },
-    "signers": {
-      "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "items": {
-        "$ref": "#/$defs/signer"
-      }
+    "authorization_model": {
+      "const": "sole_owner"
+    },
+    "owner_authorization": {
+      "$ref": "#/$defs/owner_authorization"
+    },
+    "technical_review": {
+      "$ref": "#/$defs/technical_review"
     },
     "envelope_self_digest": {
       "$ref": "#/$defs/nullable_digest"
@@ -140,7 +141,9 @@
     "nonce",
     "issued_at_ms",
     "expires_at_ms",
-    "signers",
+    "authorization_model",
+    "owner_authorization",
+    "technical_review",
     "envelope_self_digest"
   ],
   "$defs": {
@@ -399,7 +402,7 @@
         "immutable_custody_ref": {
           "$ref": "#/$defs/nullable_ref"
         },
-        "no_self_approval": {
+        "sole_owner_authorization": {
           "const": true
         },
         "no_break_glass": {
@@ -413,19 +416,17 @@
         "rotation_status_ref",
         "revocation_status_ref",
         "immutable_custody_ref",
-        "no_self_approval",
+        "sole_owner_authorization",
         "no_break_glass"
       ]
     },
-    "signer": {
+    "owner_authorization": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "role": {
           "enum": [
-            "staff",
-            "security_privacy",
-            "conversation_product"
+            "owner"
           ]
         },
         "identity_ref": {
@@ -446,7 +447,7 @@
         "signature_digest": {
           "$ref": "#/$defs/nullable_digest"
         },
-        "review_decision": {
+        "authorization_decision": {
           "enum": [
             "pending",
             "approved"
@@ -461,7 +462,31 @@
         "revocation_status_ref",
         "detached_signature_ref",
         "signature_digest",
-        "review_decision"
+        "authorization_decision"
+      ]
+    },
+    "technical_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "provenance_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "unresolved_p1_count": {
+          "$ref": "#/$defs/nullable_zero"
+        },
+        "advisory_only": {
+          "const": true
+        }
+      },
+      "required": [
+        "review_digest",
+        "provenance_ref",
+        "unresolved_p1_count",
+        "advisory_only"
       ]
     }
   },

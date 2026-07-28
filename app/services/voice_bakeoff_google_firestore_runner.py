@@ -116,6 +116,11 @@ class GoogleFirestoreClientHandle:
     def binding(self) -> FirestoreControlDatabaseBinding:
         return self._target.binding
 
+    def validate_target(self) -> None:
+        """Revalidate the frozen target without starting a transaction or SDK call."""
+
+        self._validate_client_target(construction=False)
+
     def new_transaction(self, *, max_attempts: int) -> object:
         self._validate_client_target(construction=False)
         return self._client.transaction(max_attempts=max_attempts)

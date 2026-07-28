@@ -34,6 +34,7 @@ from app.services.voice_bakeoff_transactional_control_seam import (
 _ROOT = Path(__file__).resolve().parents[2]
 _SOURCE = _ROOT / "app/services/voice_bakeoff_firestore_transaction_port.py"
 _GOOGLE_RUNNER_SOURCE = _ROOT / "app/services/voice_bakeoff_google_firestore_runner.py"
+_ASSEMBLY_SOURCE = _ROOT / "app/services/voice_bakeoff_control_store_assembly.py"
 
 
 class _FakeFirestoreTransaction(FirestoreTransaction):
@@ -560,7 +561,7 @@ def test_adapter_is_unwired_and_has_no_cloud_or_runtime_authority_imports() -> N
         *(
             path
             for path in (_ROOT / "app").rglob("*.py")
-            if path not in {_SOURCE, _GOOGLE_RUNNER_SOURCE}
+            if path not in {_SOURCE, _GOOGLE_RUNNER_SOURCE, _ASSEMBLY_SOURCE}
         ),
         *(_ROOT / "scripts").rglob("*.py"),
     )

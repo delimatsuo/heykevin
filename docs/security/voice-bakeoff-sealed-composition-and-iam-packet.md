@@ -18,10 +18,23 @@ unmet.
 
 ## Sealed control composition contract
 
-### One future control-domain boundary
+### Current inert assembly seam and one future control-domain boundary
 
-The only permitted future construction site for the **control** component is
-an isolated nonproduction module, proposed as:
+The current source-only assembly seam is:
+
+```text
+app/services/voice_bakeoff_control_store_assembly.py
+```
+
+It accepts only already-attested injected control dependencies and constructs
+only `TransactionalTrustGenerationPinStore` and
+`TransactionalExecutionControlStore`. It does not create an SDK client,
+resolve configuration or credentials, begin a transaction, activate pre-auth,
+construct a saga, or construct any provider/PSTN/evidence client. It is not a
+runtime composition root and remains absent from normal and deployment paths.
+
+The only permitted future construction site for a **runtime** control component
+is an isolated nonproduction module, proposed as:
 
 ```text
 app/experiments/voice_bakeoff_control_composition.py
@@ -109,8 +122,8 @@ prove:
 - a post-rollback readback proves no active control record and no remaining
   control identity binding/reference.
 
-Current tests intentionally prove the inverse: the transaction port and Google
-runner are unmounted from executable and deployment paths.
+Current tests prove that the transaction port, Google runner, and inert assembly
+seam are unmounted from executable and deployment paths.
 
 ## Control-domain IAM packet — DO NOT APPLY
 

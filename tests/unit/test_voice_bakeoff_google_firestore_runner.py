@@ -34,6 +34,7 @@ from app.services.voice_bakeoff_transactional_control_seam import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SOURCE = _ROOT / "app/services/voice_bakeoff_google_firestore_runner.py"
+_ASSEMBLY_SOURCE = _ROOT / "app/services/voice_bakeoff_control_store_assembly.py"
 
 
 class _FakeReference:
@@ -477,7 +478,7 @@ def test_runner_is_unwired_and_only_bakeoff_vendor_module_imports_google_sdk() -
         *((_ROOT / "scripts").rglob("*.py")),
     )
     for path in runtime_sources:
-        if path == _SOURCE:
+        if path in {_SOURCE, _ASSEMBLY_SOURCE}:
             continue
         assert "voice_bakeoff_google_firestore_runner" not in path.read_text(
             encoding="utf-8"

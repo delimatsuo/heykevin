@@ -21,6 +21,7 @@ _DEFAULT_PACKAGE = (
     "task_4_8_gate_package.template.json"
 )
 _REPORT_SOURCES = (
+    "app/services/voice_bakeoff_gate_contracts.py",
     "app/services/voice_bakeoff_gate_report.py",
     "app/services/voice_bakeoff_preauth_reference.py",
     "scripts/report_voice_bakeoff_gate.py",

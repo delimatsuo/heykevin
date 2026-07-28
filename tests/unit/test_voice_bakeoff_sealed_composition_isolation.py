@@ -11,12 +11,14 @@ _PROPOSED_COMPOSITION = (
     _ROOT / "app/experiments/voice_bakeoff_control_composition.py"
 )
 _UNMOUNTED_MODULES = {
+    "voice_bakeoff_control_admission_projection",
     "voice_bakeoff_control_store_assembly",
     "voice_bakeoff_firestore_transaction_port",
     "voice_bakeoff_google_firestore_runner",
     "voice_bakeoff_control_composition",
 }
 _SOURCE_ONLY_MODULE_FILES = {
+    _ROOT / "app/services/voice_bakeoff_control_admission_projection.py",
     _ROOT / "app/services/voice_bakeoff_control_store_assembly.py",
     _ROOT / "app/services/voice_bakeoff_firestore_transaction_port.py",
     _ROOT / "app/services/voice_bakeoff_google_firestore_runner.py",

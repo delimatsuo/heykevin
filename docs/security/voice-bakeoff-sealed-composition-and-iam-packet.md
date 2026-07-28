@@ -2,7 +2,8 @@
 
 **Status:** apply-prohibited, source/reference-only preparation.
 
-**Source baseline:** `ea470ab` (`feat: add isolated Firestore transaction runner`).
+**Source baseline:** reference-only; a future execution proposal must pin its
+own exact source SHA after independent review.
 
 This packet does not authorize a workload, service account, IAM change,
 Firestore write, credential delivery, provider/PSTN request, deployment,
@@ -32,6 +33,14 @@ only `TransactionalTrustGenerationPinStore` and
 resolve configuration or credentials, begin a transaction, activate pre-auth,
 construct a saga, or construct any provider/PSTN/evidence client. It is not a
 runtime composition root and remains absent from normal and deployment paths.
+
+The separately unmounted
+`app/services/voice_bakeoff_control_admission_projection.py` can produce only
+a payload-safe blocked diagnostic for the current fixed
+`execution_status: not_authorized` report. It validates source, dependency,
+policy, and nonproduction-scope digests before returning that diagnostic, but
+cannot construct the assembly seam or a capability. A future authorized gate
+schema must not substitute for this diagnostic type.
 
 The only permitted future construction site for a **runtime** control component
 is an isolated nonproduction module, proposed as:

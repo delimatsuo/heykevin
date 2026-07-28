@@ -140,6 +140,7 @@ def test_cli_source_binding_refuses_modified_or_untracked_helpers(
     def check_output(command: list[str], **kwargs: object) -> str:
         if "ls-files" in command:
             return (
+                "app/services/voice_bakeoff_gate_contracts.py\\n"
                 "app/services/voice_bakeoff_gate_report.py\\n"
                 "app/services/voice_bakeoff_preauth_reference.py\\n"
                 "scripts/report_voice_bakeoff_gate.py\\n"
@@ -179,14 +180,16 @@ def test_report_refuses_tampered_preauth_reference_without_relaxing_gates() -> N
 
 
 def test_report_module_and_cli_have_no_execution_or_network_capability() -> None:
+    contracts_path = _ROOT / "app/services/voice_bakeoff_gate_contracts.py"
     report_path = _ROOT / "app/services/voice_bakeoff_gate_report.py"
     reference_path = _ROOT / "app/services/voice_bakeoff_preauth_reference.py"
     cli_path = _ROOT / "scripts/report_voice_bakeoff_gate.py"
+    contracts_source = contracts_path.read_text(encoding="utf-8")
     report_source = report_path.read_text(encoding="utf-8")
     reference_source = reference_path.read_text(encoding="utf-8")
     cli_source = cli_path.read_text(encoding="utf-8")
 
-    for source in (report_source, reference_source, cli_source):
+    for source in (contracts_source, report_source, reference_source, cli_source):
         assert "--execute-provider" not in source
         assert "provider_execution" not in source
         assert "socket" not in source

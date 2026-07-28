@@ -7,9 +7,12 @@ provider, networking, or state-transition capability.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
 import re
 
+from app.services.voice_bakeoff_gate_contracts import (
+    BlockingGate,
+    Task48GateReport,
+)
 from app.services.voice_bakeoff_preauth_reference import (
     PreAuthReferenceError,
     validate_preauth_store_reference,
@@ -25,28 +28,6 @@ _PACKAGE_STATUSES = {
 
 class GateReportError(ValueError):
     """Raised when local input could be mistaken for an executable gate."""
-
-
-@dataclass(frozen=True, slots=True)
-class BlockingGate:
-    gate_id: str
-    protection: str
-
-
-@dataclass(frozen=True, slots=True)
-class Task48GateReport:
-    report_source_sha: str
-    package_source_binding: str
-    package_status: str
-    advisory_review_status: str
-    owner_approval_status: str
-    preauth_reference_status: str
-    execution_status: str
-    required_pre_network_controls: tuple[str, ...]
-    blocking_gates: tuple[BlockingGate, ...]
-
-    def as_dict(self) -> dict[str, object]:
-        return asdict(self)
 
 
 _BLOCKING_GATES = (

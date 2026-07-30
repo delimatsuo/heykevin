@@ -299,6 +299,42 @@ use after return, and scrubs mutable audio and byte buffers before dropping
 references. It promises no durable, logged, cached, persisted, or exception-echoed
 raw content. It does not claim immutable Python strings or bytes are zeroizable.
 
+### Current core driver slice
+
+The first driver slice implements only these closed synthetic journeys:
+
+- applicable direct answer followed by one question;
+- question-only intake;
+- one localized low-confidence repair;
+- localized safety guidance;
+- unsupported-language no-audio failure;
+- a superseding turn during Phase 2.
+
+All four candidate arms must produce an identical content-free canonical trace
+for those journeys. The slice also enforces exact inbound and outbound frame,
+byte, audio-duration, queue, session-duration, and concurrency limits; a
+single-use nonblocking lease; exact reviewed-source digests; and mutable-buffer
+scrubbing on success, revocation, expiry, limit failure, and internal failure.
+Lease scope, expiry, binding, contract, and consumed state live in a frozen
+driver-owned grant rather than the caller-held facade. Every facade field must
+still match that grant exactly at admission, and active execution and result
+publication use only the grant. Frame validation and accounting occur inside the
+same cleanup-guaranteed boundary; malformed or replaced frame state aborts,
+scrubs every driver-issued or still-reachable mutable payload, and leaves the
+driver reusable. Reviewed fixture, adapter, and source-identity maps are
+immutable, and the source identity set covers every direct behavior-bearing
+service import plus the reviewed transitive dialogue planner.
+
+The low-confidence Spanish fixture starts from a trusted reviewed fixture locale
+before extraction, reserves the fixed Spanish repair asset, and records only the
+allowlisted locale code in its content-free trace. The superseding fixture emits
+one `INPUT_FINAL` trace event for each admitted final turn before stale-response
+supersession and new-response delivery.
+
+This slice is not the completed synthetic-journey gate and does not claim the
+remaining journeys below. Those journeys require later offline-only increments
+and fresh exact-tree review before this driver step can be marked complete.
+
 ## Synthetic journey fixtures
 
 Every arm must produce the same canonical externally observable trace for:

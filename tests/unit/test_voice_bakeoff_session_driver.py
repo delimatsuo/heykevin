@@ -430,6 +430,87 @@ def test_unobserved_question_outcomes_never_mark_a_slot_asked(
     assert final.composition_status is CompositionStatus.SILENT
 
 
+def test_interruption_reconnect_uses_fresh_epoch_without_stale_speech(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.INTERRUPTION_RECONNECT,
+    )
+    assemblies = []
+    repairs = []
+    original_assembly = driver._assembly
+    original_repair = FixedProposalMaterializer.input_repair
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    def capture_repair(materializer, **kwargs):
+        proposal = original_repair(materializer, **kwargs)
+        repairs.append(proposal)
+        return proposal
+
+    monkeypatch.setattr(
+        driver,
+        "_assembly",
+        capture_assembly,
+    )
+    monkeypatch.setattr(
+        FixedProposalMaterializer,
+        "input_repair",
+        capture_repair,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 2
+    assert len(assemblies) == 2
+    stale, fresh = assemblies
+    assert stale.binding.call_binding == fresh.binding.call_binding
+    assert (
+        stale.binding.contractor_binding
+        == fresh.binding.contractor_binding
+    )
+    assert stale.binding.environment == fresh.binding.environment
+    assert stale.binding.stream_binding != fresh.binding.stream_binding
+    assert fresh.binding.epoch == stale.binding.epoch + 1
+    assert stale.adapter.terminally_closed
+    assert stale.transaction.pending_response_count == 0
+    assert stale.receipts.unconsumed_receipt_count == 0
+    assert stale.calls.is_quiescent
+    assert fresh.transaction.pending_response_count == 0
+    assert fresh.receipts.unconsumed_receipt_count == 0
+    assert fresh.calls.is_quiescent
+    assert stale.state.current_state() == fresh.state.current_state()
+    assert stale.state.version == fresh.state.version
+    assert fresh.state.current_state().asked_slots == set()
+    assert len(repairs) == 1
+    assert repairs[0].locale == "en"
+    assert tuple(act.text for act in repairs[0].plan.acts) == (
+        "Sorry, I did not understand. Please say that again.",
+    )
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.INPUT_FINAL) == 2
+    assert kinds.count(TraceKind.PLAYOUT_INTERRUPTED) == 1
+    assert kinds.count(TraceKind.SESSION_DISCONNECTED) == 1
+    assert kinds.count(TraceKind.SESSION_REESTABLISHED) == 1
+    assert kinds.count(TraceKind.REPAIR_PENDING) == 1
+    assert kinds.count(TraceKind.PLAYBACK_OBSERVED) == 1
+    assert kinds.count(TraceKind.RESPONSE_OBSERVED) == 1
+    assert tuple(
+        event.semantic_act_kind
+        for event in result.trace
+        if event.kind is TraceKind.ACT_CONFIRMED
+    ) == (
+        VoiceSemanticActKind.QUESTION,
+        VoiceSemanticActKind.REPAIR,
+    )
+
+
 def test_facade_is_single_use_and_driver_allows_only_one_live_lease():
     driver, facade = _lease()
     assert facade.state is OfflineSessionState.LEASED

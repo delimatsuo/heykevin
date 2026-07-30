@@ -78,7 +78,7 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "df84f4d56990dec01c23b2a6958e4f31f27d32fd580494a6b5ebe98426ca74f4"
+_DRIVER_SOURCE_DIGEST = "ec65b5a41f181599beb15b75219091da2764df7a24cfc4538a2dedcba717adb3"
 _FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
@@ -86,7 +86,7 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "caller_observation_extractor":
         "a3d79ce19f2c603f47dd370789773a707016a07e430c58fcd389a67065f9d364",
     "composition":
-        "fee2040a2fae2d7856c2fa74e8fbf48e14893270dbabc34c45e81cc66c012cd0",
+        "dd3561a3c0ba5617f74983872dca6d65407dd7ad545dc38f81e83e0c6b697f0d",
     "dialogue_planner":
         "222f332a8756eec4144bfe9ede7bb5dbae71cdbfd1ca8505df58b862dc953457",
     "materializer":
@@ -100,11 +100,11 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "voice_candidates_base":
         "1d96a31d07966f48ebb528cdd4618bc5a2c0cc7911323bef8d56431c839c7cfe",
     "voice_lifecycle":
-        "bed3dfade722e448690b61feb369fdf3d7d587f14e94bcc56adc66cdc2782213",
+        "45879f2d5247f37f5671536b8dd52947eeef77625691f442e5980cc1c96556a2",
     "voice_session_auth":
         "ecb56c931cfb8ddc2c8a70ef37d5e0b0834fece7382de5482aef8c7e914cf1ae",
     "voice_speech_control":
-        "85eed871597b0e4463cfe0f1c5d4fd081fbe6d92c4089efc692a08a4a2b74311",
+        "77187f3f725f89f111cc139dc335c4135a05f8a6e2795065f0846c375c92cf85",
 })
 _ADAPTER_TYPES = MappingProxyType({
     CandidateArm.A: NativeGeminiAdapter,
@@ -142,6 +142,7 @@ class SyntheticJourney(str, Enum):
     BIDIRECTIONAL_CODE_SWITCH = "bidirectional_code_switch"
     REPAIR_EXHAUSTION = "repair_exhaustion"
     UNOBSERVED_QUESTION_OUTCOMES = "unobserved_question_outcomes"
+    INTERRUPTION_RECONNECT = "interruption_reconnect"
 
 
 class DriverFailure(str, Enum):
@@ -171,6 +172,8 @@ class TraceKind(str, Enum):
     PLAYOUT_CLEARED = "playout_cleared"
     PLAYOUT_INTERRUPTED = "playout_interrupted"
     ACT_FAILED = "act_failed"
+    SESSION_DISCONNECTED = "session_disconnected"
+    SESSION_REESTABLISHED = "session_reestablished"
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +446,16 @@ _FIXTURES = MappingProxyType({
             ("service_object", "furnace"),
         ),
     ),
+    SyntheticJourney.INTERRUPTION_RECONNECT: _Fixture(
+        locale="en",
+        content="Fixture caller requests a furnace repair before interruption.",
+        fields=(
+            ("language", "en"),
+            ("intent", "service_request"),
+            ("service_action", "repair"),
+            ("service_object", "furnace"),
+        ),
+    ),
 })
 
 
@@ -585,6 +598,15 @@ class _SyntheticObservationBackend:
                 for field_name in fields
             },
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _ForbiddenReplayBackend:
+    def __call__(
+        self,
+        request: ExtractionRequest,
+    ) -> BackendResponse:
+        raise _DriverAbort(DriverFailure.COMPOSITION)
 
 
 class OfflineSessionDriver:
@@ -964,6 +986,16 @@ class OfflineSessionDriver:
                 now_ms=now_ms,
                 trace=trace,
             )
+        if grant.journey is SyntheticJourney.INTERRUPTION_RECONNECT:
+            return self._execute_interruption_reconnect(
+                grant=grant,
+                assembly=assembly,
+                pending=first,
+                receipt=receipt,
+                fixture=fixture,
+                now_ms=now_ms,
+                trace=trace,
+            )
         delivery_at_ms = now_ms + 10
         if grant.journey is SyntheticJourney.SUPERSEDING_TURN:
             correction = _Fixture(
@@ -1282,6 +1314,198 @@ class OfflineSessionDriver:
         ):
             raise _DriverAbort(DriverFailure.COMPOSITION)
         return final_at_ms + 1
+
+    def _execute_interruption_reconnect(
+        self,
+        *,
+        grant: _LeaseGrant,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        receipt: FinalTurnAdmissionReceipt,
+        fixture: _Fixture,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        interrupted_at_ms, stale_authorization = (
+            self._stage_unobserved_question(
+                assembly=assembly,
+                pending=pending,
+                event_kind=VoiceEventKind.PLAYOUT_INTERRUPTED,
+                trace_kind=TraceKind.PLAYOUT_INTERRUPTED,
+                resolve_transport=False,
+                at_ms=now_ms + 5,
+                trace=trace,
+            )
+        )
+        disconnected = self._session_transition(
+            assembly=assembly,
+            kind=VoiceEventKind.SESSION_DISCONNECTED,
+            at_ms=interrupted_at_ms + 1,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.SESSION_DISCONNECTED,
+            )
+        )
+        if (
+            not assembly.transaction.terminalize_disconnected_session(
+                event=disconnected
+            )
+            or assembly.transaction.pending_response_count
+            or assembly.receipts.unconsumed_receipt_count
+            or assembly.adapter.has_permit(stale_authorization)
+            or assembly.speech.is_live(
+                stale_authorization.semantic_act_id
+            )
+            or not assembly.calls.is_quiescent
+            or assembly.state.current_state().asked_slots
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        reestablished = self._session_transition(
+            assembly=assembly,
+            kind=VoiceEventKind.SESSION_REESTABLISHED,
+            at_ms=disconnected.at_ms + 1,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.SESSION_REESTABLISHED,
+            )
+        )
+        assembly.adapter.terminalize_permit_admission()
+        if not assembly.adapter.terminally_closed:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        confirmed_state = assembly.state.current_state()
+        confirmed_version = assembly.state.version
+        fresh_binding = VoiceSessionBinding(
+            environment=assembly.binding.environment,
+            contractor_binding=(
+                assembly.binding.contractor_binding
+            ),
+            call_binding=assembly.binding.call_binding,
+            stream_binding=(
+                f"{assembly.binding.stream_binding}_reconnected"
+            ),
+            epoch=assembly.binding.epoch + 1,
+        )
+        reconnect_fixture = _Fixture(
+            locale=fixture.locale,
+            content=(
+                "Fixture caller resumes after a proven "
+                "synthetic reconnect."
+            ),
+            fields=(
+                ("language", fixture.locale),
+                ("intent", "service_request"),
+            ),
+            low_confidence=True,
+        )
+        fresh = self._assembly(
+            grant,
+            reconnect_fixture,
+            binding=fresh_binding,
+            initial_state=confirmed_state,
+            initial_state_version=confirmed_version,
+        )
+        fresh_receipt = self._admit_final_turn(
+            assembly=fresh,
+            fixture=reconnect_fixture,
+            turn_number=2,
+            at_ms=reestablished.at_ms + 1,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.INPUT_FINAL,
+            )
+        )
+        fresh_result = fresh.transaction.execute(
+            fresh_receipt,
+            content=reconnect_fixture.content,
+            backend=_SyntheticObservationBackend(
+                reconnect_fixture
+            ),
+            now_ms=max(
+                reestablished.at_ms + 2,
+                fresh_receipt.at_ms,
+            ),
+        )
+        trace.append(
+            self._composition_trace(
+                trace,
+                fresh_result,
+                locale=self._trace_locale(
+                    fresh.state.current_state().language
+                ),
+            )
+        )
+        stale_replay = assembly.transaction.execute(
+            receipt,
+            content=fixture.content,
+            backend=_ForbiddenReplayBackend(),
+            now_ms=reestablished.at_ms + 3,
+        )
+        if (
+            stale_replay.status
+            is not CompositionStatus.TERMINAL_FAILURE
+            or stale_replay.reason != "session_disconnected"
+            or fresh_result.status
+            is not CompositionStatus.REPAIR_PENDING
+            or fresh_result.act_kinds
+            != (VoiceSemanticActKind.REPAIR,)
+            or fresh.binding.call_binding
+            != assembly.binding.call_binding
+            or fresh.binding.contractor_binding
+            != assembly.binding.contractor_binding
+            or fresh.binding.environment
+            != assembly.binding.environment
+            or fresh.binding.stream_binding
+            == assembly.binding.stream_binding
+            or fresh.binding.epoch
+            != assembly.binding.epoch + 1
+            or fresh.state.version != confirmed_version
+            or fresh.state.current_state() != confirmed_state
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        fresh_authorization = (
+            fresh.transaction.authorization_receipt(
+                fresh_result.act_ids[0]
+            )
+        )
+        if (
+            fresh_authorization is None
+            or assembly.lifecycle.act_state(
+                stale_authorization
+            )
+            is not VoiceEventKind.PLAYOUT_INTERRUPTED
+            or assembly.adapter.accept_permit(
+                fresh_authorization,
+                lifecycle=fresh.lifecycle,
+            )
+            or fresh.adapter.accept_permit(
+                stale_authorization,
+                lifecycle=assembly.lifecycle,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        observed, end_at_ms = self._deliver_pending(
+            assembly=fresh,
+            pending=fresh_result,
+            at_ms=reestablished.at_ms + 4,
+            trace=trace,
+        )
+        if (
+            observed.status
+            is not CompositionStatus.RESPONSE_OBSERVED
+            or fresh.state.current_state() != confirmed_state
+            or fresh.state.current_state().asked_slots
+            or fresh.transaction.pending_response_count
+            or fresh.receipts.unconsumed_receipt_count
+            or not fresh.calls.is_quiescent
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        return end_at_ms
 
     def _stage_unobserved_question(
         self,
@@ -1622,8 +1846,19 @@ class OfflineSessionDriver:
         self,
         grant: _LeaseGrant,
         fixture: _Fixture,
+        *,
+        binding: VoiceSessionBinding | None = None,
+        initial_state: IntakeState | None = None,
+        initial_state_version: int = 0,
     ) -> _Assembly:
-        binding = grant.binding
+        if binding is None:
+            binding = grant.binding
+        if (
+            not isinstance(binding, VoiceSessionBinding)
+            or type(initial_state_version) is not int
+            or initial_state_version < 0
+        ):
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
         adapter = self._adapter(grant.arm, binding)
         lifecycle = VoiceLifecycle(binding=binding)
         receipts = FinalTurnAdmissionAuthority(
@@ -1646,13 +1881,24 @@ class OfflineSessionDriver:
             min_field_confidence=0.8,
             min_aggregate_confidence=0.85,
         )
-        initial_state = IntakeState.new(
-            call_sid=binding.call_binding,
-        )
-        initial_state.language = fixture.locale
+        if initial_state is None:
+            if initial_state_version != 0:
+                raise _DriverAbort(DriverFailure.ASSEMBLY)
+            initial_state = IntakeState.new(
+                call_sid=binding.call_binding,
+            )
+            initial_state.language = fixture.locale
+        elif (
+            not isinstance(initial_state, IntakeState)
+            or initial_state.side_effects_allowed
+            or initial_state.call_sid != binding.call_binding
+            or initial_state.language != fixture.locale
+        ):
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
         state = VersionedIntakeStore(
             binding=binding,
             initial_state=initial_state,
+            initial_version=initial_state_version,
         )
         calls = CallLifecycle(
             binding=binding,
@@ -1701,6 +1947,91 @@ class OfflineSessionDriver:
             receipts=receipts,
             state=state,
         )
+
+    def _session_transition(
+        self,
+        *,
+        assembly: _Assembly,
+        kind: VoiceEventKind,
+        at_ms: int,
+    ) -> VoiceEvent:
+        if kind not in {
+            VoiceEventKind.SESSION_DISCONNECTED,
+            VoiceEventKind.SESSION_REESTABLISHED,
+        }:
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
+        sequence, canonical_at_ms = (
+            assembly.lifecycle.next_position(at_ms=at_ms)
+        )
+        context = EventContext(
+            binding=assembly.binding,
+            sequence=sequence,
+            at_ms=canonical_at_ms,
+            input_turn_id=f"session_turn_{sequence}",
+            generation_id=f"session_generation_{sequence}",
+            semantic_act_id=f"session_act_{sequence}",
+            semantic_act_kind=(
+                VoiceSemanticActKind.ACKNOWLEDGEMENT
+            ),
+        )
+        disconnected = (
+            kind is VoiceEventKind.SESSION_DISCONNECTED
+        )
+        adapter = assembly.adapter
+        if type(adapter) is NativeGeminiAdapter:
+            result = adapter.handle(
+                NativeSignal(
+                    (
+                        NativeSignalKind.SESSION_DISCONNECTED
+                        if disconnected
+                        else NativeSignalKind.SESSION_REESTABLISHED
+                    ),
+                    context,
+                )
+            )
+        elif type(adapter) is ChainedStreamingAdapter:
+            result = adapter.handle(
+                ChainedSignal(
+                    (
+                        ChainedSignalKind.SESSION_DISCONNECTED
+                        if disconnected
+                        else ChainedSignalKind.SESSION_REESTABLISHED
+                    ),
+                    context,
+                )
+            )
+        elif type(adapter) is ConversationRelayAdapter:
+            result = adapter.handle(
+                RelaySignal(
+                    (
+                        RelaySignalKind.SESSION_DISCONNECTED
+                        if disconnected
+                        else RelaySignalKind.SESSION_REESTABLISHED
+                    ),
+                    context,
+                )
+            )
+        elif type(adapter) is ManualNativeAdapter:
+            result = adapter.handle(
+                ManualNativeSignal(
+                    (
+                        ManualNativeSignalKind.SESSION_DISCONNECTED
+                        if disconnected
+                        else ManualNativeSignalKind.SESSION_REESTABLISHED
+                    ),
+                    context,
+                )
+            )
+        else:
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
+        if (
+            not result.accepted
+            or len(result.events) != 1
+            or result.events[0].kind is not kind
+            or not assembly.lifecycle.ingest(result.events[0])
+        ):
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
+        return result.events[0]
 
     def _admit_final_turn(
         self,

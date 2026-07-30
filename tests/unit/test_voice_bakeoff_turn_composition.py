@@ -259,6 +259,11 @@ def _harness(
             binding=binding,
             limits=_limits(),
         )
+    elif adapter_arm == "B2":
+        adapter = ConversationRelayAdapter(
+            binding=binding,
+            limits=_limits(),
+        )
     elif adapter_arm == "C":
         adapter = ManualNativeAdapter(
             binding=binding,
@@ -357,6 +362,17 @@ def _harness(
                 ManualNativeSignalKind.INPUT_FINAL,
                 context,
                 payload=VoicePayload(
+                    text_digest=final_turn_content_digest(content)
+                ),
+            )
+        )
+    elif type(adapter) is ConversationRelayAdapter:
+        adapter_result = adapter.handle(
+            RelaySignal(
+                RelaySignalKind.PROMPT_FINAL,
+                context,
+                CandidateUsage(),
+                VoicePayload(
                     text_digest=final_turn_content_digest(content)
                 ),
             )
@@ -540,6 +556,54 @@ def _mint_next_turn(
                 ),
             )
         )
+    elif type(harness["adapter"]) is ConversationRelayAdapter:
+        result = harness["adapter"].handle(
+            RelaySignal(
+                RelaySignalKind.PROMPT_FINAL,
+                context,
+                CandidateUsage(),
+                VoicePayload(
+                    text_digest=final_turn_content_digest(content)
+                ),
+            )
+        )
+    elif type(harness["adapter"]) is ManualNativeAdapter:
+        for signal_kind in (
+            ManualNativeSignalKind.ACTIVITY_STARTED,
+            ManualNativeSignalKind.ACTIVITY_ENDED,
+        ):
+            activity_sequence, activity_at_ms = (
+                lifecycle.next_position(at_ms=canonical_at_ms)
+            )
+            activity = harness["adapter"].handle(
+                ManualNativeSignal(
+                    signal_kind,
+                    _context(
+                        sequence=activity_sequence,
+                        at_ms=activity_at_ms,
+                        turn_id=turn_id,
+                    ),
+                )
+            )
+            assert activity.accepted
+            assert lifecycle.ingest(activity.events[0])
+        sequence, canonical_at_ms = lifecycle.next_position(
+            at_ms=canonical_at_ms
+        )
+        result = harness["adapter"].handle(
+            ManualNativeSignal(
+                ManualNativeSignalKind.INPUT_FINAL,
+                _context(
+                    sequence=sequence,
+                    at_ms=canonical_at_ms,
+                    turn_id=turn_id,
+                    act_id=f"input_{turn_id}",
+                ),
+                payload=VoicePayload(
+                    text_digest=final_turn_content_digest(content)
+                ),
+            )
+        )
     else:
         result = harness["adapter"].handle(
             ChainedSignal(
@@ -565,6 +629,54 @@ def _mint_next_turn(
     )
     assert receipt is not None
     return receipt
+
+
+def _disconnect_session(
+    harness,
+    *,
+    at_ms: int,
+) -> VoiceEvent:
+    lifecycle = harness["lifecycle"]
+    sequence, canonical_at_ms = lifecycle.next_position(
+        at_ms=at_ms
+    )
+    context = _context(
+        sequence=sequence,
+        at_ms=canonical_at_ms,
+        turn_id="disconnect_turn",
+    )
+    if type(harness["adapter"]) is NativeGeminiAdapter:
+        result = harness["adapter"].handle(
+            NativeSignal(
+                NativeSignalKind.SESSION_DISCONNECTED,
+                context,
+            )
+        )
+    elif type(harness["adapter"]) is ConversationRelayAdapter:
+        result = harness["adapter"].handle(
+            RelaySignal(
+                RelaySignalKind.SESSION_DISCONNECTED,
+                context,
+            )
+        )
+    elif type(harness["adapter"]) is ManualNativeAdapter:
+        result = harness["adapter"].handle(
+            ManualNativeSignal(
+                ManualNativeSignalKind.SESSION_DISCONNECTED,
+                context,
+            )
+        )
+    else:
+        result = harness["adapter"].handle(
+            ChainedSignal(
+                ChainedSignalKind.SESSION_DISCONNECTED,
+                context,
+            )
+        )
+    assert result.accepted
+    event = result.events[0]
+    assert lifecycle.ingest(event)
+    return event
 
 
 @pytest.mark.parametrize("arm", ["A", "B1", "B2", "C"])
@@ -1701,6 +1813,392 @@ def test_newer_final_turn_retires_pending_permit_and_terminalizes_old_outcome():
     )
     assert old_replay.status is CompositionStatus.SUPERSEDED
     assert old_replay.reason == "newer_turn"
+
+
+def test_canonical_disconnect_retires_pending_response_without_erasing_facts():
+    harness = _harness()
+    first = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    assert first.status is CompositionStatus.RESPONSE_PENDING
+    act_id = first.act_ids[0]
+    authorization = harness[
+        "transaction"
+    ].authorization_receipt(act_id)
+    assert authorization is not None
+    before = harness["state"].current_state()
+    sequence, at_ms = harness["lifecycle"].next_position(
+        at_ms=12
+    )
+    disconnected = harness["adapter"].handle(
+        ChainedSignal(
+            ChainedSignalKind.SESSION_DISCONNECTED,
+            _context(
+                sequence=sequence,
+                at_ms=at_ms,
+                turn_id="disconnect_turn",
+            ),
+        )
+    )
+    assert disconnected.accepted
+    event = disconnected.events[0]
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["lifecycle"].ingest(event)
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(
+        event=replace(
+            event,
+            input_turn_id="cloned_disconnect",
+        )
+    )
+
+    assert harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["calls"].is_quiescent
+    assert not harness["adapter"].has_permit(authorization)
+    assert not harness["speech"].is_live(act_id)
+    assert harness["state"].current_state() == before
+    replay = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=lambda request: pytest.fail(
+            "disconnect replay called extractor"
+        ),
+        now_ms=13,
+    )
+    assert replay.status is CompositionStatus.TERMINAL_FAILURE
+    assert replay.reason == "session_disconnected"
+
+
+@pytest.mark.parametrize("arm", ["A", "B1", "B2", "C"])
+def test_canonical_disconnect_tombstones_queued_receipt_before_release(
+    arm: str,
+):
+    harness = _harness(adapter_arm=arm)
+    queued_content = "second synthetic caller turn"
+    queued_receipt = _mint_next_turn(
+        harness,
+        turn_id="turn_queued",
+        content=queued_content,
+        at_ms=11,
+    )
+    assert harness["receipts"].unconsumed_receipt_count == 2
+    event = _disconnect_session(harness, at_ms=12)
+    assert not harness["receipts"].retire_disconnected_session(
+        event=replace(
+            event,
+            input_turn_id="cloned_disconnect",
+        ),
+        owner=harness["transaction"],
+    )
+    assert harness["receipts"].unconsumed_receipt_count == 2
+
+    assert harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    rejected = harness["transaction"].execute(
+        queued_receipt,
+        content=queued_content,
+        backend=lambda request: pytest.fail(
+            "retired queued receipt called extractor"
+        ),
+        now_ms=13,
+    )
+    assert rejected.status is CompositionStatus.REJECTED
+
+
+@pytest.mark.parametrize("arm", ["A", "B1", "B2", "C"])
+def test_disconnect_after_observed_question_retires_timer_and_speech(
+    arm: str,
+):
+    harness = _harness(adapter_arm=arm)
+    first = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    assert first.status is CompositionStatus.RESPONSE_PENDING
+    assert first.act_kinds == (VoiceSemanticActKind.QUESTION,)
+    act_id = first.act_ids[0]
+    playback = _playback_after_transport(harness, act_id)
+    observed = harness["transaction"].observe_playback(
+        event=playback,
+        event_id=f"observed_{arm}",
+        sequence=playback.sequence,
+    )
+    assert observed is not None
+    assert observed.status is CompositionStatus.RESPONSE_OBSERVED
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["calls"].phase is SilencePhase.FIRST_ARMED
+    assert harness["speech"].is_live(act_id)
+    asked_slots = harness["state"].current_state().asked_slots
+    timer_action_id = harness["calls"]._timer_action_id()
+    timer_revision = harness["calls"].revision
+
+    event = _disconnect_session(harness, at_ms=12)
+    assert harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert harness["calls"].is_quiescent
+    assert not harness["speech"].is_live(act_id)
+    assert harness["state"].current_state().asked_slots == asked_slots
+    sequence, at_ms = harness["calls"].next_position(at_ms=100)
+    assert harness["calls"].timer_fired(
+        binding=harness["transaction"].binding,
+        event_id=f"stale_timer_{arm}",
+        sequence=sequence,
+        action_id=timer_action_id,
+        revision=timer_revision,
+        now_ms=at_ms,
+    ) == ()
+
+
+def test_disconnect_receipt_retirement_fault_hard_terminalizes_live_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    sequence, at_ms = harness["lifecycle"].next_position(
+        at_ms=12
+    )
+    disconnected = harness["adapter"].handle(
+        ChainedSignal(
+            ChainedSignalKind.SESSION_DISCONNECTED,
+            _context(
+                sequence=sequence,
+                at_ms=at_ms,
+                turn_id="disconnect_turn",
+            ),
+        )
+    )
+    assert disconnected.accepted
+    event = disconnected.events[0]
+    assert harness["lifecycle"].ingest(event)
+    monkeypatch.setattr(
+        harness["receipts"],
+        "retire_disconnected_session",
+        lambda **kwargs: False,
+    )
+
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness["adapter"].terminally_closed
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+
+
+def test_disconnect_cleanup_fault_hard_terminalizes_pending_response(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    first = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    assert first.status is CompositionStatus.RESPONSE_PENDING
+    sequence, at_ms = harness["lifecycle"].next_position(
+        at_ms=12
+    )
+    disconnected = harness["adapter"].handle(
+        ChainedSignal(
+            ChainedSignalKind.SESSION_DISCONNECTED,
+            _context(
+                sequence=sequence,
+                at_ms=at_ms,
+                turn_id="disconnect_turn",
+            ),
+        )
+    )
+    assert disconnected.accepted
+    event = disconnected.events[0]
+    assert harness["lifecycle"].ingest(event)
+    monkeypatch.setattr(
+        harness["adapter"],
+        "permit_was_revoked",
+        lambda authorization: False,
+    )
+
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["adapter"].terminally_closed
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    replay = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=lambda request: pytest.fail(
+            "failed disconnect replay called extractor"
+        ),
+        now_ms=13,
+    )
+    assert replay.status is CompositionStatus.TERMINAL_FAILURE
+    assert replay.reason == "disconnect_compensation_failed"
+
+
+def test_disconnect_cancel_fault_hard_terminalizes_speech_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    first = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    assert first.status is CompositionStatus.RESPONSE_PENDING
+    act_id = first.act_ids[0]
+    sequence, at_ms = harness["lifecycle"].next_position(
+        at_ms=12
+    )
+    disconnected = harness["adapter"].handle(
+        ChainedSignal(
+            ChainedSignalKind.SESSION_DISCONNECTED,
+            _context(
+                sequence=sequence,
+                at_ms=at_ms,
+                turn_id="disconnect_turn",
+            ),
+        )
+    )
+    assert disconnected.accepted
+    event = disconnected.events[0]
+    assert harness["lifecycle"].ingest(event)
+    monkeypatch.setattr(
+        harness["speech"],
+        "cancel",
+        lambda *args, **kwargs: False,
+    )
+
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["adapter"].terminally_closed
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert harness["speech"].is_cancelled(act_id)
+    assert not harness["speech"].is_live(act_id)
+
+
+def test_disconnect_binding_cleanup_fault_falls_back_to_owned_speech_acts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    first = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    assert first.status is CompositionStatus.RESPONSE_PENDING
+    act_id = first.act_ids[0]
+    playback = _playback_after_transport(harness, act_id)
+    observed = harness["transaction"].observe_playback(
+        event=playback,
+        event_id="observed_before_fault",
+        sequence=playback.sequence,
+    )
+    assert observed is not None
+    assert observed.status is CompositionStatus.RESPONSE_OBSERVED
+    assert harness["speech"].is_live(act_id)
+    event = _disconnect_session(harness, at_ms=12)
+    monkeypatch.setattr(
+        harness["speech"],
+        "hard_terminalize_binding",
+        lambda binding: False,
+    )
+
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert not harness["speech"].is_live(act_id)
+
+
+def test_disconnect_binding_cleanup_fault_survives_outcome_pruning(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    first = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    assert first.status is CompositionStatus.RESPONSE_PENDING
+    act_id = first.act_ids[0]
+    playback = _playback_after_transport(harness, act_id)
+    observed = harness["transaction"].observe_playback(
+        event=playback,
+        event_id="observed_before_prune",
+        sequence=playback.sequence,
+    )
+    assert observed is not None
+    assert observed.status is CompositionStatus.RESPONSE_OBSERVED
+    assert harness["transaction"].retained_outcome_count == 1
+    rejected = harness["transaction"].execute(
+        None,
+        content="invalid receipt",
+        backend=lambda request: pytest.fail(
+            "outcome prune called extractor"
+        ),
+        now_ms=1_111,
+    )
+    assert rejected.status is CompositionStatus.REJECTED
+    assert harness["transaction"].retained_outcome_count == 0
+    assert harness["speech"].is_live(act_id)
+    event = _disconnect_session(harness, at_ms=1_112)
+    monkeypatch.setattr(
+        harness["speech"],
+        "hard_terminalize_binding",
+        lambda binding: False,
+    )
+
+    assert not harness[
+        "transaction"
+    ].terminalize_disconnected_session(event=event)
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert harness["calls"].is_quiescent
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["speech"].is_cancelled(act_id)
+    assert not harness["speech"].is_live(act_id)
+
+
+def test_versioned_intake_store_preserves_explicit_handoff_version():
+    state = IntakeState.new(call_sid="call_1")
+    store = VersionedIntakeStore(
+        binding=_binding(),
+        initial_state=state,
+        initial_version=7,
+    )
+    assert store.version == 7
+    assert store.current_state() == state
+    for invalid in (True, -1):
+        with pytest.raises(
+            ValueError,
+            match="intake store input",
+        ):
+            VersionedIntakeStore(
+                binding=_binding(),
+                initial_state=state,
+                initial_version=invalid,
+            )
 
 
 def test_preregistered_playback_inference_marks_question_only_after_transport_delay():

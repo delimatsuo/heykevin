@@ -314,7 +314,10 @@ The first driver slice implements only these closed synthetic journeys:
 - one localized repair observed before a second low-confidence turn returns
   typed `closure_required` with no second repair or closure audio;
 - partial, cleared, failed, and interrupted question playouts followed by exact
-  supersession without any slot becoming asked.
+  supersession without any slot becoming asked;
+- an interrupted pending question followed by canonical disconnect cleanup, a
+  synthetic re-established fresh epoch, and one fixed repair without stale
+  speech.
 
 All four candidate arms must produce an identical content-free canonical trace
 for those journeys. The slice also enforces exact inbound and outbound frame,
@@ -353,6 +356,23 @@ question asked or arm its silence timer.
 The driver also proves each superseded question has no live playback permit or
 speech authority, and the completed journey retains no unconsumed admission
 receipt.
+The reconnect fixture interrupts an authorized pending question before caller
+playback, consumes an exact canonical disconnect event to retire the old
+response, tombstones every still-live final-turn receipt, and permanently closes
+the old adapter after its re-established boundary. A driver-derived binding
+preserves environment, tenant, call, confirmed facts, and monotonic state version
+while advancing the epoch and stream identity. Only the fresh assembly may
+deliver the existing fixed input-repair asset. The old receipt replays only its
+typed `session_disconnected` terminal outcome, and the old question never
+becomes playback-observed or asked. A receipt-retirement or ordinary
+speech-cancellation fault hard-terminalizes the old adapter, local call reducer,
+pending composition, live receipt set, and speech authority before ownership is
+released. Content-free speech act identities remain durably enumerable by exact
+binding even after bounded composition outcomes expire, so per-act hard cleanup
+does not depend on replay retention. The same session-wide cleanup applies after
+already observed question playback: confirmed asked-slot evidence remains, while
+the old silence timer and all old-binding speech authority are permanently
+retired.
 
 This slice is not the completed synthetic-journey gate and does not claim the
 remaining journeys below. Those journeys require later offline-only increments

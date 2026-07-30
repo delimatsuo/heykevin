@@ -464,6 +464,16 @@ class VoiceLifecycle:
             and self._session_event is event
         )
 
+    def accepts_session_disconnect(self, event: VoiceEvent) -> bool:
+        """Return true only for the exact current disconnect receipt."""
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.SESSION_DISCONNECTED
+            and event.source is VoiceSource.PROVIDER_UNTRUSTED
+            and self._session_event is event
+        )
+
     def accept_command(self, command: VoiceCommand, *, now_ms: int) -> bool:
         if command.binding != self.binding or command.expires_at_ms < _nonnegative(now_ms, "now_ms"):
             return False

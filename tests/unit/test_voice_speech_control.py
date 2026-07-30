@@ -134,6 +134,85 @@ def test_caller_activity_releases_question_reservation_for_a_new_plan():
     assert control.reserve(second, _authorization())[1].reservation_id is not None
 
 
+def test_hard_terminalization_removes_live_speech_and_question_authority():
+    control = SpeechControl(_policy())
+    question = control.reserve(
+        SpokenPlan(
+            plan_id="hard_terminal",
+            acts=(
+                SemanticAct(
+                    SemanticActKind.QUESTION,
+                    "What service do you need?",
+                    question_slot="service",
+                ),
+            ),
+        ),
+        _authorization(),
+    )[0]
+    assert control.authorize_text(question.act_id, question.text)
+    assert control.is_live(question.act_id)
+
+    assert control.hard_terminalize(question.act_id)
+    assert control.hard_terminalize(question.act_id)
+    assert control.is_cancelled(question.act_id)
+    assert not control.is_live(question.act_id)
+
+
+def test_binding_hard_terminalization_retires_only_matching_speech():
+    control = SpeechControl(_policy())
+    matching = control.reserve(
+        SpokenPlan(
+            plan_id="matching",
+            acts=(
+                SemanticAct(
+                    SemanticActKind.QUESTION,
+                    "What service do you need?",
+                    question_slot="service",
+                ),
+            ),
+        ),
+        _authorization(),
+    )[0]
+    foreign_authorization = SpeechAuthorization(
+        binding=VoiceSessionBinding(
+            environment="bakeoff",
+            contractor_binding="tenant_1",
+            call_binding="call_2",
+            stream_binding="stream_2",
+            epoch=1,
+        ),
+        turn_id="turn_2",
+        authorized_kinds=(SemanticActKind.ANSWER,),
+        terminal_allowed=False,
+    )
+    foreign = control.reserve(
+        SpokenPlan(
+            plan_id="foreign",
+            acts=(
+                SemanticAct(
+                    SemanticActKind.ANSWER,
+                    "I understand.",
+                ),
+            ),
+        ),
+        foreign_authorization,
+    )[0]
+    assert control.authorize_text(matching.act_id, matching.text)
+    assert control.authorize_text(foreign.act_id, foreign.text)
+    assert control.act_ids_for_binding(
+        matching.binding
+    ) == (matching.act_id,)
+    assert control.act_ids_for_binding(
+        foreign.binding
+    ) == (foreign.act_id,)
+
+    assert control.hard_terminalize_binding(
+        matching.binding
+    )
+    assert not control.is_live(matching.act_id)
+    assert control.is_live(foreign.act_id)
+
+
 def test_pristine_batch_rollback_releases_every_reservation_atomically():
     control = SpeechControl(_policy())
     plan = SpokenPlan(

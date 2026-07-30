@@ -204,6 +204,7 @@ class FinalTurnAdmissionAuthority:
         self._counter = 0
         self._live: dict[str, FinalTurnAdmissionReceipt] = {}
         self._tombstones: dict[str, _ReceiptTombstone] = {}
+        self._disconnect_owner: object | None = None
         self._lock = Lock()
 
     def mint(
@@ -344,10 +345,83 @@ class FinalTurnAdmissionAuthority:
             and self._implementation_bindings[type(adapter)].arm is adapter.arm
         )
 
+    def bind_disconnect_owner(self, owner: object) -> bool:
+        """Bind disconnect retirement once to the exact composition owner."""
+        with self._lock:
+            if (
+                type(owner) is not TurnCompositionTransaction
+                or owner.receipts is not self
+                or owner.adapter is not self._adapter
+                or owner.lifecycle is not self._lifecycle
+                or owner.binding != self._adapter.binding
+            ):
+                return False
+            if self._disconnect_owner is None:
+                self._disconnect_owner = owner
+            return self._disconnect_owner is owner
+
+    def retire_disconnected_session(
+        self,
+        *,
+        event: VoiceEvent,
+        owner: object,
+    ) -> bool:
+        """Tombstone every live receipt for one exact canonical disconnect."""
+        if (
+            owner is not self._disconnect_owner
+            or type(owner) is not TurnCompositionTransaction
+            or owner.receipts is not self
+            or owner.adapter is not self._adapter
+            or owner.lifecycle is not self._lifecycle
+            or not self._lifecycle.accepts_session_disconnect(event)
+            or not self._adapter.permit_admission_closed
+        ):
+            return False
+        with self._lock:
+            if owner is not self._disconnect_owner:
+                return False
+            self._terminalize_live_receipts(at_ms=event.at_ms)
+            return not self._live
+
+    def hard_terminalize_live_receipts(
+        self,
+        *,
+        owner: object,
+        at_ms: int,
+    ) -> bool:
+        """Fail-closed fallback for an exact bound composition owner."""
+        if (
+            owner is not self._disconnect_owner
+            or type(owner) is not TurnCompositionTransaction
+            or type(at_ms) is not int
+            or at_ms < 0
+        ):
+            return False
+        with self._lock:
+            if owner is not self._disconnect_owner:
+                return False
+            self._terminalize_live_receipts(at_ms=at_ms)
+            return not self._live
+
     @property
     def unconsumed_receipt_count(self) -> int:
         with self._lock:
             return len(self._live)
+
+    def _terminalize_live_receipts(self, *, at_ms: int) -> None:
+        for receipt_id, receipt in tuple(self._live.items()):
+            self._live.pop(receipt_id)
+            self._tombstones[receipt_id] = _ReceiptTombstone(
+                receipt_id=receipt.receipt_id,
+                binding=receipt.binding,
+                input_turn_id=receipt.input_turn_id,
+                sequence=receipt.sequence,
+                expires_at_ms=(
+                    max(receipt.expires_at_ms, at_ms)
+                    + self.max_ttl_ms
+                ),
+                accepted=False,
+            )
 
     def _prune(self, *, now_ms: int) -> None:
         for receipt_id in tuple(
@@ -382,17 +456,20 @@ class VersionedIntakeStore:
         *,
         binding: VoiceSessionBinding,
         initial_state: IntakeState,
+        initial_version: int = 0,
     ) -> None:
         if (
             not isinstance(binding, VoiceSessionBinding)
             or not isinstance(initial_state, IntakeState)
             or initial_state.side_effects_allowed
             or initial_state.call_sid != binding.call_binding
+            or type(initial_version) is not int
+            or initial_version < 0
         ):
             raise ValueError("intake store input is invalid")
         self.binding = binding
         self._state = _copy_state(initial_state)
-        self._version = 0
+        self._version = initial_version
         self._active_turn_id: str | None = None
         self._active_sequence = -1
         self._repair_consumed = False
@@ -660,6 +737,8 @@ class TurnCompositionTransaction:
         self._pending_by_act: dict[str, _PendingResponse] = {}
         self._terminalizing_receipt_ids: set[str] = set()
         self._lock = RLock()
+        if not receipts.bind_disconnect_owner(self):
+            raise ValueError("turn composition disconnect authority is invalid")
         if type(adapter) is ManualNativeAdapter and not adapter.bind_timeout_materializer(
             self
         ):
@@ -986,6 +1065,129 @@ class TurnCompositionTransaction:
             ):
                 return None
             return authorization
+
+    def terminalize_disconnected_session(
+        self,
+        *,
+        event: VoiceEvent,
+    ) -> bool:
+        """Retire all old-session authority after an exact canonical disconnect."""
+        with self._lock:
+            if (
+                not self.lifecycle.accepts_session_disconnect(event)
+                or not self.adapter.permit_admission_closed
+            ):
+                return False
+            pending_responses = {
+                id(pending): pending
+                for pending in self._pending_by_act.values()
+            }
+            if not self.receipts.retire_disconnected_session(
+                event=event,
+                owner=self,
+            ):
+                self.receipts.hard_terminalize_live_receipts(
+                    owner=self,
+                    at_ms=event.at_ms,
+                )
+                for pending in pending_responses.values():
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="disconnect_receipt_retirement_failed",
+                        at_ms=event.at_ms,
+                    )
+                self.adapter.terminalize_permit_admission()
+                self.coordinator.calls.hard_terminalize()
+                self._hard_terminalize_session_speech()
+                return False
+            call_cleanup_succeeded = self._cancel_call(
+                event_id=f"disconnect_{event.sequence}",
+                at_ms=event.at_ms,
+            )
+            self.coordinator.calls.hard_terminalize()
+            for pending in pending_responses.values():
+                success = call_cleanup_succeeded
+                for reserved, authorization in zip(
+                    pending.reserved,
+                    pending.authorizations,
+                    strict=True,
+                ):
+                    if (
+                        reserved.act_id
+                        in pending.permitted_act_ids
+                        and reserved.act_id
+                        not in pending.retired_permit_act_ids
+                    ):
+                        revoked = self.adapter.permit_was_revoked(
+                            authorization
+                        )
+                        success = revoked and success
+                        if revoked:
+                            pending.retired_permit_act_ids.add(
+                                reserved.act_id
+                            )
+                    if reserved.act_id in pending.observed_act_ids:
+                        continue
+                    success = (
+                        self._cancel_speech(
+                            reserved.act_id,
+                            reason=CancellationReason.INTERRUPTION,
+                        )
+                        and success
+                    )
+                    success = (
+                        self._terminalize_authorization(
+                            authorization,
+                            at_ms=event.at_ms,
+                        )
+                        and success
+                    )
+                success = (
+                    self.coordinator.retire_batch(
+                        pending.reserved
+                    )
+                    and success
+                )
+                if not success:
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="disconnect_compensation_failed",
+                        at_ms=event.at_ms,
+                    )
+                    self._hard_terminalize_session_speech()
+                    return False
+                for item in pending.reserved:
+                    self._pending_by_act.pop(item.act_id, None)
+                self._outcomes[pending.receipt_id] = (
+                    CompositionResult(
+                        status=CompositionStatus.TERMINAL_FAILURE,
+                        phase=CompositionPhase.TERMINAL,
+                        receipt_id=pending.receipt_id,
+                        input_turn_id=pending.input_turn_id,
+                        state_version=pending.state_version,
+                        act_ids=tuple(
+                            item.act_id
+                            for item in pending.reserved
+                        ),
+                        act_kinds=tuple(
+                            item.kind
+                            for item in pending.reserved
+                        ),
+                        reason="session_disconnected",
+                    )
+                )
+                self._outcome_expiries[pending.receipt_id] = (
+                    pending.outcome_expires_at_ms
+                )
+            speech_cleanup_succeeded = (
+                self._hard_terminalize_session_speech()
+            )
+            return (
+                call_cleanup_succeeded
+                and speech_cleanup_succeeded
+                and not self._pending_by_act
+                and self.coordinator.calls.is_quiescent
+            )
 
     def accept_transport_resolution(
         self,
@@ -1715,10 +1917,14 @@ class TurnCompositionTransaction:
             )
             self.coordinator.calls.hard_terminalize()
             for reserved in pending.reserved:
-                self._cancel_speech(
+                cancelled = self._cancel_speech(
                     reserved.act_id,
                     reason=CancellationReason.INTERRUPTION,
                 )
+                if not cancelled:
+                    self.coordinator.speech.hard_terminalize(
+                        reserved.act_id
+                    )
             for authorization in pending.authorizations:
                 self._terminalize_authorization(
                     authorization,
@@ -1750,6 +1956,45 @@ class TurnCompositionTransaction:
             self._terminalizing_receipt_ids.discard(
                 pending.receipt_id
             )
+
+    def _hard_terminalize_session_speech(self) -> bool:
+        """Retire every transaction-owned act even if binding cleanup faults."""
+        act_ids = set(
+            self.coordinator.speech.act_ids_for_binding(
+                self.binding
+            )
+        )
+        binding_cleanup_succeeded = (
+            self.coordinator.speech.hard_terminalize_binding(
+                self.binding
+            )
+        )
+        act_ids |= {
+            act_id
+            for result in self._outcomes.values()
+            for act_id in result.act_ids
+        } | {
+            item.act_id
+            for pending in self._pending_by_act.values()
+            for item in pending.reserved
+        }
+        act_cleanup_succeeded = True
+        for act_id in act_ids:
+            if self.coordinator.speech.is_live(act_id):
+                act_cleanup_succeeded = (
+                    self.coordinator.speech.hard_terminalize(
+                        act_id
+                    )
+                    and act_cleanup_succeeded
+                )
+        return (
+            binding_cleanup_succeeded
+            and act_cleanup_succeeded
+            and all(
+                not self.coordinator.speech.is_live(act_id)
+                for act_id in act_ids
+            )
+        )
 
     def _cancel_call(self, *, event_id: str, at_ms: int) -> bool:
         if self.coordinator.calls.is_quiescent:

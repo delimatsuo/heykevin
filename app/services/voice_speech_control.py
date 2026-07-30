@@ -423,6 +423,46 @@ class SpeechControl:
             self._reserved_slots.discard((record.reserved.binding, record.question_slot))
         return True
 
+    def hard_terminalize(self, act_id: str) -> bool:
+        """Irrevocably remove local speech authority after ambiguous cleanup."""
+        record = self._records.get(act_id)
+        if record is None:
+            return False
+        record.cancelled = True
+        if record.question_slot is not None:
+            self._reserved_slots.discard(
+                (
+                    record.reserved.binding,
+                    record.question_slot,
+                )
+            )
+        return not self.is_live(act_id)
+
+    def hard_terminalize_binding(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> bool:
+        """Irrevocably remove every speech authority for one exact binding."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return False
+        act_ids = self.act_ids_for_binding(binding)
+        for act_id in act_ids:
+            self.hard_terminalize(act_id)
+        return all(not self.is_live(act_id) for act_id in act_ids)
+
+    def act_ids_for_binding(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> tuple[str, ...]:
+        """Return durable content-free act identities for one exact binding."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return ()
+        return tuple(
+            act_id
+            for act_id, record in self._records.items()
+            if record.reserved.binding == binding
+        )
+
     def is_cancelled(self, act_id: str) -> bool:
         record = self._records.get(act_id)
         return record is not None and record.cancelled

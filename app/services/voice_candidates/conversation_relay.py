@@ -6,7 +6,7 @@ closed, payload-safe protocol facts and exposes no WebSocket route.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from app.services.voice_candidates import (
@@ -47,8 +47,8 @@ class RelaySignalKind(str, Enum):
 class RelaySignal:
     kind: RelaySignalKind
     context: EventContext
-    usage: CandidateUsage = CandidateUsage()
-    payload: VoicePayload = VoicePayload()
+    usage: CandidateUsage = field(default_factory=CandidateUsage)
+    payload: VoicePayload = field(default_factory=VoicePayload)
 
     def __post_init__(self) -> None:
         if (
@@ -57,7 +57,7 @@ class RelaySignal:
             or not isinstance(self.usage, CandidateUsage)
             or not isinstance(self.payload, VoicePayload)
         ):
-            raise ValueError("relay signal is invalid")
+            raise TypeError("relay signal is invalid")
 
 
 class ConversationRelayAdapter(OfflineCandidateAdapter):
@@ -69,6 +69,7 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
         super().__init__(binding=binding, limits=limits)
         self._final_turns: set[str] = set()
         self._fresh_epoch_required = False
+        self._reconnect_required = False
         self._generation_state: dict[
             tuple[str, str, str, VoiceSemanticActKind], RelaySignalKind
         ] = {}
@@ -92,6 +93,7 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
     def accept_permit(self, event: VoiceEvent, *, lifecycle) -> bool:
         if (
             self._fresh_epoch_required
+            or self._reconnect_required
             or not isinstance(event, VoiceEvent)
             or event.input_turn_id not in self._final_turns
         ):
@@ -111,15 +113,27 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
             )
             assert preflight is not None
             return preflight
+        session_signal = signal.kind in {
+            RelaySignalKind.SESSION_DISCONNECTED,
+            RelaySignalKind.SESSION_REESTABLISHED,
+        }
+        if self._reconnect_required and not session_signal:
+            return self.rejected(AdapterRejectReason.STALE_EPOCH)
+        if session_signal:
+            if signal.kind is RelaySignalKind.SESSION_DISCONNECTED:
+                self.revoke_permits_for_disconnect()
+                self._reconnect_required = True
+            else:
+                self.terminalize_permit_admission()
+                self._reconnect_required = False
+                self._fresh_epoch_required = True
+            self._final_turns.clear()
+            self._generation_state.clear()
         payload = signal.payload
         empty_payload = payload == VoicePayload()
         prompt_signal = signal.kind in {
             RelaySignalKind.PROMPT_PARTIAL,
             RelaySignalKind.PROMPT_FINAL,
-        }
-        session_signal = signal.kind in {
-            RelaySignalKind.SESSION_DISCONNECTED,
-            RelaySignalKind.SESSION_REESTABLISHED,
         }
         if prompt_signal and (
             payload.text_digest is None
@@ -133,9 +147,13 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
             RelaySignalKind.PROMPT_PARTIAL,
             RelaySignalKind.PROMPT_FINAL,
         }:
-            if signal.kind is RelaySignalKind.PROMPT_FINAL:
-                if signal.context.input_turn_id in self._final_turns:
-                    return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+            if (
+                signal.kind is RelaySignalKind.PROMPT_FINAL
+                and signal.context.input_turn_id in self._final_turns
+            ):
+                return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+            if not self.admit_input(signal.context):
+                return self.rejected(AdapterRejectReason.LIMIT_EXCEEDED)
             preflight = self.preflight(
                 context=signal.context,
                 usage=signal.usage,
@@ -179,9 +197,6 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
                     source=VoiceSource.PROVIDER_UNTRUSTED,
                 )
             )
-            if signal.kind is RelaySignalKind.SESSION_REESTABLISHED:
-                self._fresh_epoch_required = True
-                self._permitted.clear()
             return result
         if not self.permitted(signal.context):
             return self.rejected(AdapterRejectReason.PERMIT_REQUIRED)

@@ -6,7 +6,7 @@ VoicePipeline construction. Provider identities remain unselected.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from app.services.voice_candidates import (
@@ -49,8 +49,8 @@ class ChainedSignalKind(str, Enum):
 class ChainedSignal:
     kind: ChainedSignalKind
     context: EventContext
-    usage: CandidateUsage = CandidateUsage()
-    payload: VoicePayload = VoicePayload()
+    usage: CandidateUsage = field(default_factory=CandidateUsage)
+    payload: VoicePayload = field(default_factory=VoicePayload)
 
     def __post_init__(self) -> None:
         if (
@@ -59,7 +59,7 @@ class ChainedSignal:
             or not isinstance(self.usage, CandidateUsage)
             or not isinstance(self.payload, VoicePayload)
         ):
-            raise ValueError("chained signal is invalid")
+            raise TypeError("chained signal is invalid")
 
 
 class ChainedStreamingAdapter(OfflineCandidateAdapter):
@@ -71,6 +71,7 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
         super().__init__(binding=binding, limits=limits)
         self._final_turns: set[str] = set()
         self._fresh_epoch_required = False
+        self._reconnect_required = False
         self._generation_state: dict[
             tuple[str, str, str, VoiceSemanticActKind], ChainedSignalKind
         ] = {}
@@ -80,6 +81,9 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
         self._playout_bindings: dict[
             tuple[str, str, str, VoiceSemanticActKind], tuple[str, str, str]
         ] = {}
+        self._transport_resolved: set[
+            tuple[str, str, str, VoiceSemanticActKind]
+        ] = set()
 
     @property
     def selectable_offline(self) -> bool:
@@ -96,8 +100,8 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
     def accept_permit(self, event: VoiceEvent, *, lifecycle) -> bool:
         if (
             self._fresh_epoch_required
-            or
-            not isinstance(event, VoiceEvent)
+            or self._reconnect_required
+            or not isinstance(event, VoiceEvent)
             or event.input_turn_id not in self._final_turns
         ):
             return False
@@ -116,15 +120,30 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
             )
             assert preflight is not None
             return preflight
+        session_signal = signal.kind in {
+            ChainedSignalKind.SESSION_DISCONNECTED,
+            ChainedSignalKind.SESSION_REESTABLISHED,
+        }
+        if self._reconnect_required and not session_signal:
+            return self.rejected(AdapterRejectReason.STALE_EPOCH)
+        if session_signal:
+            if signal.kind is ChainedSignalKind.SESSION_DISCONNECTED:
+                self.revoke_permits_for_disconnect()
+                self._reconnect_required = True
+            else:
+                self.terminalize_permit_admission()
+                self._reconnect_required = False
+                self._fresh_epoch_required = True
+            self._final_turns.clear()
+            self._generation_state.clear()
+            self._tts_bindings.clear()
+            self._playout_bindings.clear()
+            self._transport_resolved.clear()
         payload = signal.payload
         empty_payload = payload == VoicePayload()
         input_signal = signal.kind in {
             ChainedSignalKind.INPUT_PARTIAL,
             ChainedSignalKind.INPUT_FINAL,
-        }
-        session_signal = signal.kind in {
-            ChainedSignalKind.SESSION_DISCONNECTED,
-            ChainedSignalKind.SESSION_REESTABLISHED,
         }
         if input_signal and (
             payload.text_digest is None
@@ -138,9 +157,13 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
             ChainedSignalKind.INPUT_PARTIAL,
             ChainedSignalKind.INPUT_FINAL,
         }:
-            if signal.kind is ChainedSignalKind.INPUT_FINAL:
-                if signal.context.input_turn_id in self._final_turns:
-                    return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+            if (
+                signal.kind is ChainedSignalKind.INPUT_FINAL
+                and signal.context.input_turn_id in self._final_turns
+            ):
+                return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+            if not self.admit_input(signal.context):
+                return self.rejected(AdapterRejectReason.LIMIT_EXCEEDED)
             preflight = self.preflight(
                 context=signal.context,
                 usage=signal.usage,
@@ -184,9 +207,6 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
                     source=VoiceSource.PROVIDER_UNTRUSTED,
                 )
             )
-            if signal.kind is ChainedSignalKind.SESSION_REESTABLISHED:
-                self._fresh_epoch_required = True
-                self._permitted.clear()
             return result
         if not self.permitted(signal.context):
             return self.rejected(AdapterRejectReason.PERMIT_REQUIRED)
@@ -287,14 +307,16 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
             or payload.playout_id is not None
         ):
             return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
-        if kind is VoiceEventKind.TTS_BOUND:
-            if (
+        if (
+            kind is VoiceEventKind.TTS_BOUND
+            and (
                 key not in self._confirmed
                 or self._generation_state.get(key)
                 is not ChainedSignalKind.GENERATION_COMPLETED
                 or key in self._tts_bindings
-            ):
-                return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+            )
+        ):
+            return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         if kind in {
             VoiceEventKind.PLAYOUT_BOUND,
             VoiceEventKind.TRANSPORT_RESOLVED,
@@ -329,6 +351,13 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
             payload.playout_id,
         ):
             return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+        if key in self._transport_resolved and kind in {
+            VoiceEventKind.TRANSPORT_RESOLVED,
+            VoiceEventKind.PLAYOUT_PARTIAL,
+            VoiceEventKind.PLAYOUT_CLEARED,
+            VoiceEventKind.PLAYOUT_INTERRUPTED,
+        }:
+            return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         preflight = self.preflight(
             context=signal.context,
             usage=signal.usage,
@@ -355,6 +384,8 @@ class ChainedStreamingAdapter(OfflineCandidateAdapter):
                 payload.audio_id,
                 payload.playout_id,
             )
+        if kind is VoiceEventKind.TRANSPORT_RESOLVED:
+            self._transport_resolved.add(key)
         result = self.accepted(
             signal.context.event(
                 kind,

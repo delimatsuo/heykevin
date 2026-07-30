@@ -9,8 +9,8 @@ from app.services.voice_lifecycle import (
     VOICE_SCHEMA_VERSION,
     VoiceEvent,
     VoiceEventKind,
-    VoicePayload,
     VoiceLifecycle,
+    VoicePayload,
     VoiceSemanticActKind,
     VoiceSensitivity,
     VoiceSessionBinding,
@@ -179,9 +179,9 @@ class OfflineCandidateAdapter:
         limits: CandidateLimits,
     ) -> None:
         if not isinstance(binding, VoiceSessionBinding):
-            raise ValueError("candidate binding is invalid")
+            raise TypeError("candidate binding is invalid")
         if not isinstance(limits, CandidateLimits):
-            raise ValueError("candidate limits are invalid")
+            raise TypeError("candidate limits are invalid")
         self.binding = binding
         self.limits = limits
         self._permitted: set[
@@ -193,6 +193,13 @@ class OfflineCandidateAdapter:
         self._failed: set[
             tuple[str, str, str, VoiceSemanticActKind]
         ] = set()
+        self._retired_permit_keys: set[
+            tuple[str, str, str, VoiceSemanticActKind]
+        ] = set()
+        self._admitted_input_keys: set[
+            tuple[str, str, str, VoiceSemanticActKind]
+        ] = set()
+        self._permit_admission_closed = False
         self._usage: dict[
             tuple[str, str, str, VoiceSemanticActKind], CandidateUsage
         ] = {}
@@ -223,6 +230,7 @@ class OfflineCandidateAdapter:
             or event.kind is not VoiceEventKind.RESPONSE_AUTHORIZED
             or event.source is not VoiceSource.LOCAL_AUTHORITATIVE
             or not lifecycle.accepts_response_authorization(event)
+            or self._permit_admission_closed
         ):
             return False
         key = (
@@ -231,10 +239,61 @@ class OfflineCandidateAdapter:
             event.semantic_act_id,
             event.semantic_act_kind,
         )
-        if key in self._permitted or key in self._failed:
+        if (
+            key in self._permitted
+            or key in self._failed
+            or key in self._retired_permit_keys
+            or len(self._permitted | self._retired_permit_keys)
+            >= self.limits.request_count
+        ):
             return False
         self._permitted.add(key)
         return True
+
+    @property
+    def permit_admission_closed(self) -> bool:
+        return self._permit_admission_closed
+
+    @property
+    def retained_permit_count(self) -> int:
+        return len(self._permitted | self._retired_permit_keys)
+
+    @property
+    def retained_input_turn_count(self) -> int:
+        return len(self._admitted_input_keys)
+
+    def admit_input(self, context: EventContext) -> bool:
+        """Bound provider input state before it can allocate reducer records."""
+        if not isinstance(context, EventContext) or context.binding != self.binding:
+            return False
+        key = self.permit_key(context)
+        if key in self._admitted_input_keys:
+            return True
+        if len(self._admitted_input_keys) >= self.limits.request_count:
+            return False
+        self._admitted_input_keys.add(key)
+        return True
+
+    def revoke_permits_for_disconnect(self) -> None:
+        """Revoke active speech authority while preserving bounded tombstones."""
+        self._retired_permit_keys.update(self._permitted)
+        self._permitted.clear()
+        self._confirmed.clear()
+        self._permit_admission_closed = True
+
+    def resume_permit_admission(self) -> None:
+        """Reopen admission after an adapter-specific valid resume event."""
+        self._permit_admission_closed = False
+
+    def terminalize_permit_admission(self) -> None:
+        """Close an old adapter permanently when a fresh epoch is required."""
+        self._permitted.clear()
+        self._confirmed.clear()
+        self._retired_permit_keys.clear()
+        self._admitted_input_keys.clear()
+        self._usage.clear()
+        self._failed.clear()
+        self._permit_admission_closed = True
 
     def accept_semantic_confirmation(
         self,
@@ -283,21 +342,41 @@ class OfflineCandidateAdapter:
             return AdapterResult(False, reason=AdapterRejectReason.OUT_OF_ORDER)
         if permit_required and key not in self._permitted:
             return AdapterResult(False, reason=AdapterRejectReason.PERMIT_REQUIRED)
-        prior_usage = self._usage.get(key)
+        track_usage = (
+            key in self._permitted
+            or key in self._admitted_input_keys
+            or key in self._usage
+        )
+        prior_usage = self._usage.get(key) if track_usage else None
         if prior_usage is not None and usage.regresses(prior_usage):
             return AdapterResult(False, reason=AdapterRejectReason.OUT_OF_ORDER)
         next_request_count = self._request_count + (1 if count_request else 0)
         if count_request and next_request_count >= self.limits.request_count:
-            return self.fail(
-                context,
-                reason=AdapterRejectReason.LIMIT_EXCEEDED,
+            return (
+                self.fail(
+                    context,
+                    reason=AdapterRejectReason.LIMIT_EXCEEDED,
+                )
+                if track_usage
+                else AdapterResult(
+                    False,
+                    reason=AdapterRejectReason.LIMIT_EXCEEDED,
+                )
             )
         if usage.exceeds(self.limits):
-            return self.fail(
-                context,
-                reason=AdapterRejectReason.LIMIT_EXCEEDED,
+            return (
+                self.fail(
+                    context,
+                    reason=AdapterRejectReason.LIMIT_EXCEEDED,
+                )
+                if track_usage
+                else AdapterResult(
+                    False,
+                    reason=AdapterRejectReason.LIMIT_EXCEEDED,
+                )
             )
-        self._usage[key] = usage
+        if track_usage:
+            self._usage[key] = usage
         self._request_count = next_request_count
         return None
 

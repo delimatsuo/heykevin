@@ -30,7 +30,6 @@ from app.services.voice_speech_control import (
     SpokenPlan,
 )
 
-
 LIMITS = CandidateLimits(1_024, 15_000, 2_000_000, 30_000, 200, 200)
 
 
@@ -348,6 +347,29 @@ def test_transport_terminals_and_reconnect_are_typed_and_epoch_safe():
             ChainedSignal(signal_kind, _context(sequence), payload=payload)
         )
         assert result.events[0].kind is event_kind
+        if signal_kind is ChainedSignalKind.TRANSPORT_RESOLVED:
+            assert adapter.handle(
+                ChainedSignal(
+                    signal_kind,
+                    _context(sequence + 1),
+                    payload=payload,
+                )
+            ).reason is AdapterRejectReason.OUT_OF_ORDER
+            for offset, contradictory in enumerate(
+                (
+                    ChainedSignalKind.PLAYOUT_PARTIAL,
+                    ChainedSignalKind.PLAYOUT_CLEARED,
+                    ChainedSignalKind.PLAYOUT_INTERRUPTED,
+                ),
+                start=2,
+            ):
+                assert adapter.handle(
+                    ChainedSignal(
+                        contradictory,
+                        _context(sequence + offset),
+                        payload=payload,
+                    )
+                ).reason is AdapterRejectReason.OUT_OF_ORDER
         if signal_kind in {
             ChainedSignalKind.PLAYOUT_PARTIAL,
             ChainedSignalKind.PLAYOUT_CLEARED,

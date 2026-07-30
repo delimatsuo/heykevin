@@ -1,11 +1,14 @@
 """Offline Arm C manual-turn feasibility tests."""
 
 import ast
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
+from app.services.voice_call_lifecycle import CallLifecycle
 from app.services.voice_candidates import (
     AdapterRejectReason,
     CandidateLimits,
@@ -17,8 +20,6 @@ from app.services.voice_candidates.manual_native import (
     ManualNativeSignal,
     ManualNativeSignalKind,
 )
-from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
-from app.services.voice_call_lifecycle import CallLifecycle
 from app.services.voice_lifecycle import (
     VoiceEventKind,
     VoiceLifecycle,
@@ -28,7 +29,6 @@ from app.services.voice_lifecycle import (
     VoiceSource,
 )
 from app.services.voice_speech_control import SpeechControl, SpeechPolicy
-
 
 LIMITS = CandidateLimits(1_024, 15_000, 2_000_000, 30_000, 200, 200)
 
@@ -55,6 +55,41 @@ def _permit(context: EventContext):
     return context.event(
         VoiceEventKind.RESPONSE_AUTHORIZED,
         source=VoiceSource.LOCAL_AUTHORITATIVE,
+    )
+
+
+def _frame_signal(
+    context: EventContext,
+    *,
+    ordinal: int = 0,
+    audio_id: str = "audio_1",
+    duration_ms: int = 20,
+    usage: CandidateUsage | None = None,
+    frame_digest: str | None = None,
+) -> ManualNativeSignal:
+    if usage is None:
+        usage = CandidateUsage()
+    if frame_digest is None:
+        material = "|".join(
+            (
+                context.input_turn_id,
+                context.generation_id,
+                context.semantic_act_id,
+                str(ordinal),
+                audio_id,
+            )
+        ).encode()
+        frame_digest = hashlib.sha256(material).hexdigest()
+    return ManualNativeSignal(
+        ManualNativeSignalKind.AUDIO_FRAME,
+        context,
+        usage=usage,
+        payload=VoicePayload(
+            ordinal=ordinal,
+            duration_ms=duration_ms,
+            audio_id=audio_id,
+        ),
+        frame_digest=frame_digest,
     )
 
 
@@ -151,25 +186,13 @@ def test_manual_final_requires_a_completed_activity_cycle():
 def test_permit_precedes_every_native_audio_frame_and_generation_maps_totally():
     adapter = _adapter()
     _finalize(adapter)
-    before = adapter.handle(
-        ManualNativeSignal(
-            ManualNativeSignalKind.AUDIO_FRAME,
-            _context(4),
-            payload=VoicePayload(audio_id="audio_1"),
-        )
-    )
+    before = adapter.handle(_frame_signal(_context(4)))
     assert before.reason is AdapterRejectReason.PERMIT_REQUIRED
     _accept_permit(adapter, _context(5))
     started = adapter.handle(
         ManualNativeSignal(ManualNativeSignalKind.GENERATION_STARTED, _context(6))
     )
-    audio = adapter.handle(
-        ManualNativeSignal(
-            ManualNativeSignalKind.AUDIO_FRAME,
-            _context(7),
-            payload=VoicePayload(audio_id="audio_1", duration_ms=20),
-        )
-    )
+    audio = adapter.handle(_frame_signal(_context(7)))
     completed = adapter.handle(
         ManualNativeSignal(ManualNativeSignalKind.GENERATION_COMPLETED, _context(8))
     )
@@ -287,17 +310,350 @@ def test_invalid_audio_does_not_consume_usage_or_completion_state():
             ManualNativeSignalKind.AUDIO_FRAME,
             _context(6),
             usage=CandidateUsage(output_tokens=50),
+            frame_digest="a" * 64,
         )
     )
     assert invalid.reason is AdapterRejectReason.INVALID_SIGNAL
-    retry = adapter.handle(
+    retry = adapter.handle(_frame_signal(_context(7)))
+    assert retry.accepted
+
+
+def test_manual_audio_frame_identity_is_strictly_ordered_and_single_audio():
+    adapter = _adapter()
+    _finalize(adapter)
+    _accept_permit(adapter, _context(4))
+    assert adapter.handle(
         ManualNativeSignal(
-            ManualNativeSignalKind.AUDIO_FRAME,
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(5),
+        )
+    ).accepted
+
+    assert adapter.handle(
+        _frame_signal(
+            _context(6),
+            ordinal=1,
+            frame_digest="1" * 64,
+        )
+    ).reason is AdapterRejectReason.OUT_OF_ORDER
+    assert adapter.handle(
+        _frame_signal(
             _context(7),
-            payload=VoicePayload(audio_id="audio_1"),
+            frame_digest="0" * 64,
+        )
+    ).accepted
+    assert adapter.handle(
+        _frame_signal(
+            _context(8),
+            frame_digest="1" * 64,
+        )
+    ).reason is AdapterRejectReason.OUT_OF_ORDER
+    assert adapter.handle(
+        _frame_signal(
+            _context(9),
+            ordinal=1,
+            frame_digest="0" * 64,
+        )
+    ).reason is AdapterRejectReason.OUT_OF_ORDER
+    assert adapter.handle(
+        _frame_signal(
+            _context(10),
+            ordinal=1,
+            audio_id="audio_2",
+            frame_digest="1" * 64,
+        )
+    ).reason is AdapterRejectReason.OUT_OF_ORDER
+    assert adapter.handle(
+        _frame_signal(
+            _context(11),
+            ordinal=1,
+            frame_digest="1" * 64,
+        )
+    ).accepted
+
+    assert set(adapter._last_frame_ordinals.values()) == {1}
+    assert adapter._seen_frame_digests == {"0" * 64, "1" * 64}
+    assert adapter._internal_audio_ms == 40
+
+
+def test_manual_audio_frame_requires_started_generation_and_live_deadline():
+    adapter = _adapter()
+    _finalize(adapter)
+    _accept_permit(adapter, _context(4))
+
+    before_start = adapter.handle(
+        _frame_signal(
+            _context(5),
+            frame_digest="0" * 64,
         )
     )
-    assert retry.accepted
+    assert before_start.reason is AdapterRejectReason.OUT_OF_ORDER
+    assert adapter._audio_ids == {}
+    assert adapter._last_frame_ordinals == {}
+    assert adapter._seen_frame_digests == set()
+    assert adapter._internal_audio_ms == 0
+
+    assert adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(6),
+        )
+    ).accepted
+    at_deadline = adapter.handle(
+        _frame_signal(
+            _context(16),
+            frame_digest="0" * 64,
+        )
+    )
+    assert at_deadline.reason is AdapterRejectReason.TIMEOUT
+    assert at_deadline.events == ()
+    assert len(at_deadline.timeout_intents) == 1
+    assert adapter._audio_ids == {}
+    assert adapter._last_frame_ordinals == {}
+    assert adapter._seen_frame_digests == set()
+    assert adapter._internal_audio_ms == 0
+
+
+def test_manual_tts_binding_requires_exact_generated_audio_identity():
+    adapter = _adapter()
+    _finalize(adapter)
+    lifecycle = _accept_permit(adapter, _context(4))
+    started = adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(5),
+        )
+    )
+    frame = adapter.handle(
+        _frame_signal(
+            _context(6),
+            frame_digest="0" * 64,
+        )
+    )
+    assert lifecycle.ingest(started.events[0])
+    assert lifecycle.ingest(frame.events[0])
+    confirmation = _context(7).event(
+        VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+    )
+    assert lifecycle.ingest(confirmation)
+    assert adapter.accept_semantic_confirmation(
+        confirmation,
+        lifecycle=lifecycle,
+    )
+    assert adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_COMPLETED,
+            _context(8),
+        )
+    ).accepted
+    late_frame = adapter.handle(
+        _frame_signal(
+            _context(9),
+            ordinal=1,
+            audio_id="audio_2",
+            frame_digest="1" * 64,
+        )
+    )
+    assert late_frame.reason is AdapterRejectReason.OUT_OF_ORDER
+    assert set(adapter._audio_ids.values()) == {"audio_1"}
+    assert set(adapter._last_frame_ordinals.values()) == {0}
+    assert adapter._seen_frame_digests == {"0" * 64}
+    assert adapter._internal_audio_ms == 20
+
+    mismatch = adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.TTS_BOUND,
+            _context(10),
+            payload=VoicePayload(
+                text_digest="a" * 64,
+                audio_id="audio_2",
+            ),
+        )
+    )
+    assert mismatch.reason is AdapterRejectReason.OUT_OF_ORDER
+    assert adapter._tts_bindings == {}
+    assert set(adapter._audio_ids.values()) == {"audio_1"}
+
+    corrected = adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.TTS_BOUND,
+            _context(11),
+            payload=VoicePayload(
+                text_digest="a" * 64,
+                audio_id="audio_1",
+            ),
+        )
+    )
+    assert corrected.accepted
+    assert adapter._tts_bindings
+    assert set(adapter._audio_ids.values()) == {"audio_1"}
+
+
+def test_manual_streaming_audio_binding_cannot_release_identity_for_switch():
+    adapter = _adapter()
+    _finalize(adapter)
+    lifecycle = _accept_permit(adapter, _context(4))
+    started = adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(5),
+        )
+    )
+    first = adapter.handle(
+        _frame_signal(
+            _context(6),
+            frame_digest="0" * 64,
+        )
+    )
+    assert lifecycle.ingest(started.events[0])
+    assert lifecycle.ingest(first.events[0])
+    confirmation = _context(7).event(
+        VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+    )
+    assert lifecycle.ingest(confirmation)
+    assert adapter.accept_semantic_confirmation(
+        confirmation,
+        lifecycle=lifecycle,
+    )
+    bound = adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.TTS_BOUND,
+            _context(8),
+            payload=VoicePayload(
+                text_digest="a" * 64,
+                audio_id="audio_1",
+            ),
+        )
+    )
+    assert bound.accepted
+    assert lifecycle.ingest(bound.events[0])
+    assert set(adapter._audio_ids.values()) == {"audio_1"}
+
+    switched = adapter.handle(
+        _frame_signal(
+            _context(9),
+            ordinal=1,
+            audio_id="audio_2",
+            frame_digest="1" * 64,
+        )
+    )
+    assert switched.reason is AdapterRejectReason.OUT_OF_ORDER
+    assert set(adapter._audio_ids.values()) == {"audio_1"}
+    assert set(adapter._last_frame_ordinals.values()) == {0}
+    assert adapter._seen_frame_digests == {"0" * 64}
+    assert adapter._internal_audio_ms == 20
+
+    continued = adapter.handle(
+        _frame_signal(
+            _context(10),
+            ordinal=1,
+            frame_digest="1" * 64,
+        )
+    )
+    assert continued.accepted
+    assert set(adapter._audio_ids.values()) == {"audio_1"}
+
+
+def test_manual_audio_cap_is_adapter_owned_and_not_usage_claimed():
+    adapter = ManualNativeAdapter(
+        binding=_binding(),
+        limits=CandidateLimits(1_024, 3, 2_000_000, 30_000, 200, 200),
+        generation_timeout_ms=10,
+    )
+    _finalize(adapter)
+    _accept_permit(adapter, _context(4))
+    assert adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(5),
+        )
+    ).accepted
+    assert adapter.handle(
+        _frame_signal(
+            _context(6),
+            duration_ms=2,
+            frame_digest="0" * 64,
+        )
+    ).accepted
+
+    capped = adapter.handle(
+        _frame_signal(
+            _context(7),
+            ordinal=1,
+            duration_ms=1,
+            frame_digest="1" * 64,
+        )
+    )
+    assert capped.reason is AdapterRejectReason.LIMIT_EXCEEDED
+    assert capped.events[0].kind is VoiceEventKind.ACT_FAILED
+    assert adapter._internal_audio_ms == 2
+    assert set(adapter._last_frame_ordinals.values()) == {0}
+    assert adapter._seen_frame_digests == {"0" * 64}
+
+
+def test_manual_frame_tombstones_survive_disconnect_until_terminal_reestablish():
+    adapter = _adapter()
+    _finalize(adapter)
+    _accept_permit(adapter, _context(4))
+    assert adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(5),
+        )
+    ).accepted
+    assert adapter.handle(
+        _frame_signal(
+            _context(6),
+            duration_ms=2,
+            frame_digest="0" * 64,
+        )
+    ).accepted
+
+    assert adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.SESSION_DISCONNECTED,
+            _context(7),
+        )
+    ).accepted
+    assert adapter._audio_ids == {}
+    assert adapter._audio_seen == set()
+    assert set(adapter._last_frame_ordinals.values()) == {0}
+    assert adapter._seen_frame_digests == {"0" * 64}
+    assert adapter._internal_audio_ms == 2
+    assert adapter.handle(
+        _frame_signal(
+            _context(8),
+            ordinal=1,
+            duration_ms=1,
+            frame_digest="1" * 64,
+        )
+    ).reason is AdapterRejectReason.STALE_EPOCH
+
+    assert adapter.handle(
+        ManualNativeSignal(
+            ManualNativeSignalKind.SESSION_REESTABLISHED,
+            _context(9),
+        )
+    ).accepted
+    assert adapter._last_frame_ordinals == {}
+    assert adapter._seen_frame_digests == set()
+    assert adapter._internal_audio_ms == 0
+
+
+def test_manual_frame_digest_shape_and_signal_scope_are_closed():
+    with pytest.raises(ValueError, match="audio frame digest"):
+        ManualNativeSignal(
+            ManualNativeSignalKind.AUDIO_FRAME,
+            _context(1),
+        )
+    with pytest.raises(ValueError, match="only valid for audio frames"):
+        ManualNativeSignal(
+            ManualNativeSignalKind.GENERATION_STARTED,
+            _context(1),
+            frame_digest="0" * 64,
+        )
 
 
 @pytest.mark.parametrize(
@@ -323,13 +679,7 @@ def test_generation_terminal_then_exact_playout_clear_is_canonical_once(
     started = adapter.handle(
         ManualNativeSignal(ManualNativeSignalKind.GENERATION_STARTED, _context(5))
     )
-    audio = adapter.handle(
-        ManualNativeSignal(
-            ManualNativeSignalKind.AUDIO_FRAME,
-            _context(6),
-            payload=VoicePayload(audio_id="audio_1"),
-        )
-    )
+    audio = adapter.handle(_frame_signal(_context(6)))
     assert lifecycle.ingest(started.events[0])
     assert lifecycle.ingest(audio.events[0])
     confirmation = _context(7).event(

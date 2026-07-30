@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from app.services.voice_candidates import (
@@ -46,8 +46,9 @@ class ManualNativeSignalKind(str, Enum):
 class ManualNativeSignal:
     kind: ManualNativeSignalKind
     context: EventContext
-    usage: CandidateUsage = CandidateUsage()
-    payload: VoicePayload = VoicePayload()
+    usage: CandidateUsage = field(default_factory=CandidateUsage)
+    payload: VoicePayload = field(default_factory=VoicePayload)
+    frame_digest: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -56,7 +57,22 @@ class ManualNativeSignal:
             or not isinstance(self.usage, CandidateUsage)
             or not isinstance(self.payload, VoicePayload)
         ):
-            raise ValueError("manual native signal is invalid")
+            raise TypeError("manual native signal is invalid")
+        if self.kind is ManualNativeSignalKind.AUDIO_FRAME:
+            # The adapter boundary supplies these as opaque local sequencing and
+            # accounting claims. They detect replay and bound mock execution;
+            # they do not authenticate audio bytes or prove byte-derived timing.
+            if (
+                not isinstance(self.frame_digest, str)
+                or len(self.frame_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in self.frame_digest
+                )
+            ):
+                raise ValueError("audio frame digest is invalid")
+        elif self.frame_digest is not None:
+            raise ValueError("frame digest is only valid for audio frames")
 
 
 class ManualNativeAdapter(OfflineCandidateAdapter):
@@ -91,6 +107,14 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
         self._audio_seen: set[
             tuple[str, str, str, VoiceSemanticActKind]
         ] = set()
+        self._audio_ids: dict[
+            tuple[str, str, str, VoiceSemanticActKind], str
+        ] = {}
+        self._last_frame_ordinals: dict[
+            tuple[str, str, str, VoiceSemanticActKind], int
+        ] = {}
+        self._seen_frame_digests: set[str] = set()
+        self._internal_audio_ms = 0
         self._tts_bindings: dict[
             tuple[str, str, str, VoiceSemanticActKind], tuple[str, str]
         ] = {}
@@ -102,6 +126,7 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
             tuple[int, VoiceTimeoutIntent],
         ] = {}
         self._fresh_epoch_required = False
+        self._reconnect_required = False
 
     @property
     def selectable_offline(self) -> bool:
@@ -123,6 +148,7 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
     ) -> bool:
         if (
             self._fresh_epoch_required
+            or self._reconnect_required
             or not isinstance(event, VoiceEvent)
             or event.input_turn_id not in self._final_turns
         ):
@@ -157,6 +183,34 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
             )
             assert preflight is not None
             return preflight
+        session_signal = signal.kind in {
+            ManualNativeSignalKind.SESSION_DISCONNECTED,
+            ManualNativeSignalKind.SESSION_REESTABLISHED,
+        }
+        if self._reconnect_required and not session_signal:
+            return self.rejected(AdapterRejectReason.STALE_EPOCH)
+        if session_signal:
+            if signal.kind is ManualNativeSignalKind.SESSION_DISCONNECTED:
+                self.revoke_permits_for_disconnect()
+                self._reconnect_required = True
+            else:
+                self.terminalize_permit_admission()
+                self._reconnect_required = False
+                self._fresh_epoch_required = True
+            self._activity_open.clear()
+            self._completed_activity_turns.clear()
+            self._final_turns.clear()
+            self._begin_deadlines.clear()
+            self._completion_deadlines.clear()
+            self._pending_timeouts.clear()
+            self._audio_seen.clear()
+            self._audio_ids.clear()
+            self._tts_bindings.clear()
+            self._playout_bindings.clear()
+            if signal.kind is ManualNativeSignalKind.SESSION_REESTABLISHED:
+                self._last_frame_ordinals.clear()
+                self._seen_frame_digests.clear()
+                self._internal_audio_ms = 0
         turn_id = signal.context.input_turn_id
         payload = signal.payload
         empty_payload = payload == VoicePayload()
@@ -165,6 +219,8 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
             if not empty_payload:
                 return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
+            if not self.admit_input(signal.context):
+                return self.rejected(AdapterRejectReason.LIMIT_EXCEEDED)
             preflight = self.preflight(
                 context=signal.context,
                 usage=signal.usage,
@@ -253,15 +309,6 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
                     source=VoiceSource.PROVIDER_UNTRUSTED,
                 )
             )
-            if signal.kind is ManualNativeSignalKind.SESSION_REESTABLISHED:
-                self._fresh_epoch_required = True
-                self._permitted.clear()
-                self._begin_deadlines.clear()
-                self._completion_deadlines.clear()
-                self._pending_timeouts.clear()
-                self._audio_seen.clear()
-                self._tts_bindings.clear()
-                self._playout_bindings.clear()
             return result
         if not self.permitted(signal.context):
             return self.rejected(AdapterRejectReason.PERMIT_REQUIRED)
@@ -279,7 +326,10 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
         if (
             signal.kind is ManualNativeSignalKind.AUDIO_FRAME
             and (
-                payload.audio_id is None
+                payload.ordinal is None
+                or payload.duration_ms is None
+                or payload.duration_ms < 1
+                or payload.audio_id is None
                 or payload.playout_id is not None
             )
         ):
@@ -315,20 +365,41 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
             if signal.context.at_ms >= pending[0]:
                 return self._time_out(key, signal.context, deadline_ms=pending[0])
-        if signal.kind is ManualNativeSignalKind.TTS_BOUND:
+        if (
+            signal.kind is ManualNativeSignalKind.AUDIO_FRAME
+            and key in self._audio_ids
+            and self._audio_ids[key] != payload.audio_id
+        ):
+            return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+        if signal.kind is ManualNativeSignalKind.AUDIO_FRAME:
+            assert payload.ordinal is not None
+            assert payload.duration_ms is not None
+            assert signal.frame_digest is not None
+            expected_ordinal = self._last_frame_ordinals.get(key, -1) + 1
             if (
-                key not in self._confirmed
-                or key not in self._audio_seen
-                or key in self._tts_bindings
+                payload.ordinal != expected_ordinal
+                or signal.frame_digest in self._seen_frame_digests
             ):
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
-        if signal.kind is ManualNativeSignalKind.PLAYOUT_BOUND:
-            if (
+        if (
+            signal.kind is ManualNativeSignalKind.TTS_BOUND
+            and (
+                key not in self._confirmed
+                or key not in self._audio_seen
+                or self._audio_ids.get(key) != payload.audio_id
+                or key in self._tts_bindings
+            )
+        ):
+            return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+        if (
+            signal.kind is ManualNativeSignalKind.PLAYOUT_BOUND
+            and (
                 self._tts_bindings.get(key)
                 != (payload.text_digest, payload.audio_id)
                 or key in self._playout_bindings
-            ):
-                return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+            )
+        ):
+            return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         if (
             signal.kind is ManualNativeSignalKind.PLAYOUT_CLEARED
             and self._playout_bindings.get(key)
@@ -397,6 +468,15 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
         )
         if preflight is not None:
             return preflight
+        if (
+            signal.kind is ManualNativeSignalKind.AUDIO_FRAME
+            and self._internal_audio_ms + payload.duration_ms
+            >= self.limits.audio_ms
+        ):
+            return self.fail(
+                signal.context,
+                reason=AdapterRejectReason.LIMIT_EXCEEDED,
+            )
         if signal.kind is ManualNativeSignalKind.GENERATION_STARTED:
             self._begin_deadlines.pop(key, None)
             self._completion_deadlines[key] = (
@@ -404,7 +484,15 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
                 signal.context,
             )
         if signal.kind is ManualNativeSignalKind.AUDIO_FRAME:
+            assert payload.audio_id is not None
+            assert payload.ordinal is not None
+            assert payload.duration_ms is not None
+            assert signal.frame_digest is not None
             self._audio_seen.add(key)
+            self._audio_ids[key] = payload.audio_id
+            self._last_frame_ordinals[key] = payload.ordinal
+            self._seen_frame_digests.add(signal.frame_digest)
+            self._internal_audio_ms += payload.duration_ms
         if signal.kind is ManualNativeSignalKind.TTS_BOUND:
             assert payload.text_digest is not None
             assert payload.audio_id is not None
@@ -425,6 +513,7 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
             self._completion_deadlines.pop(key, None)
         if kind is VoiceEventKind.PLAYOUT_CLEARED:
             self._failed.add(key)
+            self._audio_ids.pop(key, None)
         return self.accepted(
             signal.context.event(
                 kind,

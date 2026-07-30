@@ -124,7 +124,7 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
                 self.revoke_permits_for_disconnect()
                 self._reconnect_required = True
             else:
-                self.terminalize_permit_admission()
+                self._retire_permit_admission_for_fresh_epoch()
                 self._reconnect_required = False
                 self._fresh_epoch_required = True
             self._final_turns.clear()
@@ -147,34 +147,38 @@ class ConversationRelayAdapter(OfflineCandidateAdapter):
             RelaySignalKind.PROMPT_PARTIAL,
             RelaySignalKind.PROMPT_FINAL,
         }:
-            if (
-                signal.kind is RelaySignalKind.PROMPT_FINAL
-                and signal.context.input_turn_id in self._final_turns
-            ):
-                return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
-            if not self.admit_input(signal.context):
-                return self.rejected(AdapterRejectReason.LIMIT_EXCEEDED)
-            preflight = self.preflight(
-                context=signal.context,
-                usage=signal.usage,
-                permit_required=False,
-            )
-            if preflight is not None:
-                return preflight
-            if signal.kind is RelaySignalKind.PROMPT_FINAL:
-                self._final_turns.add(signal.context.input_turn_id)
-            kind = (
-                VoiceEventKind.INPUT_TURN_FINAL
-                if signal.kind is RelaySignalKind.PROMPT_FINAL
-                else VoiceEventKind.INPUT_TURN_PARTIAL
-            )
-            return self.accepted(
-                signal.context.event(
+            with self._authority_lock:
+                if self._terminally_closed or self._permit_admission_closed:
+                    return self.rejected(AdapterRejectReason.STALE_EPOCH)
+                if (
+                    signal.kind is RelaySignalKind.PROMPT_FINAL
+                    and signal.context.input_turn_id in self._final_turns
+                ):
+                    return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
+                if not self.admit_input(signal.context):
+                    return self.rejected(AdapterRejectReason.LIMIT_EXCEEDED)
+                preflight = self.preflight(
+                    context=signal.context,
+                    usage=signal.usage,
+                    permit_required=False,
+                )
+                if preflight is not None:
+                    return preflight
+                if signal.kind is RelaySignalKind.PROMPT_FINAL:
+                    self._final_turns.add(signal.context.input_turn_id)
+                kind = (
+                    VoiceEventKind.INPUT_TURN_FINAL
+                    if signal.kind is RelaySignalKind.PROMPT_FINAL
+                    else VoiceEventKind.INPUT_TURN_PARTIAL
+                )
+                event = signal.context.event(
                     kind,
                     source=VoiceSource.PROVIDER_UNTRUSTED,
                     payload=signal.payload,
                 )
-            )
+                if signal.kind is RelaySignalKind.PROMPT_FINAL:
+                    return self._accept_final_transition(event)
+                return self.accepted(event)
         if signal.kind in {
             RelaySignalKind.SESSION_DISCONNECTED,
             RelaySignalKind.SESSION_REESTABLISHED,

@@ -1,0 +1,345 @@
+# Offline voice composition and session-driver addendum
+
+**Status:** panel-approved with the conditions below incorporated.
+
+**Authority:** offline construction and synthetic verification only. This addendum
+does not authorize provider access, credentials, PSTN calls, staging, production,
+participant work, or Task 4.8. The isolated bakeoff application must retain its
+current close-after-authentication behavior.
+
+**Bound baseline:**
+
+- source HEAD before implementation:
+  `41599321bb8ab8d45162432fba2bce81a88f7daa`
+- `app/experiments/voice_bakeoff_app.py`:
+  `082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127`
+- `app/main.py`:
+  `e73f0cd47ad1e10358e47e7db1981c39f0e03e041996cb4d2fd50cc9c308b7e9`
+- `app/webhooks/media_stream.py`:
+  `4dab265d4b82336d8b0239090ee4c751cff345da359d2b70b38aa4f5e48e850c`
+
+The implementation and verification commits must assert that those three
+application and production-routing files remain unchanged.
+
+## Delivery sequence
+
+1. Implement and exact-review `TurnCompositionTransaction`.
+2. Commit the composition only after staff and security approve its exact tree.
+3. Implement and exact-review the sealed offline session driver and synthetic
+   journey fixtures.
+4. Re-run the full offline gate and report remaining external blockers.
+
+There is no connected-session handler in these two increments. Any future
+post-authentication invocation in `voice_bakeoff_app.py` is a Task-4.8 source and
+configuration change requiring a separate exact-SHA, one-use authorization.
+
+## Final-turn admission
+
+Composition accepts a caller turn only with a one-use
+`FinalTurnAdmissionReceipt`. The receipt is minted after the selected real
+offline candidate adapter:
+
+1. emits an exact canonical `INPUT_TURN_FINAL` event;
+2. has that event accepted by the shared `VoiceLifecycle`; and
+3. returns an opaque one-use final-transition capability registered by object
+   identity inside that exact adapter; and
+4. proves the final content bytes and length match the event's domain-separated
+   content digest.
+
+The receipt binds:
+
+- candidate arm;
+- exact adapter class, sealed-assembly reviewed source/contract digest, and
+  configuration digest;
+- canonical event digest;
+- content digest and byte length;
+- session binding, call, stream, epoch, input-turn ID, sequence, and time;
+- a one-use receipt ID and bounded expiry.
+
+Receipts are content-free, internal-only, never logged, exported, or persisted,
+and retained only as bounded replay tombstones. A receipt is consumed exactly
+once. Candidate-final content cannot be manufactured by composition or accepted
+from a different arm, adapter, binding, epoch, or turn.
+Public result helpers cannot create the capability, subclasses are rejected, and
+a cloned event cannot spend it.
+
+## Extractor admission state
+
+Extractor concurrency and replay state is separate from canonical conversation
+state. It contains only bounded, content-free operational records:
+
+- `IN_FLIGHT`;
+- a terminal extraction outcome;
+- binding, epoch, turn, sequence, and opaque receipt identity.
+
+It is serialized per binding, capped by count and TTL, and terminalized
+deterministically. It contains no raw content, observation fields, spoken text,
+or content digest suitable for offline guessing. Rejected, late, duplicate, or
+expired extraction cannot mutate `IntakeState`, speech, call, lifecycle, or
+adapter state.
+
+Admission bookkeeping is performed under its lock, but no backend or
+current-turn callback is invoked while that lock is held. Synchronous re-entry
+therefore observes the existing `IN_FLIGHT` record and fails closed without
+deadlocking or running a duplicate backend.
+
+## `TurnCompositionTransaction`
+
+Transactions are serialized per exact binding. Each has a replay key and stores
+one terminal outcome. Replays return that stored outcome without extraction,
+planning, reservation, or adapter work. Terminal outcomes have bounded
+retention; capacity rejection consumes the receipt without growing the retained
+map.
+
+### Phase 1: accepted facts
+
+```text
+RECEIVED
+  -> FINAL_TURN_ADMITTED
+  -> EXTRACTION_IN_FLIGHT
+  -> OBSERVATION_ACCEPTED
+  -> FACTS_STAGED(N -> N+1)
+  -> FACTS_COMMITTED(N+1)
+```
+
+- The `IntakeState` mutation occurs on a detached staged copy.
+- A compare-and-swap commits only when the canonical state is still version `N`.
+- Accepted facts at version `N+1` survive later response failure.
+- `side_effects_allowed` remains `false`.
+- A newer caller turn superseding version `N` terminates the stale transaction;
+  it cannot plan, speak, overwrite state, retain a permit, or arm a timer.
+
+### Phase 2: proposed response
+
+```text
+FACTS_COMMITTED(N+1)
+  -> ACTION_PLANNED
+  -> PROPOSAL_VALIDATED
+  -> SPEECH_BATCH_RESERVED
+  -> QUESTION_RESERVED
+  -> STATE_VERSION_REVALIDATED(N+1)
+  -> RESPONSE_AUTHORIZED
+  -> ADAPTER_PERMITS_ACCEPTED
+  -> RESPONSE_PENDING_PLAYBACK
+  -> RESPONSE_OBSERVED_OR_INFERRED
+  -> RESPONSE_COMMITTED
+```
+
+The materializer is structurally non-authorizing. It receives only the closed
+`NextAction`, the state version, locale, and allowlisted safe facts. It returns a
+typed content proposal; it cannot import, construct, or return
+`SpeechAuthorization`.
+
+Composition-owned policy constructs authorization and validates:
+
+- exact binding, epoch, turn, state version, action, plan, and proposal identity;
+- semantic kinds and terminal eligibility;
+- allowed and forbidden question slots;
+- safe-fact provenance;
+- tools and side effects disabled;
+- a direct answer only when the caller asked an applicable direct question;
+- at most one question;
+- separate typed shapes for repair, safety, presence, and closure acts.
+
+The state-version compare-and-swap is repeated immediately before authorization
+and permit issuance. The exact state delivery lease remains held from that
+revalidation through speech authorization, canonical lifecycle authorization,
+adapter permit acceptance, pending-response publication, and result publication.
+A mismatch runs compensation and emits no speech.
+
+`QuestionIntent` may be reserved before speech, but `asked_slots` and delivered
+response state are committed only after canonical `caller_playback_observed` or
+the preregistered conservative `playback_inferred` fallback. Adapter permit,
+generation completion, final token, TTS completion, playout binding, and transport
+resolution do not make a question asked and do not arm a timer.
+Playback is accepted only while the exact speech act and adapter permit remain
+live. Each permit is retired before observation is committed, batch cleanup
+completes before success is published, and late playback after cancellation
+cannot mark a slot asked or arm a timer.
+
+Multi-act batches expose and permit exactly the first unresolved act. A later act
+has no usable adapter permit or public authorization receipt until canonical
+playback of every preceding act is observed. Activating the next exact permit is
+part of the same guarded observation transaction; failure hard-terminalizes the
+pending batch.
+
+## Compensation and terminal evidence
+
+Before canonical response authorization, an exact pristine speech/question batch
+may be rolled back.
+
+After any canonical `RESPONSE_AUTHORIZED` event:
+
+- evidence is never erased;
+- only canonically authorized acts receive canonical `ACT_FAILED`;
+- reserved but unauthorized acts are cancelled without invented authorization;
+- accepted permits are retired;
+- speech acts are cancelled;
+- the exact pristine question reservation is cleared;
+- no `asked_slot`, delivered response, or timer is committed;
+- the replay tombstone records the terminal outcome.
+
+Multi-act authorization is all-success-or-terminalized. Ambiguous or failed
+compensation terminalizes the affected adapter and turn and returns a hard
+fail-closed result; it never reports success or rollback. The local call reducer
+is permanently sealed on that path so no residual question, act, or timer
+authority remains usable.
+
+Adapter terminalization, resume, permit, final-input, and receipt state share one
+atomic authority lock. A native resume stages an exact one-use adapter result but
+does not reopen authority until the identical `SESSION_RESUMED` event has already
+been accepted by the exact assembly-bound canonical lifecycle object. The
+final-turn receipt authority is likewise bound to that lifecycle and one exact
+adapter instance. Rejected, cloned, replayed, stale, shadow-lifecycle, or
+concurrent evidence leaves admission closed.
+
+Arm C permit admission and its generation deadlines are one atomic transition
+under that same lock. Permanent terminalization clears begin, completion, and
+pending-timeout authority before releasing the lock; later timer, authorization,
+or timeout-receipt calls fail closed.
+
+The composition transaction binds itself once as the exact timeout owner of its
+exact-class Arm C adapter only when the transaction also names that same adapter,
+canonical lifecycle object, and session binding. Every public adapter timeout
+request releases the adapter lock and delegates to a callback captured directly
+from the reviewed transaction class at bind time.
+The transaction acquires composition ownership before invoking the adapter's
+internal commit path, which holds the adapter authority lock across
+intent validation, canonical sequence allocation, lifecycle ingestion, and
+consumption of the identical one-use timeout receipt. Every successful internal
+commit invokes the stored transaction cleanup callback after releasing the
+adapter lock, so direct internal-method reachability cannot consume a timeout
+without the same mandatory compensation. Transaction-owned batch terminalization
+then runs before composition ownership is released. Equal clones, alternate
+owners or adapters, foreign calls or epochs, subclasses, replaced instance
+callbacks, and terminalization races cannot mint or consume timeout authority.
+A committed timeout removes retained audio, TTS, playout, frame, speech,
+question, timer, and pending-response authority, records a bounded terminal
+composition outcome, and permanently seals the adapter and local call reducer.
+
+Same-thread terminalization requested by a lifecycle callback is deferred until
+the in-progress timeout transaction has either committed or failed. This orders
+reentrant and cross-thread terminalization identically. External terminalization
+invokes its transaction-owned cleanup callback only after releasing the adapter
+lock. Public terminalization has no owner-suppression argument. Reentrant
+owner cleanup is instead detected inside the transaction by receipt identity,
+without exposing a bypass surface. The single lock order is therefore
+transaction then adapter, without exposing a partially ingested lifecycle
+event, retained timeout receipt, or orphaned composition response.
+
+Disconnect-revoked permits remain bounded replay tombstones. Later supersession
+recognizes the exact already-revoked authorization as safe cleanup evidence,
+while an absent or mismatched permit still hard-terminalizes.
+Disconnect provenance is stored separately from ordinary retirement and is
+accepted only for the exact canonical authorization object; an ordinary,
+cloned, forged, or same-key retirement is never promoted to disconnect proof.
+
+`ACT_FAILED` terminalizes the semantic act, not automatically the call. Recovery
+continues through the shared caller-outcome matrix whenever current authenticated
+transport authority remains proven.
+
+## Caller outcome matrix
+
+| Outcome | Canonical state | Caller-visible act | Timer and teardown |
+| --- | --- | --- | --- |
+| Partial, late, cancelled, duplicate, or superseded turn | No facts or response commit | None | Canonical caller activity still cancels an existing timer; no new timer |
+| Low confidence, timeout, provider error, or malformed extraction with current binding and repair budget | Unchanged | One fixed localized input-repair act through the canonical authorization chain | No question timer |
+| First downstream recoverable failure | Accepted facts remain | One authorized fixed repair or exact complete-act replay | Global repair budget consumed for exact binding, call, and epoch |
+| Second recoverable failure or unavailable repair | Accepted facts remain | Composition returns typed `closure_required` with no audio; the future driver may use fixed generic closure only with every positive binding and a one-use local closure capability | Teardown only after canonical playback observation/inference and no newer activity |
+| Security, privacy, capability, binding, epoch, or external-outcome uncertainty | No new response state | None | Revoke and no-audio teardown |
+| Proven reconnect with a fresh matching epoch | Confirmed facts only | Fixed reconnect repair through the canonical chain | Stale acts and timers remain cancelled |
+| Actual caller transport loss | Preserve prior observed/inferred playout evidence | No additional audio | Residue-only teardown |
+
+Every audible repair, safety, presence, voicemail, unsupported-mode, or closure
+act follows the sole chain:
+
+```text
+shared policy
+  -> SpeechControl
+  -> canonical RESPONSE_AUTHORIZED
+  -> selected-adapter permit
+  -> canonical playback observation or approved inference
+```
+
+No emergency or closure bypass exists. Closure audio never grants terminal
+execution. Fresh canonical caller activity or interruption cancels closure
+progression. Transport loss never rewrites uncertain prior playout as silence.
+Fixed localized copy comes only from the closed reviewed catalog and never
+interpolates raw turn or state content. This increment includes fixed English,
+Spanish, Brazilian Portuguese, and Mandarin assets with locale-specific safety
+authorization; a known unsupported locale fails closed instead of silently
+receiving English.
+
+## Sealed offline session driver
+
+The second increment is a synchronous, statically pinned, repo-local driver. It
+does not accept arbitrary callables, plugins, coroutines, or handler imports.
+
+```text
+CREATED -> LEASED -> ACTIVE -> CLOSED
+                         \-> ABORTED
+```
+
+It uses synthetic fixtures and a single-use in-memory facade. The facade exposes
+no `WebSocket`, `Request`, runtime, authenticator, token, dependency, URL,
+credential, filesystem, environment, process, reflection, dynamic import, or
+network object.
+
+Every operation verifies the current binding, turn, epoch, lease, and revocation
+state. The contract digest binds:
+
+- driver and facade source/code digests;
+- composition, materializer, policy, catalog, and adapter identities;
+- codec and frame schema;
+- inbound and outbound frame-size, frame-count, cumulative-byte, audio-duration,
+  session-duration, queue, and concurrency limits.
+
+The driver permits one active invocation, owns and joins all child work, rejects
+use after return, and scrubs mutable audio and byte buffers before dropping
+references. It promises no durable, logged, cached, persisted, or exception-echoed
+raw content. It does not claim immutable Python strings or bytes are zeroizable.
+
+## Synthetic journey fixtures
+
+Every arm must produce the same canonical externally observable trace for:
+
+- applicable direct answer followed by at most one question;
+- question-only intake without a manufactured answer;
+- low-confidence input and one localized repair;
+- correction and bidirectional code switching without repeated facts;
+- interruption and proven reconnect without stale speech;
+- exact silence, boundary speech, and `more_time`;
+- `repeat` and `slower`;
+- scripted opt-out versus actual or ambiguous participant withdrawal;
+- simulated voicemail;
+- unsupported language and access mode;
+- safety guidance;
+- one repair success followed by a second failure;
+- authenticated closure versus uncertain-binding no-audio teardown;
+- a superseding turn during Phase 2;
+- partial, cleared, failed, and interrupted questions never becoming asked.
+
+The fixtures contain synthetic personas and no customer, participant, production,
+or credential data.
+
+## Required verification
+
+- fault injection after every transaction mutation boundary;
+- exact state-version and superseding-turn races;
+- exact and one-over resource limits, including Unicode byte/character cases;
+- all-arm canonical trace parity;
+- exact authorized-versus-reserved compensation;
+- replay, expiry, stale epoch, rebind, revoke, and use-after-return;
+- no orphan question, timer, permit, speech act, child task, or buffer;
+- recursive transitive import and capability firewall;
+- reverse and dynamic import checks from production modules;
+- exact bakeoff-app hash and route-table baseline assertion;
+- gate report remains `execution_status: not_authorized` with all nine external
+  blockers;
+- focused and complete unit suites;
+- independent exact-tree staff and security review for each implementation commit.
+
+Offline evidence may prove deterministic act ordering, lifecycle safety, fixed
+localized asset selection, and absence of stale or duplicate speech. It cannot
+prove caller-heard audio, comprehension, linguistic quality, naturalness, provider
+behavior, real latency, connected readiness, or live delivery.

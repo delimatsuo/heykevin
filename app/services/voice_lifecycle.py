@@ -2,8 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
-
+from typing import Any
 
 VOICE_SCHEMA_VERSION = 1
 _MAX_ID = 128
@@ -121,11 +120,7 @@ class VoicePayload:
         for name, value in (("ordinal", self.ordinal), ("duration_ms", self.duration_ms)):
             if value is not None:
                 _nonnegative(value, name)
-        if self.text_digest is not None and (
-            not isinstance(self.text_digest, str)
-            or len(self.text_digest) != 64
-            or any(character not in "0123456789abcdef" for character in self.text_digest)
-        ):
+        if self.text_digest is not None and (not isinstance(self.text_digest, str) or len(self.text_digest) != 64 or any(character not in "0123456789abcdef" for character in self.text_digest)):
             raise ValueError("text_digest is invalid")
         for name in ("audio_id", "playout_id"):
             value = getattr(self, name)
@@ -151,7 +146,15 @@ class VoiceEvent:
     def __post_init__(self) -> None:
         if self.schema_version != VOICE_SCHEMA_VERSION:
             raise ValueError("unsupported voice schema version")
-        if not all(isinstance(value, enum) for value, enum in ((self.kind, VoiceEventKind), (self.source, VoiceSource), (self.sensitivity, VoiceSensitivity), (self.semantic_act_kind, VoiceSemanticActKind))):
+        if not all(
+            isinstance(value, enum)
+            for value, enum in (
+                (self.kind, VoiceEventKind),
+                (self.source, VoiceSource),
+                (self.sensitivity, VoiceSensitivity),
+                (self.semantic_act_kind, VoiceSemanticActKind),
+            )
+        ):
             raise ValueError("invalid voice enum")
         if not isinstance(self.binding, VoiceSessionBinding) or not isinstance(self.payload, VoicePayload):
             raise ValueError("invalid voice event binding or payload")
@@ -162,16 +165,41 @@ class VoiceEvent:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VoiceEvent":
-        required = {"schema_version", "kind", "source", "sensitivity", "binding", "sequence", "at_ms", "input_turn_id", "generation_id", "semantic_act_id", "semantic_act_kind", "payload"}
+        required = {
+            "schema_version",
+            "kind",
+            "source",
+            "sensitivity",
+            "binding",
+            "sequence",
+            "at_ms",
+            "input_turn_id",
+            "generation_id",
+            "semantic_act_id",
+            "semantic_act_kind",
+            "payload",
+        }
         if set(data) - required:
             raise ValueError("unknown voice event field")
         if set(data) != required:
             raise ValueError("missing voice event field")
         binding = data["binding"]
         payload = data["payload"]
-        if not isinstance(binding, dict) or set(binding) != {"environment", "contractor_binding", "call_binding", "stream_binding", "epoch"}:
+        if not isinstance(binding, dict) or set(binding) != {
+            "environment",
+            "contractor_binding",
+            "call_binding",
+            "stream_binding",
+            "epoch",
+        }:
             raise ValueError("invalid voice event binding")
-        if not isinstance(payload, dict) or set(payload) - {"ordinal", "duration_ms", "text_digest", "audio_id", "playout_id"}:
+        if not isinstance(payload, dict) or set(payload) - {
+            "ordinal",
+            "duration_ms",
+            "text_digest",
+            "audio_id",
+            "playout_id",
+        }:
             raise ValueError("invalid voice event payload")
         return cls(
             schema_version=data["schema_version"],
@@ -179,8 +207,10 @@ class VoiceEvent:
             source=VoiceSource(data["source"]),
             sensitivity=VoiceSensitivity(data["sensitivity"]),
             binding=VoiceSessionBinding(**binding),
-            sequence=data["sequence"], at_ms=data["at_ms"],
-            input_turn_id=data["input_turn_id"], generation_id=data["generation_id"],
+            sequence=data["sequence"],
+            at_ms=data["at_ms"],
+            input_turn_id=data["input_turn_id"],
+            generation_id=data["generation_id"],
             semantic_act_id=data["semantic_act_id"],
             semantic_act_kind=VoiceSemanticActKind(data["semantic_act_kind"]),
             payload=VoicePayload(**payload),
@@ -204,7 +234,15 @@ class VoiceCommand:
     def __post_init__(self) -> None:
         if self.schema_version != VOICE_SCHEMA_VERSION:
             raise ValueError("unsupported voice schema version")
-        if not all(isinstance(value, enum) for value, enum in ((self.kind, VoiceCommandKind), (self.capability, VoiceCapability), (self.sensitivity, VoiceSensitivity), (self.confirmation, ConfirmationPolicy))):
+        if not all(
+            isinstance(value, enum)
+            for value, enum in (
+                (self.kind, VoiceCommandKind),
+                (self.capability, VoiceCapability),
+                (self.sensitivity, VoiceSensitivity),
+                (self.confirmation, ConfirmationPolicy),
+            )
+        ):
             raise ValueError("invalid voice command")
         if not isinstance(self.binding, VoiceSessionBinding):
             raise ValueError("invalid command binding")
@@ -230,11 +268,7 @@ class VoiceTimeoutIntent:
     payload: VoicePayload = VoicePayload()
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.binding, VoiceSessionBinding)
-            or not isinstance(self.semantic_act_kind, VoiceSemanticActKind)
-            or not isinstance(self.payload, VoicePayload)
-        ):
+        if not isinstance(self.binding, VoiceSessionBinding) or not isinstance(self.semantic_act_kind, VoiceSemanticActKind) or not isinstance(self.payload, VoicePayload):
             raise ValueError("invalid timeout intent binding")
         for name in ("input_turn_id", "generation_id", "semantic_act_id"):
             _identifier(getattr(self, name), name)
@@ -256,36 +290,19 @@ class VoiceTimeoutIntent:
         )
 
 
-@runtime_checkable
-class VoiceTimeoutAuthority(Protocol):
-    """Adapter-owned authority required before a timeout can become canonical."""
-
-    def authorizes_timeout(
-        self,
-        intent: VoiceTimeoutIntent,
-        *,
-        now_ms: int,
-    ) -> bool: ...
-
-    def accept_timeout(
-        self,
-        event: VoiceEvent,
-        *,
-        lifecycle: "VoiceLifecycle",
-    ) -> bool: ...
-
-
 class VoiceLifecycle:
     def __init__(self, *, binding: VoiceSessionBinding) -> None:
         self.binding = binding
         self._sequence = -1
         self._at_ms = -1
-        self._acts: dict[str, tuple[VoiceEventKind, str, str, VoiceSemanticActKind, str | None, str | None, str | None]] = {}
-        self._input_states: dict[str, VoiceEventKind] = {}
-        self._generation_states: dict[
-            tuple[str, str, str, VoiceSemanticActKind], VoiceEventKind
+        self._acts: dict[
+            str,
+            tuple[VoiceEventKind, str, str, VoiceSemanticActKind, str | None, str | None, str | None],
         ] = {}
-        self._session_state: VoiceEventKind | None = None
+        self._input_states: dict[str, VoiceEventKind] = {}
+        self._input_finals: dict[str, VoiceEvent] = {}
+        self._generation_states: dict[tuple[str, str, str, VoiceSemanticActKind], VoiceEventKind] = {}
+        self._session_event: VoiceEvent | None = None
         self._response_authorizations: dict[str, VoiceEvent] = {}
         self._semantic_confirmations: dict[str, VoiceEvent] = {}
         self._act_terminals: dict[str, VoiceEvent] = {}
@@ -341,20 +358,39 @@ class VoiceLifecycle:
             VoiceEventKind.RESPONSE_AUTHORIZED: set(),
             VoiceEventKind.SEMANTIC_ACT_CONFIRMED: {VoiceEventKind.RESPONSE_AUTHORIZED},
             VoiceEventKind.TTS_BOUND: {VoiceEventKind.SEMANTIC_ACT_CONFIRMED},
-            VoiceEventKind.PLAYOUT_BOUND: {VoiceEventKind.TTS_BOUND, VoiceEventKind.PLAYOUT_RECONNECTED},
+            VoiceEventKind.PLAYOUT_BOUND: {
+                VoiceEventKind.TTS_BOUND,
+                VoiceEventKind.PLAYOUT_RECONNECTED,
+            },
             VoiceEventKind.TRANSPORT_RESOLVED: {VoiceEventKind.PLAYOUT_BOUND},
             VoiceEventKind.PLAYOUT_PARTIAL: {VoiceEventKind.PLAYOUT_BOUND},
             VoiceEventKind.PLAYOUT_CLEARED: {VoiceEventKind.PLAYOUT_BOUND},
             VoiceEventKind.PLAYOUT_INTERRUPTED: {VoiceEventKind.PLAYOUT_BOUND},
             VoiceEventKind.PLAYOUT_RECONNECTED: {VoiceEventKind.PLAYOUT_BOUND},
             VoiceEventKind.CALLER_PLAYBACK_OBSERVED: {VoiceEventKind.TRANSPORT_RESOLVED},
-            VoiceEventKind.ACT_FAILED: {VoiceEventKind.RESPONSE_AUTHORIZED, VoiceEventKind.SEMANTIC_ACT_CONFIRMED, VoiceEventKind.TTS_BOUND, VoiceEventKind.PLAYOUT_BOUND, VoiceEventKind.TRANSPORT_RESOLVED},
-            VoiceEventKind.ACT_TIMED_OUT: {VoiceEventKind.RESPONSE_AUTHORIZED, VoiceEventKind.SEMANTIC_ACT_CONFIRMED, VoiceEventKind.TTS_BOUND, VoiceEventKind.PLAYOUT_BOUND, VoiceEventKind.TRANSPORT_RESOLVED},
+            VoiceEventKind.ACT_FAILED: {
+                VoiceEventKind.RESPONSE_AUTHORIZED,
+                VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+                VoiceEventKind.TTS_BOUND,
+                VoiceEventKind.PLAYOUT_BOUND,
+                VoiceEventKind.TRANSPORT_RESOLVED,
+            },
+            VoiceEventKind.ACT_TIMED_OUT: {
+                VoiceEventKind.RESPONSE_AUTHORIZED,
+                VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+                VoiceEventKind.TTS_BOUND,
+                VoiceEventKind.PLAYOUT_BOUND,
+                VoiceEventKind.TRANSPORT_RESOLVED,
+            },
         }[event.kind]
         if (prior is None and expected) or (prior is not None and prior not in expected):
             self.rejected_event_count += 1
             return False
-        if prior_record is not None and prior_record[1:4] != (event.input_turn_id, event.generation_id, event.semantic_act_kind):
+        if prior_record is not None and prior_record[1:4] != (
+            event.input_turn_id,
+            event.generation_id,
+            event.semantic_act_kind,
+        ):
             self.rejected_event_count += 1
             return False
         if event.kind is VoiceEventKind.TTS_BOUND:
@@ -365,15 +401,29 @@ class VoiceLifecycle:
             if event.payload.text_digest is None or event.payload.audio_id is None or event.payload.playout_id is None:
                 self.rejected_event_count += 1
                 return False
-            if prior_record is None or prior_record[4:6] != (event.payload.text_digest, event.payload.audio_id):
+            if prior_record is None or prior_record[4:6] != (
+                event.payload.text_digest,
+                event.payload.audio_id,
+            ):
                 self.rejected_event_count += 1
                 return False
-        if event.kind in {VoiceEventKind.TRANSPORT_RESOLVED, VoiceEventKind.PLAYOUT_PARTIAL, VoiceEventKind.PLAYOUT_CLEARED, VoiceEventKind.PLAYOUT_INTERRUPTED, VoiceEventKind.PLAYOUT_RECONNECTED, VoiceEventKind.CALLER_PLAYBACK_OBSERVED}:
+        if event.kind in {
+            VoiceEventKind.TRANSPORT_RESOLVED,
+            VoiceEventKind.PLAYOUT_PARTIAL,
+            VoiceEventKind.PLAYOUT_CLEARED,
+            VoiceEventKind.PLAYOUT_INTERRUPTED,
+            VoiceEventKind.PLAYOUT_RECONNECTED,
+            VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
+        }:
             if event.payload.text_digest is None or event.payload.audio_id is None or event.payload.playout_id is None or prior_record is None or prior_record[4:7] != (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id):
                 self.rejected_event_count += 1
                 return False
         if event.kind in {VoiceEventKind.ACT_FAILED, VoiceEventKind.ACT_TIMED_OUT} and prior_record is not None and prior_record[4] is not None:
-            if (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id) != prior_record[4:7]:
+            if (
+                event.payload.text_digest,
+                event.payload.audio_id,
+                event.payload.playout_id,
+            ) != prior_record[4:7]:
                 self.rejected_event_count += 1
                 return False
         self._sequence, self._at_ms = event.sequence, event.at_ms
@@ -400,6 +450,20 @@ class VoiceLifecycle:
             self.pending_question_active = True
         return True
 
+    def accepts_input_final(self, event: VoiceEvent) -> bool:
+        """Return true only for the exact candidate-final event already ingested."""
+        return isinstance(event, VoiceEvent) and event.binding == self.binding and event.kind is VoiceEventKind.INPUT_TURN_FINAL and event.source is VoiceSource.PROVIDER_UNTRUSTED and self._input_finals.get(event.input_turn_id) == event
+
+    def accepts_session_resume(self, event: VoiceEvent) -> bool:
+        """Return true only for the exact resume receipt this reducer accepted."""
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.SESSION_RESUMED
+            and event.source is VoiceSource.PROVIDER_UNTRUSTED
+            and self._session_event is event
+        )
+
     def accept_command(self, command: VoiceCommand, *, now_ms: int) -> bool:
         if command.binding != self.binding or command.expires_at_ms < _nonnegative(now_ms, "now_ms"):
             return False
@@ -418,43 +482,16 @@ class VoiceLifecycle:
     def accepts_caller_playback(self, event: VoiceEvent) -> bool:
         """Return true only for this lifecycle's already accepted caller receipt."""
         record = self._acts.get(event.semantic_act_id)
-        return (
-            isinstance(event, VoiceEvent)
-            and event.binding == self.binding
-            and event.kind is VoiceEventKind.CALLER_PLAYBACK_OBSERVED
-            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
-            and record is not None
-            and record[0] is VoiceEventKind.CALLER_PLAYBACK_OBSERVED
-            and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
-            and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
-        )
+        return isinstance(event, VoiceEvent) and event.binding == self.binding and event.kind is VoiceEventKind.CALLER_PLAYBACK_OBSERVED and event.source is VoiceSource.LOCAL_AUTHORITATIVE and record is not None and record[0] is VoiceEventKind.CALLER_PLAYBACK_OBSERVED and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind) and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
 
     def accepts_transport_resolution(self, event: VoiceEvent) -> bool:
         record = self._acts.get(event.semantic_act_id)
-        return (
-            isinstance(event, VoiceEvent)
-            and event.binding == self.binding
-            and event.kind is VoiceEventKind.TRANSPORT_RESOLVED
-            and event.source is VoiceSource.TWILIO_AUTHENTICATED
-            and record is not None
-            and record[0] in {VoiceEventKind.TRANSPORT_RESOLVED, VoiceEventKind.CALLER_PLAYBACK_OBSERVED}
-            and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
-            and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
-        )
+        return isinstance(event, VoiceEvent) and event.binding == self.binding and event.kind is VoiceEventKind.TRANSPORT_RESOLVED and event.source is VoiceSource.TWILIO_AUTHENTICATED and record is not None and record[0] in {VoiceEventKind.TRANSPORT_RESOLVED, VoiceEventKind.CALLER_PLAYBACK_OBSERVED} and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind) and record[4:7] == (event.payload.text_digest, event.payload.audio_id, event.payload.playout_id)
 
     def accepts_semantic_confirmation(self, event: VoiceEvent) -> bool:
         """Return true only for the exact confirmation accepted by this reducer."""
         record = self._acts.get(event.semantic_act_id)
-        return (
-            isinstance(event, VoiceEvent)
-            and event.binding == self.binding
-            and event.kind is VoiceEventKind.SEMANTIC_ACT_CONFIRMED
-            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
-            and self._semantic_confirmations.get(event.semantic_act_id) == event
-            and record is not None
-            and record[0] is VoiceEventKind.SEMANTIC_ACT_CONFIRMED
-            and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
-        )
+        return isinstance(event, VoiceEvent) and event.binding == self.binding and event.kind is VoiceEventKind.SEMANTIC_ACT_CONFIRMED and event.source is VoiceSource.LOCAL_AUTHORITATIVE and self._semantic_confirmations.get(event.semantic_act_id) == event and record is not None and record[0] is VoiceEventKind.SEMANTIC_ACT_CONFIRMED and record[1:4] == (event.input_turn_id, event.generation_id, event.semantic_act_kind)
 
     def accepts_response_authorization(self, event: VoiceEvent) -> bool:
         """Return true only for the exact current authorization receipt."""
@@ -464,7 +501,7 @@ class VoiceLifecycle:
             and event.binding == self.binding
             and event.kind is VoiceEventKind.RESPONSE_AUTHORIZED
             and event.source is VoiceSource.LOCAL_AUTHORITATIVE
-            and self._response_authorizations.get(event.semantic_act_id) == event
+            and self._response_authorizations.get(event.semantic_act_id) is event
             and record is not None
             and record[0] is VoiceEventKind.RESPONSE_AUTHORIZED
             and record[1:4]
@@ -475,6 +512,17 @@ class VoiceLifecycle:
             )
         )
 
+    def recognizes_response_authorization(self, event: VoiceEvent) -> bool:
+        """Recognize the exact issued authorization after later act progress."""
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind is VoiceEventKind.RESPONSE_AUTHORIZED
+            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
+            and self._response_authorizations.get(event.semantic_act_id)
+            is event
+        )
+
     def accepts_act_timeout(self, event: VoiceEvent) -> bool:
         """Return true only for the exact timeout accepted by this reducer."""
         record = self._acts.get(event.semantic_act_id)
@@ -483,7 +531,7 @@ class VoiceLifecycle:
             and event.binding == self.binding
             and event.kind is VoiceEventKind.ACT_TIMED_OUT
             and event.source is VoiceSource.LOCAL_AUTHORITATIVE
-            and self._act_terminals.get(event.semantic_act_id) == event
+            and self._act_terminals.get(event.semantic_act_id) is event
             and record is not None
             and record[0] is VoiceEventKind.ACT_TIMED_OUT
             and record[1:4]
@@ -492,6 +540,34 @@ class VoiceLifecycle:
                 event.generation_id,
                 event.semantic_act_kind,
             )
+        )
+
+    def act_state(self, event: VoiceEvent) -> VoiceEventKind | None:
+        """Return the current state only for the exact bound semantic act."""
+        if not isinstance(event, VoiceEvent) or event.binding != self.binding:
+            return None
+        record = self._acts.get(event.semantic_act_id)
+        if (
+            record is None
+            or record[1:4]
+            != (
+                event.input_turn_id,
+                event.generation_id,
+                event.semantic_act_kind,
+            )
+        ):
+            return None
+        return record[0]
+
+    def terminal_payload(self, event: VoiceEvent) -> VoicePayload | None:
+        """Return the exact accumulated identity needed for an act terminal."""
+        if self.act_state(event) is None:
+            return None
+        record = self._acts[event.semantic_act_id]
+        return VoicePayload(
+            text_digest=record[4],
+            audio_id=record[5],
+            playout_id=record[6],
         )
 
     def next_position(self, *, at_ms: int) -> tuple[int, int]:
@@ -516,6 +592,8 @@ class VoiceLifecycle:
             if not allowed or event.payload.audio_id is not None or event.payload.playout_id is not None:
                 return False
             self._input_states[event.input_turn_id] = event.kind
+            if event.kind is VoiceEventKind.INPUT_TURN_FINAL:
+                self._input_finals[event.input_turn_id] = event
             return True
         if event.kind in _GENERATION_EVENT_KINDS:
             authorization = self._acts.get(event.semantic_act_id)
@@ -576,7 +654,11 @@ class VoiceLifecycle:
                 return False
             self._generation_states[key] = event.kind
             return True
-        prior = self._session_state
+        prior = (
+            self._session_event.kind
+            if self._session_event is not None
+            else None
+        )
         allowed_prior = {
             VoiceEventKind.SESSION_DISCONNECTED: {
                 None,
@@ -598,7 +680,7 @@ class VoiceLifecycle:
         }[event.kind]
         if prior not in allowed_prior:
             return False
-        self._session_state = event.kind
+        self._session_event = event
         return True
 
 
@@ -622,6 +704,4 @@ _SESSION_EVENT_KINDS = {
     VoiceEventKind.SESSION_RESUMED,
     VoiceEventKind.SESSION_GO_AWAY,
 }
-_OBSERVATIONAL_EVENT_KINDS = (
-    _INPUT_EVENT_KINDS | _GENERATION_EVENT_KINDS | _SESSION_EVENT_KINDS
-)
+_OBSERVATIONAL_EVENT_KINDS = _INPUT_EVENT_KINDS | _GENERATION_EVENT_KINDS | _SESSION_EVENT_KINDS

@@ -7,17 +7,17 @@ state; candidate adapters must not infer either from this module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 import hashlib
 import json
 import re
+from dataclasses import dataclass
+from enum import Enum
 
 from app.services.voice_lifecycle import VoiceSemanticActKind as SemanticActKind
 from app.services.voice_lifecycle import VoiceSessionBinding
 
-
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]{1,128}")
+_LOCALE = re.compile(r"[a-z]{2,3}(?:-[a-z]{2,8})?")
 
 
 def _identifier(value: object, name: str) -> str:
@@ -111,6 +111,10 @@ class SpeechPolicy:
     safety_word_budget: int
     required_safety_fragments: tuple[str, ...]
     terminal_fragments: tuple[str, ...]
+    localized_safety_fragments: tuple[
+        tuple[str, tuple[str, ...]],
+        ...,
+    ] = ()
 
     def __post_init__(self) -> None:
         if any(type(value) is not int or value < 1 for value in (self.normal_word_budget, self.safety_word_budget)):
@@ -123,6 +127,30 @@ class SpeechPolicy:
             raise ValueError("terminal fragments are required")
         if any(not isinstance(fragment, str) or not fragment.strip() for fragment in self.terminal_fragments):
             raise ValueError("terminal fragments are invalid")
+        locales: set[str] = set()
+        for entry in self.localized_safety_fragments:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or not _locale(entry[0])
+                or entry[0] in locales
+                or not isinstance(entry[1], tuple)
+                or not entry[1]
+                or any(
+                    not isinstance(fragment, str)
+                    or not fragment.strip()
+                    for fragment in entry[1]
+                )
+            ):
+                raise ValueError("localized safety fragments are invalid")
+            locales.add(entry[0])
+
+    def safety_fragments(self, locale: str) -> tuple[str, ...]:
+        selected = _locale(locale)
+        return dict(self.localized_safety_fragments).get(
+            selected,
+            self.required_safety_fragments,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +160,7 @@ class SpeechAuthorization:
     authorized_kinds: tuple[SemanticActKind, ...]
     terminal_allowed: bool
     answered_slots: tuple[str, ...] = ()
+    locale: str = "en"
 
     def __post_init__(self) -> None:
         if not isinstance(self.binding, VoiceSessionBinding):
@@ -143,6 +172,7 @@ class SpeechAuthorization:
             raise ValueError("speech authorization is invalid")
         if any(_identifier(slot, "answered slot") != slot for slot in self.answered_slots):
             raise ValueError("answered slots are invalid")
+        _locale(self.locale)
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,8 +257,6 @@ class SpeechControl:
                     raise ValueError("question slot is already answered")
                 if (authorization.binding, act.question_slot) in self._reserved_slots:
                     raise ValueError("question slot is already reserved")
-                if not any(prior.kind is SemanticActKind.ANSWER for prior in plan.acts[:index]):
-                    raise ValueError("question requires a preceding direct answer")
         reserved: list[ReservedSpeech] = []
         for index, act in enumerate(plan.acts):
             act_id = _act_id(authorization.binding, authorization.turn_id, plan.plan_id, index)
@@ -267,25 +295,43 @@ class SpeechControl:
         records: list[_Record] = []
         for item in reserved:
             record = self._records.get(item.act_id)
-            if (
-                record is None
-                or record.reserved != item
-                or record.authorized
-                or record.cancelled
-                or record.audio is not None
-                or record.playout is not None
-                or record.streamed_text
-                or (record.reserved.binding, item.act_id) in self._repairs
-            ):
+            if record is None or record.reserved != item or record.authorized or record.cancelled or record.audio is not None or record.playout is not None or record.streamed_text or (record.reserved.binding, item.act_id) in self._repairs:
                 return False
             records.append(record)
         for record in records:
             self._records.pop(record.reserved.act_id)
             if record.question_slot is not None:
-                self._reserved_slots.discard(
-                    (record.reserved.binding, record.question_slot)
-                )
+                self._reserved_slots.discard((record.reserved.binding, record.question_slot))
         self._reservation_batches.discard(act_ids)
+        return True
+
+    def complete_reservation(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        """Release only the batch index after every act has canonical delivery."""
+        act_ids = tuple(item.act_id for item in reserved if isinstance(item, ReservedSpeech))
+        if len(act_ids) != len(reserved) or act_ids not in self._reservation_batches:
+            return False
+        if any(
+            (record := self._records.get(item.act_id)) is None
+            or record.reserved != item
+            or record.cancelled
+            for item in reserved
+        ):
+            return False
+        self._reservation_batches.remove(act_ids)
+        return True
+
+    def retire_reservation(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        """Release a terminalized batch index while retaining its act evidence."""
+        act_ids = tuple(item.act_id for item in reserved if isinstance(item, ReservedSpeech))
+        if len(act_ids) != len(reserved) or act_ids not in self._reservation_batches:
+            return False
+        if any(
+            (record := self._records.get(item.act_id)) is None
+            or record.reserved != item
+            for item in reserved
+        ):
+            return False
+        self._reservation_batches.remove(act_ids)
         return True
 
     def authorize_text(self, act_id: str, text: str) -> bool:
@@ -304,7 +350,10 @@ class SpeechControl:
         record = self._records.get(act_id)
         if record is None or record.cancelled or not record.authorized:
             return False
-        if record.reserved.kind in _TERMINAL_KINDS | {SemanticActKind.QUESTION, SemanticActKind.SAFETY}:
+        if record.reserved.kind in _TERMINAL_KINDS | {
+            SemanticActKind.QUESTION,
+            SemanticActKind.SAFETY,
+        }:
             return False
         if type(final) is not bool or not isinstance(segment, str) or not segment:
             return False
@@ -378,7 +427,24 @@ class SpeechControl:
         record = self._records.get(act_id)
         return record is not None and record.cancelled
 
-    def reserve_repair(self, *, original_act_id: str, failure: FailureClass, plan: SpokenPlan, authorization: SpeechAuthorization, confirmed_fact_ids: tuple[str, ...]) -> RepairIntent | None:
+    def is_live(self, act_id: str) -> bool:
+        """Return true only while exact speech authority remains usable."""
+        record = self._records.get(act_id)
+        return (
+            record is not None
+            and record.authorized
+            and not record.cancelled
+        )
+
+    def reserve_repair(
+        self,
+        *,
+        original_act_id: str,
+        failure: FailureClass,
+        plan: SpokenPlan,
+        authorization: SpeechAuthorization,
+        confirmed_fact_ids: tuple[str, ...],
+    ) -> RepairIntent | None:
         if not isinstance(failure, FailureClass) or failure is not FailureClass.RECOVERABLE:
             return None
         record = self._records.get(original_act_id)
@@ -410,7 +476,12 @@ class SpeechControl:
         self._validate_text(act.kind, act.text)
         if act.kind is SemanticActKind.SAFETY:
             text = act.text.casefold()
-            if any(fragment.casefold() not in text for fragment in self.policy.required_safety_fragments):
+            if any(
+                fragment.casefold() not in text
+                for fragment in self.policy.safety_fragments(
+                    authorization.locale
+                )
+            ):
                 raise ValueError("safety semantic act is incomplete")
 
     def _validate_text(self, kind: SemanticActKind, text: str) -> None:
@@ -421,3 +492,12 @@ class SpeechControl:
             raise ValueError("semantic act exceeds speech budget")
         if kind not in _TERMINAL_KINDS and any(fragment.casefold() in text.casefold() for fragment in self.policy.terminal_fragments):
             raise ValueError("terminal wording is not authorized")
+
+
+def _locale(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or _LOCALE.fullmatch(value) is None
+    ):
+        raise ValueError("locale is invalid")
+    return value

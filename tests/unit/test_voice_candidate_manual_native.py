@@ -2,13 +2,12 @@
 
 import ast
 import hashlib
+import threading
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
-from app.services.voice_call_lifecycle import CallLifecycle
 from app.services.voice_candidates import (
     AdapterRejectReason,
     CandidateLimits,
@@ -21,6 +20,7 @@ from app.services.voice_candidates.manual_native import (
     ManualNativeSignalKind,
 )
 from app.services.voice_lifecycle import (
+    VoiceEvent,
     VoiceEventKind,
     VoiceLifecycle,
     VoicePayload,
@@ -28,7 +28,6 @@ from app.services.voice_lifecycle import (
     VoiceSessionBinding,
     VoiceSource,
 )
-from app.services.voice_speech_control import SpeechControl, SpeechPolicy
 
 LIMITS = CandidateLimits(1_024, 15_000, 2_000_000, 30_000, 200, 200)
 
@@ -98,6 +97,7 @@ def _accept_permit(
     context: EventContext,
 ) -> VoiceLifecycle:
     lifecycle = VoiceLifecycle(binding=context.binding)
+    assert adapter.bind_canonical_lifecycle(lifecycle)
     permit = _permit(context)
     assert lifecycle.ingest(permit)
     assert adapter.accept_permit(permit, lifecycle=lifecycle)
@@ -109,18 +109,6 @@ def _adapter() -> ManualNativeAdapter:
         binding=_binding(),
         limits=LIMITS,
         generation_timeout_ms=10,
-    )
-
-
-def _coordinator(lifecycle: VoiceLifecycle) -> VoiceBakeoffCoordinator:
-    return VoiceBakeoffCoordinator(
-        speech=SpeechControl(SpeechPolicy(12, 20, ("safe",), ("goodbye",))),
-        calls=CallLifecycle(
-            binding=_binding(),
-            voice_lifecycle=lifecycle,
-            first_silence_ms=10,
-            second_silence_ms=20,
-        ),
     )
 
 
@@ -219,49 +207,133 @@ def test_generation_must_begin_before_the_permit_deadline_exactly_once():
     assert timed_out.events == ()
     assert len(timed_out.timeout_intents) == 1
     intent = timed_out.timeout_intents[0]
-    coordinator = _coordinator(lifecycle)
+    assert not adapter.bind_timeout_materializer(object())
+    assert not adapter.authorizes_timeout(replace(intent), now_ms=110)
+    assert not adapter.authorizes_timeout(intent, now_ms=109)
+    assert adapter.authorizes_timeout(intent, now_ms=110)
     assert (
-        coordinator.materialize_timeout(
-            intent=replace(intent),
-            authority=adapter,
+        adapter.materialize_timeout(
+            intent,
+            lifecycle=lifecycle,
             at_ms=110,
-        )
-        is None
-    )
-    assert (
-        coordinator.materialize_timeout(
-            intent=intent,
-            authority=_adapter(),
-            at_ms=110,
-        )
-        is None
-    )
-    assert (
-        coordinator.materialize_timeout(
-            intent=intent,
-            authority=adapter,
-            at_ms=109,
-        )
-        is None
-    )
-    event = coordinator.materialize_timeout(
-        intent=intent,
-        authority=adapter,
-        at_ms=110,
-    )
-    assert event is not None
-    assert event.kind is VoiceEventKind.ACT_TIMED_OUT
-    assert event.sequence == 11
-    assert not adapter.accept_timeout(event, lifecycle=lifecycle)
-    assert (
-        coordinator.materialize_timeout(
-            intent=intent,
-            authority=adapter,
-            at_ms=111,
+            owner=object(),
         )
         is None
     )
     assert adapter.timer_fired(now_ms=111).reason is AdapterRejectReason.OUT_OF_ORDER
+
+
+def test_terminalization_after_permit_clears_and_blocks_timeout_authority():
+    adapter = _adapter()
+    _finalize(adapter)
+    _accept_permit(adapter, _context(4, at_ms=100))
+
+    adapter.terminalize_permit_admission()
+
+    assert adapter.terminally_closed
+    assert adapter._begin_deadlines == {}
+    assert adapter._completion_deadlines == {}
+    assert adapter._pending_timeouts == {}
+    assert adapter.timer_fired(now_ms=110).reason is AdapterRejectReason.STALE_EPOCH
+
+    pending_adapter = _adapter()
+    _finalize(pending_adapter)
+    pending_lifecycle = _accept_permit(
+        pending_adapter,
+        _context(4, at_ms=100),
+    )
+    timed_out = pending_adapter.timer_fired(now_ms=110)
+    timeout_intent = timed_out.timeout_intents[0]
+    assert pending_adapter.authorizes_timeout(timeout_intent, now_ms=110)
+
+    pending_adapter.terminalize_permit_admission()
+
+    assert pending_adapter._begin_deadlines == {}
+    assert pending_adapter._completion_deadlines == {}
+    assert pending_adapter._pending_timeouts == {}
+    assert not pending_adapter.authorizes_timeout(timeout_intent, now_ms=110)
+    assert (
+        pending_adapter.materialize_timeout(
+            timeout_intent,
+            lifecycle=pending_lifecycle,
+            at_ms=110,
+            owner=object(),
+        )
+        is None
+    )
+    timeout_event = timeout_intent.event(sequence=5, at_ms=110)
+    assert pending_lifecycle.ingest(timeout_event)
+    assert not pending_adapter.accept_timeout(
+        timeout_event,
+        lifecycle=pending_lifecycle,
+    )
+
+
+def test_terminalization_racing_permit_acceptance_leaves_no_native_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _adapter()
+    _finalize(adapter)
+    lifecycle = VoiceLifecycle(binding=_binding())
+    permit = _permit(_context(4, at_ms=100))
+    assert lifecycle.ingest(permit)
+    deadline_transition_entered = threading.Event()
+    release_deadline_transition = threading.Event()
+    terminal_returned = threading.Event()
+    original_permit_key = adapter.permit_key
+
+    def pause_before_deadline(context: EventContext):
+        deadline_transition_entered.set()
+        assert release_deadline_transition.wait(timeout=2)
+        return original_permit_key(context)
+
+    monkeypatch.setattr(adapter, "permit_key", pause_before_deadline)
+    accepted: list[bool] = []
+
+    permit_thread = threading.Thread(
+        target=lambda: accepted.append(
+            adapter.accept_permit(permit, lifecycle=lifecycle)
+        )
+    )
+
+    def terminalize() -> None:
+        adapter.terminalize_permit_admission()
+        terminal_returned.set()
+
+    terminal_thread = threading.Thread(target=terminalize)
+    permit_thread.start()
+    assert deadline_transition_entered.wait(timeout=2)
+    terminal_thread.start()
+    assert not terminal_returned.wait(timeout=0.05)
+    release_deadline_transition.set()
+    permit_thread.join(timeout=2)
+    terminal_thread.join(timeout=2)
+
+    assert not permit_thread.is_alive()
+    assert not terminal_thread.is_alive()
+    assert accepted == [True]
+    assert terminal_returned.is_set()
+    assert adapter.terminally_closed
+    assert adapter._begin_deadlines == {}
+    assert adapter._completion_deadlines == {}
+    assert adapter._pending_timeouts == {}
+    assert adapter.timer_fired(now_ms=110).reason is AdapterRejectReason.STALE_EPOCH
+
+
+def test_timeout_receipt_clone_cannot_consume_pending_authority():
+    adapter = _adapter()
+    _finalize(adapter)
+    lifecycle = _accept_permit(adapter, _context(4, at_ms=100))
+    intent = adapter.timer_fired(now_ms=110).timeout_intents[0]
+    timeout_event = intent.event(sequence=5, at_ms=110)
+    assert lifecycle.ingest(timeout_event)
+    clone = replace(timeout_event)
+
+    assert lifecycle.accepts_act_timeout(timeout_event)
+    assert not lifecycle.accepts_act_timeout(clone)
+    assert not adapter.accept_timeout(clone, lifecycle=lifecycle)
+    assert not adapter.accept_timeout(timeout_event, lifecycle=lifecycle)
+    assert adapter.authorizes_timeout(intent, now_ms=110)
 
 
 def test_generation_completion_timeout_is_bounded_once_and_fails_the_act():
@@ -285,13 +357,9 @@ def test_generation_completion_timeout_is_bounded_once_and_fails_the_act():
     assert adapter.timer_fired(now_ms=109).reason is AdapterRejectReason.OUT_OF_ORDER
     timed_out = adapter.timer_fired(now_ms=110)
     assert timed_out.reason is AdapterRejectReason.TIMEOUT
-    event = _coordinator(lifecycle).materialize_timeout(
-        intent=timed_out.timeout_intents[0],
-        authority=adapter,
-        at_ms=110,
-    )
-    assert event is not None and event.sequence == 21
-    assert not adapter.accept_timeout(event, lifecycle=lifecycle)
+    intent = timed_out.timeout_intents[0]
+    assert adapter.authorizes_timeout(intent, now_ms=110)
+    assert not adapter.authorizes_timeout(replace(intent), now_ms=110)
     assert adapter.timer_fired(now_ms=111).reason is AdapterRejectReason.OUT_OF_ORDER
 
 
@@ -736,7 +804,7 @@ def test_generation_terminal_then_exact_playout_clear_is_canonical_once(
     assert duplicate.reason is AdapterRejectReason.OUT_OF_ORDER
 
 
-def test_simultaneous_timeouts_receive_unique_canonical_sequences():
+def test_simultaneous_timeouts_preserve_distinct_exact_owner_intents():
     adapter = _adapter()
     contexts = (
         _context(1, input_turn_id="turn_1", semantic_act_id="act_1"),
@@ -763,6 +831,7 @@ def test_simultaneous_timeouts_receive_unique_canonical_sequences():
             )
         ).accepted
     lifecycle = VoiceLifecycle(binding=_binding())
+    assert adapter.bind_canonical_lifecycle(lifecycle)
     for sequence, context in enumerate(contexts, start=3):
         permit_context = _context(
             sequence,
@@ -775,21 +844,13 @@ def test_simultaneous_timeouts_receive_unique_canonical_sequences():
         assert adapter.accept_permit(permit, lifecycle=lifecycle)
     timed_out = adapter.timer_fired(now_ms=110)
     assert len(timed_out.timeout_intents) == 2
-    coordinator = _coordinator(lifecycle)
-    events = tuple(
-        coordinator.materialize_timeout(
-            intent=intent,
-            authority=adapter,
-            at_ms=110,
-        )
-        for intent in timed_out.timeout_intents
-    )
-    assert all(event is not None for event in events)
-    assert [event.sequence for event in events if event is not None] == [5, 6]
+    assert timed_out.timeout_intents[0] is not timed_out.timeout_intents[1]
+    assert {
+        intent.semantic_act_id for intent in timed_out.timeout_intents
+    } == {"act_1", "act_2"}
     assert all(
-        not adapter.accept_timeout(event, lifecycle=lifecycle)
-        for event in events
-        if event is not None
+        adapter.authorizes_timeout(intent, now_ms=110)
+        for intent in timed_out.timeout_intents
     )
     assert adapter.timer_fired(now_ms=111).reason is AdapterRejectReason.OUT_OF_ORDER
 

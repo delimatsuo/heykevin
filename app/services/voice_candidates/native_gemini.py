@@ -49,6 +49,7 @@ class NativeMode(str, Enum):
 
 
 class NativeSignalKind(str, Enum):
+    INPUT_FINAL = "input_final"
     GENERATION_STARTED = "generation_started"
     AUDIO_FRAME = "audio_frame"
     AUDIO_BOUND = "audio_bound"
@@ -81,25 +82,13 @@ class NativeSignal:
     frame_digest: str | None = None
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.kind, NativeSignalKind)
-            or not isinstance(self.context, EventContext)
-            or not isinstance(self.usage, CandidateUsage)
-            or not isinstance(self.payload, VoicePayload)
-        ):
+        if not isinstance(self.kind, NativeSignalKind) or not isinstance(self.context, EventContext) or not isinstance(self.usage, CandidateUsage) or not isinstance(self.payload, VoicePayload):
             raise TypeError("native signal is invalid")
         if self.kind is NativeSignalKind.AUDIO_FRAME:
             # This is an upstream-supplied opaque identity used only for local
             # duplicate detection. The adapter neither computes it from audio
             # bytes nor authenticates the bytes or the identity.
-            if (
-                not isinstance(self.frame_digest, str)
-                or len(self.frame_digest) != 64
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in self.frame_digest
-                )
-            ):
+            if not isinstance(self.frame_digest, str) or len(self.frame_digest) != 64 or any(character not in "0123456789abcdef" for character in self.frame_digest):
                 raise ValueError("audio frame digest is invalid")
         elif self.frame_digest is not None:
             raise ValueError("frame digest is only valid for audio frames")
@@ -123,29 +112,43 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
         self.mode = mode
         self._fresh_epoch_required = False
         self._resume_required = False
-        self._generation_state: dict[
-            tuple[str, str, str, VoiceSemanticActKind], NativeSignalKind
-        ] = {}
-        self._audio_ids: dict[
-            tuple[str, str, str, VoiceSemanticActKind], str
-        ] = {}
-        self._audio_bindings: dict[
-            tuple[str, str, str, VoiceSemanticActKind], tuple[str, str]
-        ] = {}
+        self._final_turns: set[str] = set()
+        self._generation_state: dict[tuple[str, str, str, VoiceSemanticActKind], NativeSignalKind] = {}
+        self._audio_ids: dict[tuple[str, str, str, VoiceSemanticActKind], str] = {}
+        self._audio_bindings: dict[tuple[str, str, str, VoiceSemanticActKind], tuple[str, str]] = {}
         self._playout_records: dict[
             tuple[str, str, str, VoiceSemanticActKind],
             tuple[str, str, str, _NativePlayoutState],
         ] = {}
-        self._last_frame_ordinals: dict[
-            tuple[str, str, str, VoiceSemanticActKind], int
-        ] = {}
+        self._last_frame_ordinals: dict[tuple[str, str, str, VoiceSemanticActKind], int] = {}
         self._seen_frame_digests: set[str] = set()
         self._internal_audio_ms = 0
 
     def accept_permit(self, event, *, lifecycle) -> bool:
-        if self._fresh_epoch_required or self._resume_required:
-            return False
-        return super().accept_permit(event, lifecycle=lifecycle)
+        with self._authority_lock:
+            if self._fresh_epoch_required or self._resume_required:
+                return False
+            return super().accept_permit(event, lifecycle=lifecycle)
+
+    def resume_permit_admission(
+        self,
+        *,
+        result,
+        event,
+        lifecycle,
+    ) -> bool:
+        """Commit a resume only after the canonical lifecycle accepted it."""
+        with self._authority_lock:
+            if not self._resume_required:
+                return False
+            if not super().resume_permit_admission(
+                result=result,
+                event=event,
+                lifecycle=lifecycle,
+            ):
+                return False
+            self._resume_required = False
+            return True
 
     @property
     def selectable_offline(self) -> bool:
@@ -154,9 +157,7 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
     def provider_configuration(self) -> dict[str, object]:
         return {
             "adapter_only": True,
-            "automatic_activity_detection": (
-                self.mode is NativeMode.AUTOMATIC_CONTROL
-            ),
+            "automatic_activity_detection": (self.mode is NativeMode.AUTOMATIC_CONTROL),
             "max_output_tokens": self.limits.output_tokens,
             "max_audio_ms": self.limits.audio_ms,
             "max_bytes": self.limits.byte_count,
@@ -198,14 +199,19 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
             self._audio_ids.clear()
             self._audio_bindings.clear()
             self._playout_records.clear()
+            self._final_turns.clear()
             if signal.kind is NativeSignalKind.SESSION_REESTABLISHED:
                 self._resume_required = False
-                self.terminalize_permit_admission()
+                self._retire_permit_admission_for_fresh_epoch()
                 self._last_frame_ordinals.clear()
                 self._seen_frame_digests.clear()
                 self._internal_audio_ms = 0
                 self._fresh_epoch_required = True
         mapping = {
+            NativeSignalKind.INPUT_FINAL: (
+                VoiceEventKind.INPUT_TURN_FINAL,
+                VoiceSource.PROVIDER_UNTRUSTED,
+            ),
             NativeSignalKind.GENERATION_STARTED: (
                 VoiceEventKind.GENERATION_STARTED,
                 VoiceSource.PROVIDER_UNTRUSTED,
@@ -265,6 +271,32 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
         prior = self._generation_state.get(key)
         payload = signal.payload
         empty_payload = payload == VoicePayload()
+        if signal.kind is NativeSignalKind.INPUT_FINAL:
+            with self._authority_lock:
+                if self._terminally_closed or self._permit_admission_closed:
+                    return self.rejected(AdapterRejectReason.STALE_EPOCH)
+                if signal.context.input_turn_id in self._final_turns or payload.text_digest is None or payload.audio_id is not None or payload.playout_id is not None:
+                    return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
+                if not self.admit_input(signal.context):
+                    return self.rejected(
+                        AdapterRejectReason.LIMIT_EXCEEDED
+                    )
+                preflight = self.preflight(
+                    context=signal.context,
+                    usage=signal.usage,
+                    permit_required=False,
+                )
+                if preflight is not None:
+                    return preflight
+                self._final_turns.add(signal.context.input_turn_id)
+                kind, source = mapping[signal.kind]
+                return self._accept_final_transition(
+                    signal.context.event(
+                        kind,
+                        source=source,
+                        payload=payload,
+                    )
+                )
         allowed_prior = {
             NativeSignalKind.GENERATION_STARTED: {None},
             NativeSignalKind.AUDIO_FRAME: {
@@ -283,45 +315,32 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
                 NativeSignalKind.AUDIO_FRAME,
             },
         }
+        if signal.kind is NativeSignalKind.AUDIO_FRAME and (payload.ordinal is None or payload.duration_ms is None or payload.duration_ms < 1 or payload.audio_id is None or payload.playout_id is not None):
+            return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
+        if signal.kind is NativeSignalKind.AUDIO_BOUND and (payload.text_digest is None or payload.audio_id is None or payload.playout_id is not None):
+            return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
         if (
-            signal.kind is NativeSignalKind.AUDIO_FRAME
-            and (
-                payload.ordinal is None
-                or payload.duration_ms is None
-                or payload.duration_ms < 1
-                or payload.audio_id is None
-                or payload.playout_id is not None
-            )
+            signal.kind
+            in {
+                NativeSignalKind.GENERATION_STARTED,
+                NativeSignalKind.GENERATION_COMPLETED,
+                NativeSignalKind.TURN_COMPLETED,
+                NativeSignalKind.PROVIDER_INTERRUPTED,
+                NativeSignalKind.SESSION_DISCONNECTED,
+                NativeSignalKind.SESSION_REESTABLISHED,
+                NativeSignalKind.SESSION_RESUMED,
+                NativeSignalKind.SESSION_GO_AWAY,
+                NativeSignalKind.UNEXPECTED_TOOL_CALL,
+                NativeSignalKind.TERMINAL_REQUESTED,
+            }
+            and not empty_payload
         ):
-            return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
-        if signal.kind is NativeSignalKind.AUDIO_BOUND and (
-            payload.text_digest is None
-            or payload.audio_id is None
-            or payload.playout_id is not None
-        ):
-            return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
-        if signal.kind in {
-            NativeSignalKind.GENERATION_STARTED,
-            NativeSignalKind.GENERATION_COMPLETED,
-            NativeSignalKind.TURN_COMPLETED,
-            NativeSignalKind.PROVIDER_INTERRUPTED,
-            NativeSignalKind.SESSION_DISCONNECTED,
-            NativeSignalKind.SESSION_REESTABLISHED,
-            NativeSignalKind.SESSION_RESUMED,
-            NativeSignalKind.SESSION_GO_AWAY,
-            NativeSignalKind.UNEXPECTED_TOOL_CALL,
-            NativeSignalKind.TERMINAL_REQUESTED,
-        } and not empty_payload:
             return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
         if signal.kind in {
             NativeSignalKind.PLAYOUT_BOUND,
             NativeSignalKind.TRANSPORT_RESOLVED,
             NativeSignalKind.PLAYOUT_CLEARED,
-        } and (
-            payload.text_digest is None
-            or payload.audio_id is None
-            or payload.playout_id is None
-        ):
+        } and (payload.text_digest is None or payload.audio_id is None or payload.playout_id is None):
             return self.rejected(AdapterRejectReason.INVALID_SIGNAL)
         output_signal = signal.kind in {
             NativeSignalKind.GENERATION_STARTED,
@@ -334,28 +353,18 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
             NativeSignalKind.TRANSPORT_RESOLVED,
             NativeSignalKind.PLAYOUT_CLEARED,
         }
-        if (
-            output_signal
-            and not self.permitted(signal.context)
-        ):
+        if output_signal and not self.permitted(signal.context):
             return self.rejected(AdapterRejectReason.PERMIT_REQUIRED)
         if signal.kind is NativeSignalKind.AUDIO_BOUND:
             assert payload.text_digest is not None
             assert payload.audio_id is not None
-            if (
-                self._audio_ids.get(key) != payload.audio_id
-                or key in self._audio_bindings
-            ):
+            if self._audio_ids.get(key) != payload.audio_id or key in self._audio_bindings:
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         if signal.kind is NativeSignalKind.PLAYOUT_BOUND:
             assert payload.text_digest is not None
             assert payload.audio_id is not None
             assert payload.playout_id is not None
-            if (
-                self._audio_bindings.get(key)
-                != (payload.text_digest, payload.audio_id)
-                or key in self._playout_records
-            ):
+            if self._audio_bindings.get(key) != (payload.text_digest, payload.audio_id) or key in self._playout_records:
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         if signal.kind is NativeSignalKind.TRANSPORT_RESOLVED:
             assert payload.text_digest is not None
@@ -379,27 +388,16 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
                 _NativePlayoutState.BOUND,
             ):
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
-        if (
-            signal.kind is NativeSignalKind.AUDIO_FRAME
-            and key in self._audio_ids
-            and self._audio_ids[key] != payload.audio_id
-        ):
+        if signal.kind is NativeSignalKind.AUDIO_FRAME and key in self._audio_ids and self._audio_ids[key] != payload.audio_id:
             return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         if signal.kind is NativeSignalKind.AUDIO_FRAME:
             assert payload.ordinal is not None
             assert payload.duration_ms is not None
             assert signal.frame_digest is not None
             expected_ordinal = self._last_frame_ordinals.get(key, -1) + 1
-            if (
-                payload.ordinal != expected_ordinal
-                or signal.frame_digest in self._seen_frame_digests
-            ):
+            if payload.ordinal != expected_ordinal or signal.frame_digest in self._seen_frame_digests:
                 return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
-        if (
-            signal.kind is NativeSignalKind.AUDIO_FRAME
-            and self._playout_records.get(key, (None, None, None, None))[3]
-            is _NativePlayoutState.CLEARED
-        ):
+        if signal.kind is NativeSignalKind.AUDIO_FRAME and self._playout_records.get(key, (None, None, None, None))[3] is _NativePlayoutState.CLEARED:
             return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
         if signal.kind in allowed_prior and prior not in allowed_prior[signal.kind]:
             return self.rejected(AdapterRejectReason.OUT_OF_ORDER)
@@ -411,14 +409,7 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
         )
         if preflight is not None:
             return preflight
-        if signal.kind is NativeSignalKind.SESSION_RESUMED:
-            self._resume_required = False
-            self.resume_permit_admission()
-        if (
-            signal.kind is NativeSignalKind.AUDIO_FRAME
-            and self._internal_audio_ms + payload.duration_ms
-            >= self.limits.audio_ms
-        ):
+        if signal.kind is NativeSignalKind.AUDIO_FRAME and self._internal_audio_ms + payload.duration_ms >= self.limits.audio_ms:
             return self.fail(
                 signal.context,
                 reason=AdapterRejectReason.LIMIT_EXCEEDED,
@@ -494,13 +485,14 @@ class NativeGeminiAdapter(OfflineCandidateAdapter):
         ):
             self._audio_ids.pop(key, None)
             self._audio_bindings.pop(key, None)
-        return self.accepted(
-            signal.context.event(
-                kind,
-                source=source,
-                payload=payload,
-            )
+        event = signal.context.event(
+            kind,
+            source=source,
+            payload=payload,
         )
+        if signal.kind is NativeSignalKind.SESSION_RESUMED:
+            return self._accept_resume_transition(event)
+        return self.accepted(event)
 
 
 __all__ = [

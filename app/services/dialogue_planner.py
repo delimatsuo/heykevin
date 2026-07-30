@@ -7,6 +7,7 @@ from enum import Enum
 
 from app.services.receptionist_state import (
     AddressNeed,
+    BusinessScope,
     CallbackConfirmation,
     CallbackIntent,
     IntakeState,
@@ -108,6 +109,19 @@ def plan_next_action(state: IntakeState) -> NextAction:
             ),
             tool_calls_allowed=False,
             question_required=bool(safety_slots),
+        )
+
+    if state.business_scope is BusinessScope.OUT_OF_SCOPE:
+        return NextAction(
+            name=ActionName.DECLINE_OUT_OF_SCOPE,
+            reason="caller request is outside the reviewed business scope",
+            forbidden_slots=tuple(sorted(forbidden)),
+            memory_facts_safe_to_use=memory_facts,
+            max_spoken_shape=(
+                "briefly decline without claiming unsupported services "
+                "or asking another question"
+            ),
+            tool_calls_allowed=False,
         )
 
     if (

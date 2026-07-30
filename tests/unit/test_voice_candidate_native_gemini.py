@@ -3,6 +3,7 @@
 import ast
 import hashlib
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -53,6 +54,26 @@ def _permit(context: EventContext):
         VoiceEventKind.RESPONSE_AUTHORIZED,
         source=VoiceSource.LOCAL_AUTHORITATIVE,
     )
+
+
+def _commit_resume(
+    adapter: NativeGeminiAdapter,
+    lifecycle: VoiceLifecycle,
+    context: EventContext,
+):
+    assert adapter.bind_canonical_lifecycle(lifecycle)
+    result = adapter.handle(
+        NativeSignal(NativeSignalKind.SESSION_RESUMED, context)
+    )
+    assert result.accepted
+    event = result.events[0]
+    assert lifecycle.ingest(event)
+    assert adapter.resume_permit_admission(
+        result=result,
+        event=event,
+        lifecycle=lifecycle,
+    )
+    return result
 
 
 def _audio_binding(payload: VoicePayload) -> VoicePayload:
@@ -373,12 +394,210 @@ def test_native_session_mapping_requires_a_fresh_adapter_after_reestablishment()
         mode=NativeMode.MANUAL_GATED,
         limits=RUNAWAY_ONLY_LIMITS,
     )
-    assert adapter.handle(
+    lifecycle = VoiceLifecycle(binding=_binding())
+    go_away = adapter.handle(
         NativeSignal(NativeSignalKind.SESSION_GO_AWAY, _context(1))
-    ).accepted
-    assert adapter.handle(
+    )
+    assert go_away.accepted
+    assert lifecycle.ingest(go_away.events[0])
+    _commit_resume(adapter, lifecycle, _context(2))
+
+
+def test_native_resume_requires_exact_canonical_two_phase_commit():
+    adapter = NativeGeminiAdapter(
+        binding=_binding(),
+        mode=NativeMode.MANUAL_GATED,
+        limits=RUNAWAY_ONLY_LIMITS,
+    )
+    lifecycle = VoiceLifecycle(binding=_binding())
+    assert adapter.bind_canonical_lifecycle(lifecycle)
+    disconnected = adapter.handle(
+        NativeSignal(NativeSignalKind.SESSION_DISCONNECTED, _context(5))
+    )
+    assert disconnected.accepted
+    assert lifecycle.ingest(disconnected.events[0])
+
+    stale = adapter.handle(
+        NativeSignal(NativeSignalKind.SESSION_RESUMED, _context(5))
+    )
+    assert stale.accepted
+    stale_event = stale.events[0]
+    assert not lifecycle.ingest(stale_event)
+    shadow_lifecycle = VoiceLifecycle(binding=_binding())
+    assert shadow_lifecycle.ingest(
+        _context(4).event(
+            VoiceEventKind.SESSION_DISCONNECTED,
+            source=VoiceSource.PROVIDER_UNTRUSTED,
+        )
+    )
+    assert shadow_lifecycle.ingest(stale_event)
+    assert not adapter.resume_permit_admission(
+        result=stale,
+        event=stale_event,
+        lifecycle=shadow_lifecycle,
+    )
+    assert adapter.permit_admission_closed
+    rejected_final = adapter.handle(
+        NativeSignal(
+            NativeSignalKind.INPUT_FINAL,
+            _context(6, input_turn_id="closed_turn"),
+            payload=VoicePayload(text_digest="a" * 64),
+        )
+    )
+    assert not rejected_final.accepted
+    assert rejected_final.final_input_admission is None
+
+    _commit_resume(adapter, lifecycle, _context(6))
+    accepted_final = adapter.handle(
+        NativeSignal(
+            NativeSignalKind.INPUT_FINAL,
+            _context(7, input_turn_id="resumed_turn"),
+            payload=VoicePayload(text_digest="b" * 64),
+        )
+    )
+    assert accepted_final.accepted
+    assert accepted_final.final_input_admission is not None
+
+
+def test_terminalization_is_atomic_against_pending_resume(monkeypatch):
+    adapter = NativeGeminiAdapter(
+        binding=_binding(),
+        mode=NativeMode.MANUAL_GATED,
+        limits=RUNAWAY_ONLY_LIMITS,
+    )
+    lifecycle = VoiceLifecycle(binding=_binding())
+    assert adapter.bind_canonical_lifecycle(lifecycle)
+    disconnected = adapter.handle(
+        NativeSignal(NativeSignalKind.SESSION_DISCONNECTED, _context(1))
+    )
+    assert lifecycle.ingest(disconnected.events[0])
+    resume = adapter.handle(
         NativeSignal(NativeSignalKind.SESSION_RESUMED, _context(2))
-    ).accepted
+    )
+    resume_event = resume.events[0]
+    assert lifecycle.ingest(resume_event)
+
+    retired = Event()
+    release = Event()
+    original_retire = adapter._retire_permit_admission_for_fresh_epoch
+
+    def pause_after_retirement():
+        original_retire()
+        retired.set()
+        assert release.wait(timeout=2)
+
+    monkeypatch.setattr(
+        adapter,
+        "_retire_permit_admission_for_fresh_epoch",
+        pause_after_retirement,
+    )
+    terminal_thread = Thread(
+        target=adapter.terminalize_permit_admission
+    )
+    resume_results: list[bool] = []
+    resume_thread = Thread(
+        target=lambda: resume_results.append(
+            adapter.resume_permit_admission(
+                result=resume,
+                event=resume_event,
+                lifecycle=lifecycle,
+            )
+        )
+    )
+    terminal_thread.start()
+    assert retired.wait(timeout=2)
+    resume_thread.start()
+    resume_thread.join(timeout=0.05)
+    assert resume_thread.is_alive()
+    release.set()
+    terminal_thread.join(timeout=2)
+    resume_thread.join(timeout=2)
+
+    assert resume_results == [False]
+    assert adapter.terminally_closed
+    assert adapter.permit_admission_closed
+    final = adapter.handle(
+        NativeSignal(
+            NativeSignalKind.INPUT_FINAL,
+            _context(3, input_turn_id="post_terminal_turn"),
+            payload=VoicePayload(text_digest="c" * 64),
+        )
+    )
+    assert not final.accepted
+    assert final.final_input_admission is None
+    permit_lifecycle = VoiceLifecycle(binding=_binding())
+    permit = _permit(
+        _context(3, input_turn_id="post_terminal_turn")
+    )
+    assert permit_lifecycle.ingest(permit)
+    assert not adapter.accept_permit(
+        permit,
+        lifecycle=permit_lifecycle,
+    )
+
+
+def test_native_final_transition_is_atomic_with_terminalization(
+    monkeypatch,
+):
+    adapter = NativeGeminiAdapter(
+        binding=_binding(),
+        mode=NativeMode.MANUAL_GATED,
+        limits=RUNAWAY_ONLY_LIMITS,
+    )
+    entered = Event()
+    release = Event()
+    original_accept = adapter._accept_final_transition
+
+    def pause_before_final_acceptance(event):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_accept(event)
+
+    monkeypatch.setattr(
+        adapter,
+        "_accept_final_transition",
+        pause_before_final_acceptance,
+    )
+    results = []
+    errors: list[BaseException] = []
+
+    def run_final():
+        try:
+            results.append(
+                adapter.handle(
+                    NativeSignal(
+                        NativeSignalKind.INPUT_FINAL,
+                        _context(1, input_turn_id="atomic_final"),
+                        payload=VoicePayload(text_digest="d" * 64),
+                    )
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    final_thread = Thread(target=run_final)
+    terminal_thread = Thread(
+        target=adapter.terminalize_permit_admission
+    )
+    final_thread.start()
+    assert entered.wait(timeout=2)
+    terminal_thread.start()
+    terminal_thread.join(timeout=0.05)
+    assert terminal_thread.is_alive()
+    release.set()
+    final_thread.join(timeout=2)
+    terminal_thread.join(timeout=2)
+
+    assert errors == []
+    assert len(results) == 1
+    result = results[0]
+    assert result.accepted
+    assert adapter.terminally_closed
+    assert adapter.permit_admission_closed
+    assert not adapter.consume_final_input_admission(
+        result,
+        result.events[0],
+    )
 
 
 def test_native_transport_and_interruption_facts_remain_separate():
@@ -1044,9 +1263,11 @@ def test_native_resume_cannot_reuse_permit_frame_identity_or_audio_budget():
             frame_digest=identity,
         )
     ).accepted
-    assert adapter.handle(
+    go_away = adapter.handle(
         NativeSignal(NativeSignalKind.SESSION_GO_AWAY, _context(4))
-    ).accepted
+    )
+    assert go_away.accepted
+    assert lifecycle.ingest(go_away.events[0])
     assert not adapter.accept_permit(first_permit, lifecycle=lifecycle)
 
     second = _context(
@@ -1075,13 +1296,16 @@ def test_native_resume_cannot_reuse_permit_frame_identity_or_audio_budget():
         second_permit,
         lifecycle=second_lifecycle,
     )
-    assert adapter.handle(
-        NativeSignal(NativeSignalKind.SESSION_RESUMED, _context(5))
-    ).accepted
+    _commit_resume(adapter, lifecycle, _context(5))
     assert not adapter._resume_required
-    assert adapter.accept_permit(
+    assert not adapter.accept_permit(
         second_permit,
         lifecycle=second_lifecycle,
+    )
+    assert lifecycle.ingest(second_permit)
+    assert adapter.accept_permit(
+        second_permit,
+        lifecycle=lifecycle,
     )
     assert adapter.handle(
         NativeSignal(NativeSignalKind.GENERATION_STARTED, second)
@@ -1144,9 +1368,12 @@ def test_native_active_and_retired_permit_keys_share_a_fixed_request_cap():
         generation_id="terminal_generation",
         semantic_act_id="terminal_act",
     )
-    assert adapter.handle(
+    session_lifecycle = VoiceLifecycle(binding=_binding())
+    go_away = adapter.handle(
         NativeSignal(NativeSignalKind.SESSION_GO_AWAY, terminal)
-    ).accepted
+    )
+    assert go_away.accepted
+    assert session_lifecycle.ingest(go_away.events[0])
     assert adapter._permitted == set()
     assert len(adapter._retired_permit_keys) == adapter.limits.request_count
 
@@ -1156,20 +1383,37 @@ def test_native_active_and_retired_permit_keys_share_a_fixed_request_cap():
         generation_id="resume_generation",
         semantic_act_id="resume_act",
     )
-    assert adapter.handle(
-        NativeSignal(NativeSignalKind.SESSION_RESUMED, resumed)
-    ).accepted
-    lifecycle = VoiceLifecycle(binding=_binding())
-    new_permit = _permit(resumed)
-    assert lifecycle.ingest(new_permit)
-    assert not adapter.accept_permit(new_permit, lifecycle=lifecycle)
+    _commit_resume(adapter, session_lifecycle, resumed)
+    new_context = _context(
+        103,
+        input_turn_id="new_turn",
+        generation_id="new_generation",
+        semantic_act_id="new_act",
+    )
+    new_permit = _permit(new_context)
+    assert session_lifecycle.ingest(new_permit)
+    assert not adapter.accept_permit(
+        new_permit,
+        lifecycle=session_lifecycle,
+    )
     assert len(adapter._retired_permit_keys) == adapter.limits.request_count
 
     assert adapter.handle(
-        NativeSignal(NativeSignalKind.SESSION_REESTABLISHED, resumed)
+        NativeSignal(
+            NativeSignalKind.SESSION_REESTABLISHED,
+            _context(
+                104,
+                input_turn_id="reestablished_turn",
+                generation_id="reestablished_generation",
+                semantic_act_id="reestablished_act",
+            ),
+        )
     ).accepted
     assert adapter._retired_permit_keys == set()
-    assert not adapter.accept_permit(new_permit, lifecycle=lifecycle)
+    assert not adapter.accept_permit(
+        new_permit,
+        lifecycle=session_lifecycle,
+    )
 
 
 def test_native_audio_and_playout_bindings_follow_shared_lifecycle():

@@ -6,14 +6,28 @@ from app.services.dialogue_planner import ActionName, NextAction, plan_next_acti
 from app.services.receptionist_state import (
     ASKABLE_SLOTS,
     AddressNeed,
-    CallerObservation,
+    BusinessScope,
     CallbackConfirmation,
     CallbackIntent,
+    CallerObservation,
     IntakeState,
     Intent,
     ServiceAction,
     Urgency,
 )
+
+
+def test_planner_declines_out_of_scope_before_normal_intake():
+    state = IntakeState.new(call_sid="CA_test")
+    state.business_scope = BusinessScope.OUT_OF_SCOPE
+    state.intent = Intent.SERVICE_REQUEST
+
+    action = plan_next_action(state)
+
+    assert action.name is ActionName.DECLINE_OUT_OF_SCOPE
+    assert action.question_required is False
+    assert action.allowed_slots == ()
+    assert action.tool_calls_allowed is False
 
 
 def test_planner_blocks_duplicate_service_action_and_object_questions():

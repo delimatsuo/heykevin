@@ -1,9 +1,11 @@
 """Offline contract tests for provider-neutral speech control."""
 
-import pytest
 import json
 from pathlib import Path
 
+import pytest
+
+from app.services.voice_lifecycle import VoiceSessionBinding
 from app.services.voice_speech_control import (
     CancellationReason,
     FailureClass,
@@ -14,7 +16,6 @@ from app.services.voice_speech_control import (
     SpeechPolicy,
     SpokenPlan,
 )
-from app.services.voice_lifecycle import VoiceSessionBinding
 
 
 def _policy() -> SpeechPolicy:
@@ -72,11 +73,12 @@ def test_rejects_extra_questions_terminal_language_and_unauthorized_acts():
                 SemanticAct(SemanticActKind.QUESTION, "When do you need it?", question_slot="urgency"),
             ),
         )
-    with pytest.raises(ValueError, match="preceding direct answer"):
-        control.reserve(
-            SpokenPlan(plan_id="plan_question", acts=(SemanticAct(SemanticActKind.QUESTION, "What do you need?", question_slot="service"),)),
-            _authorization(),
-        )
+    question_only = control.reserve(
+        SpokenPlan(plan_id="plan_question", acts=(SemanticAct(SemanticActKind.QUESTION, "What do you need?", question_slot="service"),)),
+        _authorization(),
+    )
+    assert len(question_only) == 1
+    assert question_only[0].kind is SemanticActKind.QUESTION
     terminal = SpokenPlan(plan_id="plan_2", acts=(SemanticAct(SemanticActKind.CLOSING, "Goodbye."),))
     with pytest.raises(ValueError, match="terminal"):
         control.reserve(terminal, _authorization())
@@ -212,15 +214,9 @@ def test_cancellation_stale_epoch_and_single_recoverable_repair_preserve_facts()
     assert control.authorize_text(repair.repair_act_id, repair_plan.acts[0].text)
     assert control.bind_tts(repair.repair_act_id, audio_id="audio_repair")
     assert control.bind_playout(repair.repair_act_id, playout_id="playout_repair")
-    assert control.reserve_repair(
-        original_act_id=act.act_id, failure=FailureClass.RECOVERABLE, plan=repair_plan, authorization=_authorization(), confirmed_fact_ids=("service_1",)
-    ) is None
-    assert control.reserve_repair(
-        original_act_id=repair.repair_act_id, failure=FailureClass.RECOVERABLE, plan=repair_plan, authorization=_authorization(), confirmed_fact_ids=()
-    ) is None
-    assert control.reserve_repair(
-        original_act_id=act.act_id, failure=FailureClass.SECURITY, plan=repair_plan, authorization=_authorization(), confirmed_fact_ids=()
-    ) is None
+    assert control.reserve_repair(original_act_id=act.act_id, failure=FailureClass.RECOVERABLE, plan=repair_plan, authorization=_authorization(), confirmed_fact_ids=("service_1",)) is None
+    assert control.reserve_repair(original_act_id=repair.repair_act_id, failure=FailureClass.RECOVERABLE, plan=repair_plan, authorization=_authorization(), confirmed_fact_ids=()) is None
+    assert control.reserve_repair(original_act_id=act.act_id, failure=FailureClass.SECURITY, plan=repair_plan, authorization=_authorization(), confirmed_fact_ids=()) is None
 
 
 def test_fixture_is_development_only_and_uses_valid_typed_question_slots():

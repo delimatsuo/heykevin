@@ -312,7 +312,9 @@ The first driver slice implements only these closed synthetic journeys:
 - Spanish to Mandarin to Spanish correction with stale-response suppression
   and one canonical value per state fact;
 - one localized repair observed before a second low-confidence turn returns
-  typed `closure_required` with no second repair or closure audio.
+  typed `closure_required` with no second repair or closure audio;
+- partial, cleared, failed, and interrupted question playouts followed by exact
+  supersession without any slot becoming asked.
 
 All four candidate arms must produce an identical content-free canonical trace
 for those journeys. The slice also enforces exact inbound and outbound frame,
@@ -339,7 +341,18 @@ superseded before the one delivered response, and verifies corrected state facts
 replace rather than duplicate prior values. The repair-exhaustion fixture proves
 the first authorized repair is fully observed before a second final turn is
 admitted; the already-consumed global call/epoch repair budget then yields typed
-`closure_required` without reserving, confirming, or playing another act.
+`closure_required` without reserving, confirming, or playing another act. The
+unobserved-question fixture drives four separately authorized question attempts
+through partial, cleared, failed, and interrupted playout outcomes. Each stale
+attempt is terminalized; the next final turn then supersedes it before preparing
+its replacement response. A final cancelled turn leaves no pending response,
+timer, or asked-slot mutation.
+The failed question attempt records transport resolution first, then proves an
+accepted `ACT_FAILED` blocks preregistered playback inference and cannot mark the
+question asked or arm its silence timer.
+The driver also proves each superseded question has no live playback permit or
+speech authority, and the completed journey retains no unconsumed admission
+receipt.
 
 This slice is not the completed synthetic-journey gate and does not claim the
 remaining journeys below. Those journeys require later offline-only increments

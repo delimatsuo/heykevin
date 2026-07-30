@@ -33,6 +33,8 @@ from app.services.voice_bakeoff_turn_composition import (
     CompositionStatus,
 )
 from app.services.voice_lifecycle import (
+    VoiceEventKind,
+    VoiceLifecycle,
     VoiceSemanticActKind,
     VoiceSessionBinding,
 )
@@ -347,6 +349,85 @@ def test_bidirectional_code_switch_supersedes_stale_speech_without_repeated_fact
         for event in result.trace
         if event.kind is TraceKind.RESPONSE_PENDING
     ) == ("es", "zh", "es")
+
+
+def test_unobserved_question_outcomes_never_mark_a_slot_asked(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.UNOBSERVED_QUESTION_OUTCOMES,
+    )
+    assemblies = []
+    accepted_lifecycle_kinds = []
+    original_assembly = driver._assembly
+    original_ingest = VoiceLifecycle.ingest
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    def capture_ingest(lifecycle, event):
+        accepted = original_ingest(lifecycle, event)
+        if accepted:
+            accepted_lifecycle_kinds.append(event.kind)
+        return accepted
+
+    monkeypatch.setattr(
+        driver,
+        "_assembly",
+        capture_assembly,
+    )
+    monkeypatch.setattr(
+        VoiceLifecycle,
+        "ingest",
+        capture_ingest,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 4
+    assert len(assemblies) == 1
+    assembly = assemblies[0]
+    assert assembly.state.current_state().asked_slots == set()
+    assert assembly.transaction.pending_response_count == 0
+    assert assembly.receipts.unconsumed_receipt_count == 0
+    assert assembly.calls.is_quiescent
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.INPUT_FINAL) == 5
+    assert kinds.count(TraceKind.ACT_CONFIRMED) == 4
+    assert kinds.count(TraceKind.SUPERSEDED) == 4
+    assert kinds.count(TraceKind.PLAYOUT_PARTIAL) == 1
+    assert kinds.count(TraceKind.PLAYOUT_CLEARED) == 1
+    assert kinds.count(TraceKind.ACT_FAILED) == 1
+    assert kinds.count(TraceKind.PLAYOUT_INTERRUPTED) == 1
+    assert kinds.count(TraceKind.TRANSPORT_RESOLVED) == 1
+    assert kinds.count(TraceKind.PLAYBACK_OBSERVED) == 0
+    assert kinds.count(TraceKind.RESPONSE_OBSERVED) == 0
+    assert accepted_lifecycle_kinds.count(
+        VoiceEventKind.PLAYOUT_PARTIAL
+    ) == 1
+    assert accepted_lifecycle_kinds.count(
+        VoiceEventKind.PLAYOUT_CLEARED
+    ) == 1
+    assert accepted_lifecycle_kinds.count(
+        VoiceEventKind.PLAYOUT_INTERRUPTED
+    ) == 1
+    assert accepted_lifecycle_kinds.count(
+        VoiceEventKind.ACT_FAILED
+    ) == 1
+    assert VoiceEventKind.CALLER_PLAYBACK_OBSERVED not in (
+        accepted_lifecycle_kinds
+    )
+    final = next(
+        event
+        for event in reversed(result.trace)
+        if event.kind is TraceKind.TERMINAL
+    )
+    assert final.composition_status is CompositionStatus.SILENT
 
 
 def test_facade_is_single_use_and_driver_allows_only_one_live_lease():

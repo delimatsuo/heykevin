@@ -344,6 +344,11 @@ class FinalTurnAdmissionAuthority:
             and self._implementation_bindings[type(adapter)].arm is adapter.arm
         )
 
+    @property
+    def unconsumed_receipt_count(self) -> int:
+        with self._lock:
+            return len(self._live)
+
     def _prune(self, *, now_ms: int) -> None:
         for receipt_id in tuple(
             key for key, receipt in self._live.items() if receipt.expires_at_ms < now_ms
@@ -1067,6 +1072,8 @@ class TurnCompositionTransaction:
             authorization = self._authorization(pending, act_id)
             if (
                 authorization is None
+                or self.lifecycle.act_state(authorization)
+                is not VoiceEventKind.TRANSPORT_RESOLVED
                 or not self.coordinator.speech.is_live(act_id)
                 or not self.adapter.has_permit(authorization)
             ):
@@ -1789,6 +1796,9 @@ class TurnCompositionTransaction:
             VoiceEventKind.ACT_FAILED,
             VoiceEventKind.ACT_TIMED_OUT,
             VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
+            VoiceEventKind.PLAYOUT_PARTIAL,
+            VoiceEventKind.PLAYOUT_CLEARED,
+            VoiceEventKind.PLAYOUT_INTERRUPTED,
         }:
             return True
         payload = self.lifecycle.terminal_payload(authorization)
@@ -1832,6 +1842,14 @@ class TurnCompositionTransaction:
     def retained_outcome_count(self) -> int:
         with self._lock:
             return len(self._outcomes)
+
+    @property
+    def pending_response_count(self) -> int:
+        with self._lock:
+            return len({
+                id(pending)
+                for pending in self._pending_by_act.values()
+            })
 
     def _prune_outcomes(self, *, now_ms: int) -> None:
         pending_receipts = {

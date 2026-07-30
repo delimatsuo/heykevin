@@ -78,7 +78,7 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "78f364a8c29aceae72e405f1d6359c64dc7af2e93438771184b5256ab4e503a2"
+_DRIVER_SOURCE_DIGEST = "df84f4d56990dec01c23b2a6958e4f31f27d32fd580494a6b5ebe98426ca74f4"
 _FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
@@ -86,7 +86,7 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "caller_observation_extractor":
         "a3d79ce19f2c603f47dd370789773a707016a07e430c58fcd389a67065f9d364",
     "composition":
-        "69d5427e6a8f38199833b93a0279d2c714f55324e5212d8a0f8cfcf5d5f67c2e",
+        "fee2040a2fae2d7856c2fa74e8fbf48e14893270dbabc34c45e81cc66c012cd0",
     "dialogue_planner":
         "222f332a8756eec4144bfe9ede7bb5dbae71cdbfd1ca8505df58b862dc953457",
     "materializer":
@@ -141,6 +141,7 @@ class SyntheticJourney(str, Enum):
     SUPERSEDING_TURN = "superseding_turn"
     BIDIRECTIONAL_CODE_SWITCH = "bidirectional_code_switch"
     REPAIR_EXHAUSTION = "repair_exhaustion"
+    UNOBSERVED_QUESTION_OUTCOMES = "unobserved_question_outcomes"
 
 
 class DriverFailure(str, Enum):
@@ -166,6 +167,10 @@ class TraceKind(str, Enum):
     RESPONSE_OBSERVED = "response_observed"
     TERMINAL = "terminal"
     BUFFERS_SCRUBBED = "buffers_scrubbed"
+    PLAYOUT_PARTIAL = "playout_partial"
+    PLAYOUT_CLEARED = "playout_cleared"
+    PLAYOUT_INTERRUPTED = "playout_interrupted"
+    ACT_FAILED = "act_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,10 +342,18 @@ class _Fixture:
     content: str
     fields: tuple[tuple[str, object], ...]
     low_confidence: bool = False
+    outcome: BackendOutcome = BackendOutcome.OK
 
     def __post_init__(self) -> None:
-        if self.locale not in _FIXTURE_LOCALES:
-            raise ValueError("synthetic fixture locale is invalid")
+        if (
+            self.locale not in _FIXTURE_LOCALES
+            or not isinstance(self.outcome, BackendOutcome)
+            or (
+                self.outcome is not BackendOutcome.OK
+                and self.fields
+            )
+        ):
+            raise ValueError("synthetic fixture is invalid")
 
 
 _FIXTURES = MappingProxyType({
@@ -419,6 +432,16 @@ _FIXTURES = MappingProxyType({
             ("intent", "service_request"),
         ),
         low_confidence=True,
+    ),
+    SyntheticJourney.UNOBSERVED_QUESTION_OUTCOMES: _Fixture(
+        locale="en",
+        content="Fixture caller requests a furnace repair.",
+        fields=(
+            ("language", "en"),
+            ("intent", "service_request"),
+            ("service_action", "repair"),
+            ("service_object", "furnace"),
+        ),
     ),
 })
 
@@ -529,7 +552,9 @@ class _FrameSnapshot:
 class _Assembly:
     binding: VoiceSessionBinding
     adapter: OfflineCandidateAdapter
+    calls: CallLifecycle
     lifecycle: VoiceLifecycle
+    speech: SpeechControl
     transaction: TurnCompositionTransaction
     receipts: FinalTurnAdmissionAuthority
     state: VersionedIntakeStore
@@ -540,12 +565,16 @@ class _SyntheticObservationBackend:
     fixture: _Fixture
 
     def __call__(self, request: ExtractionRequest) -> BackendResponse:
-        fields = dict(self.fixture.fields)
+        fields = (
+            dict(self.fixture.fields)
+            if self.fixture.outcome is BackendOutcome.OK
+            else {}
+        )
         confidence = 0.1 if self.fixture.low_confidence else 0.99
         return BackendResponse(
             request_id=request.request_id,
             configuration_digest=request.configuration_digest,
-            outcome=BackendOutcome.OK,
+            outcome=self.fixture.outcome,
             fields=fields,
             confidences={
                 field_name: (
@@ -923,6 +952,18 @@ class OfflineSessionDriver:
                 now_ms=now_ms,
                 trace=trace,
             )
+        if (
+            grant.journey
+            is SyntheticJourney.UNOBSERVED_QUESTION_OUTCOMES
+        ):
+            return self._execute_unobserved_question_outcomes(
+                assembly=assembly,
+                pending=first,
+                receipt=receipt,
+                fixture=fixture,
+                now_ms=now_ms,
+                trace=trace,
+            )
         delivery_at_ms = now_ms + 10
         if grant.journey is SyntheticJourney.SUPERSEDING_TURN:
             correction = _Fixture(
@@ -1080,6 +1121,308 @@ class OfflineSessionDriver:
         ):
             raise _DriverAbort(DriverFailure.COMPOSITION)
         return second_at_ms
+
+    def _execute_unobserved_question_outcomes(
+        self,
+        *,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        receipt: FinalTurnAdmissionReceipt,
+        fixture: _Fixture,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        variants = (
+            (
+                VoiceEventKind.PLAYOUT_PARTIAL,
+                TraceKind.PLAYOUT_PARTIAL,
+                False,
+            ),
+            (
+                VoiceEventKind.PLAYOUT_CLEARED,
+                TraceKind.PLAYOUT_CLEARED,
+                False,
+            ),
+            (
+                VoiceEventKind.ACT_FAILED,
+                TraceKind.ACT_FAILED,
+                True,
+            ),
+            (
+                VoiceEventKind.PLAYOUT_INTERRUPTED,
+                TraceKind.PLAYOUT_INTERRUPTED,
+                False,
+            ),
+        )
+        cursor_ms = now_ms + 5
+        authorizations: list[VoiceEvent] = []
+        for index, (
+            event_kind,
+            trace_kind,
+            resolve_transport,
+        ) in enumerate(
+            variants,
+            start=1,
+        ):
+            cursor_ms, authorization = self._stage_unobserved_question(
+                assembly=assembly,
+                pending=pending,
+                event_kind=event_kind,
+                trace_kind=trace_kind,
+                resolve_transport=resolve_transport,
+                at_ms=cursor_ms,
+                trace=trace,
+            )
+            authorizations.append(authorization)
+            if index < len(variants):
+                replacement = _Fixture(
+                    locale="en",
+                    content=(
+                        "Fixture caller supplies a new final turn "
+                        f"after unobserved question {index}."
+                    ),
+                    fields=(
+                        ("language", "en"),
+                        ("intent", "service_request"),
+                        ("service_action", "repair"),
+                        ("service_object", "furnace"),
+                    ),
+                )
+                pending, receipt = self._supersede_turn(
+                    assembly=assembly,
+                    stale=pending,
+                    stale_receipt=receipt,
+                    stale_fixture=fixture,
+                    replacement=replacement,
+                    turn_number=index + 1,
+                    admit_at_ms=cursor_ms + 1,
+                    execute_at_ms=cursor_ms + 2,
+                    replay_at_ms=cursor_ms + 3,
+                    trace=trace,
+                )
+                if (
+                    assembly.adapter.has_permit(authorization)
+                    or assembly.speech.is_live(
+                        authorization.semantic_act_id
+                    )
+                    or assembly.transaction.authorization_receipt(
+                        authorization.semantic_act_id
+                    )
+                    is not None
+                ):
+                    raise _DriverAbort(DriverFailure.COMPOSITION)
+                fixture = replacement
+                cursor_ms += 5
+        if pending.status is not CompositionStatus.RESPONSE_PENDING:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        final_fixture = _Fixture(
+            locale="en",
+            content="Fixture caller final turn is cancelled.",
+            fields=(),
+            outcome=BackendOutcome.CANCELLED,
+        )
+        final_receipt = self._admit_final_turn(
+            assembly=assembly,
+            fixture=final_fixture,
+            turn_number=len(variants) + 1,
+            at_ms=cursor_ms + 1,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.INPUT_FINAL,
+            )
+        )
+        final_at_ms = max(cursor_ms + 2, final_receipt.at_ms)
+        final = assembly.transaction.execute(
+            final_receipt,
+            content=final_fixture.content,
+            backend=_SyntheticObservationBackend(final_fixture),
+            now_ms=final_at_ms,
+        )
+        replay = assembly.transaction.execute(
+            receipt,
+            content=fixture.content,
+            backend=_SyntheticObservationBackend(fixture),
+            now_ms=final_at_ms + 1,
+        )
+        if replay.status is not CompositionStatus.SUPERSEDED:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.SUPERSEDED,
+                composition_status=replay.status,
+            )
+        )
+        trace.append(
+            self._composition_trace(
+                trace,
+                final,
+                locale=self._trace_locale(
+                    assembly.state.current_state().language
+                ),
+            )
+        )
+        if (
+            final.status is not CompositionStatus.SILENT
+            or final.act_ids
+            or final.act_kinds
+            or assembly.state.current_state().asked_slots
+            or assembly.transaction.pending_response_count
+            or assembly.receipts.unconsumed_receipt_count
+            or any(
+                assembly.adapter.has_permit(authorization)
+                or assembly.speech.is_live(
+                    authorization.semantic_act_id
+                )
+                for authorization in authorizations
+            )
+            or not assembly.calls.is_quiescent
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        return final_at_ms + 1
+
+    def _stage_unobserved_question(
+        self,
+        *,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        event_kind: VoiceEventKind,
+        trace_kind: TraceKind,
+        resolve_transport: bool,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> tuple[int, VoiceEvent]:
+        if (
+            pending.status is not CompositionStatus.RESPONSE_PENDING
+            or pending.act_kinds
+            != (VoiceSemanticActKind.QUESTION,)
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        authorization = assembly.transaction.authorization_receipt(
+            pending.act_ids[0]
+        )
+        if authorization is None:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        confirmation = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=VoicePayload(),
+            at_ms=at_ms,
+        )
+        if (
+            not assembly.lifecycle.ingest(confirmation)
+            or not assembly.transaction.accept_semantic_confirmation(
+                event=confirmation,
+                event_id=f"confirm_{confirmation.sequence}",
+                sequence=confirmation.sequence,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.ACT_CONFIRMED,
+                semantic_act_kind=VoiceSemanticActKind.QUESTION,
+            )
+        )
+        payload = self._playout_payload(
+            authorization=authorization,
+        )
+        self._append_outbound_frame(
+            authorization=authorization,
+        )
+        tts = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.TTS_BOUND,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=VoicePayload(
+                text_digest=payload.text_digest,
+                audio_id=payload.audio_id,
+            ),
+            at_ms=confirmation.at_ms + 1,
+        )
+        if not assembly.lifecycle.ingest(tts):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        playout = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.PLAYOUT_BOUND,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=payload,
+            at_ms=tts.at_ms + 1,
+        )
+        if not assembly.lifecycle.ingest(playout):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        prior = playout
+        if resolve_transport:
+            transport = self._event_after(
+                assembly.lifecycle,
+                authorization,
+                kind=VoiceEventKind.TRANSPORT_RESOLVED,
+                source=VoiceSource.TWILIO_AUTHENTICATED,
+                payload=payload,
+                at_ms=playout.at_ms + 1,
+            )
+            if (
+                not assembly.lifecycle.ingest(transport)
+                or not assembly.transaction.accept_transport_resolution(
+                    event=transport,
+                    event_id=f"transport_{transport.sequence}",
+                    sequence=transport.sequence,
+                )
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.TRANSPORT_RESOLVED,
+                    semantic_act_kind=VoiceSemanticActKind.QUESTION,
+                )
+            )
+            prior = transport
+        terminal = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=event_kind,
+            source=(
+                VoiceSource.LOCAL_AUTHORITATIVE
+                if event_kind is VoiceEventKind.ACT_FAILED
+                else VoiceSource.TWILIO_AUTHENTICATED
+            ),
+            payload=payload,
+            at_ms=prior.at_ms + 1,
+        )
+        if (
+            not assembly.lifecycle.ingest(terminal)
+            or assembly.state.current_state().asked_slots
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        if resolve_transport and (
+            assembly.transaction.infer_playback(
+                act_id=authorization.semantic_act_id,
+                event_id=f"inference_{terminal.sequence}",
+                sequence=terminal.sequence + 1,
+                at_ms=terminal.at_ms + 1,
+                inference_id=f"inference_{terminal.sequence}",
+                transport_id=payload.playout_id or "",
+            )
+            is not None
+            or assembly.state.current_state().asked_slots
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=trace_kind,
+                semantic_act_kind=VoiceSemanticActKind.QUESTION,
+            )
+        )
+        return terminal.at_ms, authorization
 
     def _supersede_turn(
         self,
@@ -1351,7 +1694,9 @@ class OfflineSessionDriver:
         return _Assembly(
             binding=binding,
             adapter=adapter,
+            calls=calls,
             lifecycle=lifecycle,
+            speech=speech,
             transaction=transaction,
             receipts=receipts,
             state=state,

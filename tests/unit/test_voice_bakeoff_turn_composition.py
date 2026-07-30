@@ -1742,6 +1742,44 @@ def test_preregistered_playback_inference_marks_question_only_after_transport_de
     assert not harness["lifecycle"].pending_question_active
 
 
+def test_inferred_playback_rejects_after_transport_terminal_failure():
+    harness = _harness()
+    result = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    act_id = result.act_ids[0]
+    transport = _confirm_and_resolve_transport(harness, act_id)
+    authorization = harness[
+        "transaction"
+    ].authorization_receipt(act_id)
+    assert authorization is not None
+    failed = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.ACT_FAILED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=transport.payload,
+    )
+    assert harness["lifecycle"].ingest(failed)
+
+    assert (
+        harness["transaction"].infer_playback(
+            act_id=act_id,
+            event_id="inference_after_failure",
+            sequence=failed.sequence + 1,
+            at_ms=failed.at_ms + 1,
+            inference_id="inference_after_failure",
+            transport_id=transport.payload.playout_id or "",
+        )
+        is None
+    )
+    assert harness["state"].current_state().asked_slots == set()
+    assert harness["calls"].phase is SilencePhase.QUESTION_CONFIRMED
+
+
 def test_recoverable_extraction_failure_uses_one_fixed_repair_without_state_mutation():
     harness = _harness()
     result = harness["transaction"].execute(

@@ -308,7 +308,9 @@ The first driver slice implements only these closed synthetic journeys:
 - one localized low-confidence repair;
 - localized safety guidance;
 - unsupported-language no-audio failure;
-- a superseding turn during Phase 2.
+- a superseding turn during Phase 2;
+- Spanish to Mandarin to Spanish correction with stale-response suppression
+  and one canonical value per state fact.
 
 All four candidate arms must produce an identical content-free canonical trace
 for those journeys. The slice also enforces exact inbound and outbound frame,
@@ -329,7 +331,10 @@ The low-confidence Spanish fixture starts from a trusted reviewed fixture locale
 before extraction, reserves the fixed Spanish repair asset, and records only the
 allowlisted locale code in its content-free trace. The superseding fixture emits
 one `INPUT_FINAL` trace event for each admitted final turn before stale-response
-supersession and new-response delivery.
+supersession and new-response delivery. The bidirectional code-switch fixture
+commits three final turns (`es` to `zh` to `es`), proves both stale responses are
+superseded before the one delivered response, and verifies corrected state facts
+replace rather than duplicate prior values.
 
 This slice is not the completed synthetic-journey gate and does not claim the
 remaining journeys below. Those journeys require later offline-only increments

@@ -259,6 +259,50 @@ def test_superseding_turn_cancels_old_response_before_new_playback():
     )
 
 
+def test_bidirectional_code_switch_supersedes_stale_speech_without_repeated_facts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.BIDIRECTIONAL_CODE_SWITCH,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    monkeypatch.setattr(
+        driver,
+        "_assembly",
+        capture_assembly,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert len(assemblies) == 1
+    state = assemblies[0].state.current_state()
+    assert state.language == "es"
+    assert set(state.known_facts) == {
+        "service_action:repair",
+        "service_object:furnace",
+    }
+    assert len(state.known_facts) == len(set(state.known_facts))
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.INPUT_FINAL) == 3
+    assert kinds.count(TraceKind.SUPERSEDED) == 2
+    assert kinds.count(TraceKind.PLAYBACK_OBSERVED) == 1
+    assert tuple(
+        event.locale
+        for event in result.trace
+        if event.kind is TraceKind.RESPONSE_PENDING
+    ) == ("es", "zh", "es")
+
+
 def test_facade_is_single_use_and_driver_allows_only_one_live_lease():
     driver, facade = _lease()
     assert facade.state is OfflineSessionState.LEASED

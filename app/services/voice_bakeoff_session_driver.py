@@ -24,6 +24,7 @@ from app.services.voice_bakeoff_turn_composition import (
     CompositionResult,
     CompositionStatus,
     FinalTurnAdmissionAuthority,
+    FinalTurnAdmissionReceipt,
     TurnCompositionTransaction,
     VersionedIntakeStore,
     final_turn_content_digest,
@@ -77,7 +78,7 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "2e3eabd8238802191873cdd97467f62804637b075e709773ae951f9a0eb40b31"
+_DRIVER_SOURCE_DIGEST = "0a8f5438d21dbfb0427f724cca0bcccc804bc6417d0fa083bbb22b02deab5c45"
 _FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
@@ -138,6 +139,7 @@ class SyntheticJourney(str, Enum):
     SAFETY_GUIDANCE = "safety_guidance"
     UNSUPPORTED_LANGUAGE = "unsupported_language"
     SUPERSEDING_TURN = "superseding_turn"
+    BIDIRECTIONAL_CODE_SWITCH = "bidirectional_code_switch"
 
 
 class DriverFailure(str, Enum):
@@ -393,6 +395,16 @@ _FIXTURES = MappingProxyType({
         content="Fixture caller first requests a furnace repair.",
         fields=(
             ("language", "zh"),
+            ("intent", "service_request"),
+            ("service_action", "repair"),
+            ("service_object", "furnace"),
+        ),
+    ),
+    SyntheticJourney.BIDIRECTIONAL_CODE_SWITCH: _Fixture(
+        locale="es",
+        content="Fixture caller requests a furnace repair in Spanish.",
+        fields=(
+            ("language", "es"),
             ("intent", "service_request"),
             ("service_action", "repair"),
             ("service_object", "furnace"),
@@ -894,6 +906,7 @@ class OfflineSessionDriver:
             ):
                 raise _DriverAbort(DriverFailure.COMPOSITION)
             return receipt.at_ms
+        delivery_at_ms = now_ms + 10
         if grant.journey is SyntheticJourney.SUPERSEDING_TURN:
             correction = _Fixture(
                 locale="zh",
@@ -905,49 +918,69 @@ class OfflineSessionDriver:
                     ("service_object", "furnace"),
                 ),
             )
-            second_receipt = self._admit_final_turn(
+            first, receipt = self._supersede_turn(
                 assembly=assembly,
-                fixture=correction,
+                stale=first,
+                stale_receipt=receipt,
+                stale_fixture=fixture,
+                replacement=correction,
                 turn_number=2,
-                at_ms=now_ms + 3,
+                admit_at_ms=now_ms + 3,
+                execute_at_ms=now_ms + 4,
+                replay_at_ms=now_ms + 5,
+                trace=trace,
             )
-            trace.append(
-                OfflineTraceEvent(
-                    ordinal=len(trace),
-                    kind=TraceKind.INPUT_FINAL,
-                )
+            fixture = correction
+        elif (
+            grant.journey
+            is SyntheticJourney.BIDIRECTIONAL_CODE_SWITCH
+        ):
+            mandarin_correction = _Fixture(
+                locale="zh",
+                content="Fixture caller switches to Mandarin and requests an inspection.",
+                fields=(
+                    ("language", "zh"),
+                    ("intent", "service_request"),
+                    ("service_action", "inspect"),
+                    ("service_object", "furnace"),
+                ),
             )
-            second = assembly.transaction.execute(
-                second_receipt,
-                content=correction.content,
-                backend=_SyntheticObservationBackend(correction),
-                now_ms=max(now_ms + 4, second_receipt.at_ms),
+            first, receipt = self._supersede_turn(
+                assembly=assembly,
+                stale=first,
+                stale_receipt=receipt,
+                stale_fixture=fixture,
+                replacement=mandarin_correction,
+                turn_number=2,
+                admit_at_ms=now_ms + 3,
+                execute_at_ms=now_ms + 4,
+                replay_at_ms=now_ms + 5,
+                trace=trace,
             )
-            replay = assembly.transaction.execute(
-                receipt,
-                content=fixture.content,
-                backend=_SyntheticObservationBackend(fixture),
-                now_ms=now_ms + 5,
+            spanish_correction = _Fixture(
+                locale="es",
+                content="Fixture caller switches back to Spanish and confirms repair.",
+                fields=(
+                    ("language", "es"),
+                    ("intent", "service_request"),
+                    ("service_action", "repair"),
+                    ("service_object", "furnace"),
+                ),
             )
-            if replay.status is not CompositionStatus.SUPERSEDED:
-                raise _DriverAbort(DriverFailure.COMPOSITION)
-            trace.append(
-                OfflineTraceEvent(
-                    ordinal=len(trace),
-                    kind=TraceKind.SUPERSEDED,
-                    composition_status=replay.status,
-                )
+            first, receipt = self._supersede_turn(
+                assembly=assembly,
+                stale=first,
+                stale_receipt=receipt,
+                stale_fixture=mandarin_correction,
+                replacement=spanish_correction,
+                turn_number=3,
+                admit_at_ms=now_ms + 6,
+                execute_at_ms=now_ms + 7,
+                replay_at_ms=now_ms + 8,
+                trace=trace,
             )
-            first = second
-            trace.append(
-                self._composition_trace(
-                    trace,
-                    first,
-                    locale=self._trace_locale(
-                        assembly.state.current_state().language
-                    ),
-                )
-            )
+            fixture = spanish_correction
+            delivery_at_ms = now_ms + 12
         if first.status not in {
             CompositionStatus.RESPONSE_PENDING,
             CompositionStatus.REPAIR_PENDING,
@@ -956,12 +989,75 @@ class OfflineSessionDriver:
         final, final_at_ms = self._deliver_pending(
             assembly=assembly,
             pending=first,
-            at_ms=now_ms + 10,
+            at_ms=delivery_at_ms,
             trace=trace,
         )
         if final.status is not CompositionStatus.RESPONSE_OBSERVED:
             raise _DriverAbort(DriverFailure.DELIVERY)
         return final_at_ms
+
+    def _supersede_turn(
+        self,
+        *,
+        assembly: _Assembly,
+        stale: CompositionResult,
+        stale_receipt: FinalTurnAdmissionReceipt,
+        stale_fixture: _Fixture,
+        replacement: _Fixture,
+        turn_number: int,
+        admit_at_ms: int,
+        execute_at_ms: int,
+        replay_at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> tuple[CompositionResult, FinalTurnAdmissionReceipt]:
+        if stale.status is not CompositionStatus.RESPONSE_PENDING:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        replacement_receipt = self._admit_final_turn(
+            assembly=assembly,
+            fixture=replacement,
+            turn_number=turn_number,
+            at_ms=admit_at_ms,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.INPUT_FINAL,
+            )
+        )
+        replacement_result = assembly.transaction.execute(
+            replacement_receipt,
+            content=replacement.content,
+            backend=_SyntheticObservationBackend(replacement),
+            now_ms=max(
+                execute_at_ms,
+                replacement_receipt.at_ms,
+            ),
+        )
+        replay = assembly.transaction.execute(
+            stale_receipt,
+            content=stale_fixture.content,
+            backend=_SyntheticObservationBackend(stale_fixture),
+            now_ms=replay_at_ms,
+        )
+        if replay.status is not CompositionStatus.SUPERSEDED:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.SUPERSEDED,
+                composition_status=replay.status,
+            )
+        )
+        trace.append(
+            self._composition_trace(
+                trace,
+                replacement_result,
+                locale=self._trace_locale(
+                    assembly.state.current_state().language
+                ),
+            )
+        )
+        return replacement_result, replacement_receipt
 
     def _deliver_pending(
         self,
@@ -1183,7 +1279,7 @@ class OfflineSessionDriver:
         fixture: _Fixture,
         turn_number: int,
         at_ms: int,
-    ):
+    ) -> FinalTurnAdmissionReceipt:
         sequence, canonical_at_ms = (
             assembly.lifecycle.next_position(at_ms=at_ms)
         )

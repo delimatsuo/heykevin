@@ -16,7 +16,6 @@ from typing import Protocol
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-
 _ARMS = ("A", "B1", "B2", "C")
 _ALLOWED_EVENTS = frozenset(
     {
@@ -42,7 +41,7 @@ class HarnessCaps:
 
     def __post_init__(self) -> None:
         if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            type(value) is not int or value < 1
             for value in (
                 self.requests,
                 self.calls,
@@ -65,13 +64,11 @@ class PcmuSegment:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.at_ms, bool)
-            or not isinstance(self.at_ms, int)
+            type(self.at_ms) is not int
             or self.at_ms < 0
-            or isinstance(self.duration_ms, bool)
-            or not isinstance(self.duration_ms, int)
+            or type(self.duration_ms) is not int
             or self.duration_ms < 1
-            or not isinstance(self.audio, bytes)
+            or type(self.audio) is not bytes
             or not self.audio
             or len(self.audio) != self.duration_ms * 8
         ):
@@ -85,9 +82,11 @@ class CallerSchedule:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.scenario_id, str)
+            type(self.scenario_id) is not str
             or not self.scenario_id
+            or type(self.segments) is not tuple
             or not self.segments
+            or any(type(segment) is not PcmuSegment for segment in self.segments)
             or any(
                 current.at_ms < prior.at_ms + prior.duration_ms
                 for prior, current in zip(self.segments, self.segments[1:])
@@ -132,13 +131,15 @@ class CommonEvidenceClock:
         self._onset: int | None = None
         self._last_assistant: int | None = None
         self._first_playback: int | None = None
+        self._closed = False
 
     def observe(self, event: str, *, at_ms: int) -> None:
         if (
-            event not in _ALLOWED_EVENTS
-            or isinstance(at_ms, bool)
-            or not isinstance(at_ms, int)
+            type(event) is not str
+            or event not in _ALLOWED_EVENTS
+            or type(at_ms) is not int
             or at_ms < self._now_ms
+            or self._closed
         ):
             raise ValueError("clock observation is invalid")
         self._now_ms = at_ms
@@ -150,6 +151,8 @@ class CommonEvidenceClock:
             self._last_assistant = at_ms
         elif event == "playback_sample_received" and self._first_playback is None:
             self._first_playback = at_ms
+        elif event == "session_closed":
+            self._closed = True
 
     def snapshot(self) -> ClockEvidence:
         return ClockEvidence(
@@ -158,6 +161,77 @@ class CommonEvidenceClock:
             last_assistant_sample_ms=self._last_assistant,
             first_playback_sample_ms=self._first_playback,
         )
+
+    @property
+    def current_ms(self) -> int:
+        return self._now_ms
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+
+class OfflineEvidenceTimestampAuthority:
+    """Harness-owned deterministic timestamps for non-scoring offline evidence."""
+
+    def __init__(self, schedule: CallerSchedule) -> None:
+        self._schedule = _detached_schedule(schedule)
+        self._input_index = 0
+        self._input_byte_count = 0
+        self._input_audio_ms = 0
+        self._onset_observed = False
+        self._assistant_observed = False
+        self._playback_observed = False
+        self._closed = False
+        self._now_ms = 0
+
+    @property
+    def input_byte_count(self) -> int:
+        return self._input_byte_count
+
+    @property
+    def input_audio_ms(self) -> int:
+        return self._input_audio_ms
+
+    def timestamp(self, event: str) -> int:
+        if type(event) is not str or self._closed:
+            raise ValueError("offline evidence event is invalid")
+        if event == "caller_speech_onset":
+            if self._onset_observed or self._input_index != 0:
+                raise ValueError("caller onset evidence is invalid")
+            self._onset_observed = True
+            self._now_ms = self._schedule.segments[0].at_ms
+        elif event == "input_speech_sample":
+            if (
+                not self._onset_observed
+                or self._assistant_observed
+                or self._input_index >= len(self._schedule.segments)
+            ):
+                raise ValueError("input evidence is invalid")
+            segment = self._schedule.segments[self._input_index]
+            self._input_index += 1
+            self._input_byte_count += len(segment.audio)
+            self._input_audio_ms += segment.duration_ms
+            self._now_ms = segment.at_ms + segment.duration_ms
+        elif event == "assistant_sample_received":
+            if (
+                self._assistant_observed
+                or self._input_index != len(self._schedule.segments)
+            ):
+                raise ValueError("assistant evidence is invalid")
+            self._assistant_observed = True
+            self._now_ms += 20
+        elif event == "playback_sample_received":
+            if not self._assistant_observed or self._playback_observed:
+                raise ValueError("playback evidence is invalid")
+            self._playback_observed = True
+            self._now_ms += 20
+        elif event == "session_closed":
+            self._closed = True
+            self._now_ms += 1
+        else:
+            raise ValueError("offline evidence event is invalid")
+        return self._now_ms
 
 
 class EphemeralEvidenceStore:
@@ -308,7 +382,7 @@ class BakeoffExecutionPlan:
         manifest_schedule_digests: dict[str, str],
         arms: Iterable[str] = _ARMS,
         sealed_seed_digest: str | None,
-    ) -> "BakeoffExecutionPlan":
+    ) -> BakeoffExecutionPlan:
         schedule_tuple = tuple(schedules)
         arm_tuple = tuple(arms)
         source_cases = tuple(
@@ -353,6 +427,22 @@ class HarnessUsage:
     concurrency: int = 0
     cost_minor_units: int = 0
 
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.requests,
+                self.calls,
+                self.duration_ms,
+                self.byte_count,
+                self.audio_ms,
+                self.retries,
+                self.concurrency,
+                self.cost_minor_units,
+            )
+        ):
+            raise ValueError("harness usage is invalid")
+
 
 class ExecutionCapLedger:
     """Atomic, execution-window-wide reservation ledger."""
@@ -368,8 +458,8 @@ class ExecutionCapLedger:
     )
 
     def __init__(self, caps: HarnessCaps) -> None:
-        if not isinstance(caps, HarnessCaps):
-            raise ValueError("harness caps are required")
+        if type(caps) is not HarnessCaps:
+            raise TypeError("harness caps are required")
         self._caps = caps
         self._usage = HarnessUsage()
         self._lock = threading.Lock()
@@ -383,6 +473,17 @@ class ExecutionCapLedger:
         retry_count: int,
         cost_minor_units: int,
     ) -> bool:
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                duration_ms,
+                byte_count,
+                audio_ms,
+                retry_count,
+                cost_minor_units,
+            )
+        ):
+            return False
         requested = {
             "requests": 1,
             "calls": 1,
@@ -425,7 +526,16 @@ class ExecutionCapLedger:
 
     def snapshot(self) -> HarnessUsage:
         with self._lock:
-            return self._usage
+            return HarnessUsage(
+                requests=self._usage.requests,
+                calls=self._usage.calls,
+                duration_ms=self._usage.duration_ms,
+                byte_count=self._usage.byte_count,
+                audio_ms=self._usage.audio_ms,
+                retries=self._usage.retries,
+                concurrency=self._usage.concurrency,
+                cost_minor_units=self._usage.cost_minor_units,
+            )
 
 
 class SessionController(Protocol):
@@ -478,6 +588,162 @@ class OfflineSessionController:
             self._active.clear()
 
 
+@dataclass(frozen=True, slots=True)
+class OfflineSessionBudget:
+    """Upper bound reserved before an offline session runner is contacted."""
+
+    output_byte_count: int
+    output_audio_ms: int
+    duration_ms: int
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.output_byte_count,
+                self.output_audio_ms,
+                self.duration_ms,
+            )
+        ):
+            raise ValueError("offline session budget is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class OfflineSessionResult:
+    """Erasable PCMU result returned by an injected no-network session."""
+
+    input_byte_count: int
+    input_audio_ms: int
+    output_audio_ms: int
+    duration_ms: int
+    returned_audio: bytearray = field(repr=False)
+    stopped: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                type(value) is not int or value < 0
+                for value in (
+                    self.input_byte_count,
+                    self.input_audio_ms,
+                    self.output_audio_ms,
+                    self.duration_ms,
+                )
+            )
+            or type(self.returned_audio) is not bytearray
+            or len(self.returned_audio) != self.output_audio_ms * 8
+            or type(self.stopped) is not bool
+        ):
+            raise ValueError("offline session result is invalid")
+
+
+class EvidenceObserver(Protocol):
+    def __call__(self, event: str, *, at_ms: int) -> None: ...
+
+
+class OfflineSessionRunner(Protocol):
+    """Injected session boundary; the caller harness never creates output."""
+
+    def budget(self, schedule: CallerSchedule) -> OfflineSessionBudget: ...
+
+    def run(
+        self,
+        *,
+        arm: str,
+        schedule: CallerSchedule,
+        stop_requested: Callable[[], bool],
+        observe: EvidenceObserver,
+    ) -> OfflineSessionResult: ...
+
+
+def _detached_schedule(schedule: CallerSchedule) -> CallerSchedule:
+    """Copy immutable schedule values across an untrusted runner boundary."""
+    if type(schedule) is not CallerSchedule:
+        raise TypeError("caller schedule is required")
+    return CallerSchedule(
+        scenario_id=schedule.scenario_id,
+        segments=tuple(
+            PcmuSegment(
+                at_ms=segment.at_ms,
+                duration_ms=segment.duration_ms,
+                audio=bytes(segment.audio),
+            )
+            for segment in schedule.segments
+        ),
+    )
+
+
+class DeterministicOfflineSessionRunner:
+    """Provider-free development runner with fixed synthetic PCMU output."""
+
+    def budget(self, schedule: CallerSchedule) -> OfflineSessionBudget:
+        if type(schedule) is not CallerSchedule:
+            raise TypeError("caller schedule is required")
+        final_input_ms = max(
+            segment.at_ms + segment.duration_ms
+            for segment in schedule.segments
+        )
+        return OfflineSessionBudget(
+            output_byte_count=160,
+            output_audio_ms=20,
+            duration_ms=final_input_ms + 41,
+        )
+
+    def run(
+        self,
+        *,
+        arm: str,
+        schedule: CallerSchedule,
+        stop_requested: Callable[[], bool],
+        observe: EvidenceObserver,
+    ) -> OfflineSessionResult:
+        if (
+            arm not in _ARMS
+            or type(schedule) is not CallerSchedule
+            or not callable(stop_requested)
+            or not callable(observe)
+        ):
+            raise ValueError("offline session input is invalid")
+        input_byte_count = 0
+        input_audio_ms = 0
+        stopped = False
+        last_input_ms = 0
+        for index, segment in enumerate(schedule.segments):
+            if stop_requested():
+                stopped = True
+                break
+            if index == 0:
+                observe("caller_speech_onset", at_ms=segment.at_ms)
+            input_byte_count += len(segment.audio)
+            input_audio_ms += segment.duration_ms
+            last_input_ms = segment.at_ms + segment.duration_ms
+            observe("input_speech_sample", at_ms=last_input_ms)
+        if stopped:
+            close_ms = last_input_ms + 1
+            observe("session_closed", at_ms=close_ms)
+            return OfflineSessionResult(
+                input_byte_count=input_byte_count,
+                input_audio_ms=input_audio_ms,
+                output_audio_ms=0,
+                duration_ms=close_ms,
+                returned_audio=bytearray(),
+                stopped=True,
+            )
+        assistant_at = last_input_ms + 20
+        playback_at = assistant_at + 20
+        close_ms = playback_at + 1
+        observe("assistant_sample_received", at_ms=assistant_at)
+        observe("playback_sample_received", at_ms=playback_at)
+        observe("session_closed", at_ms=close_ms)
+        return OfflineSessionResult(
+            input_byte_count=input_byte_count,
+            input_audio_ms=input_audio_ms,
+            output_audio_ms=20,
+            duration_ms=close_ms,
+            returned_audio=bytearray(b"\xfe" * 160),
+        )
+
+
 class OfflineCallerHarness:
     """Deterministic no-network harness; it retains aggregate evidence only."""
 
@@ -486,19 +752,46 @@ class OfflineCallerHarness:
         *,
         caps: HarnessCaps,
         plan: BakeoffExecutionPlan,
+        session_runner: OfflineSessionRunner,
         stop_requested: Callable[[], bool] = lambda: False,
         session_controller: SessionController | None = None,
     ) -> None:
         if (
-            not isinstance(caps, HarnessCaps)
-            or not isinstance(plan, BakeoffExecutionPlan)
+            type(caps) is not HarnessCaps
+            or type(plan) is not BakeoffExecutionPlan
+            or not callable(getattr(session_runner, "budget", None))
+            or not callable(getattr(session_runner, "run", None))
             or not callable(stop_requested)
         ):
-            raise ValueError("harness configuration is invalid")
-        self.caps = caps
-        self.plan = plan
+            raise TypeError("harness configuration is invalid")
+        try:
+            internal_caps = HarnessCaps(
+                requests=caps.requests,
+                calls=caps.calls,
+                duration_ms=caps.duration_ms,
+                byte_count=caps.byte_count,
+                audio_ms=caps.audio_ms,
+                retries=caps.retries,
+                concurrency=caps.concurrency,
+                cost_minor_units=caps.cost_minor_units,
+            )
+            internal_plan = BakeoffExecutionPlan.create(
+                schedules=tuple(
+                    _detached_schedule(schedule)
+                    for schedule in plan.schedules
+                ),
+                manifest_schedule_digests=dict(plan.manifest_schedule_digests),
+                arms=tuple(plan.source_arms),
+                sealed_seed_digest=plan.sealed_seed_digest,
+            )
+        except (TypeError, ValueError) as exc:
+            raise TypeError("harness execution plan is invalid") from exc
+        if internal_plan.sealed_case_order != plan.sealed_case_order:
+            raise TypeError("harness execution plan is invalid")
+        self._plan = internal_plan
         self._stop_requested = stop_requested
-        self._ledger = ExecutionCapLedger(caps)
+        self._session_runner = session_runner
+        self._ledger = ExecutionCapLedger(internal_caps)
         self._sessions = session_controller or OfflineSessionController()
         self._next_case_index = 0
         self._halted = False
@@ -517,48 +810,69 @@ class OfflineCallerHarness:
         retry_count: int = 0,
         cost_minor_units: int = 1,
     ) -> HarnessSummary:
-        if not isinstance(evidence, EphemeralEvidenceStore):
-            raise ValueError("ephemeral evidence store is required")
+        if type(evidence) is not EphemeralEvidenceStore:
+            raise TypeError("ephemeral evidence store is required")
         if (
             arm not in _ARMS
-            or not isinstance(scenario_id, str)
+            or type(scenario_id) is not str
             or not scenario_id
-            or isinstance(retry_count, bool)
-            or not isinstance(retry_count, int)
+            or type(retry_count) is not int
             or retry_count < 0
-            or isinstance(cost_minor_units, bool)
-            or not isinstance(cost_minor_units, int)
+            or type(cost_minor_units) is not int
             or cost_minor_units < 0
         ):
             evidence.teardown()
             raise ValueError("harness arm or accounting input is invalid")
-        schedule = self.plan.schedule(scenario_id)
+        schedule = self._plan.schedule(scenario_id)
         if schedule is None:
             evidence.teardown()
             raise RuntimeError("scenario is not in the manifest-bound plan")
+        sealed_scenario_id = schedule.scenario_id
+        sealed_schedule_digest = schedule.digest
         input_byte_count = sum(len(segment.audio) for segment in schedule.segments)
         input_audio_ms = sum(segment.duration_ms for segment in schedule.segments)
-        expected_output_bytes = 160
-        expected_output_audio_ms = 20
-        byte_count = input_byte_count + expected_output_bytes
-        audio_ms = input_audio_ms + expected_output_audio_ms
-        final_input_ms = max(
-            segment.at_ms + segment.duration_ms for segment in schedule.segments
+        schedule_end_ms = max(
+            segment.at_ms + segment.duration_ms
+            for segment in schedule.segments
         )
-        assistant_at = final_input_ms + 20
-        playback_at = assistant_at + 20
-        planned_close_at = playback_at + 1
+        try:
+            budget = self._session_runner.budget(_detached_schedule(schedule))
+        except BaseException:
+            try:
+                evidence.teardown()
+            except BaseException:  # noqa: BLE001,S110
+                pass
+            raise
+        if (
+            type(budget) is not OfflineSessionBudget
+            or any(
+                type(value) is not int
+                for value in (
+                    budget.output_byte_count,
+                    budget.output_audio_ms,
+                    budget.duration_ms,
+                )
+            )
+            or budget.duration_ms < schedule_end_ms
+        ):
+            evidence.teardown()
+            raise TypeError("session runner budget is invalid")
+        budget_output_byte_count = budget.output_byte_count
+        budget_output_audio_ms = budget.output_audio_ms
+        budget_duration_ms = budget.duration_ms
+        byte_count = input_byte_count + budget_output_byte_count
+        audio_ms = input_audio_ms + budget_output_audio_ms
         with self._state_lock:
             if (
                 self._halted
-                or self._next_case_index >= len(self.plan.sealed_case_order)
+                or self._next_case_index >= len(self._plan.sealed_case_order)
                 or ExecutionCase(arm=arm, scenario_id=scenario_id)
-                != self.plan.sealed_case_order[self._next_case_index]
+                != self._plan.sealed_case_order[self._next_case_index]
             ):
                 evidence.teardown()
                 raise RuntimeError("candidate order is not the sealed execution order")
             if not self._ledger.reserve(
-                duration_ms=planned_close_at,
+                duration_ms=budget_duration_ms,
                 byte_count=byte_count,
                 audio_ms=audio_ms,
                 retry_count=retry_count,
@@ -571,73 +885,185 @@ class OfflineCallerHarness:
             case_index = self._next_case_index
             self._next_case_index += 1
         clock = CommonEvidenceClock()
+        timestamp_authority = OfflineEvidenceTimestampAuthority(schedule)
         returned_audio = bytearray()
-        transferred_bytes = 0
-        transferred_audio_ms = 0
-        stopped = False
-        actual_close_at = 0
+        erasable_audio = returned_audio
+        candidate_audio_exact = False
+        stop_observed = False
+        abort_all_on_cleanup = False
+        primary_failure: BaseException | None = None
         session_id = (
-            f"{case_index}_{arm}_{schedule.scenario_id}"
+            f"{case_index}_{arm}_{sealed_scenario_id}"
         )
+
+        def observe_stop() -> bool:
+            nonlocal stop_observed
+            requested = self._stop_requested()
+            if type(requested) is not bool:
+                raise TypeError("stop callback must return a boolean")
+            if requested:
+                stop_observed = True
+            return requested
+
+        def observe_evidence(event: str, *, at_ms: int) -> None:
+            if type(at_ms) is not int:
+                raise TypeError("runner timestamp must be an integer")
+            if stop_observed and event != "session_closed":
+                raise RuntimeError("session emitted evidence after stop")
+            clock.observe(
+                event,
+                at_ms=timestamp_authority.timestamp(event),
+            )
+
         try:
             self._sessions.begin(session_id)
-            for index, segment in enumerate(schedule.segments):
-                if self._stop_requested():
-                    stopped = True
-                    with self._state_lock:
-                        self._halted = True
-                    self._sessions.abort_all()
-                    break
-                if index == 0:
-                    clock.observe("caller_speech_onset", at_ms=segment.at_ms)
-                transferred_bytes += len(segment.audio)
-                transferred_audio_ms += segment.duration_ms
-                clock.observe(
-                    "input_speech_sample",
-                    at_ms=segment.at_ms + segment.duration_ms,
+            if observe_stop():
+                abort_all_on_cleanup = True
+                raise RuntimeError("stop requested before session execution")
+            result = self._session_runner.run(
+                arm=arm,
+                schedule=_detached_schedule(schedule),
+                stop_requested=observe_stop,
+                observe=observe_evidence,
+            )
+            candidate_audio = getattr(result, "returned_audio", None)
+            candidate_audio_exact = type(candidate_audio) is bytearray
+            if isinstance(candidate_audio, bytearray):
+                erasable_audio = candidate_audio
+            if candidate_audio_exact:
+                returned_audio = candidate_audio
+            observe_stop()
+            snapshot = clock.snapshot()
+            if (
+                type(result) is not OfflineSessionResult
+                or not candidate_audio_exact
+                or any(
+                    type(value) is not int
+                    for value in (
+                        result.input_byte_count,
+                        result.input_audio_ms,
+                        result.output_audio_ms,
+                        result.duration_ms,
+                    )
                 )
-            if not stopped:
-                returned_audio.extend(b"\xfe" * expected_output_bytes)
-                transferred_bytes += expected_output_bytes
-                transferred_audio_ms += expected_output_audio_ms
-                clock.observe("assistant_sample_received", at_ms=assistant_at)
-                clock.observe("playback_sample_received", at_ms=playback_at)
-                actual_close_at = planned_close_at
-                clock.observe("session_closed", at_ms=actual_close_at)
+                or type(result.stopped) is not bool
+                or result.input_byte_count
+                != timestamp_authority.input_byte_count
+                or result.input_audio_ms
+                != timestamp_authority.input_audio_ms
+                or result.input_byte_count != result.input_audio_ms * 8
+                or len(returned_audio) != result.output_audio_ms * 8
+                or result.input_byte_count > input_byte_count
+                or result.input_audio_ms > input_audio_ms
+                or len(returned_audio) > budget_output_byte_count
+                or result.output_audio_ms > budget_output_audio_ms
+                or result.duration_ms > budget_duration_ms
+                or clock.current_ms != result.duration_ms
+                or not clock.is_closed
+                or result.stopped != stop_observed
+                or (
+                    not result.stopped
+                    and (
+                        result.input_byte_count != input_byte_count
+                        or result.input_audio_ms != input_audio_ms
+                        or not returned_audio
+                        or result.duration_ms < schedule_end_ms
+                        or snapshot.caller_speech_onset_ms is None
+                        or snapshot.caller_speech_onset_ms
+                        != schedule.segments[0].at_ms
+                        or snapshot.last_input_speech_sample_ms is None
+                        or snapshot.last_input_speech_sample_ms != schedule_end_ms
+                        or snapshot.last_assistant_sample_ms is None
+                        or snapshot.first_playback_sample_ms is None
+                        or not (
+                            snapshot.caller_speech_onset_ms
+                            <= snapshot.last_input_speech_sample_ms
+                            < snapshot.last_assistant_sample_ms
+                            < snapshot.first_playback_sample_ms
+                            < result.duration_ms
+                        )
+                    )
+                )
+                or (
+                    result.stopped
+                    and (
+                        result.output_audio_ms != 0
+                        or bool(returned_audio)
+                        or snapshot.last_assistant_sample_ms is not None
+                        or snapshot.first_playback_sample_ms is not None
+                        or (
+                            result.input_byte_count == 0
+                            and (
+                                snapshot.caller_speech_onset_ms is not None
+                                or snapshot.last_input_speech_sample_ms is not None
+                            )
+                        )
+                        or (
+                            result.input_byte_count > 0
+                            and (
+                                snapshot.caller_speech_onset_ms is None
+                                or snapshot.last_input_speech_sample_ms is None
+                                or snapshot.caller_speech_onset_ms
+                                > snapshot.last_input_speech_sample_ms
+                                or snapshot.last_input_speech_sample_ms
+                                > result.duration_ms
+                            )
+                        )
+                    )
+                )
+            ):
+                raise RuntimeError("session runner exceeded reserved budget")
+            if not result.stopped:
                 self._sessions.close(session_id)
             else:
-                actual_close_at = (
-                    clock.snapshot().last_input_speech_sample_ms or 0
-                ) + 1
-                clock.observe("session_closed", at_ms=actual_close_at)
-            artifact_id = f"{arm}_{schedule.scenario_id}"
+                with self._state_lock:
+                    self._halted = True
+                abort_all_on_cleanup = True
+            artifact_id = f"{arm}_{sealed_scenario_id}"
             _, artifact_digest = evidence.capture(
                 artifact_id=artifact_id,
                 audio=bytes(returned_audio),
             )
             summary = HarnessSummary(
                 arm=arm,
-                scenario_id=schedule.scenario_id,
-                schedule_digest=schedule.digest,
+                scenario_id=sealed_scenario_id,
+                schedule_digest=sealed_schedule_digest,
                 encrypted_artifact_digest=artifact_digest,
-                byte_count=transferred_bytes,
-                audio_ms=transferred_audio_ms,
-                duration_ms=actual_close_at,
+                byte_count=result.input_byte_count + len(returned_audio),
+                audio_ms=result.input_audio_ms + result.output_audio_ms,
+                duration_ms=result.duration_ms,
                 clock=clock.snapshot(),
-                stopped=stopped,
+                stopped=result.stopped,
             )
             return summary
-        except BaseException:
+        except BaseException as exc:
+            primary_failure = exc
+            abort_all_on_cleanup = True
             with self._state_lock:
                 self._halted = True
-            self._sessions.abort_all()
             raise
         finally:
-            self._sessions.abort(session_id)
-            self._ledger.release()
-            for index in range(len(returned_audio)):
-                returned_audio[index] = 0
-            evidence.teardown()
+            cleanup_failure: BaseException | None = None
+            cleanup_steps = (
+                self._sessions.abort_all
+                if abort_all_on_cleanup
+                else lambda: self._sessions.abort(session_id),
+                self._ledger.release,
+                lambda: bytearray.__setitem__(
+                    erasable_audio,
+                    slice(None),
+                    b"\x00" * bytearray.__len__(erasable_audio),
+                ),
+                evidence.teardown,
+            )
+            for cleanup in cleanup_steps:
+                try:
+                    cleanup()
+                except BaseException as exc:  # noqa: BLE001
+                    if cleanup_failure is None:
+                        cleanup_failure = exc
+            if primary_failure is None and cleanup_failure is not None:
+                raise cleanup_failure
 
 
 def development_schedule() -> CallerSchedule:
@@ -725,6 +1151,7 @@ def run_offline_self_check(*, arm: str, manifest: dict[str, object]) -> bool:
         harness = OfflineCallerHarness(
             caps=HarnessCaps(10, 10, 2_000, 10_000, 1_000, 1, 2, 10),
             plan=plan,
+            session_runner=DeterministicOfflineSessionRunner(),
         )
         summaries = []
         for index, case in enumerate(plan.sealed_case_order):
@@ -752,10 +1179,11 @@ def run_offline_self_check(*, arm: str, manifest: dict[str, object]) -> bool:
 
 
 __all__ = [
-    "CallerSchedule",
     "BakeoffExecutionPlan",
+    "CallerSchedule",
     "ClockEvidence",
     "CommonEvidenceClock",
+    "DeterministicOfflineSessionRunner",
     "EphemeralEvidenceStore",
     "ExecutionCapLedger",
     "ExecutionCase",
@@ -763,7 +1191,10 @@ __all__ = [
     "HarnessSummary",
     "HarnessUsage",
     "OfflineCallerHarness",
+    "OfflineSessionBudget",
     "OfflineSessionController",
+    "OfflineSessionResult",
+    "OfflineSessionRunner",
     "PcmuSegment",
     "candidate_order",
     "development_harness_manifest",

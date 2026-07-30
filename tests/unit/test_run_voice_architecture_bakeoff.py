@@ -4,15 +4,14 @@ import ast
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from scripts.voice_bakeoff_caller import development_harness_manifest
-
 
 _SCRIPT = Path("scripts/run_voice_architecture_bakeoff.py")
 _SPEC = importlib.util.spec_from_file_location("bakeoff_runner", _SCRIPT)
@@ -254,7 +253,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "12756f6defdcc0c45f88921b3f12221db0ad4d858cc7e637f91b809ce9632272"
     ),
     "scripts.voice_bakeoff_caller": (
-        "a4f2aab9e95bd27048dbec60268c109fee3362ee6a2fd6f33f77dc31d1f70c1b"
+        "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
     ),
 }
 _OFFLINE_ALLOWED_IMPORTS = {
@@ -310,6 +309,9 @@ _OFFLINE_ALLOWED_GETATTR = {
                 "getattr(current, name)",
                 "getattr(self._caps, name)",
                 "getattr(self._usage, name)",
+                'getattr(session_runner, "budget", None)',
+                'getattr(session_runner, "run", None)',
+                'getattr(result, "returned_audio", None)',
             )
         ]
     ),

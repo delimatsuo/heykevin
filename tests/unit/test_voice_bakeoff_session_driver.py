@@ -29,6 +29,9 @@ from app.services.voice_bakeoff_session_driver import (
     TraceKind,
     _MutableFrame,
 )
+from app.services.voice_bakeoff_turn_composition import (
+    CompositionStatus,
+)
 from app.services.voice_lifecycle import (
     VoiceSemanticActKind,
     VoiceSessionBinding,
@@ -229,6 +232,49 @@ def test_low_confidence_repair_reserves_the_reviewed_spanish_asset(
     assert tuple(act.text for act in captured[0].plan.acts) == (
         "Perdón, no entendí. Puede repetirlo?",
     )
+
+
+def test_one_repair_success_then_second_failure_requires_silent_closure():
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPAIR_EXHAUSTION,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 1
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.INPUT_FINAL) == 2
+    assert kinds.count(TraceKind.REPAIR_PENDING) == 1
+    assert kinds.count(TraceKind.ACT_CONFIRMED) == 1
+    assert kinds.count(TraceKind.PLAYBACK_OBSERVED) == 1
+    assert kinds.count(TraceKind.RESPONSE_OBSERVED) == 1
+    assert kinds.count(TraceKind.TERMINAL) == 1
+    second_input = kinds.index(
+        TraceKind.INPUT_FINAL,
+        kinds.index(TraceKind.INPUT_FINAL) + 1,
+    )
+    assert (
+        kinds.index(TraceKind.RESPONSE_OBSERVED)
+        < second_input
+        < kinds.index(TraceKind.TERMINAL)
+    )
+    terminal = next(
+        event
+        for event in result.trace
+        if event.kind is TraceKind.TERMINAL
+    )
+    assert terminal.composition_status is (
+        CompositionStatus.CLOSURE_REQUIRED
+    )
+    assert terminal.locale == "es"
+    assert tuple(
+        event.semantic_act_kind
+        for event in result.trace
+        if event.kind is TraceKind.ACT_CONFIRMED
+    ) == (VoiceSemanticActKind.REPAIR,)
 
 
 def test_superseding_turn_cancels_old_response_before_new_playback():

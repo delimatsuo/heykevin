@@ -78,7 +78,7 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "0a8f5438d21dbfb0427f724cca0bcccc804bc6417d0fa083bbb22b02deab5c45"
+_DRIVER_SOURCE_DIGEST = "78f364a8c29aceae72e405f1d6359c64dc7af2e93438771184b5256ab4e503a2"
 _FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
@@ -140,6 +140,7 @@ class SyntheticJourney(str, Enum):
     UNSUPPORTED_LANGUAGE = "unsupported_language"
     SUPERSEDING_TURN = "superseding_turn"
     BIDIRECTIONAL_CODE_SWITCH = "bidirectional_code_switch"
+    REPAIR_EXHAUSTION = "repair_exhaustion"
 
 
 class DriverFailure(str, Enum):
@@ -409,6 +410,15 @@ _FIXTURES = MappingProxyType({
             ("service_action", "repair"),
             ("service_object", "furnace"),
         ),
+    ),
+    SyntheticJourney.REPAIR_EXHAUSTION: _Fixture(
+        locale="es",
+        content="Fixture caller audio is unclear on the first attempt.",
+        fields=(
+            ("language", "es"),
+            ("intent", "service_request"),
+        ),
+        low_confidence=True,
     ),
 })
 
@@ -906,6 +916,13 @@ class OfflineSessionDriver:
             ):
                 raise _DriverAbort(DriverFailure.COMPOSITION)
             return receipt.at_ms
+        if grant.journey is SyntheticJourney.REPAIR_EXHAUSTION:
+            return self._execute_repair_exhaustion(
+                assembly=assembly,
+                first=first,
+                now_ms=now_ms,
+                trace=trace,
+            )
         delivery_at_ms = now_ms + 10
         if grant.journey is SyntheticJourney.SUPERSEDING_TURN:
             correction = _Fixture(
@@ -995,6 +1012,74 @@ class OfflineSessionDriver:
         if final.status is not CompositionStatus.RESPONSE_OBSERVED:
             raise _DriverAbort(DriverFailure.DELIVERY)
         return final_at_ms
+
+    def _execute_repair_exhaustion(
+        self,
+        *,
+        assembly: _Assembly,
+        first: CompositionResult,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        if first.status is not CompositionStatus.REPAIR_PENDING:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        observed, first_complete_ms = self._deliver_pending(
+            assembly=assembly,
+            pending=first,
+            at_ms=now_ms + 5,
+            trace=trace,
+        )
+        if observed.status is not CompositionStatus.RESPONSE_OBSERVED:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        second_fixture = _Fixture(
+            locale="es",
+            content="Fixture caller audio remains unclear on the second attempt.",
+            fields=(
+                ("language", "es"),
+                ("intent", "service_request"),
+            ),
+            low_confidence=True,
+        )
+        second_receipt = self._admit_final_turn(
+            assembly=assembly,
+            fixture=second_fixture,
+            turn_number=2,
+            at_ms=first_complete_ms + 1,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.INPUT_FINAL,
+            )
+        )
+        second_at_ms = max(
+            first_complete_ms + 2,
+            second_receipt.at_ms,
+        )
+        second = assembly.transaction.execute(
+            second_receipt,
+            content=second_fixture.content,
+            backend=_SyntheticObservationBackend(
+                second_fixture
+            ),
+            now_ms=second_at_ms,
+        )
+        trace.append(
+            self._composition_trace(
+                trace,
+                second,
+                locale=self._trace_locale(
+                    assembly.state.current_state().language
+                ),
+            )
+        )
+        if (
+            second.status is not CompositionStatus.CLOSURE_REQUIRED
+            or second.act_ids
+            or second.act_kinds
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        return second_at_ms
 
     def _supersede_turn(
         self,

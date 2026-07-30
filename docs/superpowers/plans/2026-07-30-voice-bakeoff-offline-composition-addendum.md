@@ -310,7 +310,9 @@ The first driver slice implements only these closed synthetic journeys:
 - unsupported-language no-audio failure;
 - a superseding turn during Phase 2;
 - Spanish to Mandarin to Spanish correction with stale-response suppression
-  and one canonical value per state fact.
+  and one canonical value per state fact;
+- one localized repair observed before a second low-confidence turn returns
+  typed `closure_required` with no second repair or closure audio.
 
 All four candidate arms must produce an identical content-free canonical trace
 for those journeys. The slice also enforces exact inbound and outbound frame,
@@ -334,7 +336,10 @@ one `INPUT_FINAL` trace event for each admitted final turn before stale-response
 supersession and new-response delivery. The bidirectional code-switch fixture
 commits three final turns (`es` to `zh` to `es`), proves both stale responses are
 superseded before the one delivered response, and verifies corrected state facts
-replace rather than duplicate prior values.
+replace rather than duplicate prior values. The repair-exhaustion fixture proves
+the first authorized repair is fully observed before a second final turn is
+admitted; the already-consumed global call/epoch repair budget then yields typed
+`closure_required` without reserving, confirming, or playing another act.
 
 This slice is not the completed synthetic-journey gate and does not claim the
 remaining journeys below. Those journeys require later offline-only increments

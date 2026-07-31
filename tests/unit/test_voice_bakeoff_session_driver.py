@@ -6,10 +6,15 @@ import ast
 import hashlib
 import re
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+import app.services.voice_bakeoff_closure as closure_module
+from app.services.voice_bakeoff_closure import (
+    opt_out_text_digest,
+)
 from app.services.voice_bakeoff_materializer import (
     FixedProposalMaterializer,
 )
@@ -25,9 +30,11 @@ from app.services.voice_bakeoff_session_driver import (
     OfflineSessionFacade,
     OfflineSessionLimits,
     OfflineSessionState,
+    OfflineStopPosture,
     SyntheticJourney,
     TraceKind,
     _MutableFrame,
+    _SyntheticObservationBackend,
 )
 from app.services.voice_bakeoff_turn_composition import (
     CompositionStatus,
@@ -72,6 +79,8 @@ _REVIEWED_ASSEMBLY_SOURCE_PATHS = {
         Path("app/services/receptionist_state.py"),
     "voice_bakeoff_coordinator":
         Path("app/services/voice_bakeoff_coordinator.py"),
+    "voice_bakeoff_closure":
+        Path("app/services/voice_bakeoff_closure.py"),
     "voice_bakeoff_silence":
         Path("app/services/voice_bakeoff_silence.py"),
     "voice_call_lifecycle":
@@ -89,6 +98,7 @@ _REVIEWED_DIRECT_SERVICE_MODULES = {
     "app.services.caller_observation_extractor",
     "app.services.receptionist_state",
     "app.services.voice_bakeoff_coordinator",
+    "app.services.voice_bakeoff_closure",
     "app.services.voice_bakeoff_materializer",
     "app.services.voice_bakeoff_silence",
     "app.services.voice_bakeoff_turn_composition",
@@ -112,12 +122,16 @@ def _lease(
     journey: SyntheticJourney = SyntheticJourney.QUESTION_ONLY,
     limits: OfflineSessionLimits = OfflineSessionLimits(),  # noqa: B008
     now_ms: int = 10,
+    stop_posture: OfflineStopPosture = (
+        OfflineStopPosture.RESPONSE_PENDING
+    ),
 ):
     driver = OfflineSessionDriver(limits)
     facade = driver.lease(
         arm=arm,
         journey=journey,
         now_ms=now_ms,
+        stop_posture=stop_posture,
     )
     assert facade is not None
     return driver, facade
@@ -131,6 +145,7 @@ def _trace_projection(result):
             event.composition_status,
             event.locale,
             event.replay_mode,
+            event.content_digest,
         )
         for event in result.trace
     )
@@ -151,6 +166,532 @@ def test_every_arm_produces_the_same_content_free_trace(
         traces[arm] = _trace_projection(result)
 
     assert len(set(traces.values())) == 1
+
+
+def test_unconfirmed_or_ambiguous_opt_out_is_silent_withdrawal():
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.outbound_bytes == 0
+    assert result.outbound_audio_ms == 0
+    assert result.buffers_scrubbed
+    kinds = tuple(event.kind for event in result.trace)
+    assert TraceKind.WITHDRAWAL_CLASSIFIED in kinds
+    assert TraceKind.GENERAL_AUTHORITY_CANCELLED in kinds
+    assert TraceKind.CLOSURE_TEARDOWN_COMPLETE in kinds
+    forbidden = {
+        TraceKind.SCRIPTED_OPT_OUT_AUTHORIZED,
+        TraceKind.CLOSURE_CAPABILITY_RETAINED,
+        TraceKind.CLOSURE_STAGED,
+        TraceKind.OFFLINE_OUTBOUND_COMMITTED,
+        TraceKind.SYNTHETIC_PLAYBACK_OBSERVED,
+        TraceKind.ACT_CONFIRMED,
+        TraceKind.TRANSPORT_RESOLVED,
+        TraceKind.PLAYBACK_OBSERVED,
+    }
+    assert forbidden.isdisjoint(kinds)
+
+
+def test_stop_boundary_never_enters_extraction_or_input_admission(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+    captured_content = []
+    original = _SyntheticObservationBackend.__call__
+
+    def capture(backend, request):
+        captured_content.append(request.content)
+        return original(backend, request)
+
+    monkeypatch.setattr(
+        _SyntheticObservationBackend,
+        "__call__",
+        capture,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert captured_content == [
+        "Fixture caller requests a furnace repair."
+    ]
+    assert all(
+        token not in captured_content[0].casefold()
+        for token in ("stop", "opt out", "withdraw")
+    )
+    assert sum(
+        event.kind is TraceKind.INPUT_FINAL
+        for event in result.trace
+    ) == 1
+    assert result.outbound_frame_count == 0
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_digest"),
+    (
+        (
+            "en",
+            "bd79a37b7abe7e5311eb00e96fb5e2bc14b81e9e78933e930ded109e70787bff",
+        ),
+        (
+            "es",
+            "6580c58f06b53ef873c3a000c37f3a2d839df332c56b5f9e3d457896aabcc976",
+        ),
+        (
+            "zh",
+            "07a670fe45b7415e3cc6d474d9a9300e9ed670cc6b4cec322ca04636f64f2bb6",
+        ),
+    ),
+)
+def test_scripted_opt_out_commits_one_reviewed_local_frame_per_arm(
+    locale: str,
+    expected_digest: str,
+):
+    traces = {}
+    for arm in CandidateArm:
+        driver = OfflineSessionDriver()
+        facade = driver.lease(
+            arm=arm,
+            journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+            now_ms=10,
+            scripted_locale=locale,
+        )
+        assert facade is not None
+        confirmation = driver.confirm_scripted_opt_out(
+            facade,
+            now_ms=10,
+        )
+        assert confirmation is not None
+
+        result = driver.run(facade, now_ms=10)
+
+        assert result is not None
+        assert result.state is OfflineSessionState.CLOSED
+        assert result.failure is None
+        assert result.outbound_frame_count == 1
+        assert result.outbound_bytes == 160
+        assert result.outbound_audio_ms == 20
+        assert result.buffers_scrubbed
+        commits = tuple(
+            event
+            for event in result.trace
+            if event.kind is TraceKind.OFFLINE_OUTBOUND_COMMITTED
+        )
+        assert len(commits) == 1
+        assert commits[0].locale == locale
+        assert commits[0].content_digest == expected_digest
+        assert commits[0].semantic_act_kind is VoiceSemanticActKind.OPT_OUT
+        assert opt_out_text_digest(locale) == expected_digest
+        assert sum(
+            event.kind is TraceKind.CLOSURE_CAPABILITY_RETAINED
+            for event in result.trace
+        ) == 1
+        assert sum(
+            event.kind is TraceKind.SYNTHETIC_PLAYBACK_OBSERVED
+            for event in result.trace
+        ) == 1
+        assert not any(
+            event.kind is TraceKind.TRANSPORT_RESOLVED
+            for event in result.trace
+        )
+        traces[arm] = _trace_projection(result)
+
+    assert len(set(traces.values())) == 1
+
+
+@pytest.mark.parametrize("posture", tuple(OfflineStopPosture))
+@pytest.mark.parametrize("scripted", (False, True))
+def test_stop_postures_cancel_stale_authority_before_exact_delta(
+    posture: OfflineStopPosture,
+    scripted: bool,
+):
+    driver = OfflineSessionDriver()
+    facade = driver.lease(
+        arm=CandidateArm.B1,
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        now_ms=10,
+        scripted_locale="en",
+        stop_posture=posture,
+    )
+    assert facade is not None
+    if scripted:
+        assert driver.confirm_scripted_opt_out(
+            facade,
+            now_ms=10,
+        ) is not None
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    expected_baseline = int(
+        posture is not OfflineStopPosture.RESPONSE_PENDING
+    )
+    expected_delta = int(scripted)
+    assert (
+        result.pre_stop_outbound_frame_count
+        == expected_baseline
+    )
+    assert result.post_stop_outbound_frame_delta == expected_delta
+    assert result.post_stop_outbound_ordinals == (
+        (0,) if scripted else ()
+    )
+    assert result.outbound_frame_count == expected_delta
+    assert result.outbound_bytes == expected_delta * 160
+    assert result.outbound_audio_ms == expected_delta * 20
+    assert result.buffers_scrubbed
+    kinds = tuple(event.kind for event in result.trace)
+    activity_index = max(
+        index
+        for index, kind in enumerate(kinds)
+        if kind is TraceKind.PARTICIPANT_ACTIVITY
+    )
+    cancelled_index = kinds.index(
+        TraceKind.GENERAL_AUTHORITY_CANCELLED,
+        activity_index,
+    )
+    cleared_index = kinds.index(
+        TraceKind.GENERAL_OUTBOUND_CLEARED,
+        activity_index,
+    )
+    assert activity_index < cancelled_index < cleared_index
+    assert {
+        TraceKind.REPLAY_OBSERVED,
+        TraceKind.SILENCE_TIMER_ARMED,
+        TraceKind.TRANSPORT_RESOLVED,
+        TraceKind.PLAYBACK_OBSERVED,
+    }.isdisjoint(kinds[activity_index + 1:])
+    if scripted:
+        assert TraceKind.WITHDRAWAL_CLASSIFIED not in kinds
+        assert sum(
+            kind is TraceKind.OFFLINE_OUTBOUND_COMMITTED
+            for kind in kinds
+        ) == 1
+    else:
+        assert kinds.count(TraceKind.WITHDRAWAL_CLASSIFIED) == 1
+        assert TraceKind.OFFLINE_OUTBOUND_COMMITTED not in kinds
+
+
+@pytest.mark.parametrize(
+    "posture",
+    tuple(
+        posture
+        for posture in OfflineStopPosture
+        if posture is not OfflineStopPosture.RESPONSE_PENDING
+    ),
+)
+def test_nonzero_general_queue_is_zeroized_and_cleared_not_hidden(
+    posture: OfflineStopPosture,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        stop_posture=posture,
+    )
+    retained_payloads: list[bytearray] = []
+    original = driver._clear_general_outbound
+
+    def capture_and_clear(*, checkpoint):
+        retained_payloads.extend(
+            frame.payload for frame in driver._outbound_frames
+        )
+        return original(checkpoint=checkpoint)
+
+    monkeypatch.setattr(
+        driver,
+        "_clear_general_outbound",
+        capture_and_clear,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.pre_stop_outbound_frame_count == 1
+    assert result.post_stop_outbound_frame_delta == 0
+    assert result.outbound_frame_count == 0
+    assert len(retained_payloads) == 1
+    assert all(not any(payload) for payload in retained_payloads)
+    assert not driver._outbound_frames
+
+
+def test_portuguese_scripted_closure_is_unapproved_and_fails_silent():
+    driver = OfflineSessionDriver()
+    facade = driver.lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        now_ms=10,
+        scripted_locale="pt",
+    )
+    assert facade is not None
+
+    assert driver.confirm_scripted_opt_out(
+        facade,
+        now_ms=10,
+    ) is None
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.buffers_scrubbed
+    assert opt_out_text_digest("pt") is None
+    assert TraceKind.WITHDRAWAL_CLASSIFIED in {
+        event.kind for event in result.trace
+    }
+    assert not any(
+        event.kind is TraceKind.OFFLINE_OUTBOUND_COMMITTED
+        for event in result.trace
+    )
+
+
+def test_independent_withdrawal_overrides_live_scripted_confirmation():
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+    assert driver.confirm_scripted_opt_out(
+        facade,
+        now_ms=10,
+    ) is not None
+    assert driver.withdraw(facade)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.buffers_scrubbed
+    kinds = tuple(event.kind for event in result.trace)
+    assert TraceKind.WITHDRAWAL_CLASSIFIED in kinds
+    assert TraceKind.OFFLINE_OUTBOUND_COMMITTED not in kinds
+
+
+def test_withdrawal_is_reachable_while_run_holds_driver_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+    assert driver.confirm_scripted_opt_out(
+        facade,
+        now_ms=10,
+    ) is not None
+    commit_build_started = threading.Event()
+    allow_commit_build = threading.Event()
+    original_token = closure_module._token
+
+    def blocked_token(domain: bytes, *parts: str) -> str:
+        if domain == closure_module._COMMIT_DOMAIN:
+            commit_build_started.set()
+            assert allow_commit_build.wait(timeout=2)
+        return original_token(domain, *parts)
+
+    monkeypatch.setattr(closure_module, "_token", blocked_token)
+    results = []
+    run_thread = threading.Thread(
+        target=lambda: results.append(
+            driver.run(facade, now_ms=10)
+        )
+    )
+    run_thread.start()
+    assert commit_build_started.wait(timeout=2)
+
+    assert driver.withdraw(facade)
+    allow_commit_build.set()
+    run_thread.join(timeout=2)
+
+    assert not run_thread.is_alive()
+    assert len(results) == 1
+    result = results[0]
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.buffers_scrubbed
+    final_activity = max(
+        index
+        for index, event in enumerate(result.trace)
+        if event.kind is TraceKind.PARTICIPANT_ACTIVITY
+    )
+    forbidden_after_withdrawal = {
+        TraceKind.CLOSURE_STAGED,
+        TraceKind.OFFLINE_OUTBOUND_COMMITTED,
+        TraceKind.SYNTHETIC_PLAYBACK_OBSERVED,
+        TraceKind.TRANSPORT_RESOLVED,
+        TraceKind.PLAYBACK_OBSERVED,
+        TraceKind.SILENCE_TIMER_ARMED,
+    }
+    assert forbidden_after_withdrawal.isdisjoint(
+        event.kind
+        for event in result.trace[final_activity + 1:]
+    )
+
+
+def test_copied_confirmation_cannot_authorize_scripted_closure():
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+    confirmation = driver.confirm_scripted_opt_out(
+        facade,
+        now_ms=10,
+    )
+    assert confirmation is not None
+    driver._scripted_confirmation = replace(confirmation)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.buffers_scrubbed
+    assert TraceKind.CLOSURE_PREDICATE_REJECTED in {
+        event.kind for event in result.trace
+    }
+    assert not any(
+        event.kind is TraceKind.OFFLINE_OUTBOUND_COMMITTED
+        for event in result.trace
+    )
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ("mint_capability", "stage", "commit"),
+)
+def test_rejected_closure_predicate_adds_zero_frames(
+    boundary: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+    assert driver.confirm_scripted_opt_out(
+        facade,
+        now_ms=10,
+    ) is not None
+    monkeypatch.setattr(
+        driver._closure_authority,
+        boundary,
+        lambda **_: None,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.outbound_bytes == 0
+    assert result.outbound_audio_ms == 0
+    assert result.buffers_scrubbed
+    assert TraceKind.CLOSURE_PREDICATE_REJECTED in {
+        event.kind for event in result.trace
+    }
+    assert not any(
+        event.kind is TraceKind.OFFLINE_OUTBOUND_COMMITTED
+        for event in result.trace
+    )
+
+
+def test_ambiguous_general_cleanup_never_mints_or_commits_closure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+    )
+    assert driver.confirm_scripted_opt_out(
+        facade,
+        now_ms=10,
+    ) is not None
+    original = driver._seal_composition_assembly
+    attempts = 0
+
+    def fail_first(*, assembly, at_ms):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return False
+        return original(assembly=assembly, at_ms=at_ms)
+
+    monkeypatch.setattr(
+        driver,
+        "_seal_composition_assembly",
+        fail_first,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.DELIVERY
+    assert result.outbound_frame_count == 0
+    assert result.buffers_scrubbed
+    assert TraceKind.CLOSURE_CAPABILITY_RETAINED not in {
+        event.kind for event in result.trace
+    }
+    assert TraceKind.OFFLINE_OUTBOUND_COMMITTED not in {
+        event.kind for event in result.trace
+    }
+
+
+def test_scripted_locale_is_bound_into_the_lease_identity():
+    first = OfflineSessionDriver()
+    first_facade = first.lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        now_ms=10,
+        scripted_locale="en",
+    )
+    second = OfflineSessionDriver()
+    second_facade = second.lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        now_ms=10,
+        scripted_locale="es",
+    )
+
+    assert first_facade is not None
+    assert second_facade is not None
+    assert first_facade._lease_id != second_facade._lease_id
+
+
+def test_stop_posture_is_bound_into_the_lease_identity_and_scope():
+    first, first_facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        stop_posture=OfflineStopPosture.RESPONSE_PENDING,
+    )
+    second, second_facade = _lease(
+        journey=SyntheticJourney.OPT_OUT_WITHDRAWAL,
+        stop_posture=OfflineStopPosture.REPLAY_PENDING,
+    )
+
+    assert first_facade._lease_id != second_facade._lease_id
+    assert first_facade._stop_posture is (
+        OfflineStopPosture.RESPONSE_PENDING
+    )
+    assert second_facade._stop_posture is (
+        OfflineStopPosture.REPLAY_PENDING
+    )
+    assert first is not second
+    assert OfflineSessionDriver().lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.DIRECT_ANSWER,
+        now_ms=10,
+        stop_posture=OfflineStopPosture.REPLAY_PENDING,
+    ) is None
 
 
 def test_direct_answer_precedes_at_most_one_question():
@@ -1729,6 +2270,8 @@ def test_facade_constructor_and_limits_are_closed_exact_types():
             lease_id="a" * 64,
             expires_at_ms=1,
             contract_digest="b" * 64,
+            scripted_locale="en",
+            stop_posture=OfflineStopPosture.RESPONSE_PENDING,
             frames=[],
         )
     with pytest.raises(ValueError, match="exact integers"):

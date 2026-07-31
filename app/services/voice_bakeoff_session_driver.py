@@ -16,6 +16,13 @@ from app.services.caller_observation_extractor import (
     ObservationExtractor,
 )
 from app.services.receptionist_state import IntakeState
+from app.services.voice_bakeoff_closure import (
+    OfflineAuthorityInventory,
+    OfflineClosureCommitReceipt,
+    OfflineClosurePhase,
+    OfflineLocalClosureAuthority,
+    ScriptedOptOutConfirmationReceipt,
+)
 from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
 from app.services.voice_bakeoff_materializer import FixedProposalMaterializer
 from app.services.voice_bakeoff_silence import (
@@ -93,13 +100,15 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "4a205068fd605a4de9fe9a36006a71606f3c240392a0f9aa8d891599dd6ecc80"
-_FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
+_DRIVER_SOURCE_DIGEST = "654afa6601e985d43ee123c333f70aa17ef86686c43ab76e9e389b9bc2c59a5f"
+_FACADE_CODE_DIGEST = "620e13028fceec909f40b5f10f75cf500209de661c8cd63bc8350d3397e9f5b5"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
 _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "caller_observation_extractor":
         "a3d79ce19f2c603f47dd370789773a707016a07e430c58fcd389a67065f9d364",
+    "voice_bakeoff_closure":
+        "301999acd5aac7143ff1cabf85a9f508b194acc44afc91887c70b52731a68111",
     "composition":
         "36945f2911538aef4ce433cc9ed063dfeebe3dbcc094ccdac57735fe2cb24a6c",
     "dialogue_planner":
@@ -163,6 +172,18 @@ class SyntheticJourney(str, Enum):
     SILENCE_BOUNDARY_MORE_TIME = "silence_boundary_more_time"
     FIXED_NONTERMINAL_FALLBACKS = "fixed_nonterminal_fallbacks"
     REPEAT_SLOWER = "repeat_slower"
+    OPT_OUT_WITHDRAWAL = "opt_out_withdrawal"
+
+
+class OfflineStopPosture(str, Enum):
+    RESPONSE_PENDING = "response_pending"
+    PLAYOUT_BOUND_QUEUED = "playout_bound_queued"
+    TRANSPORT_RESOLVED_UNOBSERVED = (
+        "transport_resolved_unobserved"
+    )
+    PLAYOUT_PARTIAL_UNOBSERVED = "playout_partial_unobserved"
+    REPLAY_PENDING = "replay_pending"
+    SILENCE_TIMER_ARMED = "silence_timer_armed"
 
 
 class DriverFailure(str, Enum):
@@ -205,6 +226,17 @@ class TraceKind(str, Enum):
     REPLAY_REQUESTED = "replay_requested"
     REPLAY_PENDING = "replay_pending"
     REPLAY_OBSERVED = "replay_observed"
+    PARTICIPANT_ACTIVITY = "participant_activity"
+    WITHDRAWAL_CLASSIFIED = "withdrawal_classified"
+    SCRIPTED_OPT_OUT_AUTHORIZED = "scripted_opt_out_authorized"
+    GENERAL_AUTHORITY_CANCELLED = "general_authority_cancelled"
+    GENERAL_OUTBOUND_CLEARED = "general_outbound_cleared"
+    CLOSURE_CAPABILITY_RETAINED = "closure_capability_retained"
+    CLOSURE_STAGED = "closure_staged"
+    CLOSURE_PREDICATE_REJECTED = "closure_predicate_rejected"
+    OFFLINE_OUTBOUND_COMMITTED = "offline_outbound_committed"
+    SYNTHETIC_PLAYBACK_OBSERVED = "synthetic_playback_observed"
+    CLOSURE_TEARDOWN_COMPLETE = "closure_teardown_complete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +312,7 @@ class OfflineTraceEvent:
     composition_status: CompositionStatus | None = None
     locale: str | None = None
     replay_mode: ReplayMode | None = None
+    content_digest: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -308,6 +341,10 @@ class OfflineTraceEvent:
                 self.replay_mode is not None
                 and not isinstance(self.replay_mode, ReplayMode)
             )
+            or (
+                self.content_digest is not None
+                and not _digest(self.content_digest)
+            )
         ):
             raise ValueError("offline trace event is invalid")
 
@@ -325,6 +362,9 @@ class OfflineSessionResult:
     outbound_frame_count: int
     outbound_bytes: int
     outbound_audio_ms: int
+    pre_stop_outbound_frame_count: int
+    post_stop_outbound_frame_delta: int
+    post_stop_outbound_ordinals: tuple[int, ...]
     session_duration_ms: int
     buffers_scrubbed: bool
     failure: DriverFailure | None = None
@@ -353,6 +393,39 @@ class OfflineSessionResult:
             or self.outbound_bytes < 0
             or type(self.outbound_audio_ms) is not int
             or self.outbound_audio_ms < 0
+            or type(self.pre_stop_outbound_frame_count) is not int
+            or self.pre_stop_outbound_frame_count < 0
+            or type(self.post_stop_outbound_frame_delta) is not int
+            or self.post_stop_outbound_frame_delta < 0
+            or not isinstance(
+                self.post_stop_outbound_ordinals,
+                tuple,
+            )
+            or any(
+                type(ordinal) is not int
+                for ordinal in self.post_stop_outbound_ordinals
+            )
+            or (
+                self.journey
+                is not SyntheticJourney.OPT_OUT_WITHDRAWAL
+                and (
+                    self.pre_stop_outbound_frame_count != 0
+                    or self.post_stop_outbound_frame_delta != 0
+                    or self.post_stop_outbound_ordinals
+                )
+            )
+            or (
+                self.journey
+                is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                and (
+                    self.post_stop_outbound_frame_delta
+                    != self.outbound_frame_count
+                    or self.post_stop_outbound_ordinals
+                    != tuple(
+                        range(self.post_stop_outbound_frame_delta)
+                    )
+                )
+            )
             or type(self.session_duration_ms) is not int
             or self.session_duration_ms < 0
             or type(self.buffers_scrubbed) is not bool
@@ -522,6 +595,16 @@ _FIXTURES = MappingProxyType({
             ("service_object", "furnace"),
         ),
     ),
+    SyntheticJourney.OPT_OUT_WITHDRAWAL: _Fixture(
+        locale="en",
+        content="Fixture caller requests a furnace repair.",
+        fields=(
+            ("language", "en"),
+            ("intent", "service_request"),
+            ("service_action", "repair"),
+            ("service_object", "furnace"),
+        ),
+    ),
 })
 
 
@@ -546,7 +629,9 @@ class OfflineSessionFacade:
         "_lease_id",
         "_outbound_frames",
         "_revoked",
+        "_scripted_locale",
         "_state",
+        "_stop_posture",
     )
 
     def __init__(
@@ -560,6 +645,8 @@ class OfflineSessionFacade:
         lease_id: str,
         expires_at_ms: int,
         contract_digest: str,
+        scripted_locale: str,
+        stop_posture: OfflineStopPosture,
         frames: list[_MutableFrame],
     ) -> None:
         if seal is not _FACADE_SEAL:
@@ -571,6 +658,8 @@ class OfflineSessionFacade:
         self._lease_id = lease_id
         self._expires_at_ms = expires_at_ms
         self._contract_digest = contract_digest
+        self._scripted_locale = scripted_locale
+        self._stop_posture = stop_posture
         self._frames = frames
         self._outbound_frames: list[_MutableFrame] = []
         self._state = OfflineSessionState.LEASED
@@ -614,6 +703,8 @@ class _LeaseGrant:
     lease_id: str
     expires_at_ms: int
     contract_digest: str
+    scripted_locale: str
+    stop_posture: OfflineStopPosture
     state: OfflineSessionState
     revoked: bool
 
@@ -638,6 +729,17 @@ class _Assembly:
     silence: SilenceLifecycleController
     receipts: FinalTurnAdmissionAuthority
     state: VersionedIntakeStore
+
+
+@dataclass(frozen=True, slots=True)
+class _StopCheckpoint:
+    at_ms: int
+    state_version: int
+    state_snapshot: dict[str, object]
+    act_ids: tuple[str, ...]
+    timer: CallIntent | None
+    baseline_frame_count: int
+    baseline_last_ordinal: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,6 +795,13 @@ class OfflineSessionDriver:
         self._outbound_frames: list[_MutableFrame] = []
         self._issued_inbound_payloads: tuple[bytearray, ...] = ()
         self._issued_outbound_payloads: list[bytearray] = []
+        self._closure_authority = OfflineLocalClosureAuthority()
+        self._scripted_confirmation: (
+            ScriptedOptOutConfirmationReceipt | None
+        ) = None
+        self._participant_surrogate: object | None = None
+        self._pre_stop_outbound_frame_count = 0
+        self._post_stop_outbound_frame_delta = 0
         self._lock = RLock()
 
     @property
@@ -724,12 +833,37 @@ class OfflineSessionDriver:
         arm: CandidateArm,
         journey: SyntheticJourney,
         now_ms: int,
+        scripted_locale: str | None = None,
+        stop_posture: OfflineStopPosture = (
+            OfflineStopPosture.RESPONSE_PENDING
+        ),
     ) -> OfflineSessionFacade | None:
+        selected_locale = (
+            scripted_locale
+            if scripted_locale is not None
+            else _FIXTURES[journey].locale
+            if isinstance(journey, SyntheticJourney)
+            else None
+        )
         if (
             not isinstance(arm, CandidateArm)
             or not isinstance(journey, SyntheticJourney)
             or type(now_ms) is not int
             or now_ms < 0
+            or not isinstance(stop_posture, OfflineStopPosture)
+            or (
+                journey is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                and selected_locale not in _TRACE_LOCALES
+            )
+            or (
+                journey is not SyntheticJourney.OPT_OUT_WITHDRAWAL
+                and scripted_locale is not None
+            )
+            or (
+                journey is not SyntheticJourney.OPT_OUT_WITHDRAWAL
+                and stop_posture
+                is not OfflineStopPosture.RESPONSE_PENDING
+            )
         ):
             return None
         if not self._lock.acquire(blocking=False):
@@ -760,6 +894,8 @@ class OfflineSessionDriver:
                 binding=binding,
                 expires_at_ms=expires_at_ms,
                 contract_digest=contract_digest,
+                scripted_locale=selected_locale,
+                stop_posture=stop_posture,
             )
             frames = self._fixture_frames(journey)
             if not self._frames_within_limits(
@@ -777,16 +913,11 @@ class OfflineSessionDriver:
                 lease_id=lease_id,
                 expires_at_ms=expires_at_ms,
                 contract_digest=contract_digest,
+                scripted_locale=selected_locale,
+                stop_posture=stop_posture,
                 frames=frames,
             )
-            self._leased = facade
-            self._inbound_frames = frames
-            self._outbound_frames = facade._outbound_frames
-            self._issued_inbound_payloads = tuple(
-                frame.payload for frame in frames
-            )
-            self._issued_outbound_payloads = []
-            self._lease_grant = _LeaseGrant(
+            grant = _LeaseGrant(
                 facade=facade,
                 arm=arm,
                 journey=journey,
@@ -794,12 +925,98 @@ class OfflineSessionDriver:
                 lease_id=lease_id,
                 expires_at_ms=expires_at_ms,
                 contract_digest=contract_digest,
+                scripted_locale=selected_locale,
+                stop_posture=stop_posture,
                 state=OfflineSessionState.LEASED,
                 revoked=False,
+            )
+            participant_surrogate = object()
+            if (
+                journey is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                and not self._closure_authority.register_leased(
+                    facade=facade,
+                    leased_record=grant,
+                    driver_identity=self,
+                    participant_surrogate=participant_surrogate,
+                    lease_revision=0,
+                    expires_at_ms=expires_at_ms,
+                    arm=arm.value,
+                    journey=journey.value,
+                    contract_digest=contract_digest,
+                    binding=binding,
+                    locale=selected_locale,
+                )
+            ):
+                self._scrub_frames(frames)
+                return None
+            self._leased = facade
+            self._inbound_frames = frames
+            self._outbound_frames = facade._outbound_frames
+            self._issued_inbound_payloads = tuple(
+                frame.payload for frame in frames
+            )
+            self._issued_outbound_payloads = []
+            self._lease_grant = grant
+            self._scripted_confirmation = None
+            self._pre_stop_outbound_frame_count = 0
+            self._post_stop_outbound_frame_delta = 0
+            self._participant_surrogate = (
+                participant_surrogate
+                if journey is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                else None
             )
             return facade
         finally:
             self._lock.release()
+
+    def confirm_scripted_opt_out(
+        self,
+        facade: OfflineSessionFacade,
+        *,
+        now_ms: int,
+    ) -> ScriptedOptOutConfirmationReceipt | None:
+        """Mint fixture-only pre-activation role-play confirmation."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            if (
+                type(now_ms) is not int
+                or now_ms < 0
+                or not self._accepts_facade(
+                    facade,
+                    expected_state=OfflineSessionState.LEASED,
+                )
+            ):
+                return None
+            grant = self._lease_grant
+            participant = self._participant_surrogate
+            if (
+                grant is None
+                or grant.journey
+                is not SyntheticJourney.OPT_OUT_WITHDRAWAL
+                or participant is None
+            ):
+                return None
+            confirmation = (
+                self._closure_authority.confirm_scripted_step(
+                    facade=facade,
+                    leased_record=grant,
+                    driver_identity=self,
+                    participant_surrogate=participant,
+                    now_ms=now_ms,
+                )
+            )
+            self._scripted_confirmation = confirmation
+            return confirmation
+        finally:
+            self._lock.release()
+
+    def withdraw(
+        self,
+        facade: OfflineSessionFacade,
+    ) -> bool:
+        """Latch participant withdrawal without acquiring the driver lock."""
+        return self._closure_authority.withdraw(facade=facade)
 
     def revoke(
         self,
@@ -821,6 +1038,13 @@ class OfflineSessionDriver:
                 state=OfflineSessionState.ABORTED,
                 revoked=True,
             )
+            if (
+                grant.journey
+                is SyntheticJourney.OPT_OUT_WITHDRAWAL
+            ):
+                self._closure_authority.terminate(
+                    facade=facade,
+                )
             self._close_facade(
                 facade,
                 terminal,
@@ -854,6 +1078,13 @@ class OfflineSessionDriver:
                     state=OfflineSessionState.ABORTED,
                     revoked=True,
                 )
+                if (
+                    grant.journey
+                    is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                ):
+                    self._closure_authority.terminate(
+                        facade=facade,
+                    )
                 buffers_scrubbed = self._close_facade(
                     facade,
                     terminal,
@@ -863,11 +1094,49 @@ class OfflineSessionDriver:
                     failure=DriverFailure.EXPIRED_LEASE,
                     buffers_scrubbed=buffers_scrubbed,
                 )
-            grant = self._transition_lease(
-                grant,
-                state=OfflineSessionState.ACTIVE,
-                revoked=False,
-            )
+            if (
+                grant.journey
+                is SyntheticJourney.OPT_OUT_WITHDRAWAL
+            ):
+                active_grant = replace(
+                    grant,
+                    state=OfflineSessionState.ACTIVE,
+                    revoked=False,
+                )
+                if not self._closure_authority.activate(
+                    facade=facade,
+                    leased_record=grant,
+                    active_record=active_grant,
+                    driver_identity=self,
+                    active_revision=1,
+                ):
+                    terminal = self._transition_lease(
+                        grant,
+                        state=OfflineSessionState.ABORTED,
+                        revoked=True,
+                    )
+                    self._closure_authority.terminate(
+                        facade=facade,
+                    )
+                    buffers_scrubbed = self._close_facade(
+                        facade,
+                        terminal,
+                    )
+                    return self._aborted_result(
+                        terminal,
+                        failure=DriverFailure.INTERNAL,
+                        buffers_scrubbed=buffers_scrubbed,
+                    )
+                self._lease_grant = active_grant
+                facade._state = OfflineSessionState.ACTIVE
+                facade._revoked = False
+                grant = active_grant
+            else:
+                grant = self._transition_lease(
+                    grant,
+                    state=OfflineSessionState.ACTIVE,
+                    revoked=False,
+                )
             frame_count = 0
             inbound_bytes = 0
             inbound_audio_ms = 0
@@ -887,6 +1156,10 @@ class OfflineSessionDriver:
             ]
             failure: DriverFailure | None = None
             buffers_scrubbed = False
+            closure_cleanup_ok = (
+                grant.journey
+                is not SyntheticJourney.OPT_OUT_WITHDRAWAL
+            )
             try:
                 inbound = self._frame_snapshot(
                     facade._frames,
@@ -925,8 +1198,33 @@ class OfflineSessionDriver:
             except Exception:  # noqa: BLE001
                 failure = DriverFailure.INTERNAL
             finally:
+                outbound_source = self._outbound_frames
+                if (
+                    grant.journey
+                    is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                ):
+                    closure_frame = (
+                        self._closure_authority.committed_frame(
+                            facade=facade,
+                            active_record=grant,
+                        )
+                    )
+                    if closure_frame is None:
+                        outbound_source = []
+                    else:
+                        outbound_source = [
+                            _MutableFrame(
+                                ordinal=closure_frame.ordinal,
+                                duration_ms=(
+                                    closure_frame.duration_ms
+                                ),
+                                payload=bytearray(
+                                    closure_frame.payload
+                                ),
+                            )
+                        ]
                 outbound = self._frame_snapshot(
-                    self._outbound_frames,
+                    outbound_source,
                     outbound=True,
                     allow_empty=True,
                 )
@@ -939,6 +1237,38 @@ class OfflineSessionDriver:
                     outbound_frame_count = outbound.frame_count
                     outbound_bytes = outbound.byte_count
                     outbound_audio_ms = outbound.audio_ms
+                if (
+                    grant.journey
+                    is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                ):
+                    closure_termination = (
+                        self._closure_authority.terminate(
+                            facade=facade,
+                            active_record=grant,
+                        )
+                    )
+                    closure_cleanup_ok = (
+                        closure_termination is not None
+                        and closure_termination[0].phase
+                        is OfflineClosurePhase.TERMINATED
+                        and all(
+                            not any(payload)
+                            for payload
+                            in closure_termination[1]
+                        )
+                    )
+                    if not closure_cleanup_ok and failure is None:
+                        failure = DriverFailure.DELIVERY
+                    if closure_cleanup_ok:
+                        trace.append(
+                            OfflineTraceEvent(
+                                ordinal=len(trace),
+                                kind=(
+                                    TraceKind
+                                    .CLOSURE_TEARDOWN_COMPLETE
+                                ),
+                            )
+                        )
                 terminal = self._transition_lease(
                     grant,
                     state=(
@@ -955,6 +1285,9 @@ class OfflineSessionDriver:
                         captured_frames,
                         captured_outbound,
                     ),
+                )
+                buffers_scrubbed = (
+                    buffers_scrubbed and closure_cleanup_ok
                 )
                 trace.append(
                     OfflineTraceEvent(
@@ -974,6 +1307,21 @@ class OfflineSessionDriver:
                 outbound_frame_count=outbound_frame_count,
                 outbound_bytes=outbound_bytes,
                 outbound_audio_ms=outbound_audio_ms,
+                pre_stop_outbound_frame_count=(
+                    self._pre_stop_outbound_frame_count
+                ),
+                post_stop_outbound_frame_delta=(
+                    self._post_stop_outbound_frame_delta
+                ),
+                post_stop_outbound_ordinals=(
+                    tuple(
+                        frame.ordinal
+                        for frame in captured_outbound
+                    )
+                    if grant.journey
+                    is SyntheticJourney.OPT_OUT_WITHDRAWAL
+                    else ()
+                ),
                 session_duration_ms=session_duration_ms,
                 buffers_scrubbed=(
                     buffers_scrubbed
@@ -998,6 +1346,15 @@ class OfflineSessionDriver:
         now_ms: int,
         trace: list[OfflineTraceEvent],
     ) -> int:
+        if (
+            grant.journey
+            is SyntheticJourney.OPT_OUT_WITHDRAWAL
+        ):
+            return self._execute_opt_out_withdrawal(
+                grant=grant,
+                now_ms=now_ms,
+                trace=trace,
+            )
         fixture = _FIXTURES[grant.journey]
         assembly = self._assembly(grant, fixture)
         receipt = self._admit_final_turn(
@@ -1185,6 +1542,757 @@ class OfflineSessionDriver:
         if final.status is not CompositionStatus.RESPONSE_OBSERVED:
             raise _DriverAbort(DriverFailure.DELIVERY)
         return final_at_ms
+
+    def _execute_opt_out_withdrawal(
+        self,
+        *,
+        grant: _LeaseGrant,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        """Arbitrate typed withdrawal before any stop-turn extraction."""
+        stop_at_ms = now_ms + 3
+        facade = grant.facade
+        if self._closure_authority.is_withdrawn(
+            facade=facade,
+            active_record=grant,
+        ):
+            trace.extend((
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.PARTICIPANT_ACTIVITY,
+                ),
+                OfflineTraceEvent(
+                    ordinal=len(trace) + 1,
+                    kind=TraceKind.WITHDRAWAL_CLASSIFIED,
+                ),
+                OfflineTraceEvent(
+                    ordinal=len(trace) + 2,
+                    kind=TraceKind.GENERAL_AUTHORITY_CANCELLED,
+                ),
+            ))
+            return stop_at_ms
+        fixture = _Fixture(
+            locale=grant.scripted_locale,
+            content="Fixture caller requests a furnace repair.",
+            fields=(
+                ("language", grant.scripted_locale),
+                ("intent", "service_request"),
+                ("service_action", "repair"),
+                ("service_object", "furnace"),
+            ),
+        )
+        assembly = self._assembly(grant, fixture)
+        cleanup_at_ms = now_ms
+        assembly_sealed = False
+        try:
+            if self._closure_authority.is_withdrawn(
+                facade=facade,
+                active_record=grant,
+            ):
+                self._seal_latched_withdrawal(
+                    assembly=assembly,
+                    at_ms=now_ms,
+                    trace=trace,
+                )
+                assembly_sealed = True
+                return now_ms
+            receipt = self._admit_final_turn(
+                assembly=assembly,
+                fixture=fixture,
+                turn_number=1,
+                at_ms=now_ms + 1,
+            )
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.INPUT_FINAL,
+                )
+            )
+            if self._closure_authority.is_withdrawn(
+                facade=facade,
+                active_record=grant,
+            ):
+                self._seal_latched_withdrawal(
+                    assembly=assembly,
+                    at_ms=receipt.at_ms,
+                    trace=trace,
+                )
+                assembly_sealed = True
+                return receipt.at_ms
+            pending = assembly.transaction.execute(
+                receipt,
+                content=fixture.content,
+                backend=_SyntheticObservationBackend(fixture),
+                now_ms=max(now_ms + 2, receipt.at_ms),
+            )
+            trace.append(
+                self._composition_trace(
+                    trace,
+                    pending,
+                    locale=grant.scripted_locale,
+                )
+            )
+            if (
+                pending.status
+                is not CompositionStatus.RESPONSE_PENDING
+                or pending.act_kinds
+                != (VoiceSemanticActKind.QUESTION,)
+            ):
+                raise _DriverAbort(DriverFailure.COMPOSITION)
+            checkpoint = self._prepare_stop_checkpoint(
+                grant=grant,
+                assembly=assembly,
+                pending=pending,
+                at_ms=max(now_ms + 3, receipt.at_ms + 2),
+                trace=trace,
+            )
+            stop_at_ms = max(stop_at_ms, checkpoint.at_ms + 1)
+            cleanup_at_ms = stop_at_ms
+            self._pre_stop_outbound_frame_count = (
+                checkpoint.baseline_frame_count
+            )
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.PARTICIPANT_ACTIVITY,
+                )
+            )
+            confirmation = self._scripted_confirmation
+            if confirmation is None:
+                self._closure_authority.withdraw(
+                    facade=facade,
+                )
+            if not self._seal_composition_assembly(
+                assembly=assembly,
+                at_ms=stop_at_ms,
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            assembly_sealed = True
+            if not self._clear_general_outbound(
+                checkpoint=checkpoint,
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            inventory = self._closure_inventory(
+                assembly=assembly,
+                queued_outbound_frames=len(
+                    self._outbound_frames
+                ),
+            )
+            if (
+                not inventory.is_sealed
+                or not self._stop_checkpoint_invalidated(
+                    assembly=assembly,
+                    checkpoint=checkpoint,
+                    at_ms=stop_at_ms,
+                )
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            trace.extend((
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.GENERAL_AUTHORITY_CANCELLED,
+                ),
+                OfflineTraceEvent(
+                    ordinal=len(trace) + 1,
+                    kind=TraceKind.GENERAL_OUTBOUND_CLEARED,
+                ),
+            ))
+            if (
+                confirmation is None
+                or self._closure_authority.is_withdrawn(
+                    facade=facade,
+                    active_record=grant,
+                )
+            ):
+                trace.append(
+                    OfflineTraceEvent(
+                        ordinal=len(trace),
+                        kind=TraceKind.WITHDRAWAL_CLASSIFIED,
+                    )
+                )
+                return stop_at_ms
+            capability = self._closure_authority.mint_capability(
+                facade=facade,
+                active_record=grant,
+                confirmation=confirmation,
+                inventory=inventory,
+                now_ms=stop_at_ms,
+            )
+            if capability is None:
+                withdrawn = (
+                    self._closure_authority.is_withdrawn(
+                        facade=facade,
+                        active_record=grant,
+                    )
+                )
+                if withdrawn:
+                    trace.append(
+                        OfflineTraceEvent(
+                            ordinal=len(trace),
+                            kind=TraceKind.PARTICIPANT_ACTIVITY,
+                        )
+                    )
+                trace.append(
+                    OfflineTraceEvent(
+                        ordinal=len(trace),
+                        kind=(
+                            TraceKind.WITHDRAWAL_CLASSIFIED
+                            if withdrawn
+                            else (
+                                TraceKind
+                                .CLOSURE_PREDICATE_REJECTED
+                            )
+                        ),
+                    )
+                )
+                return stop_at_ms
+            trace.extend((
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.SCRIPTED_OPT_OUT_AUTHORIZED,
+                    locale=grant.scripted_locale,
+                ),
+                OfflineTraceEvent(
+                    ordinal=len(trace) + 1,
+                    kind=TraceKind.CLOSURE_CAPABILITY_RETAINED,
+                    locale=grant.scripted_locale,
+                ),
+            ))
+            stage = self._closure_authority.stage(
+                facade=facade,
+                active_record=grant,
+                capability=capability,
+                now_ms=stop_at_ms + 1,
+                max_frame_bytes=(
+                    self._limits.max_outbound_frame_bytes
+                ),
+                max_outbound_frames=(
+                    self._limits.max_outbound_frames
+                ),
+                max_outbound_bytes=(
+                    self._limits.max_outbound_bytes
+                ),
+                max_outbound_audio_ms=(
+                    self._limits.max_outbound_audio_ms
+                ),
+            )
+            if stage is None:
+                withdrawn = (
+                    self._closure_authority.is_withdrawn(
+                        facade=facade,
+                        active_record=grant,
+                    )
+                )
+                if withdrawn:
+                    trace.append(
+                        OfflineTraceEvent(
+                            ordinal=len(trace),
+                            kind=TraceKind.PARTICIPANT_ACTIVITY,
+                        )
+                    )
+                trace.append(
+                    OfflineTraceEvent(
+                        ordinal=len(trace),
+                        kind=(
+                            TraceKind.WITHDRAWAL_CLASSIFIED
+                            if withdrawn
+                            else (
+                                TraceKind
+                                .CLOSURE_PREDICATE_REJECTED
+                            )
+                        ),
+                    )
+                )
+                return stop_at_ms + 1
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.CLOSURE_STAGED,
+                    semantic_act_kind=VoiceSemanticActKind.OPT_OUT,
+                    locale=stage.locale,
+                    content_digest=stage.text_digest,
+                )
+            )
+            commit = self._closure_authority.commit(
+                facade=facade,
+                active_record=grant,
+                capability=capability,
+                stage=stage,
+                now_ms=stop_at_ms + 2,
+            )
+            if commit is None:
+                withdrawn = (
+                    self._closure_authority.is_withdrawn(
+                        facade=facade,
+                        active_record=grant,
+                    )
+                )
+                if withdrawn:
+                    trace.append(
+                        OfflineTraceEvent(
+                            ordinal=len(trace),
+                            kind=TraceKind.PARTICIPANT_ACTIVITY,
+                        )
+                    )
+                trace.append(
+                    OfflineTraceEvent(
+                        ordinal=len(trace),
+                        kind=(
+                            TraceKind.WITHDRAWAL_CLASSIFIED
+                            if withdrawn
+                            else (
+                                TraceKind
+                                .CLOSURE_PREDICATE_REJECTED
+                            )
+                        ),
+                    )
+                )
+                return stop_at_ms + 2
+            self._post_stop_outbound_frame_delta = (
+                commit.frame_count
+            )
+            self._trace_committed_closure(
+                trace=trace,
+                commit=commit,
+            )
+            if self._closure_authority.mark_synthetic_playback(
+                facade=facade,
+                active_record=grant,
+                commit=commit,
+            ):
+                trace.append(
+                    OfflineTraceEvent(
+                        ordinal=len(trace),
+                        kind=TraceKind.SYNTHETIC_PLAYBACK_OBSERVED,
+                        semantic_act_kind=(
+                            VoiceSemanticActKind.OPT_OUT
+                        ),
+                        locale=commit.locale,
+                        content_digest=commit.text_digest,
+                    )
+                )
+            return stop_at_ms + 3
+        finally:
+            if (
+                not assembly_sealed
+                and not self._seal_composition_assembly(
+                    assembly=assembly,
+                    at_ms=cleanup_at_ms,
+                )
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+
+    def _prepare_stop_checkpoint(
+        self,
+        *,
+        grant: _LeaseGrant,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> _StopCheckpoint:
+        """Enter one exact pre-stop posture without caller observation."""
+        posture = grant.stop_posture
+        timer: CallIntent | None = None
+        checkpoint_at_ms = at_ms
+        if posture is OfflineStopPosture.RESPONSE_PENDING:
+            pass
+        elif posture is OfflineStopPosture.PLAYOUT_BOUND_QUEUED:
+            checkpoint_at_ms = (
+                self._bind_stop_question(
+                    assembly=assembly,
+                    pending=pending,
+                    at_ms=at_ms,
+                    trace=trace,
+                    resolve_transport=False,
+                )
+            )
+        elif (
+            posture
+            is OfflineStopPosture.TRANSPORT_RESOLVED_UNOBSERVED
+        ):
+            checkpoint_at_ms = self._bind_stop_question(
+                assembly=assembly,
+                pending=pending,
+                at_ms=at_ms,
+                trace=trace,
+                resolve_transport=True,
+            )
+        elif (
+            posture
+            is OfflineStopPosture.PLAYOUT_PARTIAL_UNOBSERVED
+        ):
+            checkpoint_at_ms, _ = (
+                self._stage_unobserved_question(
+                    assembly=assembly,
+                    pending=pending,
+                    event_kind=VoiceEventKind.PLAYOUT_PARTIAL,
+                    trace_kind=TraceKind.PLAYOUT_PARTIAL,
+                    resolve_transport=False,
+                    at_ms=at_ms,
+                    trace=trace,
+                )
+            )
+        elif posture is OfflineStopPosture.REPLAY_PENDING:
+            checkpoint_at_ms, timer = (
+                self._deliver_question_for_silence(
+                    assembly=assembly,
+                    pending=pending,
+                    at_ms=at_ms,
+                    trace=trace,
+                )
+            )
+            replay_fixture = _Fixture(
+                locale=grant.scripted_locale,
+                content="repeat",
+                fields=(),
+                outcome=BackendOutcome.CANCELLED,
+            )
+            replay_receipt = self._admit_final_turn(
+                assembly=assembly,
+                fixture=replay_fixture,
+                turn_number=2,
+                at_ms=checkpoint_at_ms + 1,
+                semantic_act_kind=VoiceSemanticActKind.REPEAT,
+            )
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.REPLAY_REQUESTED,
+                    semantic_act_kind=VoiceSemanticActKind.REPEAT,
+                    locale=grant.scripted_locale,
+                    replay_mode=ReplayMode.EXACT,
+                )
+            )
+            replay = assembly.transaction.execute_replay(
+                replay_receipt,
+                content=replay_fixture.content,
+                command=VoiceSemanticActKind.REPEAT,
+                now_ms=replay_receipt.at_ms,
+            )
+            trace.append(
+                self._composition_trace(
+                    trace,
+                    replay,
+                    locale=grant.scripted_locale,
+                )
+            )
+            if (
+                replay.status is not CompositionStatus.REPLAY_PENDING
+                or replay.replay_mode is not ReplayMode.EXACT
+                or replay.act_kinds
+                != (VoiceSemanticActKind.QUESTION,)
+                or assembly.calls.phase
+                is not SilencePhase.QUESTION_RESERVED
+            ):
+                raise _DriverAbort(DriverFailure.COMPOSITION)
+            checkpoint_at_ms = replay_receipt.at_ms
+        elif posture is OfflineStopPosture.SILENCE_TIMER_ARMED:
+            checkpoint_at_ms, timer = (
+                self._deliver_question_for_silence(
+                    assembly=assembly,
+                    pending=pending,
+                    at_ms=at_ms,
+                    trace=trace,
+                )
+            )
+        else:
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        frames = tuple(self._outbound_frames)
+        if (
+            any(
+                frame.ordinal != index
+                for index, frame in enumerate(frames)
+            )
+            or (
+                posture is OfflineStopPosture.RESPONSE_PENDING
+                and frames
+            )
+            or (
+                posture is not OfflineStopPosture.RESPONSE_PENDING
+                and len(frames) != 1
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        return _StopCheckpoint(
+            at_ms=checkpoint_at_ms,
+            state_version=assembly.state.version,
+            state_snapshot=(
+                assembly.state.current_state().to_dict()
+            ),
+            act_ids=assembly.speech.act_ids_for_binding(
+                assembly.binding
+            ),
+            timer=timer,
+            baseline_frame_count=len(frames),
+            baseline_last_ordinal=(
+                frames[-1].ordinal if frames else None
+            ),
+        )
+
+    def _bind_stop_question(
+        self,
+        *,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+        resolve_transport: bool,
+    ) -> int:
+        if (
+            pending.status is not CompositionStatus.RESPONSE_PENDING
+            or pending.act_kinds
+            != (VoiceSemanticActKind.QUESTION,)
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        authorization = assembly.transaction.authorization_receipt(
+            pending.act_ids[0]
+        )
+        if authorization is None:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        confirmation = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=VoicePayload(),
+            at_ms=at_ms,
+        )
+        if (
+            not assembly.lifecycle.ingest(confirmation)
+            or not assembly.transaction.accept_semantic_confirmation(
+                event=confirmation,
+                event_id=f"confirm_{confirmation.sequence}",
+                sequence=confirmation.sequence,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.ACT_CONFIRMED,
+                semantic_act_kind=VoiceSemanticActKind.QUESTION,
+            )
+        )
+        payload = self._playout_payload(
+            authorization=authorization,
+            text_digest=assembly.speech.authorized_text_digest(
+                authorization.semantic_act_id
+            ),
+        )
+        tts = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.TTS_BOUND,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=VoicePayload(
+                text_digest=payload.text_digest,
+                audio_id=payload.audio_id,
+            ),
+            at_ms=confirmation.at_ms + 1,
+        )
+        if (
+            not assembly.lifecycle.ingest(tts)
+            or not assembly.transaction.accept_tts_binding(event=tts)
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        playout = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.PLAYOUT_BOUND,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=payload,
+            at_ms=tts.at_ms + 1,
+        )
+        if (
+            not assembly.lifecycle.ingest(playout)
+            or not assembly.transaction.accept_playout_binding(
+                event=playout
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        self._append_outbound_frame(
+            authorization=authorization,
+        )
+        if not resolve_transport:
+            return playout.at_ms
+        transport = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.TRANSPORT_RESOLVED,
+            source=VoiceSource.TWILIO_AUTHENTICATED,
+            payload=payload,
+            at_ms=playout.at_ms + 1,
+        )
+        if (
+            not assembly.lifecycle.ingest(transport)
+            or not assembly.transaction.accept_transport_resolution(
+                event=transport,
+                event_id=f"transport_{transport.sequence}",
+                sequence=transport.sequence,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.TRANSPORT_RESOLVED,
+                semantic_act_kind=VoiceSemanticActKind.QUESTION,
+            )
+        )
+        return transport.at_ms
+
+    def _clear_general_outbound(
+        self,
+        *,
+        checkpoint: _StopCheckpoint,
+    ) -> bool:
+        frames = tuple(self._outbound_frames)
+        if (
+            len(frames) != checkpoint.baseline_frame_count
+            or (
+                frames[-1].ordinal if frames else None
+            )
+            != checkpoint.baseline_last_ordinal
+        ):
+            return False
+        payloads = self._scrub_frames(frames)
+        self._outbound_frames.clear()
+        return (
+            len(payloads) == len(frames)
+            and all(not any(payload) for payload in payloads)
+            and not self._outbound_frames
+        )
+
+    @staticmethod
+    def _stop_checkpoint_invalidated(
+        *,
+        assembly: _Assembly,
+        checkpoint: _StopCheckpoint,
+        at_ms: int,
+    ) -> bool:
+        if (
+            assembly.state.version != checkpoint.state_version
+            or assembly.state.current_state().to_dict()
+            != checkpoint.state_snapshot
+            or assembly.transaction.pending_response_count
+            or assembly.receipts.unconsumed_receipt_count
+            or assembly.silence.pending_count
+            or assembly.calls.phase is not SilencePhase.TERMINATED
+            or not assembly.calls.is_quiescent
+            or not assembly.adapter.terminally_closed
+            or any(
+                assembly.speech.is_live(act_id)
+                or assembly.transaction.authorization_receipt(
+                    act_id
+                )
+                is not None
+                for act_id in checkpoint.act_ids
+            )
+        ):
+            return False
+        timer = checkpoint.timer
+        if timer is None:
+            return True
+        sequence, canonical_at_ms = assembly.calls.next_position(
+            at_ms=max(at_ms, timer.deadline_ms or at_ms)
+        )
+        return not assembly.calls.timer_fired(
+            binding=assembly.binding,
+            event_id=f"stale_stop_timer_{sequence}",
+            sequence=sequence,
+            action_id=timer.action_id,
+            revision=timer.revision,
+            now_ms=canonical_at_ms,
+        )
+
+    @staticmethod
+    def _seal_latched_withdrawal(
+        *,
+        assembly: _Assembly,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> None:
+        trace.extend((
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.PARTICIPANT_ACTIVITY,
+            ),
+            OfflineTraceEvent(
+                ordinal=len(trace) + 1,
+                kind=TraceKind.WITHDRAWAL_CLASSIFIED,
+            ),
+        ))
+        if not OfflineSessionDriver._seal_composition_assembly(
+            assembly=assembly,
+            at_ms=at_ms,
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        inventory = OfflineSessionDriver._closure_inventory(
+            assembly=assembly,
+            queued_outbound_frames=0,
+        )
+        if not inventory.is_sealed:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.GENERAL_AUTHORITY_CANCELLED,
+            )
+        )
+
+    @staticmethod
+    def _closure_inventory(
+        *,
+        assembly: _Assembly,
+        queued_outbound_frames: int,
+    ) -> OfflineAuthorityInventory:
+        act_ids = assembly.speech.act_ids_for_binding(
+            assembly.binding
+        )
+        return OfflineAuthorityInventory(
+            transaction_pending=(
+                assembly.transaction.pending_response_count
+            ),
+            admission_receipts=(
+                assembly.receipts.unconsumed_receipt_count
+            ),
+            silence_pending=assembly.silence.pending_count,
+            speech_batches=(
+                assembly.speech.reservation_batch_count(
+                    assembly.binding
+                )
+            ),
+            live_speech_acts=sum(
+                assembly.speech.is_live(act_id)
+                for act_id in act_ids
+            ),
+            queued_outbound_frames=queued_outbound_frames,
+            call_quiescent=assembly.calls.is_quiescent,
+            call_terminated=(
+                assembly.calls.phase is SilencePhase.TERMINATED
+            ),
+            adapter_terminally_closed=(
+                assembly.adapter.terminally_closed
+            ),
+        )
+
+    @staticmethod
+    def _trace_committed_closure(
+        *,
+        trace: list[OfflineTraceEvent],
+        commit: OfflineClosureCommitReceipt,
+    ) -> None:
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.OFFLINE_OUTBOUND_COMMITTED,
+                semantic_act_kind=VoiceSemanticActKind.OPT_OUT,
+                locale=commit.locale,
+                content_digest=commit.text_digest,
+            )
+        )
 
     def _execute_repair_exhaustion(
         self,
@@ -3627,6 +4735,8 @@ class OfflineSessionDriver:
         binding: VoiceSessionBinding,
         expires_at_ms: int,
         contract_digest: str,
+        scripted_locale: str,
+        stop_posture: OfflineStopPosture,
     ) -> str:
         return hashlib.sha256(
             _LEASE_DOMAIN
@@ -3643,6 +4753,8 @@ class OfflineSessionDriver:
                     "contract_digest": contract_digest,
                     "expires_at_ms": expires_at_ms,
                     "journey": journey.value,
+                    "scripted_locale": scripted_locale,
+                    "stop_posture": stop_posture.value,
                 }
             )
         ).hexdigest()
@@ -3675,6 +4787,9 @@ class OfflineSessionDriver:
                 and facade._expires_at_ms == grant.expires_at_ms
                 and facade._contract_digest
                 == grant.contract_digest
+                and facade._scripted_locale
+                == grant.scripted_locale
+                and facade._stop_posture is grant.stop_posture
                 and grant.contract_digest == self.contract_digest
                 and grant.lease_id
                 == self._lease_identifier(
@@ -3683,6 +4798,8 @@ class OfflineSessionDriver:
                     binding=grant.binding,
                     expires_at_ms=grant.expires_at_ms,
                     contract_digest=grant.contract_digest,
+                    scripted_locale=grant.scripted_locale,
+                    stop_posture=grant.stop_posture,
                 )
             )
         except Exception:  # noqa: BLE001
@@ -3744,6 +4861,12 @@ class OfflineSessionDriver:
         self._outbound_frames = []
         self._issued_inbound_payloads = ()
         self._issued_outbound_payloads = []
+        if (
+            terminal.journey
+            is SyntheticJourney.OPT_OUT_WITHDRAWAL
+        ):
+            self._scripted_confirmation = None
+            self._participant_surrogate = None
         try:
             facade._driver = self
             facade._arm = terminal.arm
@@ -3752,6 +4875,8 @@ class OfflineSessionDriver:
             facade._lease_id = terminal.lease_id
             facade._expires_at_ms = terminal.expires_at_ms
             facade._contract_digest = terminal.contract_digest
+            facade._scripted_locale = terminal.scripted_locale
+            facade._stop_posture = terminal.stop_posture
             facade._frames = []
             facade._outbound_frames = []
             facade._state = terminal.state
@@ -3813,6 +4938,9 @@ class OfflineSessionDriver:
             outbound_frame_count=0,
             outbound_bytes=0,
             outbound_audio_ms=0,
+            pre_stop_outbound_frame_count=0,
+            post_stop_outbound_frame_delta=0,
+            post_stop_outbound_ordinals=(),
             session_duration_ms=0,
             buffers_scrubbed=buffers_scrubbed,
             failure=failure,
@@ -3926,6 +5054,7 @@ __all__ = [
     "OfflineSessionLimits",
     "OfflineSessionResult",
     "OfflineSessionState",
+    "OfflineStopPosture",
     "OfflineTraceEvent",
     "SyntheticJourney",
     "TraceKind",

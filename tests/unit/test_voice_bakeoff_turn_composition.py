@@ -71,6 +71,7 @@ from app.services.voice_lifecycle import (
 from app.services.voice_session_auth import CandidateArm
 from app.services.voice_speech_control import (
     CancellationReason,
+    ReplayMode,
     SpeechControl,
     SpeechPolicy,
 )
@@ -148,6 +149,9 @@ def _context(
     at_ms: int,
     turn_id: str,
     act_id: str = "input_act",
+    semantic_act_kind: VoiceSemanticActKind = (
+        VoiceSemanticActKind.ACKNOWLEDGEMENT
+    ),
 ) -> EventContext:
     return EventContext(
         binding=_binding(),
@@ -156,7 +160,7 @@ def _context(
         input_turn_id=turn_id,
         generation_id="input_generation",
         semantic_act_id=act_id,
-        semantic_act_kind=VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        semantic_act_kind=semantic_act_kind,
     )
 
 
@@ -469,7 +473,15 @@ def _confirm_and_resolve_transport(harness, act_id: str) -> VoiceEvent:
         event_id=f"confirmation_{act_id}",
         sequence=confirmation.sequence,
     )
-    text_digest = hashlib.sha256(act_id.encode()).hexdigest()
+    pending = transaction._pending_by_act[act_id]
+    reserved = next(
+        item
+        for item in pending.reserved
+        if item.act_id == act_id
+    )
+    text_digest = hashlib.sha256(
+        reserved.text.encode("utf-8")
+    ).hexdigest()
     audio_id = f"audio_{act_id[:16]}"
     playout_id = f"playout_{act_id[:16]}"
     tts = _event_after(
@@ -480,6 +492,7 @@ def _confirm_and_resolve_transport(harness, act_id: str) -> VoiceEvent:
         payload=VoicePayload(text_digest=text_digest, audio_id=audio_id),
     )
     assert lifecycle.ingest(tts)
+    assert transaction.accept_tts_binding(event=tts)
     payload = VoicePayload(
         text_digest=text_digest,
         audio_id=audio_id,
@@ -493,6 +506,7 @@ def _confirm_and_resolve_transport(harness, act_id: str) -> VoiceEvent:
         payload=payload,
     )
     assert lifecycle.ingest(playout)
+    assert transaction.accept_playout_binding(event=playout)
     transport = _event_after(
         lifecycle,
         authorization,
@@ -536,6 +550,9 @@ def _mint_next_turn(
     turn_id: str,
     content: str,
     at_ms: int,
+    semantic_act_kind: VoiceSemanticActKind = (
+        VoiceSemanticActKind.ACKNOWLEDGEMENT
+    ),
 ):
     lifecycle = harness["lifecycle"]
     sequence, canonical_at_ms = lifecycle.next_position(at_ms=at_ms)
@@ -544,6 +561,7 @@ def _mint_next_turn(
         at_ms=canonical_at_ms,
         turn_id=turn_id,
         act_id=f"input_{turn_id}",
+        semantic_act_kind=semantic_act_kind,
     )
     if type(harness["adapter"]) is NativeGeminiAdapter:
         result = harness["adapter"].handle(
@@ -582,6 +600,7 @@ def _mint_next_turn(
                         sequence=activity_sequence,
                         at_ms=activity_at_ms,
                         turn_id=turn_id,
+                        semantic_act_kind=semantic_act_kind,
                     ),
                 )
             )
@@ -598,6 +617,7 @@ def _mint_next_turn(
                     at_ms=canonical_at_ms,
                     turn_id=turn_id,
                     act_id=f"input_{turn_id}",
+                    semantic_act_kind=semantic_act_kind,
                 ),
                 payload=VoicePayload(
                     text_digest=final_turn_content_digest(content)
@@ -874,7 +894,7 @@ def test_streaming_final_transition_is_atomic_with_terminalization(
     def run_final():
         try:
             results.append(adapter.handle(signal))
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001
             errors.append(error)
 
     final_thread = threading.Thread(target=run_final)
@@ -1223,8 +1243,17 @@ def test_accepted_facts_commit_then_question_waits_for_caller_playback():
         event_id="confirmation_1",
         sequence=confirmation.sequence,
     )
+    pending = transaction._pending_by_act[act_id]
+    reserved = next(
+        item
+        for item in pending.reserved
+        if item.act_id == act_id
+    )
+    text_digest = hashlib.sha256(
+        reserved.text.encode("utf-8")
+    ).hexdigest()
     payload = VoicePayload(
-        text_digest="a" * 64,
+        text_digest=text_digest,
         audio_id="audio_1",
     )
     tts = _event_after(
@@ -1235,8 +1264,9 @@ def test_accepted_facts_commit_then_question_waits_for_caller_playback():
         payload=payload,
     )
     assert lifecycle.ingest(tts)
+    assert transaction.accept_tts_binding(event=tts)
     playout_payload = VoicePayload(
-        text_digest="a" * 64,
+        text_digest=text_digest,
         audio_id="audio_1",
         playout_id="playout_1",
     )
@@ -1248,6 +1278,7 @@ def test_accepted_facts_commit_then_question_waits_for_caller_playback():
         payload=playout_payload,
     )
     assert lifecycle.ingest(playout)
+    assert transaction.accept_playout_binding(event=playout)
     transport = _event_after(
         lifecycle,
         authorization,
@@ -1256,6 +1287,11 @@ def test_accepted_facts_commit_then_question_waits_for_caller_playback():
         payload=playout_payload,
     )
     assert lifecycle.ingest(transport)
+    assert transaction.accept_transport_resolution(
+        event=transport,
+        event_id="transport_1",
+        sequence=transport.sequence,
+    )
     assert harness["state"].current_state().asked_slots == set()
     playback = _event_after(
         lifecycle,
@@ -1284,6 +1320,558 @@ def test_accepted_facts_commit_then_question_waits_for_caller_playback():
         now_ms=12,
     )
     assert replay == observed
+
+
+def test_repeat_then_slower_replay_exact_observed_question_without_state_mutation():
+    harness = _harness()
+    transaction = harness["transaction"]
+    original = transaction.execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    original_act_id = original.act_ids[0]
+    original_playback = _playback_after_transport(
+        harness,
+        original_act_id,
+    )
+    original_observed = transaction.observe_playback(
+        event=original_playback,
+        event_id="playback_original",
+        sequence=original_playback.sequence,
+    )
+    assert original_observed is not None
+    assert (
+        original_observed.status
+        is CompositionStatus.RESPONSE_OBSERVED
+    )
+    state_before_replay = (
+        harness["state"].current_state().to_dict()
+    )
+    version_before_replay = harness["state"].version
+    original_digest = harness[
+        "speech"
+    ].authorized_text_digest(original_act_id)
+    assert original_digest is not None
+    assert harness["calls"].phase is SilencePhase.FIRST_ARMED
+
+    repeat_content = "repeat"
+    repeat_receipt = _mint_next_turn(
+        harness,
+        turn_id="turn_repeat",
+        content=repeat_content,
+        at_ms=original_playback.at_ms + 1,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    repeated = transaction.execute_replay(
+        repeat_receipt,
+        content=repeat_content,
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=repeat_receipt.at_ms,
+    )
+    assert repeated.status is CompositionStatus.REPLAY_PENDING
+    assert repeated.replay_mode is ReplayMode.EXACT
+    assert repeated.replay_source_act_id == original_act_id
+    assert repeated.act_kinds == (VoiceSemanticActKind.QUESTION,)
+    assert repeated.act_ids != original.act_ids
+    assert harness["state"].version == version_before_replay
+    assert (
+        harness["state"].current_state().to_dict()
+        == state_before_replay
+    )
+    assert harness["calls"].phase is SilencePhase.QUESTION_RESERVED
+    repeated_act_id = repeated.act_ids[0]
+    assert (
+        harness["speech"].authorized_text_digest(repeated_act_id)
+        == original_digest
+    )
+    replay_binding = harness["speech"].replay_binding(
+        repeated_act_id
+    )
+    assert replay_binding is not None
+    assert replay_binding.mode is ReplayMode.EXACT
+    assert replay_binding.source_act_id == original_act_id
+    assert replay_binding.request_id == repeat_receipt.receipt_id
+
+    repeat_transport = _confirm_and_resolve_transport(
+        harness,
+        repeated_act_id,
+    )
+    assert (
+        transaction.infer_playback(
+            act_id=repeated_act_id,
+            event_id="inferred_repeat",
+            sequence=repeat_transport.sequence + 1,
+            at_ms=repeat_transport.at_ms + 1,
+            inference_id="inferred_repeat",
+            transport_id=repeat_transport.payload.playout_id or "",
+        )
+        is None
+    )
+    assert harness["calls"].phase is SilencePhase.QUESTION_CONFIRMED
+    repeat_playback = _event_after(
+        harness["lifecycle"],
+        transaction.authorization_receipt(repeated_act_id),
+        kind=VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=repeat_transport.payload,
+    )
+    assert harness["lifecycle"].ingest(repeat_playback)
+    repeat_observed = transaction.observe_playback(
+        event=repeat_playback,
+        event_id="playback_repeat",
+        sequence=repeat_playback.sequence,
+    )
+    assert repeat_observed is not None
+    assert (
+        repeat_observed.status
+        is CompositionStatus.REPLAY_OBSERVED
+    )
+    assert harness["state"].version == version_before_replay
+    assert (
+        harness["state"].current_state().to_dict()
+        == state_before_replay
+    )
+    assert harness["calls"].phase is SilencePhase.FIRST_ARMED
+    assert transaction.execute_replay(
+        repeat_receipt,
+        content=repeat_content,
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=repeat_playback.at_ms + 1,
+    ) == repeat_observed
+
+    slower_content = "slower"
+    slower_receipt = _mint_next_turn(
+        harness,
+        turn_id="turn_slower",
+        content=slower_content,
+        at_ms=repeat_playback.at_ms + 1,
+        semantic_act_kind=VoiceSemanticActKind.SLOWER_SPEECH,
+    )
+    slower = transaction.execute_replay(
+        slower_receipt,
+        content=slower_content,
+        command=VoiceSemanticActKind.SLOWER_SPEECH,
+        now_ms=slower_receipt.at_ms,
+    )
+    assert slower.status is CompositionStatus.REPLAY_PENDING
+    assert slower.replay_mode is ReplayMode.SLOWER
+    assert slower.replay_source_act_id == repeated_act_id
+    assert (
+        harness["speech"].authorized_text_digest(
+            slower.act_ids[0]
+        )
+        == original_digest
+    )
+    assert harness["state"].version == version_before_replay
+    assert (
+        harness["state"].current_state().to_dict()
+        == state_before_replay
+    )
+    assert harness["calls"].phase is SilencePhase.QUESTION_RESERVED
+
+    slower_playback = _playback_after_transport(
+        harness,
+        slower.act_ids[0],
+    )
+    slower_observed = transaction.observe_playback(
+        event=slower_playback,
+        event_id="playback_slower",
+        sequence=slower_playback.sequence,
+    )
+    assert slower_observed is not None
+    assert (
+        slower_observed.status
+        is CompositionStatus.REPLAY_OBSERVED
+    )
+    assert slower_observed.replay_mode is ReplayMode.SLOWER
+    assert harness["state"].version == version_before_replay
+    assert (
+        harness["state"].current_state().to_dict()
+        == state_before_replay
+    )
+    assert harness["calls"].phase is SilencePhase.FIRST_ARMED
+
+
+def test_replay_requires_typed_command_receipt_and_an_observed_source():
+    ordinary = _harness()
+    ordinary_result = ordinary["transaction"].execute_replay(
+        ordinary["receipt"],
+        content=ordinary["content"],
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=11,
+    )
+    assert ordinary_result.status is CompositionStatus.TERMINAL_FAILURE
+    assert ordinary_result.reason == "replay_command_mismatch"
+    assert ordinary["transaction"].pending_response_count == 0
+    assert ordinary["speech"].reservation_batch_count(
+        ordinary["receipt"].binding
+    ) == 0
+
+    command = _harness()
+    repeat_content = "repeat"
+    repeat_receipt = _mint_next_turn(
+        command,
+        turn_id="turn_repeat_without_source",
+        content=repeat_content,
+        at_ms=11,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    result = command["transaction"].execute_replay(
+        repeat_receipt,
+        content=repeat_content,
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=repeat_receipt.at_ms,
+    )
+    assert result.status is CompositionStatus.SILENT
+    assert result.reason == "no_caller_observed_replay_source"
+    assert result.act_ids == ()
+    assert command["transaction"].pending_response_count == 0
+    assert command["calls"].is_quiescent
+
+    normal_path = _harness()
+    typed_receipt = _mint_next_turn(
+        normal_path,
+        turn_id="turn_repeat_on_normal_path",
+        content=repeat_content,
+        at_ms=11,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    normal_result = normal_path["transaction"].execute(
+        typed_receipt,
+        content=repeat_content,
+        backend=lambda request: pytest.fail(
+            "typed command reached extraction"
+        ),
+        now_ms=typed_receipt.at_ms,
+    )
+    assert normal_result.status is CompositionStatus.TERMINAL_FAILURE
+    assert normal_result.reason == "input_semantic_kind"
+
+
+def test_replay_command_mismatch_and_tts_text_drift_fail_closed():
+    mismatch = _harness()
+    mismatch_receipt = _mint_next_turn(
+        mismatch,
+        turn_id="turn_mismatch",
+        content="repeat",
+        at_ms=11,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    mismatch_result = mismatch["transaction"].execute_replay(
+        mismatch_receipt,
+        content="repeat",
+        command=VoiceSemanticActKind.SLOWER_SPEECH,
+        now_ms=mismatch_receipt.at_ms,
+    )
+    assert mismatch_result.status is CompositionStatus.TERMINAL_FAILURE
+    assert mismatch_result.reason == "replay_command_mismatch"
+
+    harness = _harness()
+    original = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    original_playback = _playback_after_transport(
+        harness,
+        original.act_ids[0],
+    )
+    assert harness["transaction"].observe_playback(
+        event=original_playback,
+        event_id="playback_before_drift",
+        sequence=original_playback.sequence,
+    ) is not None
+    replay_receipt = _mint_next_turn(
+        harness,
+        turn_id="turn_drift",
+        content="repeat",
+        at_ms=original_playback.at_ms + 1,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    replay = harness["transaction"].execute_replay(
+        replay_receipt,
+        content="repeat",
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=replay_receipt.at_ms,
+    )
+    replay_act_id = replay.act_ids[0]
+    authorization = harness[
+        "transaction"
+    ].authorization_receipt(replay_act_id)
+    assert authorization is not None
+    confirmation = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(),
+    )
+    assert harness["lifecycle"].ingest(confirmation)
+    assert harness["transaction"].accept_semantic_confirmation(
+        event=confirmation,
+        event_id="confirm_drift",
+        sequence=confirmation.sequence,
+    )
+    tampered_tts = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.TTS_BOUND,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(
+            text_digest="f" * 64,
+            audio_id="audio_tampered",
+        ),
+    )
+    assert harness["lifecycle"].ingest(tampered_tts)
+    assert not harness["transaction"].accept_tts_binding(
+        event=tampered_tts
+    )
+    terminal = harness["transaction"]._outcomes[
+        replay.receipt_id
+    ]
+    assert terminal.status is CompositionStatus.TERMINAL_FAILURE
+    assert terminal.reason == "tts_binding_commit_failed"
+    assert harness["adapter"].permit_admission_closed
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert not harness["speech"].is_live(replay_act_id)
+    assert harness["transaction"].pending_response_count == 0
+
+
+def test_replay_call_cleanup_and_reservation_rollback_faults_seal_all_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    call_fault = _harness()
+    original = call_fault["transaction"].execute(
+        call_fault["receipt"],
+        content=call_fault["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    playback = _playback_after_transport(
+        call_fault,
+        original.act_ids[0],
+    )
+    assert call_fault["transaction"].observe_playback(
+        event=playback,
+        event_id="playback_before_call_fault",
+        sequence=playback.sequence,
+    ) is not None
+    receipt = _mint_next_turn(
+        call_fault,
+        turn_id="turn_call_cleanup_fault",
+        content="repeat",
+        at_ms=playback.at_ms + 1,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    monkeypatch.setattr(
+        call_fault["calls"],
+        "cancel",
+        lambda **kwargs: (),
+    )
+    failed = call_fault["transaction"].execute_replay(
+        receipt,
+        content="repeat",
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=receipt.at_ms,
+    )
+    assert failed.status is CompositionStatus.TERMINAL_FAILURE
+    assert failed.reason == "replay_call_cleanup"
+    assert call_fault["adapter"].terminally_closed
+    assert call_fault["calls"].phase is SilencePhase.TERMINATED
+    assert call_fault["calls"].is_quiescent
+    assert all(
+        not call_fault["speech"].is_live(act_id)
+        for act_id in call_fault["speech"].act_ids_for_binding(
+            call_fault["receipt"].binding
+        )
+    )
+
+    rollback_fault = _harness()
+    original = rollback_fault["transaction"].execute(
+        rollback_fault["receipt"],
+        content=rollback_fault["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    playback = _playback_after_transport(
+        rollback_fault,
+        original.act_ids[0],
+    )
+    assert rollback_fault["transaction"].observe_playback(
+        event=playback,
+        event_id="playback_before_rollback_fault",
+        sequence=playback.sequence,
+    ) is not None
+    receipt = _mint_next_turn(
+        rollback_fault,
+        turn_id="turn_rollback_fault",
+        content="repeat",
+        at_ms=playback.at_ms + 1,
+        semantic_act_kind=VoiceSemanticActKind.REPEAT,
+    )
+    monkeypatch.setattr(
+        rollback_fault["calls"],
+        "reserve_question",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        rollback_fault["speech"],
+        "rollback_reservation",
+        lambda reserved: False,
+    )
+    failed = rollback_fault["transaction"].execute_replay(
+        receipt,
+        content="repeat",
+        command=VoiceSemanticActKind.REPEAT,
+        now_ms=receipt.at_ms,
+    )
+    assert failed.status is CompositionStatus.TERMINAL_FAILURE
+    assert failed.reason == "replay_reservation_cleanup"
+    assert rollback_fault["adapter"].terminally_closed
+    assert rollback_fault["calls"].phase is SilencePhase.TERMINATED
+    assert rollback_fault["calls"].is_quiescent
+    assert rollback_fault["speech"].reservation_batch_count(
+        rollback_fault["receipt"].binding
+    ) == 0
+    assert all(
+        not rollback_fault["speech"].is_live(act_id)
+        for act_id in rollback_fault[
+            "speech"
+        ].act_ids_for_binding(
+            rollback_fault["receipt"].binding
+        )
+    )
+
+
+def test_tts_receipt_must_match_current_canonical_lifecycle_binding():
+    harness = _harness()
+    pending = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    act_id = pending.act_ids[0]
+    authorization = harness[
+        "transaction"
+    ].authorization_receipt(act_id)
+    assert authorization is not None
+    confirmation = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(),
+    )
+    assert harness["lifecycle"].ingest(confirmation)
+    assert harness["transaction"].accept_semantic_confirmation(
+        event=confirmation,
+        event_id="confirm_canonical_tts",
+        sequence=confirmation.sequence,
+    )
+    text_digest = harness[
+        "speech"
+    ].authorized_text_digest(act_id)
+    assert text_digest is not None
+    canonical_tts = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.TTS_BOUND,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(
+            text_digest=text_digest,
+            audio_id="audio_canonical",
+        ),
+    )
+    assert harness["lifecycle"].ingest(canonical_tts)
+    forged = replace(
+        canonical_tts,
+        payload=VoicePayload(
+            text_digest=text_digest,
+            audio_id="audio_forged",
+        ),
+    )
+    assert not harness["transaction"].accept_tts_binding(
+        event=forged
+    )
+    terminal = harness["transaction"]._outcomes[
+        pending.receipt_id
+    ]
+    assert terminal.status is CompositionStatus.TERMINAL_FAILURE
+    assert terminal.reason == "tts_binding_validation_failed"
+    assert harness["adapter"].terminally_closed
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert not harness["speech"].is_live(act_id)
+
+
+def test_transaction_abort_preserves_failed_batch_retirement_for_idempotent_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    pending = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(),
+        now_ms=11,
+    )
+    queued = _mint_next_turn(
+        harness,
+        turn_id="turn_queued_before_abort",
+        content="queued",
+        at_ms=12,
+    )
+    assert queued is not None
+    assert harness["receipts"].unconsumed_receipt_count == 1
+    original_retire = harness[
+        "transaction"
+    ].coordinator.retire_batch
+    attempts = 0
+
+    def transient_retirement_failure(reserved):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return False
+        return original_retire(reserved)
+
+    monkeypatch.setattr(
+        harness["transaction"].coordinator,
+        "retire_batch",
+        transient_retirement_failure,
+    )
+
+    assert not harness["transaction"].abort(at_ms=13)
+    assert harness["transaction"].pending_response_count == 1
+    assert harness["speech"].reservation_batch_count(
+        harness["receipt"].binding
+    ) == 1
+    assert not harness["speech"].is_live(
+        pending.act_ids[0]
+    )
+    assert harness["transaction"].abort(at_ms=14)
+    assert attempts == 2
+    terminal = harness["transaction"]._outcomes[
+        pending.receipt_id
+    ]
+    assert terminal.status is CompositionStatus.TERMINAL_FAILURE
+    assert terminal.reason == "transaction_aborted"
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness["speech"].reservation_batch_count(
+        harness["receipt"].binding
+    ) == 0
+    assert all(
+        not harness["speech"].is_live(act_id)
+        for act_id in harness["speech"].act_ids_for_binding(
+            harness["receipt"].binding
+        )
+    )
+    assert harness["adapter"].terminally_closed
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+    assert harness["calls"].is_quiescent
 
 
 def test_arm_c_timeout_terminalizes_owned_question_speech_and_call_authority():
@@ -1606,7 +2194,7 @@ def test_arm_c_timeout_serializes_cross_thread_terminalization_without_orphan(
                     at_ms=deadline_ms,
                 )
             )
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001
             failures.append(error)
 
     def terminalize() -> None:

@@ -31,6 +31,7 @@ from app.services.voice_bakeoff_session_driver import (
 )
 from app.services.voice_bakeoff_turn_composition import (
     CompositionStatus,
+    TurnCompositionTransaction,
 )
 from app.services.voice_lifecycle import (
     VoiceEventKind,
@@ -39,6 +40,10 @@ from app.services.voice_lifecycle import (
     VoiceSessionBinding,
 )
 from app.services.voice_session_auth import CandidateArm
+from app.services.voice_speech_control import (
+    ReplayMode,
+    SpeechControl,
+)
 
 _DRIVER_PATH = Path("app/services/voice_bakeoff_session_driver.py")
 _LIVE_ROUTE_PATHS = (
@@ -125,6 +130,7 @@ def _trace_projection(result):
             event.semantic_act_kind,
             event.composition_status,
             event.locale,
+            event.replay_mode,
         )
         for event in result.trace
     )
@@ -280,6 +286,286 @@ def test_one_repair_success_then_second_failure_requires_silent_closure():
         for event in result.trace
         if event.kind is TraceKind.ACT_CONFIRMED
     ) == (VoiceSemanticActKind.REPAIR,)
+
+
+def test_repeat_and_slower_replay_exact_localized_question_and_seal_every_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPEAT_SLOWER,
+    )
+    assemblies = []
+    replay_requests = []
+    original_assembly = driver._assembly
+    original_reserve_replay = SpeechControl.reserve_replay
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    def capture_replay(self, **kwargs):
+        source = kwargs["source"]
+        replay_requests.append(
+            (
+                source.locale,
+                source.text,
+                source.text_digest,
+                kwargs["mode"],
+            )
+        )
+        return original_reserve_replay(self, **kwargs)
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+    monkeypatch.setattr(
+        SpeechControl,
+        "reserve_replay",
+        capture_replay,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.buffers_scrubbed
+    assert result.outbound_frame_count == 12
+    assert result.outbound_audio_ms == 320
+    expected_text = {
+        "en": "What details would help us understand the job?",
+        "es": "Qué detalles ayudan a entender el trabajo?",
+        "pt": "Quais detalhes ajudam a entender o serviço?",
+        "zh": "还有哪些细节可以帮助我们了解这项服务？",
+    }
+    assert len(replay_requests) == 8
+    for locale_index, locale in enumerate(
+        ("en", "es", "pt", "zh")
+    ):
+        first, second = replay_requests[
+            locale_index * 2:locale_index * 2 + 2
+        ]
+        assert first[:2] == (locale, expected_text[locale])
+        assert second[:2] == (locale, expected_text[locale])
+        assert first[2] == second[2] == hashlib.sha256(
+            expected_text[locale].encode("utf-8")
+        ).hexdigest()
+        assert first[3] is ReplayMode.EXACT
+        assert second[3] is ReplayMode.SLOWER
+    requested = tuple(
+        (
+            event.locale,
+            event.semantic_act_kind,
+            event.replay_mode,
+        )
+        for event in result.trace
+        if event.kind is TraceKind.REPLAY_REQUESTED
+    )
+    assert requested == tuple(
+        pair
+        for locale in ("en", "es", "pt", "zh")
+        for pair in (
+            (
+                locale,
+                VoiceSemanticActKind.REPEAT,
+                ReplayMode.EXACT,
+            ),
+            (
+                locale,
+                VoiceSemanticActKind.SLOWER_SPEECH,
+                ReplayMode.SLOWER,
+            ),
+        )
+    )
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.REPLAY_PENDING) == 8
+    assert kinds.count(TraceKind.REPLAY_OBSERVED) == 8
+    assert kinds.count(TraceKind.RESPONSE_OBSERVED) == 4
+    assert kinds.count(TraceKind.PLAYBACK_OBSERVED) == 12
+    assert len(assemblies) == 4
+    for assembly in assemblies:
+        assert assembly.transaction.pending_response_count == 0
+        assert assembly.receipts.unconsumed_receipt_count == 0
+        assert assembly.calls.is_quiescent
+        assert assembly.adapter.terminally_closed
+        assert assembly.speech.reservation_batch_count(
+            assembly.binding
+        ) == 0
+        assert all(
+            not assembly.speech.is_live(act_id)
+            for act_id in assembly.speech.act_ids_for_binding(
+                assembly.binding
+            )
+        )
+
+
+def test_repeat_slower_reservation_fault_aborts_and_seals_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPEAT_SLOWER,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+    original_reserve_replay = SpeechControl.reserve_replay
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    def fail_slower(self, **kwargs):
+        if kwargs["mode"] is ReplayMode.SLOWER:
+            return ()
+        return original_reserve_replay(self, **kwargs)
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+    monkeypatch.setattr(
+        SpeechControl,
+        "reserve_replay",
+        fail_slower,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.COMPOSITION
+    assert result.buffers_scrubbed
+    assert len(assemblies) == 1
+    assembly = assemblies[0]
+    assert assembly.transaction.pending_response_count == 0
+    assert assembly.receipts.unconsumed_receipt_count == 0
+    assert assembly.calls.is_quiescent
+    assert assembly.adapter.terminally_closed
+    assert assembly.speech.reservation_batch_count(
+        assembly.binding
+    ) == 0
+    assert all(
+        not assembly.speech.is_live(act_id)
+        for act_id in assembly.speech.act_ids_for_binding(
+            assembly.binding
+        )
+    )
+
+
+def test_repeat_slower_exact_audio_limit_and_one_under_rejection():
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPEAT_SLOWER,
+        limits=OfflineSessionLimits(
+            max_outbound_audio_ms=320,
+        ),
+    )
+    exact = driver.run(facade, now_ms=10)
+    assert exact is not None
+    assert exact.state is OfflineSessionState.CLOSED
+    assert exact.failure is None
+    assert exact.outbound_audio_ms == 320
+
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPEAT_SLOWER,
+        limits=OfflineSessionLimits(
+            max_outbound_audio_ms=319,
+        ),
+    )
+    rejected = driver.run(facade, now_ms=10)
+    assert rejected is not None
+    assert rejected.state is OfflineSessionState.ABORTED
+    assert rejected.failure is DriverFailure.RESOURCE_LIMIT
+    assert rejected.buffers_scrubbed
+
+
+def test_repeat_slower_localized_start_fault_seals_both_assemblies(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPEAT_SLOWER,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    def fail_localized_start(**kwargs):
+        raise RuntimeError("synthetic localized start fault")
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+    monkeypatch.setattr(
+        driver,
+        "_start_silence_question",
+        fail_localized_start,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.INTERNAL
+    assert result.buffers_scrubbed
+    assert len(assemblies) == 2
+    for assembly in assemblies:
+        assert assembly.transaction.pending_response_count == 0
+        assert assembly.receipts.unconsumed_receipt_count == 0
+        assert assembly.calls.is_quiescent
+        assert assembly.adapter.terminally_closed
+        assert assembly.speech.reservation_batch_count(
+            assembly.binding
+        ) == 0
+        assert all(
+            not assembly.speech.is_live(act_id)
+            for act_id in assembly.speech.act_ids_for_binding(
+                assembly.binding
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "fault_method",
+    (
+        "accept_tts_binding",
+        "accept_playout_binding",
+        "accept_transport_resolution",
+    ),
+)
+def test_replay_binding_fault_commits_no_additional_outbound_audio(
+    monkeypatch: pytest.MonkeyPatch,
+    fault_method: str,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.REPEAT_SLOWER,
+    )
+    original = getattr(
+        TurnCompositionTransaction,
+        fault_method,
+    )
+
+    def reject_replay(self, *args, **kwargs):
+        event = kwargs["event"]
+        if (
+            self.coordinator.speech.replay_binding(
+                event.semantic_act_id
+            )
+            is not None
+        ):
+            return False
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        TurnCompositionTransaction,
+        fault_method,
+        reject_replay,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.DELIVERY
+    assert result.buffers_scrubbed
+    assert result.outbound_frame_count == 1
+    assert result.outbound_audio_ms == 20
 
 
 def test_superseding_turn_cancels_old_response_before_new_playback():

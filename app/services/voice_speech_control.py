@@ -61,6 +61,11 @@ class CancellationReason(str, Enum):
     EPOCH_SUPERSEDED = "epoch_superseded"
 
 
+class ReplayMode(str, Enum):
+    EXACT = "exact"
+    SLOWER = "slower"
+
+
 _TERMINAL_KINDS = {SemanticActKind.CLOSING, SemanticActKind.OPT_OUT, SemanticActKind.VOICEMAIL}
 
 
@@ -203,6 +208,90 @@ class PlayoutBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplaySource:
+    act_id: str
+    kind: SemanticActKind
+    text: str
+    text_digest: str
+    binding: VoiceSessionBinding
+    turn_id: str
+    question_slot: str | None
+    locale: str
+
+    def __post_init__(self) -> None:
+        if (
+            _identifier(self.act_id, "replay source act id")
+            != self.act_id
+            or not isinstance(self.kind, SemanticActKind)
+            or self.kind in _TERMINAL_KINDS
+            or not isinstance(self.text, str)
+            or not self.text
+            or (
+                not isinstance(self.text_digest, str)
+                or len(self.text_digest) != 64
+                or any(
+                    part not in "0123456789abcdef"
+                    for part in self.text_digest
+                )
+            )
+            or hashlib.sha256(
+                self.text.encode("utf-8")
+            ).hexdigest()
+            != self.text_digest
+            or not isinstance(self.binding, VoiceSessionBinding)
+            or _identifier(self.turn_id, "replay source turn id")
+            != self.turn_id
+            or (
+                self.kind is SemanticActKind.QUESTION
+                and _identifier(
+                    self.question_slot,
+                    "replay source question slot",
+                )
+                != self.question_slot
+            )
+            or (
+                self.kind is not SemanticActKind.QUESTION
+                and self.question_slot is not None
+            )
+            or _locale(self.locale) != self.locale
+        ):
+            raise ValueError("replay source is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayBinding:
+    act_id: str
+    source_act_id: str
+    request_id: str
+    mode: ReplayMode
+    text_digest: str
+    binding: VoiceSessionBinding
+
+    def __post_init__(self) -> None:
+        if (
+            _identifier(self.act_id, "replay act id") != self.act_id
+            or _identifier(
+                self.source_act_id,
+                "replay source act id",
+            )
+            != self.source_act_id
+            or _identifier(self.request_id, "replay request id")
+            != self.request_id
+            or not isinstance(self.mode, ReplayMode)
+            or (
+                not isinstance(self.text_digest, str)
+                or len(self.text_digest) != 64
+                or any(
+                    part not in "0123456789abcdef"
+                    for part in self.text_digest
+                )
+            )
+            or not isinstance(self.binding, VoiceSessionBinding)
+        ):
+            raise ValueError("replay binding is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class RepairIntent:
     original_act_id: str
     repair_act_id: str
@@ -224,11 +313,17 @@ class RepairIntent:
 class _Record:
     reserved: ReservedSpeech
     question_slot: str | None = None
+    owns_question_slot_reservation: bool = False
+    locale: str = "en"
     authorized: bool = False
     cancelled: bool = False
     audio: AudioBinding | None = None
     playout: PlayoutBinding | None = None
     streamed_text: str = ""
+    caller_observed_ordinal: int | None = None
+    replay_mode: ReplayMode | None = None
+    replay_source_act_id: str | None = None
+    replay_request_id: str | None = None
 
 
 class SpeechControl:
@@ -242,6 +337,10 @@ class SpeechControl:
         self._reservation_batches: set[tuple[str, ...]] = set()
         self._reserved_slots: set[tuple[VoiceSessionBinding, str]] = set()
         self._repairs: set[tuple[VoiceSessionBinding, str]] = set()
+        self._replay_requests: set[
+            tuple[VoiceSessionBinding, str]
+        ] = set()
+        self._caller_observation_counter = 0
 
     def reserve(self, plan: SpokenPlan, authorization: SpeechAuthorization) -> tuple[ReservedSpeech, ...]:
         if not isinstance(plan, SpokenPlan) or not isinstance(authorization, SpeechAuthorization):
@@ -274,7 +373,14 @@ class SpeechControl:
                 binding=authorization.binding,
                 turn_id=authorization.turn_id,
             )
-            self._records[act_id] = _Record(reserved=entry, question_slot=act.question_slot)
+            self._records[act_id] = _Record(
+                reserved=entry,
+                question_slot=act.question_slot,
+                owns_question_slot_reservation=(
+                    act.question_slot is not None
+                ),
+                locale=authorization.locale,
+            )
             reserved.append(entry)
         batch = tuple(reserved)
         self._reservation_batches.add(tuple(item.act_id for item in batch))
@@ -300,8 +406,16 @@ class SpeechControl:
             records.append(record)
         for record in records:
             self._records.pop(record.reserved.act_id)
-            if record.question_slot is not None:
+            if record.owns_question_slot_reservation:
+                assert record.question_slot is not None
                 self._reserved_slots.discard((record.reserved.binding, record.question_slot))
+            if record.replay_request_id is not None:
+                self._replay_requests.discard(
+                    (
+                        record.reserved.binding,
+                        record.replay_request_id,
+                    )
+                )
         self._reservation_batches.discard(act_ids)
         return True
 
@@ -387,6 +501,24 @@ class SpeechControl:
             for act_ids in self._reservation_batches
         )
 
+    def tracks_reservation_batch(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Report whether one exact batch still needs retirement."""
+        if not isinstance(reserved, tuple) or not reserved:
+            return False
+        act_ids = tuple(
+            item.act_id
+            for item in reserved
+            if isinstance(item, ReservedSpeech)
+        )
+        return (
+            len(act_ids) == len(reserved)
+            and len(set(act_ids)) == len(act_ids)
+            and act_ids in self._reservation_batches
+        )
+
     def authorize_text(self, act_id: str, text: str) -> bool:
         record = self._records.get(act_id)
         if record is None or record.cancelled or record.authorized or text != record.reserved.text:
@@ -442,6 +574,19 @@ class SpeechControl:
         record = self._records.get(act_id)
         return None if record is None else record.audio
 
+    def authorized_text_digest(self, act_id: str) -> str | None:
+        """Expose only the digest of one exact live authorized act."""
+        record = self._records.get(act_id)
+        if (
+            record is None
+            or record.cancelled
+            or not record.authorized
+        ):
+            return None
+        return hashlib.sha256(
+            record.reserved.text.encode("utf-8")
+        ).hexdigest()
+
     def bind_playout(self, act_id: str, *, playout_id: str) -> bool:
         record = self._records.get(act_id)
         if record is None or record.cancelled or record.audio is None or record.playout is not None:
@@ -463,6 +608,166 @@ class SpeechControl:
         record = self._records.get(act_id)
         return None if record is None else record.playout
 
+    def record_caller_playback_observed(
+        self,
+        act_id: str,
+        *,
+        playout_id: str,
+    ) -> bool:
+        """Record one canonical caller-heard complete act for exact replay."""
+        record = self._records.get(act_id)
+        if (
+            record is None
+            or record.cancelled
+            or not record.authorized
+            or record.playout is None
+            or record.playout.playout_id != playout_id
+            or record.caller_observed_ordinal is not None
+        ):
+            return False
+        self._caller_observation_counter += 1
+        record.caller_observed_ordinal = (
+            self._caller_observation_counter
+        )
+        return True
+
+    def latest_replay_source(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> ReplaySource | None:
+        """Return only the latest exact caller-observed nonterminal act."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return None
+        eligible = tuple(
+            record
+            for record in self._records.values()
+            if record.reserved.binding == binding
+            and record.caller_observed_ordinal is not None
+            and record.authorized
+            and not record.cancelled
+            and record.playout is not None
+            and record.reserved.kind not in _TERMINAL_KINDS
+        )
+        if not eligible:
+            return None
+        record = max(
+            eligible,
+            key=lambda item: item.caller_observed_ordinal or 0,
+        )
+        assert record.playout is not None
+        return ReplaySource(
+            act_id=record.reserved.act_id,
+            kind=record.reserved.kind,
+            text=record.reserved.text,
+            text_digest=record.playout.text_digest,
+            binding=record.reserved.binding,
+            turn_id=record.reserved.turn_id,
+            question_slot=record.question_slot,
+            locale=record.locale,
+        )
+
+    def reserve_replay(
+        self,
+        *,
+        source: ReplaySource,
+        request_id: str,
+        mode: ReplayMode,
+        authorization: SpeechAuthorization,
+    ) -> tuple[ReservedSpeech, ...]:
+        """Reserve one exact-content replay under fresh one-use authority."""
+        if (
+            not isinstance(source, ReplaySource)
+            or _identifier(request_id, "replay request id")
+            != request_id
+            or not isinstance(mode, ReplayMode)
+            or not isinstance(authorization, SpeechAuthorization)
+            or source != self.latest_replay_source(source.binding)
+            or authorization.binding != source.binding
+            or authorization.turn_id == source.turn_id
+            or authorization.authorized_kinds != (source.kind,)
+            or authorization.terminal_allowed
+            or authorization.answered_slots
+            or authorization.locale != source.locale
+            or (
+                source.binding,
+                request_id,
+            )
+            in self._replay_requests
+        ):
+            return ()
+        replay_material = json.dumps(
+            {
+                "domain": "hey-kevin/offline-speech-replay/v1",
+                "binding": {
+                    "environment": source.binding.environment,
+                    "contractor_binding":
+                        source.binding.contractor_binding,
+                    "call_binding": source.binding.call_binding,
+                    "stream_binding": source.binding.stream_binding,
+                    "epoch": source.binding.epoch,
+                },
+                "request_id": request_id,
+                "source_act_id": source.act_id,
+                "turn_id": authorization.turn_id,
+                "mode": mode.value,
+                "text_digest": source.text_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        act_id = (
+            "act_"
+            + hashlib.sha256(replay_material).hexdigest()
+        )
+        if act_id in self._records:
+            return ()
+        reserved = ReservedSpeech(
+            act_id=act_id,
+            reservation_id=(
+                f"reservation_{act_id}"
+                if source.kind is SemanticActKind.QUESTION
+                else None
+            ),
+            kind=source.kind,
+            text=source.text,
+            binding=source.binding,
+            turn_id=authorization.turn_id,
+        )
+        self._records[act_id] = _Record(
+            reserved=reserved,
+            question_slot=source.question_slot,
+            locale=source.locale,
+            replay_mode=mode,
+            replay_source_act_id=source.act_id,
+            replay_request_id=request_id,
+        )
+        self._reservation_batches.add((act_id,))
+        self._replay_requests.add(
+            (source.binding, request_id)
+        )
+        return (reserved,)
+
+    def replay_binding(self, act_id: str) -> ReplayBinding | None:
+        """Expose content-free exact replay provenance for qualification."""
+        record = self._records.get(act_id)
+        if (
+            record is None
+            or record.replay_mode is None
+            or record.replay_source_act_id is None
+            or record.replay_request_id is None
+        ):
+            return None
+        return ReplayBinding(
+            act_id=act_id,
+            source_act_id=record.replay_source_act_id,
+            request_id=record.replay_request_id,
+            mode=record.replay_mode,
+            text_digest=hashlib.sha256(
+                record.reserved.text.encode("utf-8")
+            ).hexdigest(),
+            binding=record.reserved.binding,
+        )
+
     def cancel(self, act_id: str, *, reason: CancellationReason, superseding_epoch: int | None = None) -> bool:
         record = self._records.get(act_id)
         if record is None or record.cancelled or not isinstance(reason, CancellationReason):
@@ -472,7 +777,8 @@ class SpeechControl:
         if reason is not CancellationReason.EPOCH_SUPERSEDED and superseding_epoch is not None:
             return False
         record.cancelled = True
-        if record.question_slot is not None:
+        if record.owns_question_slot_reservation:
+            assert record.question_slot is not None
             self._reserved_slots.discard((record.reserved.binding, record.question_slot))
         return True
 
@@ -482,7 +788,8 @@ class SpeechControl:
         if record is None:
             return False
         record.cancelled = True
-        if record.question_slot is not None:
+        if record.owns_question_slot_reservation:
+            assert record.question_slot is not None
             self._reserved_slots.discard(
                 (
                     record.reserved.binding,

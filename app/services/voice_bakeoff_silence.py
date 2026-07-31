@@ -759,9 +759,25 @@ class SilenceLifecycleController:
                     )
                     return None
                 try:
-                    completed = self.adapter.retire_permit(
+                    permit_retired = self.adapter.retire_permit(
                         pending.authorization
-                    ) and self.coordinator.complete_batch(pending.reserved)
+                    )
+                    playback_recorded = (
+                        permit_retired
+                        and self.coordinator.speech
+                        .record_caller_playback_observed(
+                            event.semantic_act_id,
+                            playout_id=(
+                                event.payload.playout_id or ""
+                            ),
+                        )
+                    )
+                    completed = (
+                        playback_recorded
+                        and self.coordinator.complete_batch(
+                            pending.reserved
+                        )
+                    )
                 except Exception:  # noqa: BLE001
                     completed = False
                 if not completed:

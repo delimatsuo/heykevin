@@ -1,5 +1,6 @@
 """Offline contract tests for provider-neutral speech control."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from app.services.voice_lifecycle import VoiceSessionBinding
 from app.services.voice_speech_control import (
     CancellationReason,
     FailureClass,
+    ReplayMode,
     SemanticAct,
     SemanticActKind,
     SpeechAuthorization,
@@ -40,6 +42,65 @@ def _authorization(*, terminal_allowed: bool = False) -> SpeechAuthorization:
         authorized_kinds=(SemanticActKind.ANSWER, SemanticActKind.QUESTION, SemanticActKind.SAFETY, SemanticActKind.REPAIR),
         terminal_allowed=terminal_allowed,
     )
+
+
+def _replay_authorization(
+    *,
+    turn_id: str,
+    kind: SemanticActKind,
+    locale: str = "en",
+) -> SpeechAuthorization:
+    return SpeechAuthorization(
+        binding=_authorization().binding,
+        turn_id=turn_id,
+        authorized_kinds=(kind,),
+        terminal_allowed=False,
+        locale=locale,
+    )
+
+
+def _observe_exact_act(
+    control: SpeechControl,
+    *,
+    plan_id: str,
+    turn_id: str,
+    kind: SemanticActKind,
+    text: str,
+    question_slot: str | None = None,
+):
+    authorization = SpeechAuthorization(
+        binding=_authorization().binding,
+        turn_id=turn_id,
+        authorized_kinds=(kind,),
+        terminal_allowed=False,
+    )
+    reserved = control.reserve(
+        SpokenPlan(
+            plan_id=plan_id,
+            acts=(
+                SemanticAct(
+                    kind,
+                    text,
+                    question_slot=question_slot,
+                ),
+            ),
+        ),
+        authorization,
+    )[0]
+    assert control.authorize_text(reserved.act_id, reserved.text)
+    assert control.bind_tts(
+        reserved.act_id,
+        audio_id=f"audio_{plan_id}",
+    )
+    assert control.bind_playout(
+        reserved.act_id,
+        playout_id=f"playout_{plan_id}",
+    )
+    assert control.record_caller_playback_observed(
+        reserved.act_id,
+        playout_id=f"playout_{plan_id}",
+    )
+    return reserved
 
 
 def test_answer_precedes_one_reserved_question_and_binds_exact_audio_identity():
@@ -117,6 +178,173 @@ def test_lower_risk_segments_are_bounded_and_exact_before_tts():
     assert control.accept_segment(act.act_id, "Yes, ", final=False)
     assert not control.accept_segment(act.act_id, "wrong", final=True)
     assert control.accept_segment(act.act_id, "we can help.", final=True)
+
+
+def test_repeat_and_slower_reserve_exact_latest_observed_act_once_per_request():
+    control = SpeechControl(_policy())
+    original = _observe_exact_act(
+        control,
+        plan_id="original",
+        turn_id="turn_original",
+        kind=SemanticActKind.QUESTION,
+        text="What service do you need?",
+        question_slot="service",
+    )
+    source = control.latest_replay_source(original.binding)
+    assert source is not None
+    assert source.act_id == original.act_id
+    assert source.text == original.text
+    assert source.text_digest == hashlib.sha256(
+        original.text.encode("utf-8")
+    ).hexdigest()
+    assert source.question_slot == "service"
+
+    exact_authorization = _replay_authorization(
+        turn_id="turn_repeat",
+        kind=source.kind,
+    )
+    exact = control.reserve_replay(
+        source=source,
+        request_id="request_repeat",
+        mode=ReplayMode.EXACT,
+        authorization=exact_authorization,
+    )
+    assert len(exact) == 1
+    assert exact[0].text == original.text
+    assert exact[0].act_id != original.act_id
+    assert control.authorized_text_digest(exact[0].act_id) is None
+    binding = control.replay_binding(exact[0].act_id)
+    assert binding is not None
+    assert binding.source_act_id == original.act_id
+    assert binding.request_id == "request_repeat"
+    assert binding.mode is ReplayMode.EXACT
+    assert binding.text_digest == source.text_digest
+    assert control.authorize_text(exact[0].act_id, exact[0].text)
+    assert (
+        control.authorized_text_digest(exact[0].act_id)
+        == source.text_digest
+    )
+    assert control.reserve_replay(
+        source=source,
+        request_id="request_repeat",
+        mode=ReplayMode.EXACT,
+        authorization=exact_authorization,
+    ) == ()
+
+    slower = control.reserve_replay(
+        source=source,
+        request_id="request_slower",
+        mode=ReplayMode.SLOWER,
+        authorization=_replay_authorization(
+            turn_id="turn_slower",
+            kind=source.kind,
+        ),
+    )
+    assert len(slower) == 1
+    assert slower[0].text == exact[0].text
+    slower_binding = control.replay_binding(slower[0].act_id)
+    assert slower_binding is not None
+    assert slower_binding.mode is ReplayMode.SLOWER
+    assert slower_binding.text_digest == source.text_digest
+
+
+def test_replay_rejects_unobserved_stale_and_mismatched_sources_but_rolls_back_pristine():
+    control = SpeechControl(_policy())
+    unobserved = control.reserve(
+        SpokenPlan(
+            plan_id="unobserved",
+            acts=(
+                SemanticAct(
+                    SemanticActKind.ANSWER,
+                    "I understand.",
+                ),
+            ),
+        ),
+        _authorization(),
+    )[0]
+    assert control.authorize_text(unobserved.act_id, unobserved.text)
+    assert control.latest_replay_source(unobserved.binding) is None
+
+    first = _observe_exact_act(
+        control,
+        plan_id="first_observed",
+        turn_id="turn_first",
+        kind=SemanticActKind.QUESTION,
+        text="What service do you need?",
+        question_slot="service",
+    )
+    stale_source = control.latest_replay_source(first.binding)
+    assert stale_source is not None
+    second = _observe_exact_act(
+        control,
+        plan_id="second_observed",
+        turn_id="turn_second",
+        kind=SemanticActKind.QUESTION,
+        text="When do you need help?",
+        question_slot="urgency",
+    )
+    latest = control.latest_replay_source(second.binding)
+    assert latest is not None
+    assert latest.act_id == second.act_id
+    assert control.reserve_replay(
+        source=stale_source,
+        request_id="request_stale",
+        mode=ReplayMode.EXACT,
+        authorization=_replay_authorization(
+            turn_id="turn_stale",
+            kind=stale_source.kind,
+        ),
+    ) == ()
+    assert control.reserve_replay(
+        source=latest,
+        request_id="request_wrong_kind",
+        mode=ReplayMode.EXACT,
+        authorization=_replay_authorization(
+            turn_id="turn_wrong_kind",
+            kind=SemanticActKind.ANSWER,
+        ),
+    ) == ()
+    pristine = control.reserve_replay(
+        source=latest,
+        request_id="request_retry",
+        mode=ReplayMode.EXACT,
+        authorization=_replay_authorization(
+            turn_id="turn_retry",
+            kind=latest.kind,
+        ),
+    )
+    assert len(pristine) == 1
+    assert control.rollback_reservation(pristine)
+    with pytest.raises(ValueError, match="already reserved"):
+        control.reserve(
+            SpokenPlan(
+                plan_id="slot_still_reserved",
+                acts=(
+                    SemanticAct(
+                        SemanticActKind.QUESTION,
+                        "When do you need help?",
+                        question_slot="urgency",
+                    ),
+                ),
+            ),
+            SpeechAuthorization(
+                binding=latest.binding,
+                turn_id="turn_slot_check",
+                authorized_kinds=(
+                    SemanticActKind.QUESTION,
+                ),
+                terminal_allowed=False,
+            ),
+        )
+    assert control.reserve_replay(
+        source=latest,
+        request_id="request_retry",
+        mode=ReplayMode.EXACT,
+        authorization=_replay_authorization(
+            turn_id="turn_retry",
+            kind=latest.kind,
+        ),
+    ) == pristine
 
 
 def test_caller_activity_releases_question_reservation_for_a_new_plan():

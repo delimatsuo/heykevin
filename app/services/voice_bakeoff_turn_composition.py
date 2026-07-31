@@ -23,7 +23,10 @@ from app.services.voice_bakeoff_materializer import (
     FixedProposalMaterializer,
     ProposalKind,
 )
-from app.services.voice_call_lifecycle import PlaybackEvidence
+from app.services.voice_call_lifecycle import (
+    PlaybackEvidence,
+    SilencePhase,
+)
 from app.services.voice_candidates import AdapterResult, OfflineCandidateAdapter
 from app.services.voice_candidates.chained_streaming import ChainedStreamingAdapter
 from app.services.voice_candidates.conversation_relay import ConversationRelayAdapter
@@ -44,6 +47,8 @@ from app.services.voice_lifecycle import (
 from app.services.voice_session_auth import CandidateArm
 from app.services.voice_speech_control import (
     CancellationReason,
+    ReplayMode,
+    ReplaySource,
     ReservedSpeech,
     SpeechAuthorization,
 )
@@ -68,7 +73,9 @@ _RECOVERABLE_EXTRACTION = {
 class CompositionStatus(str, Enum):
     RESPONSE_PENDING = "response_pending"
     REPAIR_PENDING = "repair_pending"
+    REPLAY_PENDING = "replay_pending"
     RESPONSE_OBSERVED = "response_observed"
+    REPLAY_OBSERVED = "replay_observed"
     SILENT = "silent"
     SUPERSEDED = "superseded"
     REJECTED = "rejected"
@@ -98,6 +105,7 @@ class FinalTurnAdmissionReceipt:
     adapter_admission_revision: int
     binding: VoiceSessionBinding
     input_turn_id: str
+    input_semantic_act_kind: VoiceSemanticActKind
     sequence: int
     at_ms: int
     expires_at_ms: int
@@ -121,6 +129,10 @@ class FinalTurnAdmissionReceipt:
             or self.adapter_admission_revision < 0
             or not isinstance(self.binding, VoiceSessionBinding)
             or not _identifier(self.input_turn_id)
+            or not isinstance(
+                self.input_semantic_act_kind,
+                VoiceSemanticActKind,
+            )
             or type(self.sequence) is not int
             or self.sequence < 0
             or type(self.at_ms) is not int
@@ -281,6 +293,9 @@ class FinalTurnAdmissionAuthority:
                 adapter_admission_revision=adapter.admission_revision,
                 binding=event.binding,
                 input_turn_id=event.input_turn_id,
+                input_semantic_act_kind=(
+                    event.semantic_act_kind
+                ),
                 sequence=event.sequence,
                 at_ms=event.at_ms,
                 expires_at_ms=now_ms + ttl_ms,
@@ -694,6 +709,39 @@ class CompositionPolicy:
             locale=proposal.locale,
         )
 
+    def authorize_replay(
+        self,
+        *,
+        source: ReplaySource,
+        binding: VoiceSessionBinding,
+        turn_id: str,
+        state_version: int,
+    ) -> SpeechAuthorization:
+        terminal = {
+            VoiceSemanticActKind.CLOSING,
+            VoiceSemanticActKind.OPT_OUT,
+            VoiceSemanticActKind.VOICEMAIL,
+        }
+        if (
+            not isinstance(source, ReplaySource)
+            or source.binding != binding
+            or source.kind in terminal
+            or not isinstance(binding, VoiceSessionBinding)
+            or not _identifier(turn_id)
+            or turn_id == source.turn_id
+            or type(state_version) is not int
+            or state_version < 0
+        ):
+            raise ValueError("replay authorization input is invalid")
+        return SpeechAuthorization(
+            binding=binding,
+            turn_id=turn_id,
+            authorized_kinds=(source.kind,),
+            terminal_allowed=False,
+            answered_slots=(),
+            locale=source.locale,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CompositionResult:
@@ -704,6 +752,8 @@ class CompositionResult:
     state_version: int
     act_ids: tuple[str, ...] = ()
     act_kinds: tuple[VoiceSemanticActKind, ...] = ()
+    replay_mode: ReplayMode | None = None
+    replay_source_act_id: str | None = None
     reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -717,6 +767,26 @@ class CompositionResult:
             or len(self.act_ids) != len(self.act_kinds)
             or any(not _identifier(value) for value in self.act_ids)
             or any(not isinstance(value, VoiceSemanticActKind) for value in self.act_kinds)
+            or (
+                (self.replay_mode is None)
+                != (self.replay_source_act_id is None)
+            )
+            or (
+                self.replay_mode is not None
+                and (
+                    not isinstance(self.replay_mode, ReplayMode)
+                    or not _identifier(
+                        self.replay_source_act_id
+                    )
+                    or self.status
+                    not in {
+                        CompositionStatus.REPLAY_PENDING,
+                        CompositionStatus.REPLAY_OBSERVED,
+                        CompositionStatus.SUPERSEDED,
+                        CompositionStatus.TERMINAL_FAILURE,
+                    }
+                )
+            )
         ):
             raise ValueError("composition result is invalid")
 
@@ -733,9 +803,13 @@ class _PendingResponse:
     question_slot: str | None
     permitted_act_ids: set[str]
     confirmed_act_ids: set[str]
+    tts_act_ids: set[str]
+    playout_act_ids: set[str]
     transport_act_ids: set[str]
     observed_act_ids: set[str]
     retired_permit_act_ids: set[str]
+    replay_mode: ReplayMode | None = None
+    replay_source_act_id: str | None = None
 
 
 class TurnCompositionTransaction:
@@ -820,6 +894,17 @@ class TurnCompositionTransaction:
                 now_ms=now_ms,
             ):
                 return _untracked_rejection(receipt, self.state.version)
+            if (
+                receipt.input_semantic_act_kind
+                is not VoiceSemanticActKind.ACKNOWLEDGEMENT
+            ):
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="input_semantic_kind",
+                )
             if not self.state.admit_turn(
                 turn_id=receipt.input_turn_id,
                 sequence=receipt.sequence,
@@ -908,6 +993,299 @@ class TurnCompositionTransaction:
                 state_version=committed_version,
                 pending_status=CompositionStatus.RESPONSE_PENDING,
             )
+
+    def execute_replay(
+        self,
+        receipt: FinalTurnAdmissionReceipt,
+        *,
+        content: str,
+        command: VoiceSemanticActKind,
+        now_ms: int,
+    ) -> CompositionResult:
+        """Consume one typed caller repeat/slower turn without extraction."""
+        with self._lock:
+            self._prune_outcomes(now_ms=now_ms)
+            if isinstance(receipt, FinalTurnAdmissionReceipt):
+                replay = self._outcomes.get(receipt.receipt_id)
+                if replay is not None:
+                    return replay
+            if (
+                not isinstance(command, VoiceSemanticActKind)
+                or command
+                not in {
+                    VoiceSemanticActKind.REPEAT,
+                    VoiceSemanticActKind.SLOWER_SPEECH,
+                }
+                or not isinstance(receipt, FinalTurnAdmissionReceipt)
+                or not self.receipts.consume(
+                    receipt,
+                    adapter=self.adapter,
+                    content=content,
+                    now_ms=now_ms,
+                )
+            ):
+                return _untracked_rejection(
+                    receipt,
+                    self.state.version,
+                )
+            if receipt.input_semantic_act_kind is not command:
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="replay_command_mismatch",
+                )
+            if not self.state.admit_turn(
+                turn_id=receipt.input_turn_id,
+                sequence=receipt.sequence,
+            ):
+                return self._record(
+                    receipt,
+                    CompositionStatus.SUPERSEDED,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="stale_replay_turn",
+                )
+            if not self._supersede_pending(receipt):
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="replay_supersede_compensation_failed",
+                )
+            if len(self._outcomes) >= self.max_outcomes:
+                return _untracked_capacity(
+                    receipt,
+                    self.state.version,
+                )
+            if (
+                self.coordinator.calls.phase
+                is SilencePhase.TERMINATED
+                or self.adapter.permit_admission_closed
+            ):
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="replay_authority_closed",
+                )
+            if not self._cancel_call(
+                    event_id=f"replay_activity_{receipt.sequence}",
+                    at_ms=receipt.at_ms,
+            ):
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="replay_call_cleanup",
+                )
+            try:
+                source = (
+                    self.coordinator.speech.latest_replay_source(
+                        self.binding
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    self.state.version,
+                    reason="replay_source_inventory",
+                )
+            if source is None:
+                return self._record(
+                    receipt,
+                    CompositionStatus.SILENT,
+                    CompositionPhase.EXTRACTION_TERMINAL,
+                    self.state.version,
+                    reason="no_caller_observed_replay_source",
+                )
+            mode = (
+                ReplayMode.EXACT
+                if command is VoiceSemanticActKind.REPEAT
+                else ReplayMode.SLOWER
+            )
+            state_version = self.state.version
+            try:
+                authorization = self.policy.authorize_replay(
+                    source=source,
+                    binding=self.binding,
+                    turn_id=receipt.input_turn_id,
+                    state_version=state_version,
+                )
+                reserve_sequence, reserve_at_ms = (
+                    self.lifecycle.next_position(
+                        at_ms=receipt.at_ms
+                    )
+                )
+                reserved = self.coordinator.reserve_replay_batch(
+                    source=source,
+                    request_id=receipt.receipt_id,
+                    mode=mode,
+                    authorization=authorization,
+                    event_id=f"reserve_replay_{receipt.sequence}",
+                    sequence=reserve_sequence,
+                    at_ms=reserve_at_ms,
+                    turn_sequence=receipt.sequence,
+                )
+            except (TypeError, ValueError):
+                reserved = ()
+            except Exception:  # noqa: BLE001
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.TERMINAL,
+                    state_version,
+                    replay_mode=mode,
+                    replay_source_act_id=source.act_id,
+                    reason="replay_reservation_cleanup",
+                )
+            if len(reserved) != 1:
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.FACTS_COMMITTED,
+                    state_version,
+                    replay_mode=mode,
+                    replay_source_act_id=source.act_id,
+                    reason="replay_reservation",
+                )
+            item = reserved[0]
+            with self.state.delivery_guard():
+                if not self.state.revalidate(
+                    expected_version=state_version,
+                    turn_id=receipt.input_turn_id,
+                    sequence=receipt.sequence,
+                ):
+                    if not self.coordinator.rollback_batch(reserved):
+                        return self._terminalize_partial(
+                            receipt=receipt,
+                            reserved=reserved,
+                            canonical=(),
+                            accepted_permits=(),
+                            state_version=state_version,
+                            reason="replay_cas_rollback_failed",
+                            replay_mode=mode,
+                            replay_source_act_id=source.act_id,
+                        )
+                    return self._record(
+                        receipt,
+                        CompositionStatus.SUPERSEDED,
+                        CompositionPhase.TERMINAL,
+                        self.state.version,
+                        replay_mode=mode,
+                        replay_source_act_id=source.act_id,
+                        reason="replay_cas",
+                    )
+                if not self.coordinator.speech.authorize_text(
+                    item.act_id,
+                    item.text,
+                ):
+                    return self._compensate(
+                        receipt=receipt,
+                        reserved=reserved,
+                        canonical=(),
+                        accepted_permits=(),
+                        state_version=state_version,
+                        reason="replay_speech_authorization",
+                        replay_mode=mode,
+                        replay_source_act_id=source.act_id,
+                    )
+                sequence, canonical_at_ms = (
+                    self.lifecycle.next_position(
+                        at_ms=receipt.at_ms
+                    )
+                )
+                canonical = VoiceEvent(
+                    schema_version=VOICE_SCHEMA_VERSION,
+                    kind=VoiceEventKind.RESPONSE_AUTHORIZED,
+                    source=VoiceSource.LOCAL_AUTHORITATIVE,
+                    sensitivity=VoiceSensitivity.OPERATIONAL,
+                    binding=self.binding,
+                    sequence=sequence,
+                    at_ms=canonical_at_ms,
+                    input_turn_id=receipt.input_turn_id,
+                    generation_id=(
+                        f"replay_generation_{item.act_id}"
+                    ),
+                    semantic_act_id=item.act_id,
+                    semantic_act_kind=item.kind,
+                    payload=VoicePayload(),
+                )
+                canonical_events: tuple[VoiceEvent, ...] = ()
+                accepted_permits: tuple[VoiceEvent, ...] = ()
+                if self.lifecycle.ingest(canonical):
+                    canonical_events = (canonical,)
+                else:
+                    return self._compensate(
+                        receipt=receipt,
+                        reserved=reserved,
+                        canonical=canonical_events,
+                        accepted_permits=accepted_permits,
+                        state_version=state_version,
+                        reason="replay_canonical_authorization",
+                        replay_mode=mode,
+                        replay_source_act_id=source.act_id,
+                    )
+                if self.adapter.accept_permit(
+                    canonical,
+                    lifecycle=self.lifecycle,
+                ):
+                    accepted_permits = (canonical,)
+                else:
+                    return self._compensate(
+                        receipt=receipt,
+                        reserved=reserved,
+                        canonical=canonical_events,
+                        accepted_permits=accepted_permits,
+                        state_version=state_version,
+                        reason="replay_adapter_permit",
+                        replay_mode=mode,
+                        replay_source_act_id=source.act_id,
+                    )
+                pending = _PendingResponse(
+                    receipt_id=receipt.receipt_id,
+                    outcome_expires_at_ms=(
+                        receipt.expires_at_ms
+                        + self.receipts.max_ttl_ms
+                    ),
+                    input_turn_id=receipt.input_turn_id,
+                    turn_sequence=receipt.sequence,
+                    state_version=state_version,
+                    reserved=reserved,
+                    authorizations=canonical_events,
+                    question_slot=source.question_slot,
+                    permitted_act_ids={item.act_id},
+                    confirmed_act_ids=set(),
+                    tts_act_ids=set(),
+                    playout_act_ids=set(),
+                    transport_act_ids=set(),
+                    observed_act_ids=set(),
+                    retired_permit_act_ids=set(),
+                    replay_mode=mode,
+                    replay_source_act_id=source.act_id,
+                )
+                self._pending_by_act[item.act_id] = pending
+                return self._record(
+                    receipt,
+                    CompositionStatus.REPLAY_PENDING,
+                    CompositionPhase.RESPONSE_PENDING_PLAYBACK,
+                    state_version,
+                    act_ids=(item.act_id,),
+                    act_kinds=(item.kind,),
+                    replay_mode=mode,
+                    replay_source_act_id=source.act_id,
+                )
 
     def _materialize_timeout_from_adapter(
         self,
@@ -1096,6 +1474,183 @@ class TurnCompositionTransaction:
             pending.confirmed_act_ids.add(event.semantic_act_id)
             return True
 
+    def accept_tts_binding(self, *, event: VoiceEvent) -> bool:
+        """Bind canonical TTS to the exact authorized response text."""
+        with self._lock:
+            pending = self._pending_by_act.get(
+                event.semantic_act_id
+                if isinstance(event, VoiceEvent)
+                else ""
+            )
+            if pending is None:
+                return False
+            failure_at_ms = (
+                event.at_ms
+                if isinstance(event, VoiceEvent)
+                else 0
+            )
+            with self.state.delivery_guard():
+                if not self.state.revalidate(
+                    expected_version=pending.state_version,
+                    turn_id=pending.input_turn_id,
+                    sequence=pending.turn_sequence,
+                ):
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="tts_binding_state_drift",
+                        at_ms=failure_at_ms,
+                    )
+                    return False
+                authorization = self._authorization(
+                    pending,
+                    event.semantic_act_id,
+                )
+                if (
+                    authorization is None
+                    or not self._matches_lifecycle_binding(
+                        event=event,
+                        authorization=authorization,
+                        kind=VoiceEventKind.TTS_BOUND,
+                    )
+                    or event.semantic_act_id
+                    != self._next_unobserved_act_id(pending)
+                    or event.semantic_act_id
+                    not in pending.confirmed_act_ids
+                    or event.semantic_act_id in pending.tts_act_ids
+                    or self.lifecycle.act_state(authorization)
+                    is not VoiceEventKind.TTS_BOUND
+                    or not self.coordinator.speech.is_live(
+                        event.semantic_act_id
+                    )
+                    or not self.adapter.has_permit(authorization)
+                    or event.payload.audio_id is None
+                ):
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="tts_binding_validation_failed",
+                        at_ms=failure_at_ms,
+                    )
+                    return False
+                try:
+                    accepted = self.coordinator.speech.bind_tts(
+                        event.semantic_act_id,
+                        audio_id=event.payload.audio_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    accepted = False
+                binding = self.coordinator.speech.audio_binding(
+                    event.semantic_act_id
+                )
+                if (
+                    not accepted
+                    or binding is None
+                    or binding.binding != self.binding
+                    or binding.text_digest
+                    != event.payload.text_digest
+                    or binding.audio_id != event.payload.audio_id
+                ):
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="tts_binding_commit_failed",
+                        at_ms=failure_at_ms,
+                    )
+                    return False
+                pending.tts_act_ids.add(event.semantic_act_id)
+                return True
+
+    def accept_playout_binding(self, *, event: VoiceEvent) -> bool:
+        """Bind canonical playout to the exact SpeechControl audio."""
+        with self._lock:
+            pending = self._pending_by_act.get(
+                event.semantic_act_id
+                if isinstance(event, VoiceEvent)
+                else ""
+            )
+            if pending is None:
+                return False
+            failure_at_ms = (
+                event.at_ms
+                if isinstance(event, VoiceEvent)
+                else 0
+            )
+            with self.state.delivery_guard():
+                if not self.state.revalidate(
+                    expected_version=pending.state_version,
+                    turn_id=pending.input_turn_id,
+                    sequence=pending.turn_sequence,
+                ):
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="playout_binding_state_drift",
+                        at_ms=failure_at_ms,
+                    )
+                    return False
+                authorization = self._authorization(
+                    pending,
+                    event.semantic_act_id,
+                )
+                if (
+                    authorization is None
+                    or not self._matches_lifecycle_binding(
+                        event=event,
+                        authorization=authorization,
+                        kind=VoiceEventKind.PLAYOUT_BOUND,
+                    )
+                    or event.semantic_act_id
+                    != self._next_unobserved_act_id(pending)
+                    or event.semantic_act_id
+                    not in pending.tts_act_ids
+                    or event.semantic_act_id
+                    in pending.playout_act_ids
+                    or self.lifecycle.act_state(authorization)
+                    is not VoiceEventKind.PLAYOUT_BOUND
+                    or not self.coordinator.speech.is_live(
+                        event.semantic_act_id
+                    )
+                    or not self.adapter.has_permit(authorization)
+                    or event.payload.playout_id is None
+                ):
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason=(
+                            "playout_binding_validation_failed"
+                        ),
+                        at_ms=failure_at_ms,
+                    )
+                    return False
+                try:
+                    accepted = (
+                        self.coordinator.speech.bind_playout(
+                            event.semantic_act_id,
+                            playout_id=event.payload.playout_id,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    accepted = False
+                binding = self.coordinator.speech.playout_binding(
+                    event.semantic_act_id
+                )
+                if (
+                    not accepted
+                    or binding is None
+                    or binding.binding != self.binding
+                    or binding.text_digest
+                    != event.payload.text_digest
+                    or binding.audio_id != event.payload.audio_id
+                    or binding.playout_id
+                    != event.payload.playout_id
+                ):
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="playout_binding_commit_failed",
+                        at_ms=failure_at_ms,
+                    )
+                    return False
+                pending.playout_act_ids.add(
+                    event.semantic_act_id
+                )
+                return True
+
     def authorization_receipt(self, act_id: str) -> VoiceEvent | None:
         """Expose only the exact canonical operational receipt for offline driving."""
         if not _identifier(act_id):
@@ -1120,6 +1675,66 @@ class TurnCompositionTransaction:
             ):
                 return None
             return authorization
+
+    def abort(self, *, at_ms: int) -> bool:
+        """Idempotently seal every transaction-owned local capability."""
+        with self._lock:
+            canonical_at_ms = (
+                at_ms
+                if type(at_ms) is int and at_ms >= 0
+                else 0
+            )
+            try:
+                self.adapter.terminalize_permit_admission()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            try:
+                receipts_closed = (
+                    self.receipts.hard_terminalize_live_receipts(
+                        owner=self,
+                        at_ms=canonical_at_ms,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                receipts_closed = False
+            pending_responses = {
+                id(pending): pending
+                for pending in self._pending_by_act.values()
+            }
+            pending_closed = True
+            for pending in pending_responses.values():
+                try:
+                    self._hard_terminalize_pending(
+                        pending,
+                        reason="transaction_aborted",
+                        at_ms=canonical_at_ms,
+                    )
+                except Exception:  # noqa: BLE001
+                    pending_closed = False
+            try:
+                self.coordinator.calls.hard_terminalize()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            try:
+                speech_closed = (
+                    self._hard_terminalize_session_speech()
+                )
+            except Exception:  # noqa: BLE001
+                speech_closed = False
+            return (
+                receipts_closed
+                and pending_closed
+                and not self._pending_by_act
+                and self.receipts.unconsumed_receipt_count == 0
+                and self.coordinator.speech
+                .reservation_batch_count(self.binding)
+                == 0
+                and speech_closed
+                and self.adapter.terminally_closed
+                and self.coordinator.calls.phase
+                is SilencePhase.TERMINATED
+                and self.coordinator.calls.is_quiescent
+            )
 
     def terminalize_disconnected_session(
         self,
@@ -1228,6 +1843,10 @@ class TurnCompositionTransaction:
                             item.kind
                             for item in pending.reserved
                         ),
+                        replay_mode=pending.replay_mode,
+                        replay_source_act_id=(
+                            pending.replay_source_act_id
+                        ),
                         reason="session_disconnected",
                     )
                 )
@@ -1262,6 +1881,7 @@ class TurnCompositionTransaction:
                 or event.semantic_act_id
                 not in pending.permitted_act_ids
                 or event.semantic_act_id not in pending.confirmed_act_ids
+                or event.semantic_act_id not in pending.playout_act_ids
                 or event.semantic_act_id in pending.transport_act_ids
                 or not self.lifecycle.accepts_transport_resolution(event)
             ):
@@ -1277,6 +1897,23 @@ class TurnCompositionTransaction:
                 )
                 or not self.adapter.has_permit(authorization)
             ):
+                return False
+            binding = self.coordinator.speech.playout_binding(
+                event.semantic_act_id
+            )
+            if (
+                binding is None
+                or binding.binding != self.binding
+                or binding.text_digest
+                != event.payload.text_digest
+                or binding.audio_id != event.payload.audio_id
+                or binding.playout_id != event.payload.playout_id
+            ):
+                self._hard_terminalize_pending(
+                    pending,
+                    reason="transport_playout_binding_mismatch",
+                    at_ms=event.at_ms,
+                )
                 return False
             if (
                 event.semantic_act_kind
@@ -1305,6 +1942,7 @@ class TurnCompositionTransaction:
             pending = self._pending_by_act.get(act_id)
             if (
                 pending is None
+                or pending.replay_mode is not None
                 or act_id not in pending.confirmed_act_ids
                 or act_id not in pending.transport_act_ids
                 or act_id in pending.observed_act_ids
@@ -1404,6 +2042,8 @@ class TurnCompositionTransaction:
                 pending is None
                 or not self.lifecycle.accepts_caller_playback(event)
                 or event.semantic_act_id not in pending.confirmed_act_ids
+                or event.semantic_act_id not in pending.playout_act_ids
+                or event.semantic_act_id not in pending.transport_act_ids
                 or event.semantic_act_id in pending.observed_act_ids
             ):
                 return None
@@ -1429,6 +2069,22 @@ class TurnCompositionTransaction:
                 or not self.adapter.has_permit(authorization)
             ):
                 return None
+            binding = self.coordinator.speech.playout_binding(
+                event.semantic_act_id
+            )
+            if (
+                binding is None
+                or binding.binding != self.binding
+                or binding.text_digest
+                != event.payload.text_digest
+                or binding.audio_id != event.payload.audio_id
+                or binding.playout_id != event.payload.playout_id
+            ):
+                return self._hard_terminalize_pending(
+                    pending,
+                    reason="playback_playout_binding_mismatch",
+                    at_ms=event.at_ms,
+                )
             state_version = pending.state_version
             with self.state.delivery_guard():
                 if not self.state.revalidate(
@@ -1436,7 +2092,11 @@ class TurnCompositionTransaction:
                     turn_id=pending.input_turn_id,
                     sequence=pending.turn_sequence,
                 ):
-                    return None
+                    return self._hard_terminalize_pending(
+                        pending,
+                        reason="observed_playback_state_drift",
+                        at_ms=event.at_ms,
+                    )
                 if (
                     event.semantic_act_kind
                     is VoiceSemanticActKind.QUESTION
@@ -1449,21 +2109,22 @@ class TurnCompositionTransaction:
                     )
                     if not intents:
                         return None
-                    asked_version = self.state.mark_slot_asked(
-                        expected_version=pending.state_version,
-                        turn_id=pending.input_turn_id,
-                        sequence=pending.turn_sequence,
-                        slot=pending.question_slot,
-                    )
-                    if asked_version is None:
-                        return self._hard_terminalize_pending(
-                            pending,
-                            reason=(
-                                "observed_playback_state_commit_failed"
-                            ),
-                            at_ms=event.at_ms,
+                    if pending.replay_mode is None:
+                        asked_version = self.state.mark_slot_asked(
+                            expected_version=pending.state_version,
+                            turn_id=pending.input_turn_id,
+                            sequence=pending.turn_sequence,
+                            slot=pending.question_slot,
                         )
-                    state_version = asked_version
+                        if asked_version is None:
+                            return self._hard_terminalize_pending(
+                                pending,
+                                reason=(
+                                    "observed_playback_state_commit_failed"
+                                ),
+                                at_ms=event.at_ms,
+                            )
+                        state_version = asked_version
                 if not self.adapter.retire_permit(authorization):
                     return self._hard_terminalize_pending(
                         pending,
@@ -1475,6 +2136,20 @@ class TurnCompositionTransaction:
                 pending.retired_permit_act_ids.add(
                     event.semantic_act_id
                 )
+                if not (
+                    self.coordinator.speech
+                    .record_caller_playback_observed(
+                        event.semantic_act_id,
+                        playout_id=event.payload.playout_id or "",
+                    )
+                ):
+                    return self._hard_terminalize_pending(
+                        pending,
+                        reason=(
+                            "caller_playback_evidence_commit_failed"
+                        ),
+                        at_ms=event.at_ms,
+                    )
                 pending.observed_act_ids.add(event.semantic_act_id)
                 pending.state_version = state_version
                 if not self._activate_next_permit(pending):
@@ -1679,6 +2354,8 @@ class TurnCompositionTransaction:
                     for event in accepted_permits
                 },
                 confirmed_act_ids=set(),
+                tts_act_ids=set(),
+                playout_act_ids=set(),
                 transport_act_ids=set(),
                 observed_act_ids=set(),
                 retired_permit_act_ids=set(),
@@ -1750,13 +2427,19 @@ class TurnCompositionTransaction:
         for item in pending.reserved:
             self._pending_by_act.pop(item.act_id, None)
         result = CompositionResult(
-            status=CompositionStatus.RESPONSE_OBSERVED,
+            status=(
+                CompositionStatus.REPLAY_OBSERVED
+                if pending.replay_mode is not None
+                else CompositionStatus.RESPONSE_OBSERVED
+            ),
             phase=CompositionPhase.RESPONSE_COMMITTED,
             receipt_id=pending.receipt_id,
             input_turn_id=pending.input_turn_id,
             state_version=pending.state_version,
             act_ids=tuple(item.act_id for item in pending.reserved),
             act_kinds=tuple(item.kind for item in pending.reserved),
+            replay_mode=pending.replay_mode,
+            replay_source_act_id=pending.replay_source_act_id,
         )
         self._outcomes[pending.receipt_id] = result
         self._outcome_expiries[pending.receipt_id] = (
@@ -1835,6 +2518,8 @@ class TurnCompositionTransaction:
                 state_version=pending.state_version,
                 act_ids=tuple(item.act_id for item in pending.reserved),
                 act_kinds=tuple(item.kind for item in pending.reserved),
+                replay_mode=pending.replay_mode,
+                replay_source_act_id=pending.replay_source_act_id,
                 reason="newer_turn",
             )
             self._outcome_expiries[pending.receipt_id] = (
@@ -1851,6 +2536,8 @@ class TurnCompositionTransaction:
         accepted_permits: tuple[VoiceEvent, ...],
         state_version: int,
         reason: str,
+        replay_mode: ReplayMode | None = None,
+        replay_source_act_id: str | None = None,
     ) -> CompositionResult:
         success = self.coordinator.rollback_pristine_question(reserved)
         retired_ids: set[str] = set()
@@ -1899,9 +2586,13 @@ class TurnCompositionTransaction:
                     for event in accepted_permits
                 },
                 confirmed_act_ids=set(),
+                tts_act_ids=set(),
+                playout_act_ids=set(),
                 transport_act_ids=set(),
                 observed_act_ids=set(),
                 retired_permit_act_ids=retired_ids,
+                replay_mode=replay_mode,
+                replay_source_act_id=replay_source_act_id,
             )
             return self._hard_terminalize_pending(
                 pending,
@@ -1913,6 +2604,8 @@ class TurnCompositionTransaction:
             CompositionStatus.TERMINAL_FAILURE,
             CompositionPhase.TERMINAL,
             state_version,
+            replay_mode=replay_mode,
+            replay_source_act_id=replay_source_act_id,
             reason=reason,
         )
 
@@ -1925,6 +2618,8 @@ class TurnCompositionTransaction:
         accepted_permits: tuple[VoiceEvent, ...],
         state_version: int,
         reason: str,
+        replay_mode: ReplayMode | None = None,
+        replay_source_act_id: str | None = None,
     ) -> CompositionResult:
         pending = _PendingResponse(
             receipt_id=receipt.receipt_id,
@@ -1942,9 +2637,13 @@ class TurnCompositionTransaction:
                 for event in accepted_permits
             },
             confirmed_act_ids=set(),
+            tts_act_ids=set(),
+            playout_act_ids=set(),
             transport_act_ids=set(),
             observed_act_ids=set(),
             retired_permit_act_ids=set(),
+            replay_mode=replay_mode,
+            replay_source_act_id=replay_source_act_id,
         )
         for event in accepted_permits:
             if self.adapter.retire_permit(event):
@@ -1989,9 +2688,27 @@ class TurnCompositionTransaction:
                     authorization,
                     at_ms=at_ms,
                 )
-            self.coordinator.retire_batch(pending.reserved)
-            for item in pending.reserved:
-                self._pending_by_act.pop(item.act_id, None)
+            try:
+                batch_retired = self.coordinator.retire_batch(
+                    pending.reserved
+                )
+            except Exception:  # noqa: BLE001
+                batch_retired = False
+            try:
+                batch_still_tracked = (
+                    self.coordinator.speech
+                    .tracks_reservation_batch(
+                        pending.reserved
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                batch_still_tracked = True
+            if batch_retired or not batch_still_tracked:
+                for item in pending.reserved:
+                    self._pending_by_act.pop(
+                        item.act_id,
+                        None,
+                    )
             result = CompositionResult(
                 status=CompositionStatus.TERMINAL_FAILURE,
                 phase=CompositionPhase.TERMINAL,
@@ -2003,6 +2720,10 @@ class TurnCompositionTransaction:
                 ),
                 act_kinds=tuple(
                     item.kind for item in pending.reserved
+                ),
+                replay_mode=pending.replay_mode,
+                replay_source_act_id=(
+                    pending.replay_source_act_id
                 ),
                 reason=reason,
             )
@@ -2053,6 +2774,30 @@ class TurnCompositionTransaction:
                 not self.coordinator.speech.is_live(act_id)
                 for act_id in act_ids
             )
+        )
+
+    def _seal_replay_authority(self) -> bool:
+        """Fail closed when replay admission cannot prove clean authority."""
+        try:
+            self.adapter.terminalize_permit_admission()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            self.coordinator.calls.hard_terminalize()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            speech_closed = (
+                self._hard_terminalize_session_speech()
+            )
+        except Exception:  # noqa: BLE001
+            speech_closed = False
+        return (
+            speech_closed
+            and self.adapter.terminally_closed
+            and self.coordinator.calls.is_quiescent
+            and self.coordinator.calls.phase
+            is SilencePhase.TERMINATED
         )
 
     def _cancel_call(self, *, event_id: str, at_ms: int) -> bool:
@@ -2142,6 +2887,37 @@ class TurnCompositionTransaction:
             None,
         )
 
+    def _matches_lifecycle_binding(
+        self,
+        *,
+        event: VoiceEvent,
+        authorization: VoiceEvent,
+        kind: VoiceEventKind,
+    ) -> bool:
+        """Bind a supplied receipt to the lifecycle's exact current act."""
+        return (
+            isinstance(event, VoiceEvent)
+            and isinstance(authorization, VoiceEvent)
+            and event.kind is kind
+            and event.source is VoiceSource.LOCAL_AUTHORITATIVE
+            and event.sensitivity
+            is VoiceSensitivity.OPERATIONAL
+            and event.binding == self.binding
+            and event.input_turn_id
+            == authorization.input_turn_id
+            and event.generation_id
+            == authorization.generation_id
+            and event.semantic_act_id
+            == authorization.semantic_act_id
+            and event.semantic_act_kind
+            is authorization.semantic_act_kind
+            and self.lifecycle.act_state(authorization) is kind
+            and self.lifecycle.terminal_payload(
+                authorization
+            )
+            == event.payload
+        )
+
     @property
     def retained_outcome_count(self) -> int:
         with self._lock:
@@ -2181,6 +2957,8 @@ class TurnCompositionTransaction:
         *,
         act_ids: tuple[str, ...] = (),
         act_kinds: tuple[VoiceSemanticActKind, ...] = (),
+        replay_mode: ReplayMode | None = None,
+        replay_source_act_id: str | None = None,
         reason: str | None = None,
     ) -> CompositionResult:
         result = CompositionResult(
@@ -2191,6 +2969,8 @@ class TurnCompositionTransaction:
             state_version=state_version,
             act_ids=act_ids,
             act_kinds=act_kinds,
+            replay_mode=replay_mode,
+            replay_source_act_id=replay_source_act_id,
             reason=reason,
         )
         if (

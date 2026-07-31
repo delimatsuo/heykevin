@@ -66,7 +66,14 @@ class ReplayMode(str, Enum):
     SLOWER = "slower"
 
 
-_TERMINAL_KINDS = {SemanticActKind.CLOSING, SemanticActKind.OPT_OUT, SemanticActKind.VOICEMAIL}
+_TERMINAL_KINDS = {
+    SemanticActKind.CLOSING,
+    SemanticActKind.OPT_OUT,
+    SemanticActKind.VOICEMAIL,
+}
+_NON_REPLAYABLE_KINDS = _TERMINAL_KINDS | {
+    SemanticActKind.LANGUAGE_CHOICE,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +230,7 @@ class ReplaySource:
             _identifier(self.act_id, "replay source act id")
             != self.act_id
             or not isinstance(self.kind, SemanticActKind)
-            or self.kind in _TERMINAL_KINDS
+            or self.kind in _NON_REPLAYABLE_KINDS
             or not isinstance(self.text, str)
             or not self.text
             or (
@@ -646,7 +653,7 @@ class SpeechControl:
             and record.authorized
             and not record.cancelled
             and record.playout is not None
-            and record.reserved.kind not in _TERMINAL_KINDS
+            and record.reserved.kind not in _NON_REPLAYABLE_KINDS
         )
         if not eligible:
             return None

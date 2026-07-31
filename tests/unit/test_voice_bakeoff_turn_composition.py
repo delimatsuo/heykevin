@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,7 +20,18 @@ from app.services.caller_observation_extractor import (
     ObservationExtractor,
 )
 from app.services.receptionist_state import IntakeState
+from app.services.voice_bakeoff_closure import (
+    ClosureTrigger,
+    OfflineAuthorityInventory,
+)
 from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
+from app.services.voice_bakeoff_language_choice import (
+    AdmissionPurpose,
+    LanguageChoicePhase,
+    LanguageRecoveryFinalTurnReceipt,
+    OfflineLanguageChoiceLifecycle,
+    materialize_language_choice,
+)
 from app.services.voice_bakeoff_materializer import FixedProposalMaterializer
 from app.services.voice_bakeoff_turn_composition import (
     AdapterImplementationBinding,
@@ -60,11 +72,13 @@ from app.services.voice_candidates.native_gemini import (
     NativeSignalKind,
 )
 from app.services.voice_lifecycle import (
+    VOICE_SCHEMA_VERSION,
     VoiceEvent,
     VoiceEventKind,
     VoiceLifecycle,
     VoicePayload,
     VoiceSemanticActKind,
+    VoiceSensitivity,
     VoiceSessionBinding,
     VoiceSource,
 )
@@ -171,14 +185,21 @@ def _backend(
     outcome: BackendOutcome = BackendOutcome.OK,
     effect=None,
 ):
-    selected_fields = fields or {
-        "intent": "service_request",
-        "service_action": "repair",
-        "service_object": "furnace",
-    }
-    selected_confidences = confidences or {
-        key: 0.95 for key in selected_fields
-    }
+    selected_fields = (
+        fields
+        if fields is not None
+        else {
+            "language": "en",
+            "intent": "service_request",
+            "service_action": "repair",
+            "service_object": "furnace",
+        }
+    )
+    selected_confidences = (
+        confidences
+        if confidences is not None
+        else {key: 0.95 for key in selected_fields}
+    )
 
     def extract(request):
         if effect is not None:
@@ -649,6 +670,181 @@ def _mint_next_turn(
     )
     assert receipt is not None
     return receipt
+
+
+def _mint_language_recovery(
+    harness,
+    *,
+    language_choice: OfflineLanguageChoiceLifecycle,
+    turn_id: str,
+    content: str,
+    detected_locale: str | None,
+    at_ms: int,
+):
+    lifecycle = harness["lifecycle"]
+    sequence, canonical_at_ms = lifecycle.next_position(
+        at_ms=at_ms
+    )
+    context = _context(
+        sequence=sequence,
+        at_ms=canonical_at_ms,
+        turn_id=turn_id,
+        act_id=f"input_{turn_id}",
+    )
+    payload = VoicePayload(
+        text_digest=final_turn_content_digest(content)
+    )
+    adapter = harness["adapter"]
+    if type(adapter) is NativeGeminiAdapter:
+        result = adapter.handle(
+            NativeSignal(
+                NativeSignalKind.INPUT_FINAL,
+                context,
+                CandidateUsage(),
+                payload,
+            )
+        )
+    elif type(adapter) is ConversationRelayAdapter:
+        result = adapter.handle(
+            RelaySignal(
+                RelaySignalKind.PROMPT_FINAL,
+                context,
+                CandidateUsage(),
+                payload,
+            )
+        )
+    elif type(adapter) is ManualNativeAdapter:
+        for signal_kind in (
+            ManualNativeSignalKind.ACTIVITY_STARTED,
+            ManualNativeSignalKind.ACTIVITY_ENDED,
+        ):
+            activity_sequence, activity_at_ms = (
+                lifecycle.next_position(at_ms=canonical_at_ms)
+            )
+            activity = adapter.handle(
+                ManualNativeSignal(
+                    signal_kind,
+                    _context(
+                        sequence=activity_sequence,
+                        at_ms=activity_at_ms,
+                        turn_id=turn_id,
+                    ),
+                )
+            )
+            assert activity.accepted
+            activity_event = activity.events[0]
+            assert lifecycle.ingest(activity_event)
+            if (
+                signal_kind
+                is ManualNativeSignalKind.ACTIVITY_STARTED
+            ):
+                assert language_choice.accept_activity_started(
+                    event=activity_event,
+                    lifecycle=lifecycle,
+                )
+            else:
+                assert language_choice.accept_activity_ended(
+                    event=activity_event,
+                    lifecycle=lifecycle,
+                )
+        sequence, canonical_at_ms = lifecycle.next_position(
+            at_ms=canonical_at_ms
+        )
+        result = adapter.handle(
+            ManualNativeSignal(
+                ManualNativeSignalKind.INPUT_FINAL,
+                _context(
+                    sequence=sequence,
+                    at_ms=canonical_at_ms,
+                    turn_id=turn_id,
+                    act_id=f"input_{turn_id}",
+                ),
+                payload=payload,
+            )
+        )
+    else:
+        result = adapter.handle(
+            ChainedSignal(
+                ChainedSignalKind.INPUT_FINAL,
+                context,
+                CandidateUsage(),
+                payload,
+            )
+        )
+    assert result.accepted
+    event = result.events[0]
+    assert lifecycle.ingest(event)
+    pair = harness["receipts"].mint_language_recovery(
+        adapter=adapter,
+        lifecycle=lifecycle,
+        language_choice=language_choice,
+        result=result,
+        event=event,
+        content=content,
+        detected_locale=detected_locale,
+        now_ms=event.at_ms,
+        ttl_ms=100,
+    )
+    return pair, event
+
+
+def _prepare_language_window(harness):
+    trigger = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(
+            fields={
+                "language": "fr",
+                "intent": "service_request",
+            }
+        ),
+        now_ms=11,
+    )
+    assert trigger.status is (
+        CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+    )
+    language_choice = OfflineLanguageChoiceLifecycle(
+        binding=harness["lifecycle"].binding,
+        speech=harness["speech"],
+    )
+    pending = harness[
+        "transaction"
+    ].prepare_language_choice(
+        receipt=harness["receipt"],
+        trigger=trigger,
+        language_choice=language_choice,
+        proposal=materialize_language_choice(
+            state_version=trigger.state_version
+        ),
+    )
+    assert pending.status is (
+        CompositionStatus.LANGUAGE_CHOICE_PENDING
+    )
+    assert pending.act_kinds == (
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+    )
+    observed = pending
+    for act_id in pending.act_ids:
+        playback = _playback_after_transport(
+            harness,
+            act_id,
+        )
+        observed = harness["transaction"].observe_playback(
+            event=playback,
+            event_id=f"language_playback_{playback.sequence}",
+            sequence=playback.sequence,
+        )
+        assert observed is not None
+    assert observed.status is (
+        CompositionStatus.LANGUAGE_CHOICE_WINDOW
+    )
+    assert language_choice.phase is (
+        LanguageChoicePhase.RESPONSE_WINDOW
+    )
+    assert harness["state"].current_state().language == "fr"
+    return language_choice, observed
 
 
 def _disconnect_session(
@@ -2962,9 +3158,564 @@ def test_unknown_reviewed_locale_fails_closed_after_facts_commit():
         ),
         now_ms=11,
     )
-    assert result.status is CompositionStatus.TERMINAL_FAILURE
-    assert result.reason == "proposal"
+    assert result.status is (
+        CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+    )
+    assert result.reason == "unlisted_language"
     assert result.act_ids == ()
+
+
+@pytest.mark.parametrize(
+    ("locale", "supported"),
+    (
+        ("en", True),
+        ("es-MX", True),
+        ("pt-BR", True),
+        ("zh-Hans", True),
+        (None, False),
+        ("", False),
+        ("unknown", False),
+        ("und", False),
+        ("fr-FR", False),
+    ),
+)
+def test_materializer_locale_authority_is_strict(
+    locale: object,
+    supported: bool,
+):
+    assert FixedProposalMaterializer.supports_locale(locale) is supported
+
+
+@pytest.mark.parametrize(
+    "fields",
+    (
+        {"intent": "service_request"},
+        {"language": "unknown", "intent": "service_request"},
+        {"language": "und", "intent": "service_request"},
+    ),
+)
+def test_missing_unknown_and_und_language_require_choice(
+    fields: dict[str, object],
+):
+    harness = _harness()
+    result = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(fields=fields),
+        now_ms=11,
+    )
+
+    assert result.status is CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+    assert result.reason == "unlisted_language"
+    assert result.act_ids == ()
+    assert harness["speech"].latest_replay_source(
+        harness["lifecycle"].binding
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("arm", "detected_locale", "content"),
+    (
+        (
+            "A",
+            "en",
+            "Fixture caller says Spanish in English and needs a furnace repair.",
+        ),
+        (
+            "B1",
+            "es",
+            "La persona dice español y necesita reparar la calefacción.",
+        ),
+        (
+            "B2",
+            "zh",
+            "来电者用中文说普通话，并需要维修暖气。",
+        ),
+        (
+            "C",
+            "en",
+            "Fixture caller says Mandarin in English and needs a furnace repair.",
+        ),
+    ),
+)
+def test_language_choice_recovers_through_purpose_sealed_pair_for_every_arm(
+    arm: str,
+    detected_locale: str,
+    content: str,
+):
+    harness = _harness(adapter_arm=arm)
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+    pair, _ = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="language_recovery_turn",
+        content=content,
+        detected_locale=detected_locale,
+        at_ms=deadline,
+    )
+    assert pair is not None
+    receipt, admission = pair
+    assert type(receipt) is LanguageRecoveryFinalTurnReceipt
+    assert receipt.purpose is AdmissionPurpose.LANGUAGE_RECOVERY
+    assert harness["receipts"].unconsumed_receipt_count == 1
+
+    ordinary_rejection = harness["transaction"].execute(
+        receipt,
+        content=content,
+        backend=_backend(),
+        now_ms=receipt.at_ms,
+    )
+    assert ordinary_rejection.status is CompositionStatus.REJECTED
+    assert harness["receipts"].unconsumed_receipt_count == 1
+    assert language_choice.phase is (
+        LanguageChoicePhase.RECOVERY_PENDING
+    )
+
+    recovered = harness[
+        "transaction"
+    ].execute_language_recovery(
+        receipt,
+        admission,
+        language_choice=language_choice,
+        content=content,
+        backend=_backend(
+            fields={
+                "language": detected_locale,
+                "intent": "service_request",
+                "service_action": "repair",
+                "service_object": "furnace",
+            }
+        ),
+        now_ms=receipt.at_ms,
+    )
+
+    assert recovered.status is CompositionStatus.RESPONSE_PENDING
+    assert language_choice.phase is LanguageChoicePhase.RECOVERED
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert (
+        harness["state"].current_state().language
+        == detected_locale
+    )
+    assert harness["speech"].latest_replay_source(
+        harness["lifecycle"].binding
+    ) is None
+
+
+def test_final_ingested_before_prompt_authorization_is_not_recovery_input():
+    harness = _harness(adapter_arm="B1")
+    trigger = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(
+            fields={
+                "language": "fr",
+                "intent": "service_request",
+            }
+        ),
+        now_ms=11,
+    )
+    assert trigger.status is CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+    stale_content = "Fixture final arrives before prompt authorization."
+    sequence, at_ms = harness["lifecycle"].next_position(at_ms=12)
+    context = _context(
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="pre_prompt_final",
+        act_id="input_pre_prompt_final",
+    )
+    stale_result = harness["adapter"].handle(
+        ChainedSignal(
+            ChainedSignalKind.INPUT_FINAL,
+            context,
+            CandidateUsage(),
+            VoicePayload(
+                text_digest=final_turn_content_digest(
+                    stale_content
+                )
+            ),
+        )
+    )
+    assert stale_result.accepted
+    stale_event = stale_result.events[0]
+    assert harness["lifecycle"].ingest(stale_event)
+    language_choice = OfflineLanguageChoiceLifecycle(
+        binding=harness["lifecycle"].binding,
+        speech=harness["speech"],
+    )
+    pending = harness["transaction"].prepare_language_choice(
+        receipt=harness["receipt"],
+        trigger=trigger,
+        language_choice=language_choice,
+        proposal=materialize_language_choice(
+            state_version=trigger.state_version
+        ),
+    )
+    assert pending.status is CompositionStatus.LANGUAGE_CHOICE_PENDING
+
+    assert harness["receipts"].mint_language_recovery(
+        adapter=harness["adapter"],
+        lifecycle=harness["lifecycle"],
+        language_choice=language_choice,
+        result=stale_result,
+        event=stale_event,
+        content=stale_content,
+        detected_locale="en",
+        now_ms=stale_event.at_ms,
+        ttl_ms=100,
+    ) is None
+    assert language_choice.phase is LanguageChoicePhase.PRESENTING
+    assert harness["receipts"].unconsumed_receipt_count == 0
+
+
+def test_language_playback_defers_to_earlier_retained_caller_activity():
+    harness = _harness(adapter_arm="B1")
+    trigger = harness["transaction"].execute(
+        harness["receipt"],
+        content=harness["content"],
+        backend=_backend(
+            fields={
+                "language": "fr",
+                "intent": "service_request",
+            }
+        ),
+        now_ms=11,
+    )
+    language_choice = OfflineLanguageChoiceLifecycle(
+        binding=harness["lifecycle"].binding,
+        speech=harness["speech"],
+    )
+    pending_result = harness["transaction"].prepare_language_choice(
+        receipt=harness["receipt"],
+        trigger=trigger,
+        language_choice=language_choice,
+        proposal=materialize_language_choice(
+            state_version=trigger.state_version
+        ),
+    )
+    act_id = pending_result.act_ids[0]
+    transport = _confirm_and_resolve_transport(harness, act_id)
+    lifecycle = harness["lifecycle"]
+    sequence, at_ms = lifecycle.next_position(
+        at_ms=transport.at_ms + 1
+    )
+    caller_activity = VoiceEvent(
+        schema_version=VOICE_SCHEMA_VERSION,
+        kind=VoiceEventKind.INPUT_ACTIVITY_STARTED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        sensitivity=VoiceSensitivity.OPERATIONAL,
+        binding=lifecycle.binding,
+        sequence=sequence,
+        at_ms=at_ms,
+        input_turn_id="interposed_language_turn",
+        generation_id="interposed_language_generation",
+        semantic_act_id="interposed_language_input",
+        semantic_act_kind=VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        payload=VoicePayload(),
+    )
+    assert lifecycle.ingest(caller_activity)
+    authorization = harness[
+        "transaction"
+    ].authorization_receipt(act_id)
+    assert authorization is not None
+    playback = _event_after(
+        lifecycle,
+        authorization,
+        kind=VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=transport.payload,
+    )
+    assert lifecycle.ingest(playback)
+
+    deferred = harness["transaction"].observe_playback(
+        event=playback,
+        event_id=f"deferred_playback_{playback.sequence}",
+        sequence=playback.sequence,
+    )
+
+    assert deferred is pending_result
+    assert deferred.status is CompositionStatus.LANGUAGE_CHOICE_PENDING
+    assert language_choice.phase is LanguageChoicePhase.PRESENTING
+    assert language_choice.observed_segment_count == 0
+    assert harness["transaction"].adapter.has_permit(authorization)
+    assert language_choice.accept_activity_started(
+        event=caller_activity,
+        lifecycle=lifecycle,
+    )
+    assert language_choice.phase is LanguageChoicePhase.ACTIVITY_OPEN
+    assert all(
+        not harness["speech"].is_live(item)
+        for item in pending_result.act_ids
+    )
+
+
+def test_language_recovery_content_mismatch_tombstones_both_halves():
+    harness = _harness()
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+    content = "Fixture caller responds in English."
+    pair, _ = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="content_bound_recovery",
+        content=content,
+        detected_locale="en",
+        at_ms=deadline,
+    )
+    assert pair is not None
+    receipt, admission = pair
+
+    rejected = harness[
+        "transaction"
+    ].execute_language_recovery(
+        receipt,
+        admission,
+        language_choice=language_choice,
+        content=f"{content} drift",
+        backend=_backend(),
+        now_ms=receipt.at_ms,
+    )
+
+    assert rejected.status is CompositionStatus.REJECTED
+    assert language_choice.phase is LanguageChoicePhase.TERMINAL
+    assert language_choice.pending_pair_count == 0
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness[
+        "transaction"
+    ].execute_language_recovery(
+        receipt,
+        admission,
+        language_choice=language_choice,
+        content=content,
+        backend=_backend(),
+        now_ms=receipt.at_ms + 1,
+    ).status is CompositionStatus.REJECTED
+
+
+@pytest.mark.parametrize("extracted_locale", ("pt", "zh", None))
+def test_recovery_extraction_must_match_candidate_final_locale(
+    extracted_locale: str | None,
+):
+    harness = _harness()
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+    content = "Fixture candidate final is classified as English."
+    pair, _ = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="locale_bound_recovery",
+        content=content,
+        detected_locale="en",
+        at_ms=deadline,
+    )
+    assert pair is not None
+    receipt, admission = pair
+    fields: dict[str, object] = {
+        "intent": "service_request",
+        "service_action": "repair",
+        "service_object": "furnace",
+    }
+    if extracted_locale is not None:
+        fields["language"] = extracted_locale
+
+    rejected = harness[
+        "transaction"
+    ].execute_language_recovery(
+        receipt,
+        admission,
+        language_choice=language_choice,
+        content=content,
+        backend=_backend(fields=fields),
+        now_ms=receipt.at_ms,
+    )
+
+    assert rejected.status is CompositionStatus.TERMINAL_FAILURE
+    assert rejected.reason == "language_recovery_locale_mismatch"
+    assert rejected.phase is CompositionPhase.EXTRACTION_TERMINAL
+    assert language_choice.phase is LanguageChoicePhase.TERMINAL
+    assert language_choice.pending_pair_count == 0
+    assert harness["state"].current_state().language == "fr"
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness["transaction"].pending_response_count == 0
+    assert harness["adapter"].terminally_closed
+    assert harness["calls"].phase is SilencePhase.TERMINATED
+
+
+def test_language_recovery_pair_is_consumed_once_under_concurrency():
+    harness = _harness()
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+    content = "Fixture caller responds in Spanish."
+    pair, _ = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="concurrent_language_recovery",
+        content=content,
+        detected_locale="es",
+        at_ms=deadline,
+    )
+    assert pair is not None
+    receipt, admission = pair
+    backend_calls = 0
+    call_lock = threading.Lock()
+
+    def count_backend():
+        nonlocal backend_calls
+        with call_lock:
+            backend_calls += 1
+
+    def execute():
+        return harness[
+            "transaction"
+        ].execute_language_recovery(
+            receipt,
+            admission,
+            language_choice=language_choice,
+            content=content,
+            backend=_backend(
+                fields={
+                    "language": "es",
+                    "intent": "service_request",
+                },
+                effect=count_backend,
+            ),
+            now_ms=receipt.at_ms,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            future.result()
+            for future in (
+                executor.submit(execute),
+                executor.submit(execute),
+            )
+        )
+
+    assert results[0] is results[1]
+    assert backend_calls == 1
+    assert language_choice.phase is LanguageChoicePhase.RECOVERED
+    assert harness["receipts"].unconsumed_receipt_count == 0
+
+
+def test_language_recovery_binding_failure_leaves_zero_live_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _harness()
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+    original = (
+        OfflineLanguageChoiceLifecycle.bind_recovery_receipt
+    )
+
+    def fail_publication(self, receipt):
+        assert original(self, receipt) is not None
+        self.tombstone_pending_pair()
+
+    monkeypatch.setattr(
+        OfflineLanguageChoiceLifecycle,
+        "bind_recovery_receipt",
+        fail_publication,
+    )
+
+    pair, _ = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="failed_pair_publication",
+        content="Fixture caller response cannot publish authority.",
+        detected_locale="en",
+        at_ms=deadline,
+    )
+
+    assert pair is None
+    assert language_choice.phase is LanguageChoicePhase.TERMINAL
+    assert language_choice.pending_pair_count == 0
+    assert harness["receipts"].unconsumed_receipt_count == 0
+
+
+@pytest.mark.parametrize(
+    "detected_locale",
+    ("pt", "fr_fr", "ar_msa", "ambiguous", None),
+)
+def test_language_choice_unqualified_final_has_no_recovery_authority(
+    detected_locale,
+):
+    harness = _harness()
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+
+    pair, _ = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="unqualified_language_turn",
+        content="Fixture caller remains outside the qualified set.",
+        detected_locale=detected_locale,
+        at_ms=deadline,
+    )
+
+    assert pair is None
+    assert language_choice.phase is LanguageChoicePhase.TERMINAL
+    assert language_choice.pending_pair_count == 0
+    assert harness["receipts"].unconsumed_receipt_count == 0
+    assert harness["state"].current_state().language == "fr"
+
+
+def test_language_choice_exhaustion_receipt_requires_exact_sealed_inventory():
+    harness = _harness()
+    language_choice, _ = _prepare_language_window(harness)
+    deadline = language_choice.response_deadline_ms
+    assert deadline is not None
+
+    pair, final = _mint_language_recovery(
+        harness,
+        language_choice=language_choice,
+        turn_id="exhausted_language_turn",
+        content="Fixture caller remains outside the qualified set.",
+        detected_locale="ar_msa",
+        at_ms=deadline,
+    )
+
+    assert pair is None
+    assert harness["transaction"].abort(at_ms=final.at_ms + 1)
+    act_ids = harness["speech"].act_ids_for_binding(_binding())
+    inventory = OfflineAuthorityInventory(
+        transaction_pending=harness[
+            "transaction"
+        ].pending_response_count,
+        admission_receipts=harness[
+            "receipts"
+        ].unconsumed_receipt_count,
+        silence_pending=0,
+        speech_batches=harness[
+            "speech"
+        ].reservation_batch_count(_binding()),
+        live_speech_acts=sum(
+            harness["speech"].is_live(act_id)
+            for act_id in act_ids
+        ),
+        queued_outbound_frames=0,
+        call_quiescent=harness["calls"].is_quiescent,
+        call_terminated=(
+            harness["calls"].phase is SilencePhase.TERMINATED
+        ),
+        adapter_terminally_closed=(
+            harness["adapter"].terminally_closed
+        ),
+    )
+    assert inventory.is_sealed
+    terminal = language_choice.issue_terminal_receipt(
+        inventory=inventory,
+        at_ms=final.at_ms + 1,
+    )
+    assert terminal is not None
+    assert terminal.trigger is ClosureTrigger.LANGUAGE_CHOICE_EXHAUSTED
+    assert not terminal.satisfies_playback_observation
+    assert not terminal.satisfies_disconnect_observation
 
 
 def test_direct_answer_and_question_play_in_declared_order():
@@ -2973,8 +3724,9 @@ def test_direct_answer_and_question_play_in_declared_order():
         harness["receipt"],
         content=harness["content"],
         backend=_backend(
-            fields={
-                "intent": "pricing_question",
+                fields={
+                    "language": "en",
+                    "intent": "pricing_question",
                 "service_action": "replace",
                 "service_object": "faucet",
             }
@@ -3041,8 +3793,9 @@ def test_out_of_scope_request_materializes_reviewed_non_answer_decline():
         harness["receipt"],
         content=harness["content"],
         backend=_backend(
-            fields={
-                "business_scope": "out_of_scope",
+                fields={
+                    "language": "en",
+                    "business_scope": "out_of_scope",
                 "intent": "service_request",
             }
         ),
@@ -3122,8 +3875,9 @@ def test_failed_next_permit_closes_adapter_after_first_act_playback(
         harness["receipt"],
         content=harness["content"],
         backend=_backend(
-            fields={
-                "intent": "pricing_question",
+                fields={
+                    "language": "en",
+                    "intent": "pricing_question",
                 "service_action": "replace",
                 "service_object": "faucet",
             }

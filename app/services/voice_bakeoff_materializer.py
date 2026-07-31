@@ -66,6 +66,16 @@ class ContentProposal:
 class FixedProposalMaterializer:
     """Select reviewed fixed assets; never creates authorization or interpolates facts."""
 
+    @staticmethod
+    def supports_locale(locale: object) -> bool:
+        """Check ordinary catalog support without applying fallback semantics."""
+        if type(locale) is not str:
+            return False
+        normalized = locale.strip().casefold()
+        if normalized in {"", "unknown", "und"}:
+            return False
+        return normalized.split("-", 1)[0] in _CATALOG
+
     def materialize(
         self,
         *,

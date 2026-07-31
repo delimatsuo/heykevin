@@ -29,6 +29,12 @@ from app.services.voice_bakeoff_closure import (
     ScriptedOptOutConfirmationReceipt,
 )
 from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
+from app.services.voice_bakeoff_language_choice import (
+    LANGUAGE_CHOICE_DESCRIPTOR_DIGEST,
+    LanguageChoicePhase,
+    OfflineLanguageChoiceLifecycle,
+    materialize_language_choice,
+)
 from app.services.voice_bakeoff_materializer import FixedProposalMaterializer
 from app.services.voice_bakeoff_silence import (
     LifecycleActResult,
@@ -105,21 +111,30 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "1465d7588646fa2019fbeb646ac840d5be025d783e9cfade47a74a09fc5e8dd8"
+_DRIVER_SOURCE_DIGEST = "3c9e676a8cd77a1da501574d55857a1453adddb20b936aec15f335b27fce3dfe"
 _FACADE_CODE_DIGEST = "25c52f623c383c6b024eeee8ee80f8827f016d08a962b953876bd5fb6de6801a"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
-_FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
+_FIXTURE_LOCALES = _TRACE_LOCALES | {
+    "ambiguous",
+    "ar-MSA",
+    "ar_msa",
+    "fr",
+    "fr-FR",
+    "fr_fr",
+}
 _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "caller_observation_extractor":
         "a3d79ce19f2c603f47dd370789773a707016a07e430c58fcd389a67065f9d364",
     "voice_bakeoff_closure":
-        "59d019088d7869d180f7bdcc8b6374787b0c875e347b0248845e41d831f2ae89",
+        "462c78acb2f76c162b616b9b9986e6dd2abf4fbad870cdf20b562b6562345e91",
+    "voice_bakeoff_language_choice":
+        "285be91deef4f719d5965ebbe38b132248f98efb58fbf1d87f558eb40d048c1c",
     "composition":
-        "36945f2911538aef4ce433cc9ed063dfeebe3dbcc094ccdac57735fe2cb24a6c",
+        "5f0065e89cfee1fda2e3c7e665fa952ca28cef186d35f4b95bc50eef79f5feb6",
     "dialogue_planner":
         "222f332a8756eec4144bfe9ede7bb5dbae71cdbfd1ca8505df58b862dc953457",
     "materializer":
-        "a9f7eb4458bc6f52fd4e4836d1c8eca0e50ca8bf8b636fd3fab88e63aa0fa9c7",
+        "944fdb5d892d1850ec6e6e6e3228eaca52584b06a514fee0d5a16873e696e040",
     "receptionist_state":
         "8f26251f7d9e1e534acf6178d1d5bcefac2efb87016e3b34b881decea2294845",
     "voice_bakeoff_coordinator":
@@ -131,11 +146,11 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "voice_candidates_base":
         "1d96a31d07966f48ebb528cdd4618bc5a2c0cc7911323bef8d56431c839c7cfe",
     "voice_lifecycle":
-        "45879f2d5247f37f5671536b8dd52947eeef77625691f442e5980cc1c96556a2",
+        "4c4df662d9239825e25a2429adf55526216ce581e8b68dd8f2df858a6d52b265",
     "voice_session_auth":
         "ecb56c931cfb8ddc2c8a70ef37d5e0b0834fece7382de5482aef8c7e914cf1ae",
     "voice_speech_control":
-        "2cb20a33235f11dff59effb6e1d95b0635d22dcc8a07d0973aa5f85c40ef7e1f",
+        "ee5ea350d036557003f9a5f3fdd35b573039de876ad22d4b4326426b827a40ba",
 })
 _ADAPTER_TYPES = MappingProxyType({
     CandidateArm.A: NativeGeminiAdapter,
@@ -169,6 +184,27 @@ class SyntheticJourney(str, Enum):
     LOW_CONFIDENCE_REPAIR = "low_confidence_repair"
     SAFETY_GUIDANCE = "safety_guidance"
     UNSUPPORTED_LANGUAGE = "unsupported_language"
+    UNSUPPORTED_LANGUAGE_RECOVERY_ES = (
+        "unsupported_language_recovery_es"
+    )
+    UNSUPPORTED_LANGUAGE_RECOVERY_ZH = (
+        "unsupported_language_recovery_zh"
+    )
+    UNSUPPORTED_LANGUAGE_EXHAUSTION_PT = (
+        "unsupported_language_exhaustion_pt"
+    )
+    UNSUPPORTED_LANGUAGE_EXHAUSTION_AMBIGUOUS = (
+        "unsupported_language_exhaustion_ambiguous"
+    )
+    UNSUPPORTED_LANGUAGE_EXHAUSTION_TIMEOUT = (
+        "unsupported_language_exhaustion_timeout"
+    )
+    UNSUPPORTED_LANGUAGE_EXHAUSTION_FR = (
+        "unsupported_language_exhaustion_fr"
+    )
+    UNSUPPORTED_LANGUAGE_EXHAUSTION_AR = (
+        "unsupported_language_exhaustion_ar"
+    )
     SUPERSEDING_TURN = "superseding_turn"
     BIDIRECTIONAL_CODE_SWITCH = "bidirectional_code_switch"
     REPAIR_EXHAUSTION = "repair_exhaustion"
@@ -227,6 +263,23 @@ _CLOSURE_JOURNEYS = frozenset({
     SyntheticJourney.OPT_OUT_WITHDRAWAL,
     SyntheticJourney.GENERIC_FAILURE_CLOSURE,
 })
+_LANGUAGE_RECOVERY_LOCALES = MappingProxyType({
+    SyntheticJourney.UNSUPPORTED_LANGUAGE: "en",
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ES: "es",
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ZH: "zh",
+})
+_LANGUAGE_EXHAUSTION_LOCALES = MappingProxyType({
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_PT: "pt",
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AMBIGUOUS:
+        "ambiguous",
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_TIMEOUT: None,
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR: "fr_fr",
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR: "ar_msa",
+})
+_LANGUAGE_JOURNEYS = frozenset({
+    *_LANGUAGE_RECOVERY_LOCALES,
+    *_LANGUAGE_EXHAUSTION_LOCALES,
+})
 _PRE_PROOF_FAILURE_INJECTIONS = frozenset({
     OfflineFailureInjection.ACTIVE_EXECUTION_UNCERTAIN,
     OfflineFailureInjection.CALL_UNCERTAIN,
@@ -259,6 +312,11 @@ class TraceKind(str, Enum):
     INPUT_FINAL = "input_final"
     RESPONSE_PENDING = "response_pending"
     REPAIR_PENDING = "repair_pending"
+    LANGUAGE_CHOICE_REQUIRED = "language_choice_required"
+    LANGUAGE_CHOICE_PENDING = "language_choice_pending"
+    LANGUAGE_CHOICE_WINDOW = "language_choice_window"
+    LANGUAGE_RECOVERY_ADMITTED = "language_recovery_admitted"
+    LANGUAGE_CHOICE_EXHAUSTED = "language_choice_exhausted"
     SUPERSEDED = "superseded"
     ACT_CONFIRMED = "act_confirmed"
     TRANSPORT_RESOLVED = "transport_resolved"
@@ -650,10 +708,66 @@ _FIXTURES = MappingProxyType({
         ),
     ),
     SyntheticJourney.UNSUPPORTED_LANGUAGE: _Fixture(
-        locale="fr",
+        locale="fr-FR",
         content="Fixture caller selects an unsupported locale.",
         fields=(
-            ("language", "fr"),
+            ("language", "fr-FR"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ES: _Fixture(
+        locale="ar-MSA",
+        content="Fixture caller selects an unsupported Arabic locale.",
+        fields=(
+            ("language", "ar-MSA"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ZH: _Fixture(
+        locale="fr-FR",
+        content="Fixture caller selects an unsupported French locale.",
+        fields=(
+            ("language", "fr-FR"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_PT: _Fixture(
+        locale="ar-MSA",
+        content="Fixture caller selects an unsupported Arabic locale.",
+        fields=(
+            ("language", "ar-MSA"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AMBIGUOUS: _Fixture(
+        locale="fr-FR",
+        content="Fixture caller selects an unsupported French locale.",
+        fields=(
+            ("language", "fr-FR"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_TIMEOUT: _Fixture(
+        locale="ar-MSA",
+        content="Fixture caller selects an unsupported Arabic locale.",
+        fields=(
+            ("language", "ar-MSA"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR: _Fixture(
+        locale="fr-FR",
+        content="Fixture caller selects an unsupported French locale.",
+        fields=(
+            ("language", "fr-FR"),
+            ("intent", "service_request"),
+        ),
+    ),
+    SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR: _Fixture(
+        locale="ar-MSA",
+        content="Fixture caller selects an unsupported Arabic locale.",
+        fields=(
+            ("language", "ar-MSA"),
             ("intent", "service_request"),
         ),
     ),
@@ -1562,6 +1676,12 @@ class OfflineSessionDriver:
                 now_ms=now_ms,
                 trace=trace,
             )
+        if grant.journey in _LANGUAGE_JOURNEYS:
+            return self._execute_unsupported_language(
+                grant=grant,
+                now_ms=now_ms,
+                trace=trace,
+            )
         fixture = _FIXTURES[grant.journey]
         assembly = self._assembly(grant, fixture)
         receipt = self._admit_final_turn(
@@ -1591,13 +1711,6 @@ class OfflineSessionDriver:
                 ),
             )
         )
-        if grant.journey is SyntheticJourney.UNSUPPORTED_LANGUAGE:
-            if (
-                first.status is not CompositionStatus.TERMINAL_FAILURE
-                or first.act_ids
-            ):
-                raise _DriverAbort(DriverFailure.COMPOSITION)
-            return receipt.at_ms
         if grant.journey is SyntheticJourney.REPAIR_EXHAUSTION:
             return self._execute_repair_exhaustion(
                 assembly=assembly,
@@ -1894,6 +2007,283 @@ class OfflineSessionDriver:
                 )
             ):
                 raise _DriverAbort(DriverFailure.DELIVERY)
+
+    def _execute_unsupported_language(
+        self,
+        *,
+        grant: _LeaseGrant,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        """Prove the fixed prompt, recovery set, and silent exhaustion set."""
+        fixture = _FIXTURES[grant.journey]
+        assembly = self._assembly(grant, fixture)
+        receipt = self._admit_final_turn(
+            assembly=assembly,
+            fixture=fixture,
+            turn_number=1,
+            at_ms=now_ms + 1,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.INPUT_FINAL,
+            )
+        )
+        trigger = assembly.transaction.execute(
+            receipt,
+            content=fixture.content,
+            backend=_SyntheticObservationBackend(fixture),
+            now_ms=max(now_ms + 2, receipt.at_ms),
+        )
+        trace.append(
+            self._composition_trace(
+                trace,
+                trigger,
+                locale=None,
+            )
+        )
+        if (
+            trigger.status
+            is not CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+            or trigger.reason != "unlisted_language"
+            or trigger.act_ids
+            or assembly.state.current_state().language
+            != fixture.locale
+            or fixture.locale not in {"fr-FR", "ar-MSA"}
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        language_choice = OfflineLanguageChoiceLifecycle(
+            binding=assembly.binding,
+            speech=assembly.speech,
+        )
+        pending = assembly.transaction.prepare_language_choice(
+            receipt=receipt,
+            trigger=trigger,
+            language_choice=language_choice,
+            proposal=materialize_language_choice(
+                state_version=trigger.state_version,
+            ),
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.LANGUAGE_CHOICE_PENDING,
+                composition_status=pending.status,
+                content_digest=(
+                    LANGUAGE_CHOICE_DESCRIPTOR_DIGEST
+                ),
+            )
+        )
+        if (
+            pending.status
+            is not CompositionStatus.LANGUAGE_CHOICE_PENDING
+            or pending.act_kinds
+            != (
+                VoiceSemanticActKind.LANGUAGE_CHOICE,
+                VoiceSemanticActKind.LANGUAGE_CHOICE,
+                VoiceSemanticActKind.LANGUAGE_CHOICE,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        choice_window, prompt_end_ms = self._deliver_pending(
+            assembly=assembly,
+            pending=pending,
+            at_ms=max(now_ms + 3, receipt.at_ms),
+            trace=trace,
+        )
+        response_deadline = language_choice.response_deadline_ms
+        if (
+            choice_window.status
+            is not CompositionStatus.LANGUAGE_CHOICE_WINDOW
+            or language_choice.phase
+            is not LanguageChoicePhase.RESPONSE_WINDOW
+            or response_deadline is None
+            or assembly.state.current_state().language
+            != fixture.locale
+            or assembly.speech.latest_replay_source(
+                assembly.binding
+            )
+            is not None
+            or len(self._outbound_frames) != 3
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        recovery_locale = _LANGUAGE_RECOVERY_LOCALES.get(
+            grant.journey
+        )
+        if recovery_locale is not None:
+            localized_content = {
+                "en": (
+                    "Fixture caller responds in English and "
+                    "needs a furnace repair."
+                ),
+                "es": (
+                    "La persona responde en español y necesita "
+                    "reparar la calefacción."
+                ),
+                "zh": "来电者用中文回答，并需要维修暖气。",
+            }
+            recovery_fixture = _Fixture(
+                locale=recovery_locale,
+                content=localized_content[recovery_locale],
+                fields=(
+                    ("language", recovery_locale),
+                    ("intent", "service_request"),
+                    ("service_action", "repair"),
+                    ("service_object", "furnace"),
+                ),
+            )
+            pair, _ = self._submit_language_response(
+                assembly=assembly,
+                language_choice=language_choice,
+                fixture=recovery_fixture,
+                turn_number=2,
+                at_ms=max(
+                    prompt_end_ms,
+                    response_deadline - 2,
+                ),
+            )
+            if pair is None:
+                raise _DriverAbort(DriverFailure.ASSEMBLY)
+            recovery_receipt, recovery_admission = pair
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.LANGUAGE_RECOVERY_ADMITTED,
+                    locale=recovery_locale,
+                    content_digest=(
+                        recovery_receipt.content_digest
+                    ),
+                )
+            )
+            recovered = (
+                assembly.transaction.execute_language_recovery(
+                    recovery_receipt,
+                    recovery_admission,
+                    language_choice=language_choice,
+                    content=recovery_fixture.content,
+                    backend=_SyntheticObservationBackend(
+                        recovery_fixture
+                    ),
+                    now_ms=recovery_receipt.at_ms,
+                )
+            )
+            trace.append(
+                self._composition_trace(
+                    trace,
+                    recovered,
+                    locale=self._trace_locale(
+                        assembly.state.current_state().language
+                    ),
+                )
+            )
+            if (
+                recovered.status
+                is not CompositionStatus.RESPONSE_PENDING
+                or language_choice.phase
+                is not LanguageChoicePhase.RECOVERED
+                or assembly.receipts.unconsumed_receipt_count
+                or assembly.state.current_state().language
+                != recovery_locale
+            ):
+                raise _DriverAbort(DriverFailure.COMPOSITION)
+            observed, end_ms = self._deliver_pending(
+                assembly=assembly,
+                pending=recovered,
+                at_ms=recovery_receipt.at_ms + 1,
+                trace=trace,
+            )
+            if (
+                observed.status
+                is not CompositionStatus.RESPONSE_OBSERVED
+                or assembly.transaction.pending_response_count
+                or assembly.receipts.unconsumed_receipt_count
+                or len(self._outbound_frames) != 4
+            ):
+                raise _DriverAbort(DriverFailure.COMPOSITION)
+            return end_ms
+
+        exhaustion_locale = _LANGUAGE_EXHAUSTION_LOCALES[
+            grant.journey
+        ]
+        if exhaustion_locale is None:
+            terminal_at_ms = response_deadline + 1
+            if not language_choice.advance_time(
+                lifecycle=assembly.lifecycle,
+                at_ms=terminal_at_ms,
+            ):
+                raise _DriverAbort(DriverFailure.COMPOSITION)
+        else:
+            exhausted_fixture = _Fixture(
+                locale=exhaustion_locale,
+                content=(
+                    "Fixture caller remains outside the qualified "
+                    "language set."
+                ),
+                fields=(),
+            )
+            pair, final = self._submit_language_response(
+                assembly=assembly,
+                language_choice=language_choice,
+                fixture=exhausted_fixture,
+                turn_number=2,
+                at_ms=max(
+                    prompt_end_ms,
+                    response_deadline - 2,
+                ),
+            )
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.INPUT_FINAL,
+                )
+            )
+            if (
+                pair is not None
+                or language_choice.phase
+                is not LanguageChoicePhase.TERMINAL
+            ):
+                raise _DriverAbort(DriverFailure.COMPOSITION)
+            terminal_at_ms = final.at_ms + 1
+        if (
+            language_choice.phase
+            is not LanguageChoicePhase.TERMINAL
+            or not self._seal_composition_assembly(
+                assembly=assembly,
+                at_ms=terminal_at_ms,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        inventory = self._closure_inventory(
+            assembly=assembly,
+            queued_outbound_frames=0,
+        )
+        terminal = language_choice.issue_terminal_receipt(
+            inventory=inventory,
+            at_ms=terminal_at_ms + 1,
+        )
+        if (
+            terminal is None
+            or not inventory.is_sealed
+            or terminal.descriptor_digest
+            != LANGUAGE_CHOICE_DESCRIPTOR_DIGEST
+            or terminal.satisfies_playback_observation
+            or terminal.satisfies_disconnect_observation
+            or len(self._outbound_frames) != 3
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.extend((
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.LANGUAGE_CHOICE_EXHAUSTED,
+                content_digest=terminal.descriptor_digest,
+            ),
+            OfflineTraceEvent(
+                ordinal=len(trace) + 1,
+                kind=TraceKind.NO_AUDIO_TEARDOWN,
+            ),
+        ))
+        return terminal.at_ms
 
     def _execute_generic_failure_closure(
         self,
@@ -4827,6 +5217,9 @@ class OfflineSessionDriver:
                     TraceKind.REPLAY_OBSERVED
                     if result.status
                     is CompositionStatus.REPLAY_OBSERVED
+                    else TraceKind.LANGUAGE_CHOICE_WINDOW
+                    if result.status
+                    is CompositionStatus.LANGUAGE_CHOICE_WINDOW
                     else TraceKind.RESPONSE_OBSERVED
                 ),
                 composition_status=result.status,
@@ -5095,6 +5488,74 @@ class OfflineSessionDriver:
         if receipt is None:
             raise _DriverAbort(DriverFailure.ASSEMBLY)
         return receipt
+
+    def _submit_language_response(
+        self,
+        *,
+        assembly: _Assembly,
+        language_choice: OfflineLanguageChoiceLifecycle,
+        fixture: _Fixture,
+        turn_number: int,
+        at_ms: int,
+    ):
+        sequence, canonical_at_ms = (
+            assembly.lifecycle.next_position(at_ms=at_ms)
+        )
+        context = EventContext(
+            binding=assembly.binding,
+            sequence=sequence,
+            at_ms=canonical_at_ms,
+            input_turn_id=f"turn_{turn_number}",
+            generation_id=f"input_generation_{turn_number}",
+            semantic_act_id=f"input_act_{turn_number}",
+            semantic_act_kind=(
+                VoiceSemanticActKind.ACKNOWLEDGEMENT
+            ),
+        )
+        results = self._final_results(
+            assembly.adapter,
+            context=context,
+            content=fixture.content,
+        )
+        if not results:
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
+        for result in results:
+            candidate = result.events[0]
+            if (
+                not result.accepted
+                or len(result.events) != 1
+                or not assembly.lifecycle.ingest(candidate)
+            ):
+                raise _DriverAbort(DriverFailure.ASSEMBLY)
+            if (
+                candidate.kind
+                is VoiceEventKind.INPUT_ACTIVITY_STARTED
+                and not language_choice.accept_activity_started(
+                    event=candidate,
+                    lifecycle=assembly.lifecycle,
+                )
+            ) or (
+                candidate.kind
+                is VoiceEventKind.INPUT_ACTIVITY_ENDED
+                and not language_choice.accept_activity_ended(
+                    event=candidate,
+                    lifecycle=assembly.lifecycle,
+                )
+            ):
+                raise _DriverAbort(DriverFailure.ASSEMBLY)
+        result = results[-1]
+        pair = assembly.receipts.mint_language_recovery(
+            adapter=assembly.adapter,
+            lifecycle=assembly.lifecycle,
+            language_choice=language_choice,
+            result=result,
+            event=result.events[0],
+            content=fixture.content,
+            detected_locale=fixture.locale,
+            now_ms=result.events[0].at_ms,
+            ttl_ms=min(1_000, self._limits.max_session_ms),
+        )
+        return pair, result.events[0]
 
     @staticmethod
     def _final_results(
@@ -5653,6 +6114,21 @@ class OfflineSessionDriver:
             kind = TraceKind.REPAIR_PENDING
         elif result.status is CompositionStatus.RESPONSE_PENDING:
             kind = TraceKind.RESPONSE_PENDING
+        elif (
+            result.status
+            is CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+        ):
+            kind = TraceKind.LANGUAGE_CHOICE_REQUIRED
+        elif (
+            result.status
+            is CompositionStatus.LANGUAGE_CHOICE_PENDING
+        ):
+            kind = TraceKind.LANGUAGE_CHOICE_PENDING
+        elif (
+            result.status
+            is CompositionStatus.LANGUAGE_CHOICE_WINDOW
+        ):
+            kind = TraceKind.LANGUAGE_CHOICE_WINDOW
         elif result.status is CompositionStatus.REPLAY_PENDING:
             kind = TraceKind.REPLAY_PENDING
         elif result.status is CompositionStatus.SUPERSEDED:

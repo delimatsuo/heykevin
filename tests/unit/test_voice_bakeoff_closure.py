@@ -12,6 +12,7 @@ import pytest
 
 import app.services.voice_bakeoff_closure as closure_module
 from app.services.voice_bakeoff_closure import (
+    ClosureTrigger,
     GenericFailureProofReceipt,
     OfflineAuthorityInventory,
     OfflineClosureDestination,
@@ -70,6 +71,7 @@ def _failure_record() -> CompositionResult:
         receipt_id="receipt_generic_failure",
         input_turn_id="turn_generic_failure",
         state_version=2,
+        closure_trigger=ClosureTrigger.REPAIR_EXHAUSTED,
     )
 
 

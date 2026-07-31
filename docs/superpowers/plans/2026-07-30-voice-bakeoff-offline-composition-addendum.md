@@ -307,7 +307,10 @@ The first driver slice implements only these closed synthetic journeys:
 - question-only intake;
 - one localized low-confidence repair;
 - localized safety guidance;
-- unsupported-language no-audio failure;
+- unsupported-language fixed English-to-Spanish-to-Mandarin prompt from exact
+  French and Modern Standard Arabic triggers, with integrated English, Spanish,
+  and Mandarin recovery journeys plus Portuguese, ambiguous, timeout, repeated
+  French, and repeated Arabic typed no-audio exhaustion journeys;
 - a superseding turn during Phase 2;
 - Spanish to Mandarin to Spanish correction with stale-response suppression
   and one canonical value per state fact;
@@ -338,6 +341,39 @@ scrubs every driver-issued or still-reachable mutable payload, and leaves the
 driver reusable. Reviewed fixture, adapter, and source-identity maps are
 immutable, and the source identity set covers every direct behavior-bearing
 service import plus the reviewed transitive dialogue planner.
+
+The unsupported-language slice uses one immutable `language_choice` descriptor,
+not candidate-generated copy. It binds the exact English, Spanish, and Mandarin
+NFC UTF-8 text and per-segment SHA-256 digests, ordered ordinals, two 250 ms
+pauses, and aggregate descriptor SHA-256
+`f840fd799016c0f3369e8c4894e15abfa58138d5f99e82e1d9585c4d00a3d622`.
+In this offline tier, canonical observation of the third final-segment playback
+marker latches one 10,000 ms deadline. Complete speech-batch cleanup transitions
+to the response-window phase without moving that deadline; eligible cleanup-
+boundary onset or final input is arbitrated against the same clock. Those local
+markers do not prove that a caller heard any audio; a later rendered/live tier
+must separately start and verify timing from approved caller-receipt evidence or
+inference. Eligible speech onset at or before the offline window's inclusive
+deadline may run for at most 15,000 ms, and a final may arrive within 2,000 ms
+of accepted speech end. Canonical retained input wins a same-boundary timer
+race. A final-only response at the early, middle, final, or cleanup boundary
+atomically seals all remaining prompt authority before it can qualify.
+
+Only a final detected as `en`, `es`, or `zh` can mint the distinct,
+purpose-sealed, one-use language-recovery receipt/admission pair. `pt`, `fr_fr`,
+`ar_msa`, missing, ambiguous, and every other locale fail closed. A qualified
+same-call recovery proceeds through the ordinary fixed response pipeline only
+after consuming that exact pair and proving that extraction returns the same
+locale bound by the candidate-final receipt. Stale pre-prompt input and a
+wrong-turn activity end cannot open or indefinitely defer the response window;
+the lifecycle arbitrates every retained accepted input observation in monotonic
+sequence order. Timeout or unqualified response uses the separate
+`language_choice_exhausted` trigger and can issue only a no-audio terminal
+receipt after the typed transaction, admission, silence, speech, outbound,
+call, and adapter inventory is exactly sealed. The integrated driver retains
+exactly the three prompt markers and emits no additional outbound frame on each
+exhaustion journey. That receipt cannot satisfy playback or disconnect
+evidence and cannot be substituted for generic failure closure.
 
 The low-confidence Spanish fixture starts from a trusted reviewed fixture locale
 before extraction, reserves the fixed Spanish repair asset, and records only the
@@ -444,8 +480,15 @@ timing remain blocked on separate authorized rendered-audio and native-speaker
 qualification.
 
 This slice is not the completed synthetic-journey gate. Journeys not explicitly
-listed in the current core slice still require later offline-only increments and
-fresh exact-tree review before this driver step can be marked complete.
+listed in the current core slice still require later offline-only increments
+and fresh exact-tree review before the broader driver gate can be marked
+complete.
+The language-choice slice proves only immutable metadata, ordering, canonical
+state transitions, boundary clocks, one-use authority, cleanup, and
+content-free synthetic trace parity. It does not prove rendered audio,
+pronunciation, comprehension, provider behavior, caller-heard timing, or live
+terminal UX. Provider/PSTN access, credentials, staging, production, and Task
+4.8 remain sealed.
 
 ## Synthetic journey fixtures
 

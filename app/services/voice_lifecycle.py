@@ -6,6 +6,7 @@ from typing import Any
 
 VOICE_SCHEMA_VERSION = 1
 _MAX_ID = 128
+_MAX_INPUT_OBSERVATION_HISTORY = 256
 
 
 class VoiceSource(str, Enum):
@@ -61,6 +62,7 @@ class VoiceSemanticActKind(str, Enum):
     LONGER_WAIT = "longer_wait"
     OPT_OUT = "opt_out"
     VOICEMAIL = "voicemail"
+    LANGUAGE_CHOICE = "language_choice"
 
 
 class VoiceCommandKind(str, Enum):
@@ -300,6 +302,9 @@ class VoiceLifecycle:
             tuple[VoiceEventKind, str, str, VoiceSemanticActKind, str | None, str | None, str | None],
         ] = {}
         self._input_states: dict[str, VoiceEventKind] = {}
+        self._input_observations: dict[str, VoiceEvent] = {}
+        self._input_observation_history: list[VoiceEvent] = []
+        self._input_observation_history_floor = -1
         self._input_finals: dict[str, VoiceEvent] = {}
         self._generation_states: dict[tuple[str, str, str, VoiceSemanticActKind], VoiceEventKind] = {}
         self._session_event: VoiceEvent | None = None
@@ -310,6 +315,11 @@ class VoiceLifecycle:
         self.rejected_event_count = 0
         self.idempotent_command_count = 0
         self.pending_question_active = False
+
+    @property
+    def latest_sequence(self) -> int:
+        """Return the latest canonical event sequence for arbitration anchoring."""
+        return self._sequence
 
     def ingest(self, event: VoiceEvent) -> bool:
         if event.binding != self.binding or event.sequence <= self._sequence or event.at_ms < self._at_ms:
@@ -453,6 +463,57 @@ class VoiceLifecycle:
     def accepts_input_final(self, event: VoiceEvent) -> bool:
         """Return true only for the exact candidate-final event already ingested."""
         return isinstance(event, VoiceEvent) and event.binding == self.binding and event.kind is VoiceEventKind.INPUT_TURN_FINAL and event.source is VoiceSource.PROVIDER_UNTRUSTED and self._input_finals.get(event.input_turn_id) == event
+
+    def accepts_current_input_observation(
+        self,
+        event: VoiceEvent,
+    ) -> bool:
+        """Return true only for the exact latest accepted input observation."""
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind in _INPUT_EVENT_KINDS
+            and self._input_observations.get(event.input_turn_id)
+            is event
+        )
+
+    def accepts_input_observation(self, event: VoiceEvent) -> bool:
+        """Return true only for an exact accepted input event still in history."""
+        return (
+            isinstance(event, VoiceEvent)
+            and event.binding == self.binding
+            and event.kind in _INPUT_EVENT_KINDS
+            and any(
+                accepted is event
+                for accepted in self._input_observation_history
+            )
+        )
+
+    def input_observations_after(
+        self,
+        sequence: int,
+    ) -> tuple[VoiceEvent, ...] | None:
+        """Return every retained accepted input event after an exact cursor."""
+        if (
+            type(sequence) is not int
+            or sequence < -1
+            or sequence < self._input_observation_history_floor
+        ):
+            return None
+        return tuple(
+            event
+            for event in self._input_observation_history
+            if event.sequence > sequence
+        )
+
+    def latest_input_observation(self) -> VoiceEvent | None:
+        """Return the highest-sequence exact accepted input observation."""
+        if not self._input_observations:
+            return None
+        return max(
+            self._input_observations.values(),
+            key=lambda event: event.sequence,
+        )
 
     def accepts_session_resume(self, event: VoiceEvent) -> bool:
         """Return true only for the exact resume receipt this reducer accepted."""
@@ -602,6 +663,16 @@ class VoiceLifecycle:
             if not allowed or event.payload.audio_id is not None or event.payload.playout_id is not None:
                 return False
             self._input_states[event.input_turn_id] = event.kind
+            self._input_observations[event.input_turn_id] = event
+            self._input_observation_history.append(event)
+            if (
+                len(self._input_observation_history)
+                > _MAX_INPUT_OBSERVATION_HISTORY
+            ):
+                removed = self._input_observation_history.pop(0)
+                self._input_observation_history_floor = (
+                    removed.sequence
+                )
             if event.kind is VoiceEventKind.INPUT_TURN_FINAL:
                 self._input_finals[event.input_turn_id] = event
             return True

@@ -67,6 +67,11 @@ class OfflineClosureStep(str, Enum):
     GENERIC_FAILURE = "generic_failure"
 
 
+class ClosureTrigger(str, Enum):
+    REPAIR_EXHAUSTED = "repair_exhausted"
+    LANGUAGE_CHOICE_EXHAUSTED = "language_choice_exhausted"
+
+
 class OfflineClosurePhase(str, Enum):
     LEASED = "leased"
     ACTIVE = "active"
@@ -714,6 +719,7 @@ class OfflineLocalClosureAuthority:
             != (
                 "closure_required",
                 "extraction_terminal",
+                ClosureTrigger.REPAIR_EXHAUSTED.value,
                 state_version,
                 (),
                 (),
@@ -1669,6 +1675,7 @@ class OfflineLocalClosureAuthority:
             != (
                 "closure_required",
                 "extraction_terminal",
+                ClosureTrigger.REPAIR_EXHAUSTED.value,
                 state.failure_state_version,
                 (),
                 (),
@@ -1715,6 +1722,7 @@ class OfflineLocalClosureAuthority:
             == (
                 "closure_required",
                 "extraction_terminal",
+                ClosureTrigger.REPAIR_EXHAUSTED.value,
                 state.failure_state_version,
                 (),
                 (),
@@ -2161,6 +2169,7 @@ def _failure_record_values(
 ) -> tuple[
     str,
     str,
+    str,
     int,
     tuple[object, ...],
     tuple[object, ...],
@@ -2169,15 +2178,18 @@ def _failure_record_values(
         status = record.status
         phase = record.phase
         state_version = record.state_version
+        closure_trigger = record.closure_trigger
         act_ids = record.act_ids
         act_kinds = record.act_kinds
         status_value = status.value
         phase_value = phase.value
+        closure_trigger_value = closure_trigger.value
     except AttributeError:
         return None
     if (
         type(status_value) is not str
         or type(phase_value) is not str
+        or type(closure_trigger_value) is not str
         or type(state_version) is not int
         or state_version < 0
         or type(act_ids) is not tuple
@@ -2187,6 +2199,7 @@ def _failure_record_values(
     return (
         status_value,
         phase_value,
+        closure_trigger_value,
         state_version,
         act_ids,
         act_kinds,
@@ -2369,6 +2382,7 @@ def _token(domain: bytes, *parts: str) -> str:
 
 
 __all__ = [
+    "ClosureTrigger",
     "GenericFailureProofReceipt",
     "OfflineAuthorityInventory",
     "OfflineClosureCapability",

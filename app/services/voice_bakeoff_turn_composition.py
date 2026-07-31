@@ -17,7 +17,18 @@ from app.services.caller_observation_extractor import (
 )
 from app.services.dialogue_planner import ActionName, NextAction, plan_next_action
 from app.services.receptionist_state import IntakeState
+from app.services.voice_bakeoff_closure import ClosureTrigger
 from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
+from app.services.voice_bakeoff_language_choice import (
+    AdmissionPurpose,
+    LanguageChoicePhase,
+    LanguageChoiceProposal,
+    LanguageFinalDisposition,
+    LanguageRecoveryAdmission,
+    LanguageRecoveryFinalTurnReceipt,
+    OfflineLanguageChoiceLifecycle,
+    language_recovery_receipt_id,
+)
 from app.services.voice_bakeoff_materializer import (
     ContentProposal,
     FixedProposalMaterializer,
@@ -81,6 +92,9 @@ class CompositionStatus(str, Enum):
     REJECTED = "rejected"
     TERMINAL_FAILURE = "terminal_failure"
     CLOSURE_REQUIRED = "closure_required"
+    LANGUAGE_CHOICE_REQUIRED = "language_choice_required"
+    LANGUAGE_CHOICE_PENDING = "language_choice_pending"
+    LANGUAGE_CHOICE_WINDOW = "language_choice_window"
 
 
 class CompositionPhase(str, Enum):
@@ -215,6 +229,14 @@ class FinalTurnAdmissionAuthority:
         self._lifecycle = lifecycle
         self._counter = 0
         self._live: dict[str, FinalTurnAdmissionReceipt] = {}
+        self._pending_recovery: dict[
+            str,
+            tuple[
+                LanguageRecoveryFinalTurnReceipt,
+                LanguageRecoveryAdmission,
+                OfflineLanguageChoiceLifecycle,
+            ],
+        ] = {}
         self._tombstones: dict[str, _ReceiptTombstone] = {}
         self._disconnect_owner: object | None = None
         self._lock = Lock()
@@ -259,7 +281,12 @@ class FinalTurnAdmissionAuthority:
             self._prune(now_ms=now_ms)
             if not adapter.consume_final_input_admission(result, event):
                 return None
-            if len(self._live) + len(self._tombstones) >= self.max_records:
+            if (
+                len(self._live)
+                + len(self._pending_recovery)
+                + len(self._tombstones)
+                >= self.max_records
+            ):
                 return None
             implementation = self._implementation_bindings[type(adapter)]
             self._counter += 1
@@ -312,7 +339,7 @@ class FinalTurnAdmissionAuthority:
         now_ms: int,
     ) -> bool:
         if (
-            not isinstance(receipt, FinalTurnAdmissionReceipt)
+            type(receipt) is not FinalTurnAdmissionReceipt
             or not self.accepts_adapter(adapter)
             or not isinstance(content, str)
             or not content
@@ -349,6 +376,233 @@ class FinalTurnAdmissionAuthority:
                 sequence=receipt.sequence,
                 expires_at_ms=receipt.expires_at_ms + self.max_ttl_ms,
                 accepted=accepted,
+            )
+            return accepted
+
+    def mint_language_recovery(
+        self,
+        *,
+        adapter: OfflineCandidateAdapter,
+        lifecycle: VoiceLifecycle,
+        language_choice: OfflineLanguageChoiceLifecycle,
+        result: AdapterResult,
+        event: VoiceEvent,
+        content: str,
+        detected_locale: str | None,
+        now_ms: int,
+        ttl_ms: int,
+    ) -> tuple[
+        LanguageRecoveryFinalTurnReceipt,
+        LanguageRecoveryAdmission,
+    ] | None:
+        """Mint a purpose-sealed pair that ordinary composition cannot consume."""
+        if (
+            not self.accepts_adapter(adapter)
+            or lifecycle is not self._lifecycle
+            or type(language_choice)
+            is not OfflineLanguageChoiceLifecycle
+            or language_choice.binding != adapter.binding
+            or not isinstance(event, VoiceEvent)
+            or event.binding != adapter.binding
+            or event.semantic_act_kind
+            is not VoiceSemanticActKind.ACKNOWLEDGEMENT
+            or type(now_ms) is not int
+            or now_ms < event.at_ms
+            or type(ttl_ms) is not int
+            or not 1 <= ttl_ms <= self.max_ttl_ms
+            or type(content) is not str
+            or not content
+            or len(content) > _MAX_CONTENT_CHARS
+        ):
+            return None
+        encoded = content.encode("utf-8")
+        if len(encoded) > _MAX_CONTENT_BYTES:
+            return None
+        content_digest = final_turn_content_digest(content)
+        if (
+            event.payload.text_digest != content_digest
+            or not lifecycle.accepts_input_final(event)
+        ):
+            return None
+        with self._lock:
+            self._prune(now_ms=now_ms)
+            if (
+                len(self._live)
+                + len(self._pending_recovery)
+                + len(self._tombstones)
+                >= self.max_records
+                or not adapter.consume_final_input_admission(
+                    result,
+                    event,
+                )
+            ):
+                return None
+            disposition = language_choice.stage_final(
+                event=event,
+                lifecycle=lifecycle,
+                detected_locale=detected_locale,
+            )
+            if disposition is not LanguageFinalDisposition.QUALIFIED:
+                return None
+            implementation = self._implementation_bindings[
+                type(adapter)
+            ]
+            self._counter += 1
+            canonical_event_digest = _event_digest(event)
+            expires_at_ms = now_ms + ttl_ms
+            try:
+                receipt = LanguageRecoveryFinalTurnReceipt(
+                    receipt_id=language_recovery_receipt_id(
+                        arm=adapter.arm,
+                        canonical_event_digest=(
+                            canonical_event_digest
+                        ),
+                        content_digest=content_digest,
+                        content_byte_length=len(encoded),
+                        language_generation=(
+                            language_choice.generation
+                        ),
+                        detected_locale=detected_locale,
+                        counter=self._counter,
+                        expires_at_ms=expires_at_ms,
+                    ),
+                    purpose=AdmissionPurpose.LANGUAGE_RECOVERY,
+                    arm=adapter.arm,
+                    adapter_implementation_digest=(
+                        implementation.implementation_digest
+                    ),
+                    adapter_configuration_digest=(
+                        adapter.configuration_digest
+                    ),
+                    canonical_event_digest=canonical_event_digest,
+                    content_digest=content_digest,
+                    content_byte_length=len(encoded),
+                    adapter_admission_revision=(
+                        adapter.admission_revision
+                    ),
+                    binding=event.binding,
+                    input_turn_id=event.input_turn_id,
+                    input_semantic_act_kind=(
+                        event.semantic_act_kind
+                    ),
+                    sequence=event.sequence,
+                    at_ms=event.at_ms,
+                    expires_at_ms=expires_at_ms,
+                    language_generation=(
+                        language_choice.generation
+                    ),
+                    detected_locale=detected_locale,
+                )
+            except (TypeError, ValueError):
+                language_choice.tombstone_pending_pair()
+                return None
+            admission = language_choice.bind_recovery_receipt(
+                receipt
+            )
+            if admission is None:
+                self._tombstones[receipt.receipt_id] = (
+                    _ReceiptTombstone(
+                        receipt_id=receipt.receipt_id,
+                        binding=receipt.binding,
+                        input_turn_id=receipt.input_turn_id,
+                        sequence=receipt.sequence,
+                        expires_at_ms=(
+                            receipt.expires_at_ms
+                            + self.max_ttl_ms
+                        ),
+                        accepted=False,
+                    )
+                )
+                language_choice.tombstone_pending_pair()
+                return None
+            self._pending_recovery[receipt.receipt_id] = (
+                receipt,
+                admission,
+                language_choice,
+            )
+            return receipt, admission
+
+    def consume_language_recovery(
+        self,
+        receipt: LanguageRecoveryFinalTurnReceipt,
+        admission: LanguageRecoveryAdmission,
+        *,
+        adapter: OfflineCandidateAdapter,
+        language_choice: OfflineLanguageChoiceLifecycle,
+        content: str,
+        now_ms: int,
+    ) -> bool:
+        if (
+            type(receipt) is not LanguageRecoveryFinalTurnReceipt
+            or type(admission) is not LanguageRecoveryAdmission
+            or type(language_choice)
+            is not OfflineLanguageChoiceLifecycle
+            or not self.accepts_adapter(adapter)
+            or type(content) is not str
+            or not content
+            or len(content) > _MAX_CONTENT_CHARS
+            or type(now_ms) is not int
+            or now_ms < 0
+            or len(content.encode("utf-8")) > _MAX_CONTENT_BYTES
+        ):
+            return False
+        with self._lock:
+            self._prune(now_ms=now_ms)
+            pending = self._pending_recovery.get(
+                receipt.receipt_id
+            )
+            if pending is None:
+                return False
+            expected, expected_admission, expected_choice = pending
+            implementation = self._implementation_bindings[
+                type(adapter)
+            ]
+            accepted = (
+                expected is receipt
+                and expected_admission is admission
+                and expected_choice is language_choice
+                and receipt.purpose
+                is AdmissionPurpose.LANGUAGE_RECOVERY
+                and admission.purpose
+                is AdmissionPurpose.LANGUAGE_RECOVERY
+                and now_ms <= receipt.expires_at_ms
+                and receipt.arm is adapter.arm
+                and receipt.binding == adapter.binding
+                and receipt.adapter_implementation_digest
+                == implementation.implementation_digest
+                and receipt.adapter_configuration_digest
+                == adapter.configuration_digest
+                and receipt.adapter_admission_revision
+                == adapter.admission_revision
+                and not adapter.permit_admission_closed
+                and receipt.content_digest
+                == final_turn_content_digest(content)
+                and receipt.content_byte_length
+                == len(content.encode("utf-8"))
+                and language_choice.consume_recovery_pair(
+                    receipt=receipt,
+                    admission=admission,
+                    now_ms=now_ms,
+                )
+            )
+            self._pending_recovery.pop(
+                receipt.receipt_id,
+                None,
+            )
+            if not accepted:
+                language_choice.tombstone_pending_pair()
+            self._tombstones[receipt.receipt_id] = (
+                _ReceiptTombstone(
+                    receipt_id=receipt.receipt_id,
+                    binding=receipt.binding,
+                    input_turn_id=receipt.input_turn_id,
+                    sequence=receipt.sequence,
+                    expires_at_ms=(
+                        receipt.expires_at_ms
+                        + self.max_ttl_ms
+                    ),
+                    accepted=accepted,
+                )
             )
             return accepted
 
@@ -396,7 +650,7 @@ class FinalTurnAdmissionAuthority:
             if owner is not self._disconnect_owner:
                 return False
             self._terminalize_live_receipts(at_ms=event.at_ms)
-            return not self._live
+            return not self._live and not self._pending_recovery
 
     def hard_terminalize_live_receipts(
         self,
@@ -416,16 +670,35 @@ class FinalTurnAdmissionAuthority:
             if owner is not self._disconnect_owner:
                 return False
             self._terminalize_live_receipts(at_ms=at_ms)
-            return not self._live
+            return not self._live and not self._pending_recovery
 
     @property
     def unconsumed_receipt_count(self) -> int:
         with self._lock:
-            return len(self._live)
+            return len(self._live) + len(
+                self._pending_recovery
+            )
 
     def _terminalize_live_receipts(self, *, at_ms: int) -> None:
         for receipt_id, receipt in tuple(self._live.items()):
             self._live.pop(receipt_id)
+            self._tombstones[receipt_id] = _ReceiptTombstone(
+                receipt_id=receipt.receipt_id,
+                binding=receipt.binding,
+                input_turn_id=receipt.input_turn_id,
+                sequence=receipt.sequence,
+                expires_at_ms=(
+                    max(receipt.expires_at_ms, at_ms)
+                    + self.max_ttl_ms
+                ),
+                accepted=False,
+            )
+        for receipt_id, pending in tuple(
+            self._pending_recovery.items()
+        ):
+            receipt, _, language_choice = pending
+            self._pending_recovery.pop(receipt_id)
+            language_choice.tombstone_pending_pair()
             self._tombstones[receipt_id] = _ReceiptTombstone(
                 receipt_id=receipt.receipt_id,
                 binding=receipt.binding,
@@ -443,6 +716,23 @@ class FinalTurnAdmissionAuthority:
             key for key, receipt in self._live.items() if receipt.expires_at_ms < now_ms
         ):
             receipt = self._live.pop(receipt_id)
+            self._tombstones[receipt_id] = _ReceiptTombstone(
+                receipt_id=receipt.receipt_id,
+                binding=receipt.binding,
+                input_turn_id=receipt.input_turn_id,
+                sequence=receipt.sequence,
+                expires_at_ms=now_ms + self.max_ttl_ms,
+                accepted=False,
+            )
+        for receipt_id in tuple(
+            key
+            for key, pending in self._pending_recovery.items()
+            if pending[0].expires_at_ms < now_ms
+        ):
+            receipt, _, language_choice = (
+                self._pending_recovery.pop(receipt_id)
+            )
+            language_choice.tombstone_pending_pair()
             self._tombstones[receipt_id] = _ReceiptTombstone(
                 receipt_id=receipt.receipt_id,
                 binding=receipt.binding,
@@ -617,6 +907,7 @@ class CompositionPolicy:
         questions = tuple(act for act in acts if act.kind is VoiceSemanticActKind.QUESTION)
         terminal = {
             VoiceSemanticActKind.CLOSING,
+            VoiceSemanticActKind.LANGUAGE_CHOICE,
             VoiceSemanticActKind.OPT_OUT,
             VoiceSemanticActKind.VOICEMAIL,
         }
@@ -709,6 +1000,45 @@ class CompositionPolicy:
             locale=proposal.locale,
         )
 
+    def authorize_language_choice(
+        self,
+        *,
+        proposal: LanguageChoiceProposal,
+        binding: VoiceSessionBinding,
+        turn_id: str,
+        state_version: int,
+    ) -> SpeechAuthorization:
+        """Authorize only the exact immutable multilingual choice asset."""
+        if (
+            type(proposal) is not LanguageChoiceProposal
+            or proposal.state_version != state_version
+            or not isinstance(binding, VoiceSessionBinding)
+            or not _identifier(turn_id)
+            or len(proposal.plan.acts) != 3
+            or any(
+                act.kind
+                is not VoiceSemanticActKind.LANGUAGE_CHOICE
+                or act.question_slot is not None
+                or act.private_disclosure
+                or act.unsupported_promise
+                or not act.complete
+                for act in proposal.plan.acts
+            )
+        ):
+            raise ValueError(
+                "language choice authorization input is invalid"
+            )
+        return SpeechAuthorization(
+            binding=binding,
+            turn_id=turn_id,
+            authorized_kinds=(
+                VoiceSemanticActKind.LANGUAGE_CHOICE,
+            ),
+            terminal_allowed=False,
+            answered_slots=(),
+            locale="mul",
+        )
+
     def authorize_replay(
         self,
         *,
@@ -754,6 +1084,7 @@ class CompositionResult:
     act_kinds: tuple[VoiceSemanticActKind, ...] = ()
     replay_mode: ReplayMode | None = None
     replay_source_act_id: str | None = None
+    closure_trigger: ClosureTrigger | None = None
     reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -787,6 +1118,39 @@ class CompositionResult:
                     }
                 )
             )
+            or (
+                self.status is CompositionStatus.CLOSURE_REQUIRED
+                and self.closure_trigger
+                is not ClosureTrigger.REPAIR_EXHAUSTED
+            )
+            or (
+                self.status is not CompositionStatus.CLOSURE_REQUIRED
+                and self.closure_trigger is not None
+            )
+            or (
+                self.status
+                is CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+                and (
+                    self.phase is not CompositionPhase.FACTS_COMMITTED
+                    or self.act_ids
+                    or self.reason != "unlisted_language"
+                )
+            )
+            or (
+                self.status
+                in {
+                    CompositionStatus.LANGUAGE_CHOICE_PENDING,
+                    CompositionStatus.LANGUAGE_CHOICE_WINDOW,
+                }
+                and (
+                    len(self.act_kinds) != 3
+                    or any(
+                        kind
+                        is not VoiceSemanticActKind.LANGUAGE_CHOICE
+                        for kind in self.act_kinds
+                    )
+                )
+            )
         ):
             raise ValueError("composition result is invalid")
 
@@ -810,6 +1174,7 @@ class _PendingResponse:
     retired_permit_act_ids: set[str]
     replay_mode: ReplayMode | None = None
     replay_source_act_id: str | None = None
+    language_choice: OfflineLanguageChoiceLifecycle | None = None
 
 
 class TurnCompositionTransaction:
@@ -883,21 +1248,88 @@ class TurnCompositionTransaction:
     ) -> CompositionResult:
         with self._lock:
             self._prune_outcomes(now_ms=now_ms)
-            if isinstance(receipt, FinalTurnAdmissionReceipt):
+            if type(receipt) is FinalTurnAdmissionReceipt:
                 replay = self._outcomes.get(receipt.receipt_id)
                 if replay is not None:
                     return replay
-            if not isinstance(receipt, FinalTurnAdmissionReceipt) or not self.receipts.consume(
+            if type(receipt) is not FinalTurnAdmissionReceipt or not self.receipts.consume(
                 receipt,
                 adapter=self.adapter,
                 content=content,
                 now_ms=now_ms,
             ):
                 return _untracked_rejection(receipt, self.state.version)
+            return self._execute_admitted(
+                receipt,
+                content=content,
+                backend=backend,
+            )
+
+    def execute_language_recovery(
+        self,
+        receipt: LanguageRecoveryFinalTurnReceipt,
+        admission: LanguageRecoveryAdmission,
+        *,
+        language_choice: OfflineLanguageChoiceLifecycle,
+        content: str,
+        backend: ObservationBackend,
+        now_ms: int,
+    ) -> CompositionResult:
+        """Consume the exact paired recovery authority, then compose normally."""
+        with self._lock:
+            self._prune_outcomes(now_ms=now_ms)
+            if type(receipt) is LanguageRecoveryFinalTurnReceipt:
+                replay = self._outcomes.get(receipt.receipt_id)
+                if replay is not None:
+                    return replay
+            if (
+                type(receipt)
+                is not LanguageRecoveryFinalTurnReceipt
+                or type(admission) is not LanguageRecoveryAdmission
+                or type(language_choice)
+                is not OfflineLanguageChoiceLifecycle
+                or language_choice.binding != self.binding
+                or not self.receipts.consume_language_recovery(
+                    receipt,
+                    admission,
+                    adapter=self.adapter,
+                    language_choice=language_choice,
+                    content=content,
+                    now_ms=now_ms,
+                )
+            ):
+                return _untracked_rejection(
+                    receipt,
+                    self.state.version,
+                )
+            return self._execute_admitted(
+                receipt,
+                content=content,
+                backend=backend,
+                language_choice=language_choice,
+            )
+
+    def _execute_admitted(
+        self,
+        receipt: (
+            FinalTurnAdmissionReceipt
+            | LanguageRecoveryFinalTurnReceipt
+        ),
+        *,
+        content: str,
+        backend: ObservationBackend,
+        language_choice: (
+            OfflineLanguageChoiceLifecycle | None
+        ) = None,
+    ) -> CompositionResult:
+        """Compose only after the caller receipt's owning authority consumed it."""
+        with self._lock:
             if (
                 receipt.input_semantic_act_kind
                 is not VoiceSemanticActKind.ACKNOWLEDGEMENT
             ):
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
                 return self._record(
                     receipt,
                     CompositionStatus.TERMINAL_FAILURE,
@@ -909,6 +1341,8 @@ class TurnCompositionTransaction:
                 turn_id=receipt.input_turn_id,
                 sequence=receipt.sequence,
             ):
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
                 return self._record(
                     receipt,
                     CompositionStatus.SUPERSEDED,
@@ -917,6 +1351,8 @@ class TurnCompositionTransaction:
                     reason="stale_turn",
                 )
             if not self._supersede_pending(receipt):
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
                 return self._record(
                     receipt,
                     CompositionStatus.TERMINAL_FAILURE,
@@ -925,6 +1361,8 @@ class TurnCompositionTransaction:
                     reason="supersede_compensation_failed",
                 )
             if len(self._outcomes) >= self.max_outcomes:
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
                 return _untracked_capacity(
                     receipt,
                     self.state.version,
@@ -947,11 +1385,38 @@ class TurnCompositionTransaction:
                 ),
             )
             if extraction.outcome is not ExtractionOutcome.ACCEPTED:
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
+                    self._seal_replay_authority()
+                    return self._record(
+                        receipt,
+                        CompositionStatus.TERMINAL_FAILURE,
+                        CompositionPhase.EXTRACTION_TERMINAL,
+                        self.state.version,
+                        reason=(
+                            "language_recovery_extraction_"
+                            f"{extraction.outcome.value}"
+                        ),
+                    )
                 return self._handle_extraction_failure(
                     receipt=receipt,
                     outcome=extraction.outcome,
                 )
             assert extraction.observation is not None
+            if (
+                language_choice is not None
+                and not language_choice.validate_recovery_locale(
+                    extraction.observation.language
+                )
+            ):
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.EXTRACTION_TERMINAL,
+                    self.state.version,
+                    reason="language_recovery_locale_mismatch",
+                )
             snapshot = self.state.snapshot()
             staged = _copy_state(snapshot.state)
             staged.apply_caller_observation(extraction.observation)
@@ -963,12 +1428,36 @@ class TurnCompositionTransaction:
                 staged=staged,
             )
             if committed_version is None:
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
                 return self._record(
                     receipt,
                     CompositionStatus.SUPERSEDED,
                     CompositionPhase.TERMINAL,
                     self.state.version,
                     reason="facts_cas",
+                )
+            if (
+                language_choice is not None
+                and not language_choice.commit_recovery()
+            ):
+                self._seal_replay_authority()
+                return self._record(
+                    receipt,
+                    CompositionStatus.TERMINAL_FAILURE,
+                    CompositionPhase.FACTS_COMMITTED,
+                    committed_version,
+                    reason="language_recovery_commit",
+                )
+            if not self.materializer.supports_locale(
+                staged.language
+            ):
+                return self._record(
+                    receipt,
+                    CompositionStatus.LANGUAGE_CHOICE_REQUIRED,
+                    CompositionPhase.FACTS_COMMITTED,
+                    committed_version,
+                    reason="unlisted_language",
                 )
             action = plan_next_action(staged)
             try:
@@ -2085,6 +2574,14 @@ class TurnCompositionTransaction:
                     reason="playback_playout_binding_mismatch",
                     at_ms=event.at_ms,
                 )
+            if (
+                pending.language_choice is not None
+                and pending.language_choice.defers_playback(
+                    event=event,
+                    lifecycle=self.lifecycle,
+                )
+            ):
+                return self._outcomes[pending.receipt_id]
             state_version = pending.state_version
             with self.state.delivery_guard():
                 if not self.state.revalidate(
@@ -2150,6 +2647,22 @@ class TurnCompositionTransaction:
                         ),
                         at_ms=event.at_ms,
                     )
+                if (
+                    pending.language_choice is not None
+                    and not pending.language_choice.observe_segment(
+                        event=event,
+                        lifecycle=self.lifecycle,
+                    )
+                ):
+                    failure = self._hard_terminalize_pending(
+                        pending,
+                        reason=(
+                            "language_choice_observation_failed"
+                        ),
+                        at_ms=event.at_ms,
+                    )
+                    pending.language_choice.tombstone_pending_pair()
+                    return failure
                 pending.observed_act_ids.add(event.semantic_act_id)
                 pending.state_version = state_version
                 if not self._activate_next_permit(pending):
@@ -2186,6 +2699,7 @@ class TurnCompositionTransaction:
                 CompositionStatus.CLOSURE_REQUIRED,
                 CompositionPhase.EXTRACTION_TERMINAL,
                 self.state.version,
+                closure_trigger=ClosureTrigger.REPAIR_EXHAUSTED,
                 reason="call_repair_exhausted",
             )
         state_version = self.state.version
@@ -2210,25 +2724,87 @@ class TurnCompositionTransaction:
             pending_status=CompositionStatus.REPAIR_PENDING,
         )
 
-    def _prepare_response(
+    def prepare_language_choice(
         self,
         *,
         receipt: FinalTurnAdmissionReceipt,
+        trigger: CompositionResult,
+        language_choice: OfflineLanguageChoiceLifecycle,
+        proposal: LanguageChoiceProposal,
+    ) -> CompositionResult:
+        """Prepare only the exact one-shot choice after an unlisted locale."""
+        with self._lock:
+            if (
+                type(receipt) is not FinalTurnAdmissionReceipt
+                or type(trigger) is not CompositionResult
+                or self._outcomes.get(receipt.receipt_id)
+                is not trigger
+                or trigger.status
+                is not CompositionStatus.LANGUAGE_CHOICE_REQUIRED
+                or trigger.phase
+                is not CompositionPhase.FACTS_COMMITTED
+                or trigger.reason != "unlisted_language"
+                or trigger.receipt_id != receipt.receipt_id
+                or trigger.input_turn_id != receipt.input_turn_id
+                or type(language_choice)
+                is not OfflineLanguageChoiceLifecycle
+                or language_choice.binding != self.binding
+                or language_choice.phase
+                is not LanguageChoicePhase.AVAILABLE
+                or type(proposal) is not LanguageChoiceProposal
+                or proposal.state_version != trigger.state_version
+            ):
+                return _untracked_rejection(
+                    receipt,
+                    self.state.version,
+                )
+            return self._prepare_response(
+                receipt=receipt,
+                action=None,
+                proposal=proposal,
+                state_version=trigger.state_version,
+                pending_status=(
+                    CompositionStatus.LANGUAGE_CHOICE_PENDING
+                ),
+                language_choice=language_choice,
+            )
+
+    def _prepare_response(
+        self,
+        *,
+        receipt: (
+            FinalTurnAdmissionReceipt
+            | LanguageRecoveryFinalTurnReceipt
+        ),
         action: NextAction | None,
-        proposal: ContentProposal,
+        proposal: ContentProposal | LanguageChoiceProposal,
         state_version: int,
         pending_status: CompositionStatus,
+        language_choice: (
+            OfflineLanguageChoiceLifecycle | None
+        ) = None,
     ) -> CompositionResult:
         try:
             reserve_sequence, reserve_at_ms = self.lifecycle.next_position(
                 at_ms=receipt.at_ms
             )
-            authorization = self.policy.authorize(
-                action=action,
-                proposal=proposal,
-                binding=self.binding,
-                turn_id=receipt.input_turn_id,
-                state_version=state_version,
+            authorization = (
+                self.policy.authorize_language_choice(
+                    proposal=proposal,
+                    binding=self.binding,
+                    turn_id=receipt.input_turn_id,
+                    state_version=state_version,
+                )
+                if type(proposal) is LanguageChoiceProposal
+                and type(language_choice)
+                is OfflineLanguageChoiceLifecycle
+                else self.policy.authorize(
+                    action=action,
+                    proposal=proposal,
+                    binding=self.binding,
+                    turn_id=receipt.input_turn_id,
+                    state_version=state_version,
+                )
             )
             reserved = self.coordinator.reserve_batch(
                 plan=proposal.plan,
@@ -2248,6 +2824,36 @@ class TurnCompositionTransaction:
                 state_version,
                 reason="reservation",
             )
+        if (
+            language_choice is not None
+            and (
+                type(proposal) is not LanguageChoiceProposal
+                or not language_choice.reserve(
+                    proposal=proposal,
+                    reserved=reserved,
+                )
+            )
+        ):
+            if not self.coordinator.rollback_batch(reserved):
+                return self._terminalize_partial(
+                    receipt=receipt,
+                    reserved=reserved,
+                    canonical=(),
+                    accepted_permits=(),
+                    state_version=state_version,
+                    reason=(
+                        "language_choice_reservation_cleanup"
+                    ),
+                    language_choice=language_choice,
+                )
+            language_choice.tombstone_pending_pair()
+            return self._record(
+                receipt,
+                CompositionStatus.TERMINAL_FAILURE,
+                CompositionPhase.FACTS_COMMITTED,
+                state_version,
+                reason="language_choice_reservation",
+            )
         with self.state.delivery_guard():
             if not self.state.revalidate(
                 expected_version=state_version,
@@ -2262,7 +2868,10 @@ class TurnCompositionTransaction:
                         accepted_permits=(),
                         state_version=state_version,
                         reason="response_cas_rollback_failed",
+                        language_choice=language_choice,
                     )
+                if language_choice is not None:
+                    language_choice.tombstone_pending_pair()
                 return self._record(
                     receipt,
                     CompositionStatus.SUPERSEDED,
@@ -2284,6 +2893,7 @@ class TurnCompositionTransaction:
                     accepted_permits=(),
                     state_version=state_version,
                     reason="speech_authorization",
+                    language_choice=language_choice,
                 )
             canonical: list[VoiceEvent] = []
             accepted_permits: list[VoiceEvent] = []
@@ -2314,6 +2924,7 @@ class TurnCompositionTransaction:
                         accepted_permits=tuple(accepted_permits),
                         state_version=state_version,
                         reason="canonical_authorization",
+                        language_choice=language_choice,
                     )
                 canonical.append(event)
                 if not accepted_permits:
@@ -2328,8 +2939,24 @@ class TurnCompositionTransaction:
                             accepted_permits=tuple(accepted_permits),
                             state_version=state_version,
                             reason="adapter_permit",
+                            language_choice=language_choice,
                         )
                     accepted_permits.append(event)
+            if (
+                language_choice is not None
+                and not language_choice.begin_presentation(
+                    lifecycle=self.lifecycle,
+                )
+            ):
+                return self._compensate(
+                    receipt=receipt,
+                    reserved=reserved,
+                    canonical=tuple(canonical),
+                    accepted_permits=tuple(accepted_permits),
+                    state_version=state_version,
+                    reason="language_choice_presentation",
+                    language_choice=language_choice,
+                )
             question_slot = next(
                 (
                     act.question_slot
@@ -2359,6 +2986,7 @@ class TurnCompositionTransaction:
                 transport_act_ids=set(),
                 observed_act_ids=set(),
                 retired_permit_act_ids=set(),
+                language_choice=language_choice,
             )
             for item in reserved:
                 self._pending_by_act[item.act_id] = pending
@@ -2424,12 +3052,25 @@ class TurnCompositionTransaction:
                 reason="delivered_response_cleanup_failed",
                 at_ms=at_ms,
             )
+        if (
+            pending.language_choice is not None
+            and not pending.language_choice.complete_prompt_cleanup()
+        ):
+            failure = self._hard_terminalize_pending(
+                pending,
+                reason="language_choice_cleanup_failed",
+                at_ms=at_ms,
+            )
+            pending.language_choice.tombstone_pending_pair()
+            return failure
         for item in pending.reserved:
             self._pending_by_act.pop(item.act_id, None)
         result = CompositionResult(
             status=(
                 CompositionStatus.REPLAY_OBSERVED
                 if pending.replay_mode is not None
+                else CompositionStatus.LANGUAGE_CHOICE_WINDOW
+                if pending.language_choice is not None
                 else CompositionStatus.RESPONSE_OBSERVED
             ),
             phase=CompositionPhase.RESPONSE_COMMITTED,
@@ -2530,7 +3171,10 @@ class TurnCompositionTransaction:
     def _compensate(
         self,
         *,
-        receipt: FinalTurnAdmissionReceipt,
+        receipt: (
+            FinalTurnAdmissionReceipt
+            | LanguageRecoveryFinalTurnReceipt
+        ),
         reserved: tuple[ReservedSpeech, ...],
         canonical: tuple[VoiceEvent, ...],
         accepted_permits: tuple[VoiceEvent, ...],
@@ -2538,6 +3182,9 @@ class TurnCompositionTransaction:
         reason: str,
         replay_mode: ReplayMode | None = None,
         replay_source_act_id: str | None = None,
+        language_choice: (
+            OfflineLanguageChoiceLifecycle | None
+        ) = None,
     ) -> CompositionResult:
         success = self.coordinator.rollback_pristine_question(reserved)
         retired_ids: set[str] = set()
@@ -2593,12 +3240,15 @@ class TurnCompositionTransaction:
                 retired_permit_act_ids=retired_ids,
                 replay_mode=replay_mode,
                 replay_source_act_id=replay_source_act_id,
+                language_choice=language_choice,
             )
             return self._hard_terminalize_pending(
                 pending,
                 reason=f"compensation_failed_{reason}",
                 at_ms=receipt.at_ms,
             )
+        if language_choice is not None:
+            language_choice.tombstone_pending_pair()
         return self._record(
             receipt,
             CompositionStatus.TERMINAL_FAILURE,
@@ -2612,7 +3262,10 @@ class TurnCompositionTransaction:
     def _terminalize_partial(
         self,
         *,
-        receipt: FinalTurnAdmissionReceipt,
+        receipt: (
+            FinalTurnAdmissionReceipt
+            | LanguageRecoveryFinalTurnReceipt
+        ),
         reserved: tuple[ReservedSpeech, ...],
         canonical: tuple[VoiceEvent, ...],
         accepted_permits: tuple[VoiceEvent, ...],
@@ -2620,6 +3273,9 @@ class TurnCompositionTransaction:
         reason: str,
         replay_mode: ReplayMode | None = None,
         replay_source_act_id: str | None = None,
+        language_choice: (
+            OfflineLanguageChoiceLifecycle | None
+        ) = None,
     ) -> CompositionResult:
         pending = _PendingResponse(
             receipt_id=receipt.receipt_id,
@@ -2644,6 +3300,7 @@ class TurnCompositionTransaction:
             retired_permit_act_ids=set(),
             replay_mode=replay_mode,
             replay_source_act_id=replay_source_act_id,
+            language_choice=language_choice,
         )
         for event in accepted_permits:
             if self.adapter.retire_permit(event):
@@ -2709,6 +3366,8 @@ class TurnCompositionTransaction:
                         item.act_id,
                         None,
                     )
+            if pending.language_choice is not None:
+                pending.language_choice.tombstone_pending_pair()
             result = CompositionResult(
                 status=CompositionStatus.TERMINAL_FAILURE,
                 phase=CompositionPhase.TERMINAL,
@@ -2959,6 +3618,7 @@ class TurnCompositionTransaction:
         act_kinds: tuple[VoiceSemanticActKind, ...] = (),
         replay_mode: ReplayMode | None = None,
         replay_source_act_id: str | None = None,
+        closure_trigger: ClosureTrigger | None = None,
         reason: str | None = None,
     ) -> CompositionResult:
         result = CompositionResult(
@@ -2971,6 +3631,7 @@ class TurnCompositionTransaction:
             act_kinds=act_kinds,
             replay_mode=replay_mode,
             replay_source_act_id=replay_source_act_id,
+            closure_trigger=closure_trigger,
             reason=reason,
         )
         if (

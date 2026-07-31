@@ -16,6 +16,9 @@ from app.services.voice_bakeoff_closure import (
     generic_failure_text_digest,
     opt_out_text_digest,
 )
+from app.services.voice_bakeoff_language_choice import (
+    LANGUAGE_CHOICE_DESCRIPTOR_DIGEST,
+)
 from app.services.voice_bakeoff_materializer import (
     FixedProposalMaterializer,
 )
@@ -26,6 +29,7 @@ from app.services.voice_bakeoff_session_driver import (
     _DRIVER_SOURCE_DIGEST,
     _FACADE_CODE_DIGEST,
     _FIXTURES,
+    _LANGUAGE_EXHAUSTION_LOCALES,
     DriverFailure,
     OfflineClosureOutcome,
     OfflineFailureInjection,
@@ -84,6 +88,8 @@ _REVIEWED_ASSEMBLY_SOURCE_PATHS = {
         Path("app/services/voice_bakeoff_coordinator.py"),
     "voice_bakeoff_closure":
         Path("app/services/voice_bakeoff_closure.py"),
+    "voice_bakeoff_language_choice":
+        Path("app/services/voice_bakeoff_language_choice.py"),
     "voice_bakeoff_silence":
         Path("app/services/voice_bakeoff_silence.py"),
     "voice_call_lifecycle":
@@ -102,6 +108,7 @@ _REVIEWED_DIRECT_SERVICE_MODULES = {
     "app.services.receptionist_state",
     "app.services.voice_bakeoff_coordinator",
     "app.services.voice_bakeoff_closure",
+    "app.services.voice_bakeoff_language_choice",
     "app.services.voice_bakeoff_materializer",
     "app.services.voice_bakeoff_silence",
     "app.services.voice_bakeoff_turn_composition",
@@ -729,7 +736,12 @@ def test_question_repair_safety_and_unsupported_locale_are_typed():
             VoiceSemanticActKind.SAFETY,
             VoiceSemanticActKind.QUESTION,
         ),
-        SyntheticJourney.UNSUPPORTED_LANGUAGE: (),
+        SyntheticJourney.UNSUPPORTED_LANGUAGE: (
+            VoiceSemanticActKind.LANGUAGE_CHOICE,
+            VoiceSemanticActKind.LANGUAGE_CHOICE,
+            VoiceSemanticActKind.LANGUAGE_CHOICE,
+            VoiceSemanticActKind.QUESTION,
+        ),
     }
     for journey, expected_acts in expected.items():
         driver, facade = _lease(journey=journey)
@@ -750,12 +762,183 @@ def test_question_repair_safety_and_unsupported_locale_are_typed():
             assert len(repairs) == 1
             assert repairs[0].locale == "es"
         if journey is SyntheticJourney.UNSUPPORTED_LANGUAGE:
-            assert tuple(event.kind for event in result.trace) == (
-                TraceKind.LEASE_ACCEPTED,
-                TraceKind.INPUT_FINAL,
-                TraceKind.TERMINAL,
-                TraceKind.BUFFERS_SCRUBBED,
+            kinds = tuple(event.kind for event in result.trace)
+            assert kinds.count(
+                TraceKind.LANGUAGE_CHOICE_REQUIRED
+            ) == 1
+            assert kinds.count(
+                TraceKind.LANGUAGE_CHOICE_PENDING
+            ) == 1
+            assert kinds.count(
+                TraceKind.LANGUAGE_CHOICE_WINDOW
+            ) >= 1
+            assert kinds.count(
+                TraceKind.LANGUAGE_RECOVERY_ADMITTED
+            ) == 1
+            assert (
+                kinds.index(TraceKind.LANGUAGE_CHOICE_REQUIRED)
+                < kinds.index(TraceKind.LANGUAGE_CHOICE_PENDING)
+                < kinds.index(TraceKind.LANGUAGE_CHOICE_WINDOW)
+                < kinds.index(
+                    TraceKind.LANGUAGE_RECOVERY_ADMITTED
+                )
             )
+            assert TraceKind.NO_AUDIO_TEARDOWN not in kinds
+            assert result.outbound_frame_count == 4
+
+
+@pytest.mark.parametrize(
+    ("journey", "recovered_locale"),
+    (
+        (SyntheticJourney.UNSUPPORTED_LANGUAGE, "en"),
+        (
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ES,
+            "es",
+        ),
+        (
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ZH,
+            "zh",
+        ),
+    ),
+)
+def test_integrated_language_recovery_journeys_are_exact_and_same_call(
+    journey: SyntheticJourney,
+    recovered_locale: str,
+):
+    driver, facade = _lease(journey=journey)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    confirmed = tuple(
+        event.semantic_act_kind
+        for event in result.trace
+        if event.kind is TraceKind.ACT_CONFIRMED
+    )
+    assert confirmed == (
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.QUESTION,
+    )
+    admitted = tuple(
+        event
+        for event in result.trace
+        if event.kind is TraceKind.LANGUAGE_RECOVERY_ADMITTED
+    )
+    assert len(admitted) == 1
+    assert admitted[0].locale == recovered_locale
+    assert result.outbound_frame_count == 4
+    assert TraceKind.LANGUAGE_CHOICE_EXHAUSTED not in {
+        event.kind for event in result.trace
+    }
+    assert TraceKind.NO_AUDIO_TEARDOWN not in {
+        event.kind for event in result.trace
+    }
+
+
+@pytest.mark.parametrize(
+    "journey",
+    (
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_PT,
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AMBIGUOUS,
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_TIMEOUT,
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR,
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR,
+    ),
+)
+def test_integrated_language_exhaustion_is_distinct_sealed_and_no_audio(
+    journey: SyntheticJourney,
+):
+    driver, facade = _lease(journey=journey)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    confirmed = tuple(
+        event.semantic_act_kind
+        for event in result.trace
+        if event.kind is TraceKind.ACT_CONFIRMED
+    )
+    assert confirmed == (
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+        VoiceSemanticActKind.LANGUAGE_CHOICE,
+    )
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.LANGUAGE_CHOICE_EXHAUSTED) == 1
+    assert kinds.count(TraceKind.NO_AUDIO_TEARDOWN) == 1
+    assert result.outbound_frame_count == 3
+    assert (
+        kinds.count(TraceKind.INPUT_FINAL)
+        == (
+            1
+            if journey
+            is SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_TIMEOUT
+            else 2
+        )
+    )
+    exhausted = next(
+        event
+        for event in result.trace
+        if event.kind is TraceKind.LANGUAGE_CHOICE_EXHAUSTED
+    )
+    assert exhausted.content_digest == LANGUAGE_CHOICE_DESCRIPTOR_DIGEST
+    assert not any(
+        event.semantic_act_kind is VoiceSemanticActKind.CLOSING
+        for event in result.trace
+    )
+    assert {
+        TraceKind.GENERIC_FAILURE_PROOF_RETAINED,
+        TraceKind.CLOSURE_CAPABILITY_RETAINED,
+        TraceKind.CLOSURE_STAGED,
+        TraceKind.OFFLINE_OUTBOUND_COMMITTED,
+        TraceKind.SYNTHETIC_PLAYBACK_OBSERVED,
+        TraceKind.ATOMIC_SYNTHETIC_FRAME_CONSUMED,
+        TraceKind.CLOSURE_TEARDOWN_COMPLETE,
+    }.isdisjoint(kinds)
+
+
+def test_language_journeys_cover_both_exact_unlisted_trigger_locales():
+    assert {
+        journey: dict(_FIXTURES[journey].fields)["language"]
+        for journey in (
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR,
+        )
+    } == {
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR:
+            "fr-FR",
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR:
+            "ar-MSA",
+    }
+    assert {
+        journey: _LANGUAGE_EXHAUSTION_LOCALES[journey]
+        for journey in (
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR,
+        )
+    } == {
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR:
+            "fr_fr",
+        SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR:
+            "ar_msa",
+    }
+    assert {
+        dict(_FIXTURES[journey].fields)["language"]
+        for journey in (
+            SyntheticJourney.UNSUPPORTED_LANGUAGE,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ES,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_RECOVERY_ZH,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_PT,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AMBIGUOUS,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_TIMEOUT,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_FR,
+            SyntheticJourney.UNSUPPORTED_LANGUAGE_EXHAUSTION_AR,
+        )
+    } == {"fr-FR", "ar-MSA"}
 
 
 def test_low_confidence_repair_reserves_the_reviewed_spanish_asset(

@@ -67,6 +67,8 @@ _REVIEWED_ASSEMBLY_SOURCE_PATHS = {
         Path("app/services/receptionist_state.py"),
     "voice_bakeoff_coordinator":
         Path("app/services/voice_bakeoff_coordinator.py"),
+    "voice_bakeoff_silence":
+        Path("app/services/voice_bakeoff_silence.py"),
     "voice_call_lifecycle":
         Path("app/services/voice_call_lifecycle.py"),
     "voice_candidates_base":
@@ -83,6 +85,7 @@ _REVIEWED_DIRECT_SERVICE_MODULES = {
     "app.services.receptionist_state",
     "app.services.voice_bakeoff_coordinator",
     "app.services.voice_bakeoff_materializer",
+    "app.services.voice_bakeoff_silence",
     "app.services.voice_bakeoff_turn_composition",
     "app.services.voice_call_lifecycle",
     "app.services.voice_candidates",
@@ -508,6 +511,108 @@ def test_interruption_reconnect_uses_fresh_epoch_without_stale_speech(
     ) == (
         VoiceSemanticActKind.QUESTION,
         VoiceSemanticActKind.REPAIR,
+    )
+
+
+def test_silence_boundary_and_more_time_use_fixed_canonical_speech(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    proposals = []
+    original = FixedProposalMaterializer.lifecycle_act
+
+    def capture(materializer, **kwargs):
+        proposal = original(materializer, **kwargs)
+        proposals.append(proposal)
+        return proposal
+
+    monkeypatch.setattr(
+        FixedProposalMaterializer,
+        "lifecycle_act",
+        capture,
+    )
+    driver, facade = _lease(
+        journey=SyntheticJourney.SILENCE_BOUNDARY_MORE_TIME,
+    )
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 9
+    assert result.outbound_audio_ms == 180
+    assert result.session_duration_ms == 70_053
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.CALLER_ACTIVITY_AT_BOUNDARY) == 1
+    assert kinds.count(TraceKind.MORE_TIME_ACCEPTED) == 2
+    assert kinds.count(TraceKind.MORE_TIME_IGNORED) == 1
+    assert kinds.count(TraceKind.LOCAL_TERMINAL_ELIGIBLE) == 2
+    assert kinds.count(TraceKind.LOCAL_TERMINATED) == 2
+    assert tuple(
+        event.semantic_act_kind
+        for event in result.trace
+        if event.kind is TraceKind.ACT_CONFIRMED
+    ) == (
+        VoiceSemanticActKind.QUESTION,
+        VoiceSemanticActKind.QUESTION,
+        VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        VoiceSemanticActKind.PRESENCE_CHECK,
+        VoiceSemanticActKind.CLOSING,
+        VoiceSemanticActKind.QUESTION,
+        VoiceSemanticActKind.PRESENCE_CHECK,
+        VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        VoiceSemanticActKind.CLOSING,
+    )
+    assert tuple(
+        proposal.plan.acts[0].text
+        for proposal in proposals
+    ) == (
+        "Take your time. I’ll wait twenty more seconds.",
+        "Are you still there?",
+        (
+            "I can’t hear a response, so I’ll end this "
+            "test call now. Goodbye."
+        ),
+        "Are you still there?",
+        "Take your time. I’ll wait twenty more seconds.",
+        (
+            "I can’t hear a response, so I’ll end this "
+            "test call now. Goodbye."
+        ),
+    )
+
+
+def test_silence_journey_closes_manual_timeout_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        arm=CandidateArm.C,
+        journey=SyntheticJourney.SILENCE_BOUNDARY_MORE_TIME,
+    )
+    assemblies = []
+    original = driver._assembly
+
+    def capture(*args, **kwargs):
+        assembly = original(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    monkeypatch.setattr(driver, "_assembly", capture)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert len(assemblies) == 3
+    assert all(
+        assembly.adapter.terminally_closed
+        and not assembly.adapter._begin_deadlines
+        and not assembly.adapter._completion_deadlines
+        and not assembly.adapter._pending_timeouts
+        and not assembly.adapter._pending_timeout_receipts
+        and assembly.calls.is_quiescent
+        for assembly in assemblies
     )
 
 

@@ -187,6 +187,23 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
             )
             return True
 
+    def retire_permit(self, event: VoiceEvent) -> bool:
+        """Retire exact permit and all of its stale timeout authority."""
+        with self._authority_lock:
+            if not super().retire_permit(event):
+                return False
+            key = (
+                event.input_turn_id,
+                event.generation_id,
+                event.semantic_act_id,
+                event.semantic_act_kind,
+            )
+            self._begin_deadlines.pop(key, None)
+            self._completion_deadlines.pop(key, None)
+            self._pending_timeouts.pop(key, None)
+            self._pending_timeout_receipts.pop(key, None)
+            return True
+
     def terminalize_permit_admission(self) -> None:
         """Permanently clear native permit and timeout authority atomically."""
         terminal_callback: Callable[[str, int], bool] | None = None
@@ -766,7 +783,7 @@ class ManualNativeAdapter(OfflineCandidateAdapter):
                         terminal_callback = self._timeout_terminal_callback
                         terminal_reason = "act_timed_out"
                         terminal_at_ms = event.at_ms
-            except Exception as caught:
+            except Exception as caught:  # noqa: BLE001
                 error = caught
             finally:
                 self._timeout_materialization_active = False

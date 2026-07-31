@@ -9,6 +9,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from app.services.dialogue_planner import ActionName, NextAction
+from app.services.voice_call_lifecycle import CallIntentKind
 from app.services.voice_lifecycle import VoiceSemanticActKind
 from app.services.voice_speech_control import SemanticAct, SpokenPlan
 
@@ -16,6 +17,9 @@ from app.services.voice_speech_control import SemanticAct, SpokenPlan
 class ProposalKind(str, Enum):
     PLANNED = "planned"
     INPUT_REPAIR = "input_repair"
+    PRESENCE_CHECK = "presence_check"
+    MORE_TIME_ACKNOWLEDGEMENT = "more_time_acknowledgement"
+    SILENCE_CLOSURE = "silence_closure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +40,10 @@ class ContentProposal:
                 self.proposal_kind is ProposalKind.PLANNED
                 and not isinstance(self.action_name, ActionName)
             )
-            or (self.proposal_kind is ProposalKind.INPUT_REPAIR and self.action_name is not None)
+            or (
+                self.proposal_kind is not ProposalKind.PLANNED
+                and self.action_name is not None
+            )
             or type(self.state_version) is not int
             or self.state_version < 0
             or self.locale not in _CATALOG
@@ -105,6 +112,60 @@ class FixedProposalMaterializer:
             ),
         )
 
+    def lifecycle_act(
+        self,
+        *,
+        intent_kind: CallIntentKind,
+        state_version: int,
+        locale: str,
+    ) -> ContentProposal:
+        if (
+            not isinstance(intent_kind, CallIntentKind)
+            or type(state_version) is not int
+            or state_version < 0
+        ):
+            raise ValueError("lifecycle materializer input is invalid")
+        selected_locale = _locale(locale)
+        mapping = {
+            CallIntentKind.REQUEST_PRESENCE_CHECK: (
+                ProposalKind.PRESENCE_CHECK,
+                VoiceSemanticActKind.PRESENCE_CHECK,
+                "presence_check",
+            ),
+            CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT: (
+                ProposalKind.MORE_TIME_ACKNOWLEDGEMENT,
+                VoiceSemanticActKind.ACKNOWLEDGEMENT,
+                "more_time_acknowledgement",
+            ),
+            CallIntentKind.REQUEST_CLOSING: (
+                ProposalKind.SILENCE_CLOSURE,
+                VoiceSemanticActKind.CLOSING,
+                "silence_closure",
+            ),
+        }
+        selected = mapping.get(intent_kind)
+        if selected is None:
+            raise ValueError("lifecycle intent has no reviewed asset")
+        proposal_kind, semantic_kind, catalog_key = selected
+        try:
+            text = _CATALOG[selected_locale][catalog_key]
+        except KeyError as error:
+            raise ValueError(
+                "no reviewed lifecycle asset exists"
+            ) from error
+        return _proposal(
+            proposal_kind=proposal_kind,
+            action_name=None,
+            state_version=state_version,
+            locale=selected_locale,
+            acts=(
+                SemanticAct(
+                    semantic_kind,
+                    text,
+                ),
+            ),
+        )
+
 
 _CATALOG_DATA: dict[str, dict[str, str]] = {
     "en": {
@@ -123,6 +184,11 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "acknowledgement": "Thank you. I have the details.",
         "decline": "I can only help with this business's services.",
         "input_repair": "Sorry, I did not understand. Please say that again.",
+        "presence_check": "Are you still there?",
+        "more_time_acknowledgement":
+            "Take your time. I’ll wait twenty more seconds.",
+        "silence_closure":
+            "I can’t hear a response, so I’ll end this test call now. Goodbye.",
     },
     "es": {
         "answer": "El precio depende de los detalles del trabajo.",
@@ -140,6 +206,11 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "acknowledgement": "Gracias. Ya tengo los detalles.",
         "decline": "Solo puedo ayudar con los servicios de este negocio.",
         "input_repair": "Perdón, no entendí. Puede repetirlo?",
+        "presence_check": "¿Sigue ahí?",
+        "more_time_acknowledgement":
+            "Tómese su tiempo. Esperaré veinte segundos más.",
+        "silence_closure":
+            "No escucho una respuesta, así que finalizaré esta llamada de prueba ahora. Adiós.",
     },
     "pt": {
         "answer": "O preço depende dos detalhes do serviço.",
@@ -157,6 +228,9 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "acknowledgement": "Obrigado. Já tenho os detalhes.",
         "decline": "Só posso ajudar com os serviços desta empresa.",
         "input_repair": "Desculpe, não entendi. Pode repetir?",
+        "presence_check": "Você ainda está aí?",
+        "more_time_acknowledgement": "Sem pressa. Vou esperar mais vinte segundos.",
+        "silence_closure": "Não consigo ouvir uma resposta, então vou encerrar esta chamada de teste agora. Até logo.",
     },
     "zh": {
         "answer": "价格取决于具体的服务情况。",
@@ -174,6 +248,11 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "acknowledgement": "谢谢，我已经记下这些信息。",
         "decline": "我只能协助处理这家公司的服务。",
         "input_repair": "抱歉，我没有听懂。请再说一遍。",
+        "presence_check": "请问您还在吗？",
+        "more_time_acknowledgement":
+            "您慢慢来。我会再等二十秒。",
+        "silence_closure":
+            "我没有听到回应，所以现在结束这次测试通话。再见。",
     },
 }
 _CATALOG = MappingProxyType(

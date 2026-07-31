@@ -18,6 +18,11 @@ from app.services.caller_observation_extractor import (
 from app.services.receptionist_state import IntakeState
 from app.services.voice_bakeoff_coordinator import VoiceBakeoffCoordinator
 from app.services.voice_bakeoff_materializer import FixedProposalMaterializer
+from app.services.voice_bakeoff_silence import (
+    LifecycleActResult,
+    LifecycleActStatus,
+    SilenceLifecycleController,
+)
 from app.services.voice_bakeoff_turn_composition import (
     AdapterImplementationBinding,
     CompositionPolicy,
@@ -29,7 +34,11 @@ from app.services.voice_bakeoff_turn_composition import (
     VersionedIntakeStore,
     final_turn_content_digest,
 )
-from app.services.voice_call_lifecycle import CallLifecycle
+from app.services.voice_call_lifecycle import (
+    CallIntent,
+    CallIntentKind,
+    CallLifecycle,
+)
 from app.services.voice_candidates import (
     AdapterResult,
     CandidateLimits,
@@ -68,7 +77,11 @@ from app.services.voice_lifecycle import (
     VoiceSource,
 )
 from app.services.voice_session_auth import CandidateArm
-from app.services.voice_speech_control import SpeechControl, SpeechPolicy
+from app.services.voice_speech_control import (
+    CancellationReason,
+    SpeechControl,
+    SpeechPolicy,
+)
 
 _DRIVER_DOMAIN = b"hey-kevin/offline-session-driver/v1\x00"
 _LEASE_DOMAIN = b"hey-kevin/offline-session-lease/v1\x00"
@@ -78,7 +91,7 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "ec65b5a41f181599beb15b75219091da2764df7a24cfc4538a2dedcba717adb3"
+_DRIVER_SOURCE_DIGEST = "737629386faec10613d95084832589654b4f8a293c5b6c5c14e46cd32181c121"
 _FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
@@ -86,17 +99,19 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "caller_observation_extractor":
         "a3d79ce19f2c603f47dd370789773a707016a07e430c58fcd389a67065f9d364",
     "composition":
-        "dd3561a3c0ba5617f74983872dca6d65407dd7ad545dc38f81e83e0c6b697f0d",
+        "9fb562780858f0f7419d35d9d1e603deb5b42211950daee66725697d9a6d4f18",
     "dialogue_planner":
         "222f332a8756eec4144bfe9ede7bb5dbae71cdbfd1ca8505df58b862dc953457",
     "materializer":
-        "4526aa31b979b544a5de761b9ea7f8ac4abfaa4d913044840629ef2f8a88d998",
+        "4df0fa5c9c0c571e2af9865c14e9dea18a51d62ed7a71f91363a14ff0f6febeb",
     "receptionist_state":
         "8f26251f7d9e1e534acf6178d1d5bcefac2efb87016e3b34b881decea2294845",
     "voice_bakeoff_coordinator":
-        "2a408b27c60c89091ef99261f3cd539ac1149ecc19102f55456da3d0ca2c6898",
+        "59c2753fc453afeb60dbfb252a74b552816188f6fadf2f738cee043590ab3ca1",
+    "voice_bakeoff_silence":
+        "4f507052b5c4b016a8956a0a7f7d5a4068058aafeaff979e3b483213e6bb1d4d",
     "voice_call_lifecycle":
-        "875f0edddc5560510f906eb940bb9f1e38ed3ccf2dbfac722db59d85367aeda0",
+        "b2054756846ef3c2acbaeac4ff649bce085ce26c679532cbb1f39c0615d7dc5c",
     "voice_candidates_base":
         "1d96a31d07966f48ebb528cdd4618bc5a2c0cc7911323bef8d56431c839c7cfe",
     "voice_lifecycle":
@@ -120,7 +135,7 @@ _ADAPTER_CODE_DIGESTS = MappingProxyType({
     CandidateArm.B2:
         "e8adbcff7c0df53ac46666bf552bc48fb032f0eeb9b4df064bd57afd31e5612b",
     CandidateArm.C:
-        "5c707edca3b9e9f59fea0a39d6b39a401bd8e0874506f21955f9f8c7598efc95",
+        "e7baa4dc48873c6f3504a77a0e705f423c01e2b704d221d0a4e78890a4c44a2a",
 })
 
 
@@ -143,6 +158,7 @@ class SyntheticJourney(str, Enum):
     REPAIR_EXHAUSTION = "repair_exhaustion"
     UNOBSERVED_QUESTION_OUTCOMES = "unobserved_question_outcomes"
     INTERRUPTION_RECONNECT = "interruption_reconnect"
+    SILENCE_BOUNDARY_MORE_TIME = "silence_boundary_more_time"
 
 
 class DriverFailure(str, Enum):
@@ -174,6 +190,12 @@ class TraceKind(str, Enum):
     ACT_FAILED = "act_failed"
     SESSION_DISCONNECTED = "session_disconnected"
     SESSION_REESTABLISHED = "session_reestablished"
+    SILENCE_TIMER_ARMED = "silence_timer_armed"
+    CALLER_ACTIVITY_AT_BOUNDARY = "caller_activity_at_boundary"
+    MORE_TIME_ACCEPTED = "more_time_accepted"
+    MORE_TIME_IGNORED = "more_time_ignored"
+    LOCAL_TERMINAL_ELIGIBLE = "local_terminal_eligible"
+    LOCAL_TERMINATED = "local_terminated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +208,7 @@ class OfflineSessionLimits:
     max_outbound_bytes: int = 5_120
     max_inbound_audio_ms: int = 320
     max_outbound_audio_ms: int = 320
-    max_session_ms: int = 2_000
+    max_session_ms: int = 120_000
     max_queue_depth: int = 16
     max_concurrency: int = 1
     lease_ttl_ms: int = 1_000
@@ -456,6 +478,16 @@ _FIXTURES = MappingProxyType({
             ("service_object", "furnace"),
         ),
     ),
+    SyntheticJourney.SILENCE_BOUNDARY_MORE_TIME: _Fixture(
+        locale="en",
+        content="Fixture caller requests a furnace repair before waiting.",
+        fields=(
+            ("language", "en"),
+            ("intent", "service_request"),
+            ("service_action", "repair"),
+            ("service_object", "furnace"),
+        ),
+    ),
 })
 
 
@@ -569,6 +601,7 @@ class _Assembly:
     lifecycle: VoiceLifecycle
     speech: SpeechControl
     transaction: TurnCompositionTransaction
+    silence: SilenceLifecycleController
     receipts: FinalTurnAdmissionAuthority
     state: VersionedIntakeStore
 
@@ -996,6 +1029,18 @@ class OfflineSessionDriver:
                 now_ms=now_ms,
                 trace=trace,
             )
+        if (
+            grant.journey
+            is SyntheticJourney.SILENCE_BOUNDARY_MORE_TIME
+        ):
+            return self._execute_silence_boundary_more_time(
+                grant=grant,
+                assembly=assembly,
+                pending=first,
+                fixture=fixture,
+                now_ms=now_ms,
+                trace=trace,
+            )
         delivery_at_ms = now_ms + 10
         if grant.journey is SyntheticJourney.SUPERSEDING_TURN:
             correction = _Fixture(
@@ -1153,6 +1198,652 @@ class OfflineSessionDriver:
         ):
             raise _DriverAbort(DriverFailure.COMPOSITION)
         return second_at_ms
+
+    def _execute_silence_boundary_more_time(
+        self,
+        *,
+        grant: _LeaseGrant,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        fixture: _Fixture,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        """Qualify exact boundary and both more-time branches in isolation."""
+        boundary_end_ms, boundary_timer = (
+            self._deliver_question_for_silence(
+                assembly=assembly,
+                pending=pending,
+                at_ms=now_ms + 5,
+                trace=trace,
+            )
+        )
+        boundary_sequence, boundary_at_ms = (
+            assembly.calls.next_position(
+                at_ms=boundary_timer.deadline_ms or 0
+            )
+        )
+        cancelled = assembly.calls.cancel(
+            binding=assembly.binding,
+            event_id="boundary_caller_activity",
+            sequence=boundary_sequence,
+            at_ms=boundary_at_ms,
+        )
+        assembly.adapter.terminalize_permit_admission()
+        if (
+            tuple(intent.kind for intent in cancelled)
+            != (
+                CallIntentKind.CANCEL_TIMER,
+                CallIntentKind.CANCEL_ACT,
+            )
+            or cancelled[1].act_id is None
+            or not assembly.speech.cancel(
+                cancelled[1].act_id,
+                reason=CancellationReason.CALLER_ACTIVITY,
+            )
+            or assembly.calls.timer_fired(
+                binding=assembly.binding,
+                event_id="stale_boundary_timer",
+                sequence=boundary_sequence + 1,
+                action_id=boundary_timer.action_id,
+                revision=boundary_timer.revision,
+                now_ms=boundary_at_ms,
+            )
+            or not assembly.calls.is_quiescent
+            or assembly.speech.is_live(cancelled[1].act_id)
+            or assembly.transaction.pending_response_count
+            or assembly.receipts.unconsumed_receipt_count
+            or not assembly.adapter.terminally_closed
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.CALLER_ACTIVITY_AT_BOUNDARY,
+            )
+        )
+
+        before = self._fresh_silence_assembly(
+            grant=grant,
+            fixture=fixture,
+            suffix="before_presence",
+            epoch_offset=1,
+        )
+        before_end_ms = self._run_more_time_before_presence(
+            assembly=before,
+            fixture=fixture,
+            at_ms=max(boundary_end_ms, boundary_at_ms) + 1,
+            trace=trace,
+        )
+
+        after = self._fresh_silence_assembly(
+            grant=grant,
+            fixture=fixture,
+            suffix="after_presence",
+            epoch_offset=2,
+        )
+        after_end_ms = self._run_more_time_after_presence(
+            assembly=after,
+            fixture=fixture,
+            at_ms=before_end_ms + 1,
+            trace=trace,
+        )
+        return after_end_ms
+
+    def _run_more_time_before_presence(
+        self,
+        *,
+        assembly: _Assembly,
+        fixture: _Fixture,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        pending, start_ms = self._start_silence_question(
+            assembly=assembly,
+            fixture=fixture,
+            turn_number=2,
+            at_ms=at_ms,
+            trace=trace,
+        )
+        end_ms, original_timer = self._deliver_question_for_silence(
+            assembly=assembly,
+            pending=pending,
+            at_ms=start_ms + 1,
+            trace=trace,
+        )
+        acknowledgement, request_at_ms = self._request_more_time(
+            assembly=assembly,
+            at_ms=end_ms,
+            event_id="more_time_before_presence",
+            trace=trace,
+        )
+        observed, end_ms = self._deliver_lifecycle_act(
+            assembly=assembly,
+            intent=acknowledgement,
+            at_ms=request_at_ms + 1,
+            trace=trace,
+        )
+        extension = self._single_emitted(
+            observed,
+            CallIntentKind.ARM_TIMER,
+        )
+        if (
+            assembly.calls.timer_fired(
+                binding=assembly.binding,
+                event_id="stale_pre_extension_timer",
+                sequence=(
+                    assembly.calls.next_position(
+                        at_ms=end_ms
+                    )[0]
+                ),
+                action_id=original_timer.action_id,
+                revision=original_timer.revision,
+                now_ms=end_ms,
+            )
+            or assembly.calls.timer_receipt() is not extension
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        immutable = (
+            extension.action_id,
+            extension.revision,
+            extension.deadline_ms,
+        )
+        repeat_sequence, repeat_at_ms = (
+            assembly.calls.next_position(at_ms=end_ms + 1)
+        )
+        if assembly.calls.request_more_time(
+            binding=assembly.binding,
+            event_id="repeat_more_time_before_presence",
+            sequence=repeat_sequence,
+            at_ms=repeat_at_ms,
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        current = assembly.calls.timer_receipt()
+        if (
+            current is not extension
+            or (
+                current.action_id,
+                current.revision,
+                current.deadline_ms,
+            )
+            != immutable
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.MORE_TIME_IGNORED,
+            )
+        )
+        presence = self._fire_timer(
+            assembly=assembly,
+            timer=extension,
+            event_id="extension_before_presence",
+            expected=CallIntentKind.REQUEST_PRESENCE_CHECK,
+        )
+        presence_observed, end_ms = self._deliver_lifecycle_act(
+            assembly=assembly,
+            intent=presence,
+            at_ms=extension.deadline_ms or end_ms,
+            trace=trace,
+        )
+        second_timer = self._single_emitted(
+            presence_observed,
+            CallIntentKind.ARM_TIMER,
+        )
+        closing = self._fire_timer(
+            assembly=assembly,
+            timer=second_timer,
+            event_id="second_silence_before_presence",
+            expected=CallIntentKind.REQUEST_CLOSING,
+        )
+        terminal, end_ms = self._deliver_lifecycle_act(
+            assembly=assembly,
+            intent=closing,
+            at_ms=second_timer.deadline_ms or end_ms,
+            trace=trace,
+        )
+        return self._finish_local_terminal(
+            assembly=assembly,
+            result=terminal,
+            at_ms=end_ms,
+            trace=trace,
+        )
+
+    def _run_more_time_after_presence(
+        self,
+        *,
+        assembly: _Assembly,
+        fixture: _Fixture,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        pending, start_ms = self._start_silence_question(
+            assembly=assembly,
+            fixture=fixture,
+            turn_number=3,
+            at_ms=at_ms,
+            trace=trace,
+        )
+        end_ms, first_timer = self._deliver_question_for_silence(
+            assembly=assembly,
+            pending=pending,
+            at_ms=start_ms + 1,
+            trace=trace,
+        )
+        presence = self._fire_timer(
+            assembly=assembly,
+            timer=first_timer,
+            event_id="first_silence_after_presence",
+            expected=CallIntentKind.REQUEST_PRESENCE_CHECK,
+        )
+        presence_observed, end_ms = self._deliver_lifecycle_act(
+            assembly=assembly,
+            intent=presence,
+            at_ms=first_timer.deadline_ms or end_ms,
+            trace=trace,
+        )
+        second_timer = self._single_emitted(
+            presence_observed,
+            CallIntentKind.ARM_TIMER,
+        )
+        if assembly.calls.timer_receipt() is not second_timer:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        acknowledgement, request_at_ms = self._request_more_time(
+            assembly=assembly,
+            at_ms=end_ms,
+            event_id="more_time_after_presence",
+            trace=trace,
+        )
+        observed, end_ms = self._deliver_lifecycle_act(
+            assembly=assembly,
+            intent=acknowledgement,
+            at_ms=request_at_ms + 1,
+            trace=trace,
+        )
+        extension = self._single_emitted(
+            observed,
+            CallIntentKind.ARM_TIMER,
+        )
+        closing = self._fire_timer(
+            assembly=assembly,
+            timer=extension,
+            event_id="extension_after_presence",
+            expected=CallIntentKind.REQUEST_CLOSING,
+        )
+        terminal, end_ms = self._deliver_lifecycle_act(
+            assembly=assembly,
+            intent=closing,
+            at_ms=extension.deadline_ms or end_ms,
+            trace=trace,
+        )
+        return self._finish_local_terminal(
+            assembly=assembly,
+            result=terminal,
+            at_ms=end_ms,
+            trace=trace,
+        )
+
+    def _start_silence_question(
+        self,
+        *,
+        assembly: _Assembly,
+        fixture: _Fixture,
+        turn_number: int,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> tuple[CompositionResult, int]:
+        receipt = self._admit_final_turn(
+            assembly=assembly,
+            fixture=fixture,
+            turn_number=turn_number,
+            at_ms=at_ms,
+        )
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.INPUT_FINAL,
+            )
+        )
+        execute_at_ms = max(at_ms + 1, receipt.at_ms)
+        pending = assembly.transaction.execute(
+            receipt,
+            content=fixture.content,
+            backend=_SyntheticObservationBackend(fixture),
+            now_ms=execute_at_ms,
+        )
+        trace.append(
+            self._composition_trace(
+                trace,
+                pending,
+                locale=self._trace_locale(
+                    assembly.state.current_state().language
+                ),
+            )
+        )
+        if (
+            pending.status is not CompositionStatus.RESPONSE_PENDING
+            or pending.act_kinds
+            != (VoiceSemanticActKind.QUESTION,)
+        ):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        return pending, execute_at_ms
+
+    def _deliver_question_for_silence(
+        self,
+        *,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> tuple[int, CallIntent]:
+        if pending.act_kinds != (VoiceSemanticActKind.QUESTION,):
+            raise _DriverAbort(DriverFailure.COMPOSITION)
+        observed, end_ms = self._deliver_pending(
+            assembly=assembly,
+            pending=pending,
+            at_ms=at_ms,
+            trace=trace,
+        )
+        timer = assembly.calls.timer_receipt()
+        if (
+            observed.status is not CompositionStatus.RESPONSE_OBSERVED
+            or timer is None
+            or timer.kind is not CallIntentKind.ARM_TIMER
+            or timer.deadline_ms is None
+            or timer.deadline_ms
+            != at_ms + 4 + 10_000
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.SILENCE_TIMER_ARMED,
+            )
+        )
+        return end_ms, timer
+
+    def _request_more_time(
+        self,
+        *,
+        assembly: _Assembly,
+        at_ms: int,
+        event_id: str,
+        trace: list[OfflineTraceEvent],
+    ) -> tuple[CallIntent, int]:
+        sequence, canonical_at_ms = assembly.calls.next_position(
+            at_ms=at_ms
+        )
+        intents = assembly.calls.request_more_time(
+            binding=assembly.binding,
+            event_id=event_id,
+            sequence=sequence,
+            at_ms=canonical_at_ms,
+        )
+        if (
+            tuple(intent.kind for intent in intents)
+            != (
+                CallIntentKind.CANCEL_TIMER,
+                CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT,
+            )
+            or assembly.calls.timer_receipt() is not None
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.MORE_TIME_ACCEPTED,
+            )
+        )
+        return intents[1], canonical_at_ms
+
+    def _deliver_lifecycle_act(
+        self,
+        *,
+        assembly: _Assembly,
+        intent: CallIntent,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> tuple[LifecycleActResult, int]:
+        pending = assembly.silence.prepare(intent, at_ms=at_ms)
+        if (
+            pending is None
+            or pending.status is not LifecycleActStatus.PENDING
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        authorization = assembly.silence.authorization_receipt(
+            pending.act_id
+        )
+        if authorization is None:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        confirmation = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=VoicePayload(),
+            at_ms=at_ms,
+        )
+        if (
+            not assembly.lifecycle.ingest(confirmation)
+            or not assembly.silence.accept_semantic_confirmation(
+                event=confirmation
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.ACT_CONFIRMED,
+                semantic_act_kind=pending.semantic_act_kind,
+            )
+        )
+        payload = self._playout_payload(
+            authorization=authorization,
+            text_digest=pending.text_digest,
+        )
+        self._append_outbound_frame(authorization=authorization)
+        tts = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.TTS_BOUND,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=VoicePayload(
+                text_digest=payload.text_digest,
+                audio_id=payload.audio_id,
+            ),
+            at_ms=confirmation.at_ms + 1,
+        )
+        if not assembly.lifecycle.ingest(tts) or not assembly.silence.accept_tts_binding(event=tts):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        playout = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.PLAYOUT_BOUND,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=payload,
+            at_ms=tts.at_ms + 1,
+        )
+        if not assembly.lifecycle.ingest(playout) or not assembly.silence.accept_playout_binding(
+            event=playout
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        transport = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.TRANSPORT_RESOLVED,
+            source=VoiceSource.TWILIO_AUTHENTICATED,
+            payload=payload,
+            at_ms=playout.at_ms + 1,
+        )
+        if (
+            not assembly.lifecycle.ingest(transport)
+            or not assembly.silence.accept_transport_resolution(
+                event=transport,
+                event_id=f"lifecycle_transport_{transport.sequence}",
+                sequence=transport.sequence,
+            )
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.TRANSPORT_RESOLVED,
+                semantic_act_kind=pending.semantic_act_kind,
+            )
+        )
+        playback = self._event_after(
+            assembly.lifecycle,
+            authorization,
+            kind=VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
+            source=VoiceSource.LOCAL_AUTHORITATIVE,
+            payload=payload,
+            at_ms=transport.at_ms + 1,
+        )
+        if not assembly.lifecycle.ingest(playback):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        observed = assembly.silence.observe_playback(
+            event=playback,
+            event_id=f"lifecycle_playback_{playback.sequence}",
+            sequence=playback.sequence,
+        )
+        if observed is None:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.PLAYBACK_OBSERVED,
+                semantic_act_kind=pending.semantic_act_kind,
+            )
+        )
+        if observed.status is LifecycleActStatus.OBSERVED:
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.SILENCE_TIMER_ARMED,
+                )
+            )
+        elif (
+            observed.status
+            is LifecycleActStatus.TERMINAL_ELIGIBLE
+        ):
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.LOCAL_TERMINAL_ELIGIBLE,
+                )
+            )
+        else:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        return observed, playback.at_ms + 1
+
+    @staticmethod
+    def _single_emitted(
+        result: LifecycleActResult,
+        expected: CallIntentKind,
+    ) -> CallIntent:
+        if (
+            len(result.emitted_intents) != 1
+            or result.emitted_intents[0].kind is not expected
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        return result.emitted_intents[0]
+
+    @staticmethod
+    def _fire_timer(
+        *,
+        assembly: _Assembly,
+        timer: CallIntent,
+        event_id: str,
+        expected: CallIntentKind,
+    ) -> CallIntent:
+        if (
+            timer.kind is not CallIntentKind.ARM_TIMER
+            or timer.deadline_ms is None
+            or assembly.calls.timer_receipt() is not timer
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        sequence, at_ms = assembly.calls.next_position(
+            at_ms=timer.deadline_ms
+        )
+        intents = assembly.calls.timer_fired(
+            binding=assembly.binding,
+            event_id=event_id,
+            sequence=sequence,
+            action_id=timer.action_id,
+            revision=timer.revision,
+            now_ms=at_ms,
+        )
+        if len(intents) != 1 or intents[0].kind is not expected:
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        return intents[0]
+
+    @staticmethod
+    def _finish_local_terminal(
+        *,
+        assembly: _Assembly,
+        result: LifecycleActResult,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        terminal = OfflineSessionDriver._single_emitted(
+            result,
+            CallIntentKind.TERMINAL_ELIGIBLE,
+        )
+        if (
+            not assembly.silence.terminalize(terminal)
+            or not assembly.silence.is_terminal
+            or not assembly.calls.is_quiescent
+            or assembly.silence.pending_count
+            or any(
+                assembly.speech.is_live(act_id)
+                for act_id
+                in assembly.speech.act_ids_for_binding(
+                    assembly.binding
+                )
+            )
+            or assembly.transaction.pending_response_count
+            or assembly.receipts.unconsumed_receipt_count
+        ):
+            raise _DriverAbort(DriverFailure.DELIVERY)
+        trace.append(
+            OfflineTraceEvent(
+                ordinal=len(trace),
+                kind=TraceKind.LOCAL_TERMINATED,
+            )
+        )
+        return at_ms
+
+    def _fresh_silence_assembly(
+        self,
+        *,
+        grant: _LeaseGrant,
+        fixture: _Fixture,
+        suffix: str,
+        epoch_offset: int,
+    ) -> _Assembly:
+        if (
+            not suffix.replace("_", "").isalnum()
+            or type(epoch_offset) is not int
+            or epoch_offset < 1
+        ):
+            raise _DriverAbort(DriverFailure.ASSEMBLY)
+        binding = VoiceSessionBinding(
+            environment=grant.binding.environment,
+            contractor_binding=grant.binding.contractor_binding,
+            call_binding=(
+                f"{grant.binding.call_binding}_{suffix}"
+            ),
+            stream_binding=(
+                f"{grant.binding.stream_binding}_{suffix}"
+            ),
+            epoch=grant.binding.epoch + epoch_offset,
+        )
+        return self._assembly(
+            grant,
+            fixture,
+            binding=binding,
+        )
 
     def _execute_unobserved_question_outcomes(
         self,
@@ -1903,8 +2594,9 @@ class OfflineSessionDriver:
         calls = CallLifecycle(
             binding=binding,
             voice_lifecycle=lifecycle,
-            first_silence_ms=100,
-            second_silence_ms=200,
+            first_silence_ms=10_000,
+            second_silence_ms=10_000,
+            more_time_extension_ms=20_000,
         )
         speech = SpeechControl(
             SpeechPolicy(
@@ -1922,6 +2614,12 @@ class OfflineSessionDriver:
                 ),
             )
         )
+        coordinator = VoiceBakeoffCoordinator(
+            speech=speech,
+            calls=calls,
+        )
+        materializer = FixedProposalMaterializer()
+        policy = CompositionPolicy()
         transaction = TurnCompositionTransaction(
             binding=binding,
             adapter=adapter,
@@ -1929,13 +2627,19 @@ class OfflineSessionDriver:
             extractor=extractor,
             receipts=receipts,
             state=state,
-            coordinator=VoiceBakeoffCoordinator(
-                speech=speech,
-                calls=calls,
-            ),
-            materializer=FixedProposalMaterializer(),
-            policy=CompositionPolicy(),
+            coordinator=coordinator,
+            materializer=materializer,
+            policy=policy,
             max_outcomes=16,
+        )
+        silence = SilenceLifecycleController(
+            binding=binding,
+            adapter=adapter,
+            lifecycle=lifecycle,
+            state=state,
+            coordinator=coordinator,
+            materializer=materializer,
+            policy=policy,
         )
         return _Assembly(
             binding=binding,
@@ -1944,6 +2648,7 @@ class OfflineSessionDriver:
             lifecycle=lifecycle,
             speech=speech,
             transaction=transaction,
+            silence=silence,
             receipts=receipts,
             state=state,
         )
@@ -2561,13 +3266,14 @@ class OfflineSessionDriver:
     def _playout_payload(
         *,
         authorization: VoiceEvent,
+        text_digest: str | None = None,
     ) -> VoicePayload:
         digest = hashlib.sha256(
             _AUDIO_DOMAIN
             + authorization.semantic_act_id.encode("ascii")
         ).hexdigest()
         return VoicePayload(
-            text_digest=digest,
+            text_digest=(digest if text_digest is None else text_digest),
             audio_id=f"audio_{digest[:24]}",
             playout_id=f"playout_{digest[24:48]}",
         )

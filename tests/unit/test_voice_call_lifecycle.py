@@ -1,7 +1,24 @@
 """Deterministic tests for the revision-bound bakeoff call lifecycle."""
 
-from app.services.voice_call_lifecycle import CallIntentKind, CallLifecycle, PlaybackEvidence, QuestionIntent, SilencePhase
-from app.services.voice_lifecycle import VoiceEvent, VoiceEventKind, VoiceLifecycle, VoicePayload, VoiceSemanticActKind, VoiceSensitivity, VoiceSessionBinding, VoiceSource
+from dataclasses import replace
+
+from app.services.voice_call_lifecycle import (
+    CallIntentKind,
+    CallLifecycle,
+    PlaybackEvidence,
+    QuestionIntent,
+    SilencePhase,
+)
+from app.services.voice_lifecycle import (
+    VoiceEvent,
+    VoiceEventKind,
+    VoiceLifecycle,
+    VoicePayload,
+    VoiceSemanticActKind,
+    VoiceSensitivity,
+    VoiceSessionBinding,
+    VoiceSource,
+)
 
 
 def _binding(epoch: int = 1) -> VoiceSessionBinding:
@@ -15,9 +32,12 @@ def _lifecycle() -> CallLifecycle:
 def _receipt(lifecycle: VoiceLifecycle, act_id: str, kind: VoiceSemanticActKind, at_ms: int, *, playback: bool = True) -> VoiceEvent:
     values = {"schema_version": 1, "source": VoiceSource.LOCAL_AUTHORITATIVE, "sensitivity": VoiceSensitivity.OPERATIONAL, "binding": _binding(), "input_turn_id": "turn_1", "generation_id": "generation_1", "semantic_act_id": act_id, "semantic_act_kind": kind}
     start = getattr(lifecycle, "_test_sequence", 1)
-    def event(kind, offset, payload=VoicePayload()):
+    def event(kind, offset, payload=None):
         source = VoiceSource.TWILIO_AUTHENTICATED if kind is VoiceEventKind.TRANSPORT_RESOLVED else VoiceSource.LOCAL_AUTHORITATIVE
-        return VoiceEvent(kind=kind, sequence=start + offset, at_ms=at_ms, payload=payload, source=source, **{key: value for key, value in values.items() if key != "source"})
+        selected_payload = (
+            VoicePayload() if payload is None else payload
+        )
+        return VoiceEvent(kind=kind, sequence=start + offset, at_ms=at_ms, payload=selected_payload, source=source, **{key: value for key, value in values.items() if key != "source"})
     digest = "a" * 64
     payload = VoicePayload(text_digest=digest, audio_id="audio_1", playout_id="playout_1")
     prior = lifecycle._acts.get(act_id)
@@ -42,6 +62,17 @@ def _receipt(lifecycle: VoiceLifecycle, act_id: str, kind: VoiceSemanticActKind,
 
 
 def _observed(call: CallLifecycle, *, event_id: str, sequence: int, act_id: str, kind: VoiceSemanticActKind, at_ms: int):
+    if kind is not VoiceSemanticActKind.QUESTION and act_id not in call._materialized_act_ids:
+        intent = next(
+            (
+                candidate
+                for candidate in call._issued_intents.values()
+                if candidate.act_id == act_id
+            ),
+            None,
+        )
+        assert intent is not None
+        assert call.consume_intent(intent)
     receipt = _receipt(call.voice_lifecycle, act_id, kind, at_ms)
     return call.observed_playback(event_id=event_id, sequence=sequence, event=receipt)
 
@@ -129,6 +160,197 @@ def test_activity_invalidates_timer_presence_closing_and_terminal_intents():
     assert lifecycle.timer_fired(binding=_binding(), event_id="timer_1", sequence=5, action_id=arm.action_id, revision=arm.revision, now_ms=100) == ()
 
 
+def test_speech_at_exact_timer_boundary_wins_by_canonical_sequence():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    arm = _observed(
+        lifecycle,
+        event_id="playback_1",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+    assert arm.deadline_ms == 12
+
+    cancelled = lifecycle.cancel(
+        binding=_binding(),
+        event_id="boundary_speech",
+        sequence=4,
+        at_ms=arm.deadline_ms,
+    )
+    assert {intent.kind for intent in cancelled} == {
+        CallIntentKind.CANCEL_TIMER,
+        CallIntentKind.CANCEL_ACT,
+    }
+    assert lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="late_timer_callback",
+        sequence=5,
+        action_id=arm.action_id,
+        revision=arm.revision,
+        now_ms=arm.deadline_ms,
+    ) == ()
+    assert lifecycle.phase is SilencePhase.IDLE
+
+
+def test_more_time_before_presence_is_once_and_uses_immutable_extension():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    original = _observed(
+        lifecycle,
+        event_id="playback_1",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+    intents = lifecycle.request_more_time(
+        binding=_binding(),
+        event_id="more_time_1",
+        sequence=4,
+        at_ms=5,
+    )
+    assert tuple(intent.kind for intent in intents) == (
+        CallIntentKind.CANCEL_TIMER,
+        CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT,
+    )
+    acknowledgement = intents[1]
+    assert lifecycle.consume_intent(acknowledgement)
+    extension = _observed(
+        lifecycle,
+        event_id="more_time_playback",
+        sequence=5,
+        act_id=acknowledgement.act_id,
+        kind=VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        at_ms=6,
+    )[0]
+    assert lifecycle.phase is SilencePhase.MORE_TIME_ARMED
+    assert extension.deadline_ms == 20_006
+    assert lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="old_timer",
+        sequence=6,
+        action_id=original.action_id,
+        revision=original.revision,
+        now_ms=20_006,
+    ) == ()
+    immutable = (
+        extension.action_id,
+        extension.revision,
+        extension.deadline_ms,
+    )
+    assert lifecycle.request_more_time(
+        binding=_binding(),
+        event_id="more_time_2",
+        sequence=6,
+        at_ms=7,
+    ) == ()
+    assert lifecycle.phase is SilencePhase.MORE_TIME_ARMED
+    assert (
+        lifecycle._timer_action_id(),
+        lifecycle.revision,
+        lifecycle._deadline_ms,
+    ) == immutable
+    presence = lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="extended_timer",
+        sequence=7,
+        action_id=extension.action_id,
+        revision=extension.revision,
+        now_ms=extension.deadline_ms,
+    )[0]
+    assert presence.kind is CallIntentKind.REQUEST_PRESENCE_CHECK
+    second = _observed(
+        lifecycle,
+        event_id="presence_playback",
+        sequence=8,
+        act_id=presence.act_id,
+        kind=VoiceSemanticActKind.PRESENCE_CHECK,
+        at_ms=20_007,
+    )[0]
+    assert second.deadline_ms == 20_027
+
+
+def test_more_time_after_presence_expires_to_closing_without_repeating_presence():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    first = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+    presence = lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="first_timer",
+        sequence=4,
+        action_id=first.action_id,
+        revision=first.revision,
+        now_ms=first.deadline_ms,
+    )[0]
+    second = _observed(
+        lifecycle,
+        event_id="presence_playback",
+        sequence=5,
+        act_id=presence.act_id,
+        kind=VoiceSemanticActKind.PRESENCE_CHECK,
+        at_ms=13,
+    )[0]
+    assert lifecycle.phase is SilencePhase.SECOND_ARMED
+    assert second.deadline_ms == 33
+    intents = lifecycle.request_more_time(
+        binding=_binding(),
+        event_id="more_time_after_presence",
+        sequence=6,
+        at_ms=14,
+    )
+    acknowledgement = intents[1]
+    assert lifecycle.consume_intent(acknowledgement)
+    extension = _observed(
+        lifecycle,
+        event_id="more_time_playback",
+        sequence=7,
+        act_id=acknowledgement.act_id,
+        kind=VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        at_ms=15,
+    )[0]
+    closing = lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="extended_timer",
+        sequence=8,
+        action_id=extension.action_id,
+        revision=extension.revision,
+        now_ms=extension.deadline_ms,
+    )[0]
+    assert closing.kind is CallIntentKind.REQUEST_CLOSING
+
+
+def test_lifecycle_act_intent_rejects_equal_clone_and_is_single_use():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    arm = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+    presence = lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="first_timer",
+        sequence=4,
+        action_id=arm.action_id,
+        revision=arm.revision,
+        now_ms=arm.deadline_ms,
+    )[0]
+    assert not lifecycle.consume_intent(replace(presence))
+    assert not lifecycle.consume_intent(presence)
+
+
 def test_inferred_playback_requires_matching_transport_and_conservative_deadline():
     lifecycle = _lifecycle()
     _start(lifecycle)
@@ -183,4 +405,138 @@ def test_transport_evidence_expires_on_cancellation_and_cannot_cross_acts():
     assert lifecycle.voice_lifecycle.ingest(response)
     assert lifecycle.voice_lifecycle.ingest(confirmation)
     assert lifecycle.semantic_confirmed(event_id="confirm_2", sequence=6, event=confirmation)
-    assert lifecycle.playback(binding=_binding(), event_id="infer_stale", sequence=7, act_id="question_2", evidence=PlaybackEvidence.PLAYBACK_INFERRED, inference_id="infer_1", transport_id="playout_1", at_ms=10) == ()
+    assert (
+        lifecycle.playback(
+            binding=_binding(),
+            event_id="infer_stale",
+            sequence=7,
+            act_id="question_2",
+            evidence=PlaybackEvidence.PLAYBACK_INFERRED,
+            inference_id="infer_1",
+            transport_id="playout_1",
+            at_ms=10,
+        )
+        == ()
+    )
+
+
+def test_activity_after_deadline_does_not_steal_timer_authority():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    arm = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+
+    assert (
+        lifecycle.cancel(
+            binding=_binding(),
+            event_id="late_activity",
+            sequence=4,
+            at_ms=arm.deadline_ms + 1,
+        )
+        == ()
+    )
+    assert lifecycle.phase is SilencePhase.FIRST_ARMED
+    presence = lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="timer_wins",
+        sequence=4,
+        action_id=arm.action_id,
+        revision=arm.revision,
+        now_ms=arm.deadline_ms,
+    )
+    assert len(presence) == 1
+    assert presence[0].kind is CallIntentKind.REQUEST_PRESENCE_CHECK
+
+
+def test_more_time_after_deadline_does_not_steal_timer_authority():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    arm = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+
+    assert (
+        lifecycle.request_more_time(
+            binding=_binding(),
+            event_id="late_more_time",
+            sequence=4,
+            at_ms=arm.deadline_ms + 1,
+        )
+        == ()
+    )
+    assert lifecycle.phase is SilencePhase.FIRST_ARMED
+    presence = lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="timer_wins",
+        sequence=4,
+        action_id=arm.action_id,
+        revision=arm.revision,
+        now_ms=arm.deadline_ms,
+    )
+    assert len(presence) == 1
+    assert presence[0].kind is CallIntentKind.REQUEST_PRESENCE_CHECK
+
+
+def test_invalid_activity_timestamp_preserves_exact_timer_authority():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    arm = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+
+    for index, invalid_at_ms in enumerate(
+        (None, True, "13", object(), 13.0)
+    ):
+        assert lifecycle.cancel(
+            binding=_binding(),
+            event_id=f"invalid_activity_{index}",
+            sequence=4,
+            at_ms=invalid_at_ms,
+        ) == ()
+        assert lifecycle.phase is SilencePhase.FIRST_ARMED
+        assert lifecycle.timer_receipt() is arm
+        assert lifecycle.revision == arm.revision
+        assert lifecycle._deadline_ms == arm.deadline_ms
+
+
+def test_invalid_more_time_timestamp_preserves_exact_timer_authority():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    arm = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+
+    for index, invalid_at_ms in enumerate(
+        (None, True, "13", object(), 13.0)
+    ):
+        assert lifecycle.request_more_time(
+            binding=_binding(),
+            event_id=f"invalid_more_time_{index}",
+            sequence=4,
+            at_ms=invalid_at_ms,
+        ) == ()
+        assert lifecycle.phase is SilencePhase.FIRST_ARMED
+        assert lifecycle.timer_receipt() is arm
+        assert lifecycle.revision == arm.revision
+        assert lifecycle._deadline_ms == arm.deadline_ms

@@ -20,7 +20,6 @@ from app.services.voice_candidates.manual_native import (
     ManualNativeSignalKind,
 )
 from app.services.voice_lifecycle import (
-    VoiceEvent,
     VoiceEventKind,
     VoiceLifecycle,
     VoicePayload,
@@ -894,6 +893,24 @@ def test_manual_config_disables_automatic_vad_tools_and_terminal_actions():
     assert adapter.handle(
         ManualNativeSignal(ManualNativeSignalKind.TERMINAL_REQUESTED, _context(6))
     ).reason is AdapterRejectReason.TERMINAL_DENIED
+
+
+def test_retired_permit_clears_exact_timeout_authority():
+    adapter = _adapter()
+    _finalize(adapter)
+    lifecycle = VoiceLifecycle(binding=_binding())
+    assert adapter.bind_canonical_lifecycle(lifecycle)
+    permit = _permit(_context(4))
+    assert lifecycle.ingest(permit)
+    assert adapter.accept_permit(permit, lifecycle=lifecycle)
+    assert adapter._begin_deadlines
+
+    assert adapter.retire_permit(permit)
+    assert adapter._begin_deadlines == {}
+    assert adapter._completion_deadlines == {}
+    assert adapter._pending_timeouts == {}
+    assert adapter._pending_timeout_receipts == {}
+    assert adapter.timer_fired(now_ms=permit.at_ms + 100).reason is AdapterRejectReason.OUT_OF_ORDER
 
 
 def test_manual_native_module_has_no_sdk_network_or_live_route_imports():

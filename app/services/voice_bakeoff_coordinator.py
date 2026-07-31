@@ -36,6 +36,7 @@ class VoiceBakeoffCoordinator:
         event_id: str,
         sequence: int,
         at_ms: int,
+        turn_sequence: int | None = None,
     ) -> tuple[str, ...]:
         return tuple(
             act.act_id
@@ -45,6 +46,7 @@ class VoiceBakeoffCoordinator:
                 event_id=event_id,
                 sequence=sequence,
                 at_ms=at_ms,
+                turn_sequence=turn_sequence,
             )
         )
 
@@ -56,8 +58,18 @@ class VoiceBakeoffCoordinator:
         event_id: str,
         sequence: int,
         at_ms: int,
+        turn_sequence: int | None = None,
     ) -> tuple[ReservedSpeech, ...]:
-        if authorization.binding != self.calls.binding:
+        if (
+            authorization.binding != self.calls.binding
+            or (
+                turn_sequence is not None
+                and (
+                    type(turn_sequence) is not int
+                    or turn_sequence < 0
+                )
+            )
+        ):
             return ()
         try:
             acts = self.speech.reserve(plan, authorization)
@@ -74,6 +86,7 @@ class VoiceBakeoffCoordinator:
                 slot=planned.question_slot,
                 turn_id=reserved.turn_id,
                 act_id=reserved.act_id,
+                turn_sequence=turn_sequence,
             )
         if question is not None and not self.calls.reserve_question(
             binding=authorization.binding,

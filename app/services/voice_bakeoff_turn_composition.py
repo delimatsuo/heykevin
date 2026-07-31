@@ -591,6 +591,11 @@ class CompositionPolicy:
             or proposal.state_version != state_version
             or not isinstance(binding, VoiceSessionBinding)
             or not _identifier(turn_id)
+            or proposal.proposal_kind
+            not in {
+                ProposalKind.PLANNED,
+                ProposalKind.INPUT_REPAIR,
+            }
         ):
             raise ValueError("proposal authorization input is invalid")
         acts = proposal.plan.acts
@@ -636,6 +641,52 @@ class CompositionPolicy:
             authorized_kinds=kinds,
             terminal_allowed=False,
             answered_slots=answered_slots,
+            locale=proposal.locale,
+        )
+
+    def authorize_lifecycle(
+        self,
+        *,
+        proposal: ContentProposal,
+        binding: VoiceSessionBinding,
+        turn_id: str,
+        state_version: int,
+    ) -> SpeechAuthorization:
+        if (
+            not isinstance(proposal, ContentProposal)
+            or proposal.state_version != state_version
+            or not isinstance(binding, VoiceSessionBinding)
+            or not _identifier(turn_id)
+            or len(proposal.plan.acts) != 1
+        ):
+            raise ValueError("lifecycle authorization input is invalid")
+        expected = {
+            ProposalKind.PRESENCE_CHECK:
+                VoiceSemanticActKind.PRESENCE_CHECK,
+            ProposalKind.MORE_TIME_ACKNOWLEDGEMENT:
+                VoiceSemanticActKind.ACKNOWLEDGEMENT,
+            ProposalKind.SILENCE_CLOSURE:
+                VoiceSemanticActKind.CLOSING,
+        }.get(proposal.proposal_kind)
+        act = proposal.plan.acts[0]
+        if (
+            expected is None
+            or proposal.action_name is not None
+            or act.kind is not expected
+            or act.question_slot is not None
+            or act.private_disclosure
+            or act.unsupported_promise
+            or not act.complete
+        ):
+            raise ValueError("lifecycle proposal is invalid")
+        return SpeechAuthorization(
+            binding=binding,
+            turn_id=turn_id,
+            authorized_kinds=(act.kind,),
+            terminal_allowed=(
+                act.kind is VoiceSemanticActKind.CLOSING
+            ),
+            answered_slots=(),
             locale=proposal.locale,
         )
 
@@ -936,7 +987,7 @@ class TurnCompositionTransaction:
                     at_ms=at_ms,
                     owner=self,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 if any(
                     self._pending_by_act.get(item.act_id) is pending
                     for item in pending.reserved
@@ -1223,13 +1274,16 @@ class TurnCompositionTransaction:
                 or not self.adapter.has_permit(authorization)
             ):
                 return False
-            if event.semantic_act_kind is VoiceSemanticActKind.QUESTION:
-                if not self.coordinator.calls.transport_resolved(
+            if (
+                event.semantic_act_kind
+                is VoiceSemanticActKind.QUESTION
+                and not self.coordinator.calls.transport_resolved(
                     event=event,
                     event_id=event_id,
                     sequence=sequence,
-                ):
-                    return False
+                )
+            ):
+                return False
             pending.transport_act_ids.add(event.semantic_act_id)
             return True
 
@@ -1503,6 +1557,7 @@ class TurnCompositionTransaction:
                 event_id=f"reserve_{receipt.sequence}",
                 sequence=reserve_sequence,
                 at_ms=reserve_at_ms,
+                turn_sequence=receipt.sequence,
             )
         except (TypeError, ValueError):
             reserved = ()

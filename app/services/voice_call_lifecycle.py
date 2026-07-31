@@ -22,6 +22,7 @@ class SilencePhase(str, Enum):
     SECOND_ARMED = "second_armed"
     MORE_TIME_PENDING = "more_time_pending"
     MORE_TIME_ARMED = "more_time_armed"
+    FALLBACK_PENDING = "fallback_pending"
     CLOSING_PENDING = "closing_pending"
     TERMINAL_ELIGIBLE = "terminal_eligible"
     TERMINATED = "terminated"
@@ -39,6 +40,12 @@ class CallIntentKind(str, Enum):
     REQUEST_PRESENCE_CHECK = "request_presence_check"
     REQUEST_MORE_TIME_ACKNOWLEDGEMENT = (
         "request_more_time_acknowledgement"
+    )
+    REQUEST_UNSUPPORTED_ACCESS_MODE = (
+        "request_unsupported_access_mode"
+    )
+    REQUEST_SIMULATED_VOICEMAIL = (
+        "request_simulated_voicemail"
     )
     REQUEST_CLOSING = "request_closing"
     TERMINAL_ELIGIBLE = "terminal_eligible"
@@ -147,6 +154,8 @@ class CallLifecycle:
         self._presence_delivered = False
         self._more_time_used = False
         self._more_time_ack_id: str | None = None
+        self._fallback_id: str | None = None
+        self._fallback_kind: CallIntentKind | None = None
         self._closing_id: str | None = None
         self._deadline_ms: int | None = None
         self._timer_intent: CallIntent | None = None
@@ -252,6 +261,8 @@ class CallLifecycle:
             and self._silence_turn_sequence is None
             and self._presence_id is None
             and self._more_time_ack_id is None
+            and self._fallback_id is None
+            and self._fallback_kind is None
             and self._closing_id is None
             and self._deadline_ms is None
             and self._timer_intent is None
@@ -283,6 +294,7 @@ class CallLifecycle:
             ),
             self._presence_id,
             self._more_time_ack_id,
+            self._fallback_id,
             self._closing_id,
         ):
             if act_id is not None:
@@ -339,6 +351,16 @@ class CallLifecycle:
                     and self.phase is SilencePhase.CLOSING_PENDING
                     and intent.act_id == self._closing_id
                 )
+                or (
+                    intent.kind
+                    in {
+                        CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+                        CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+                    }
+                    and self.phase is SilencePhase.FALLBACK_PENDING
+                    and intent.kind is self._fallback_kind
+                    and intent.act_id == self._fallback_id
+                )
             )
         )
         if accepted and intent.act_id is not None:
@@ -353,6 +375,14 @@ class CallLifecycle:
                 is CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT
             ):
                 self._more_time_ack_id = actual_act_id
+            elif (
+                intent.kind
+                in {
+                    CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+                    CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+                }
+            ):
+                self._fallback_id = actual_act_id
             else:
                 self._closing_id = actual_act_id
             self._materialized_act_ids.add(actual_act_id)
@@ -421,11 +451,24 @@ class CallLifecycle:
             and event.semantic_act_kind is VoiceSemanticActKind.CLOSING
             and act_id in self._materialized_act_ids
         )
+        expected_fallback = (
+            act_id == self._fallback_id
+            and self.phase is SilencePhase.FALLBACK_PENDING
+            and self._fallback_kind
+            in {
+                CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+                CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+            }
+            and event.semantic_act_kind
+            is VoiceSemanticActKind.ACKNOWLEDGEMENT
+            and act_id in self._materialized_act_ids
+        )
         expected = (
             expected_question
             or expected_presence
             or expected_more_time
             or expected_closing
+            or expected_fallback
         )
         if not expected or not self.voice_lifecycle.accepts_transport_resolution(event) or not self._accept(event.binding, event_id, sequence, event.at_ms):
             return False
@@ -469,6 +512,11 @@ class CallLifecycle:
                     and self.phase is SilencePhase.CLOSING_PENDING
                     and act_id in self._materialized_act_ids
                 )
+                or (
+                    act_id == self._fallback_id
+                    and self.phase is SilencePhase.FALLBACK_PENDING
+                    and act_id in self._materialized_act_ids
+                )
             )
             if not active or transport is None or not _id(inference_id) or transport_id != transport[1] or at_ms < transport[0] + self.inference_delay_ms:
                 return ()
@@ -499,6 +547,14 @@ class CallLifecycle:
             self._closing_id = None
             self.phase = SilencePhase.TERMINAL_ELIGIBLE
             return (self._issue_intent(CallIntentKind.TERMINAL_ELIGIBLE, f"terminal_{act_id}", act_id=act_id),)
+        if (
+            act_id == self._fallback_id
+            and self.phase is SilencePhase.FALLBACK_PENDING
+        ):
+            self._clear_silence_cycle()
+            self.phase = SilencePhase.IDLE
+            self.revision += 1
+            return ()
         return ()
 
     def observed_playback(self, *, event_id: str, sequence: int, event: VoiceEvent) -> tuple[CallIntent, ...]:
@@ -513,6 +569,8 @@ class CallLifecycle:
             if event.semantic_act_id == self._more_time_ack_id
             else "closing"
             if event.semantic_act_id == self._closing_id
+            else "acknowledgement"
+            if event.semantic_act_id == self._fallback_id
             else ""
         )
         active = (
@@ -533,6 +591,11 @@ class CallLifecycle:
             or (
                 expected_kind == "closing"
                 and self.phase is SilencePhase.CLOSING_PENDING
+                and event.semantic_act_id in self._materialized_act_ids
+            )
+            or (
+                expected_kind == "acknowledgement"
+                and self.phase is SilencePhase.FALLBACK_PENDING
                 and event.semantic_act_id in self._materialized_act_ids
             )
         )
@@ -562,6 +625,14 @@ class CallLifecycle:
             self._closing_id = None
             self.phase = SilencePhase.TERMINAL_ELIGIBLE
             return (self._issue_intent(CallIntentKind.TERMINAL_ELIGIBLE, f"terminal_{act_id}", act_id=act_id),)
+        if (
+            act_id == self._fallback_id
+            and self.phase is SilencePhase.FALLBACK_PENDING
+        ):
+            self._clear_silence_cycle()
+            self.phase = SilencePhase.IDLE
+            self.revision += 1
+            return ()
         return ()
 
     def timer_fired(
@@ -620,6 +691,109 @@ class CallLifecycle:
                 ),
             )
         return ()
+
+    def request_fixed_fallback(
+        self,
+        *,
+        kind: CallIntentKind,
+        binding: VoiceSessionBinding,
+        event_id: str,
+        sequence: int,
+        at_ms: int,
+        turn_id: str,
+        turn_sequence: int,
+    ) -> tuple[CallIntent, ...]:
+        """Replace current local speech with one exact nonterminal fallback."""
+        if (
+            not isinstance(kind, CallIntentKind)
+            or kind
+            not in {
+                CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+                CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+            }
+            or type(at_ms) is not int
+            or not _id(turn_id)
+            or type(turn_sequence) is not int
+            or turn_sequence < 0
+            or self.phase
+            not in {
+                SilencePhase.FIRST_ARMED,
+                SilencePhase.SECOND_ARMED,
+                SilencePhase.MORE_TIME_ARMED,
+            }
+            or turn_id != self._silence_turn_id
+            or turn_sequence != self._silence_turn_sequence
+        ):
+            return ()
+        deadline_expired = (
+            self.phase
+            in {
+                SilencePhase.FIRST_ARMED,
+                SilencePhase.SECOND_ARMED,
+                SilencePhase.MORE_TIME_ARMED,
+            }
+            and self._deadline_ms is not None
+            and at_ms > self._deadline_ms
+        )
+        if deadline_expired or not self._accept(
+            binding,
+            event_id,
+            sequence,
+            at_ms,
+        ):
+            return ()
+        intents: list[CallIntent] = []
+        if self._deadline_ms is not None:
+            intents.append(
+                self._intent(
+                    CallIntentKind.CANCEL_TIMER,
+                    f"fallback_cancel_timer_{self.revision}",
+                    act_id=(
+                        self._question.act_id
+                        if self._question is not None
+                        else self._silence_origin_act_id
+                    ),
+                )
+            )
+        for index, act_id in enumerate((
+            (
+                self._question.act_id
+                if self._question is not None
+                else None
+            ),
+            self._presence_id,
+            self._more_time_ack_id,
+            self._fallback_id,
+            self._closing_id,
+        )):
+            if act_id is not None:
+                intents.append(
+                    self._intent(
+                        CallIntentKind.CANCEL_ACT,
+                        (
+                            f"fallback_cancel_act_"
+                            f"{self.revision}_{index}"
+                        ),
+                        act_id=act_id,
+                    )
+                )
+        self._clear_silence_cycle()
+        self.revision += 1
+        self._silence_turn_id = turn_id
+        self._silence_turn_sequence = turn_sequence
+        self._fallback_kind = kind
+        self._fallback_id = (
+            f"fallback_{kind.value}_{self.revision}"
+        )
+        self.phase = SilencePhase.FALLBACK_PENDING
+        intents.append(
+            self._issue_intent(
+                kind,
+                self._fallback_id,
+                act_id=self._fallback_id,
+            )
+        )
+        return tuple(intents)
 
     def request_more_time(
         self,
@@ -728,6 +902,7 @@ class CallLifecycle:
             self._question.act_id if self._question is not None else None,
             self._presence_id,
             self._more_time_ack_id,
+            self._fallback_id,
             self._closing_id,
         ):
             if act_id is not None:
@@ -763,6 +938,8 @@ class CallLifecycle:
         self._presence_delivered = False
         self._more_time_used = False
         self._more_time_ack_id = None
+        self._fallback_id = None
+        self._fallback_kind = None
         self._closing_id = None
         self._transport.clear()
         self._timer_intent = None

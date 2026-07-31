@@ -665,6 +665,10 @@ class CompositionPolicy:
                 VoiceSemanticActKind.PRESENCE_CHECK,
             ProposalKind.MORE_TIME_ACKNOWLEDGEMENT:
                 VoiceSemanticActKind.ACKNOWLEDGEMENT,
+            ProposalKind.UNSUPPORTED_ACCESS_MODE:
+                VoiceSemanticActKind.ACKNOWLEDGEMENT,
+            ProposalKind.SIMULATED_VOICEMAIL:
+                VoiceSemanticActKind.ACKNOWLEDGEMENT,
             ProposalKind.SILENCE_CLOSURE:
                 VoiceSemanticActKind.CLOSING,
         }.get(proposal.proposal_kind)

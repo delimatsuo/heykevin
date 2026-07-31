@@ -51,13 +51,21 @@ _ADAPTER_TYPES = {
 _REQUEST_KINDS = {
     CallIntentKind.REQUEST_PRESENCE_CHECK,
     CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT,
+    CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+    CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
     CallIntentKind.REQUEST_CLOSING,
+}
+_NONTERMINAL_FALLBACK_KINDS = {
+    CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+    CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
 }
 _EXPECTED_RESULT_KIND = {
     CallIntentKind.REQUEST_PRESENCE_CHECK:
         CallIntentKind.ARM_TIMER,
     CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT:
         CallIntentKind.ARM_TIMER,
+    CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE: None,
+    CallIntentKind.REQUEST_SIMULATED_VOICEMAIL: None,
     CallIntentKind.REQUEST_CLOSING:
         CallIntentKind.TERMINAL_ELIGIBLE,
 }
@@ -102,7 +110,18 @@ class LifecycleActResult:
                 and self.emitted_intents
             )
             or (
-                self.status is not LifecycleActStatus.PENDING
+                self.status is LifecycleActStatus.OBSERVED
+                and len(self.emitted_intents)
+                != (
+                    0
+                    if self.request_kind
+                    in _NONTERMINAL_FALLBACK_KINDS
+                    else 1
+                )
+            )
+            or (
+                self.status
+                is LifecycleActStatus.TERMINAL_ELIGIBLE
                 and len(self.emitted_intents) != 1
             )
         ):
@@ -121,6 +140,12 @@ class _PendingLifecycleAct:
     tts_bound: bool = False
     playout_bound: bool = False
     transport_resolved: bool = False
+
+
+@dataclass(slots=True)
+class _CleanupAuthority:
+    reserved: tuple[ReservedSpeech, ...]
+    authorization: VoiceEvent | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +194,7 @@ class SilenceLifecycleController:
         self.materializer = materializer
         self.policy = policy
         self._pending: _PendingLifecycleAct | None = None
+        self._cleanup_authority: _CleanupAuthority | None = None
         self._terminal_authority: _TerminalAuthority | None = None
         self._lock = RLock()
 
@@ -189,6 +215,7 @@ class SilenceLifecycleController:
                 or type(at_ms) is not int
                 or at_ms < 0
                 or self._pending is not None
+                or self._cleanup_authority is not None
                 or self._terminal_authority is not None
             ):
                 return None
@@ -234,6 +261,11 @@ class SilenceLifecycleController:
                     )
                 except Exception:  # noqa: BLE001
                     reserved = ()
+                if reserved:
+                    self._cleanup_authority = _CleanupAuthority(
+                        reserved=reserved,
+                        authorization=None,
+                    )
                 if len(reserved) != 1:
                     if reserved:
                         self._fail_closed(
@@ -249,6 +281,42 @@ class SilenceLifecycleController:
                         )
                     return None
                 item = reserved[0]
+                try:
+                    sequence, canonical_at_ms = (
+                        self.lifecycle.next_position(at_ms=at_ms)
+                    )
+                    authorization = VoiceEvent(
+                        schema_version=VOICE_SCHEMA_VERSION,
+                        kind=VoiceEventKind.RESPONSE_AUTHORIZED,
+                        source=VoiceSource.LOCAL_AUTHORITATIVE,
+                        sensitivity=VoiceSensitivity.OPERATIONAL,
+                        binding=self.binding,
+                        sequence=sequence,
+                        at_ms=canonical_at_ms,
+                        input_turn_id=intent.turn_id,
+                        generation_id=(
+                            f"lifecycle_{proposal.proposal_digest}"
+                        ),
+                        semantic_act_id=item.act_id,
+                        semantic_act_kind=item.kind,
+                        payload=VoicePayload(),
+                    )
+                except Exception:  # noqa: BLE001
+                    self._fail_closed(
+                        reserved=reserved,
+                        authorization=None,
+                        at_ms=at_ms,
+                    )
+                    return None
+                self._cleanup_authority.authorization = authorization
+                self._pending = _PendingLifecycleAct(
+                    intent=intent,
+                    reserved=reserved,
+                    authorization=authorization,
+                    state_version=snapshot.version,
+                    locale=proposal.locale,
+                    proposal_digest=proposal.proposal_digest,
+                )
                 try:
                     text_authorized = self.coordinator.speech.authorize_text(
                         item.act_id,
@@ -277,25 +345,6 @@ class SilenceLifecycleController:
                         at_ms=at_ms,
                     )
                     return None
-                sequence, canonical_at_ms = (
-                    self.lifecycle.next_position(at_ms=at_ms)
-                )
-                authorization = VoiceEvent(
-                    schema_version=VOICE_SCHEMA_VERSION,
-                    kind=VoiceEventKind.RESPONSE_AUTHORIZED,
-                    source=VoiceSource.LOCAL_AUTHORITATIVE,
-                    sensitivity=VoiceSensitivity.OPERATIONAL,
-                    binding=self.binding,
-                    sequence=sequence,
-                    at_ms=canonical_at_ms,
-                    input_turn_id=intent.turn_id,
-                    generation_id=(
-                        f"lifecycle_{proposal.proposal_digest}"
-                    ),
-                    semantic_act_id=item.act_id,
-                    semantic_act_kind=item.kind,
-                    payload=VoicePayload(),
-                )
                 try:
                     permit_accepted = self.lifecycle.ingest(
                         authorization
@@ -312,14 +361,6 @@ class SilenceLifecycleController:
                         at_ms=canonical_at_ms,
                     )
                     return None
-                self._pending = _PendingLifecycleAct(
-                    intent=intent,
-                    reserved=reserved,
-                    authorization=authorization,
-                    state_version=snapshot.version,
-                    locale=proposal.locale,
-                    proposal_digest=proposal.proposal_digest,
-                )
                 return self._result(
                     self._pending,
                     status=LifecycleActStatus.PENDING,
@@ -689,9 +730,28 @@ class SilenceLifecycleController:
                         sequence=sequence,
                     )
                 except Exception:  # noqa: BLE001
-                    intents = ()
+                    self._fail_closed(
+                        reserved=pending.reserved,
+                        authorization=pending.authorization,
+                        at_ms=event.at_ms,
+                    )
+                    return None
                 expected = _EXPECTED_RESULT_KIND[pending.intent.kind]
-                if len(intents) != 1 or intents[0].kind is not expected:
+                if (
+                    expected is None
+                    and (
+                        intents
+                        or not self.coordinator.calls.is_quiescent
+                        or self.coordinator.calls.phase
+                        is not SilencePhase.IDLE
+                    )
+                ) or (
+                    expected is not None
+                    and (
+                        len(intents) != 1
+                        or intents[0].kind is not expected
+                    )
+                ):
                     self._fail_closed(
                         reserved=pending.reserved,
                         authorization=pending.authorization,
@@ -723,6 +783,7 @@ class SilenceLifecycleController:
                         ),
                     )
                 self._pending = None
+                self._cleanup_authority = None
                 return self._result(
                     pending,
                     status=(
@@ -767,16 +828,111 @@ class SilenceLifecycleController:
                 self.adapter.terminalize_permit_admission()
                 return speech_closed and self.adapter.terminally_closed
 
+    def abort(self, *, at_ms: int) -> bool:
+        """Unconditionally seal every local capability for this binding."""
+        with self._lock:
+            canonical_at_ms = (
+                at_ms
+                if type(at_ms) is int and at_ms >= 0
+                else 0
+            )
+            pending = self._pending
+            cleanup = self._cleanup_authority
+            reserved = (
+                pending.reserved
+                if pending is not None
+                else cleanup.reserved
+                if cleanup is not None
+                else ()
+            )
+            authorization = (
+                pending.authorization
+                if pending is not None
+                else cleanup.authorization
+                if cleanup is not None
+                else None
+            )
+            retry_cleanup = cleanup or _CleanupAuthority(
+                reserved=reserved,
+                authorization=authorization,
+            )
+            self._cleanup_authority = retry_cleanup
+            try:
+                self._fail_closed(
+                    reserved=reserved,
+                    authorization=authorization,
+                    at_ms=canonical_at_ms,
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+            if authorization is not None:
+                try:
+                    if self.adapter.has_permit(authorization):
+                        self.adapter.retire_permit(authorization)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            for item in reserved:
+                try:
+                    self.coordinator.speech.hard_terminalize(
+                        item.act_id
+                    )
+                except Exception:  # noqa: BLE001, S112
+                    continue
+            try:
+                self.coordinator.calls.hard_terminalize()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            try:
+                speech_closed = self._hard_terminalize_speech()
+            except Exception:  # noqa: BLE001
+                speech_closed = False
+            batch_closed = self._verified_retire_batch(
+                reserved
+            )
+            try:
+                self.adapter.terminalize_permit_admission()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            speech_inventory_closed = (
+                self._speech_inventory_closed()
+            )
+            sealed = (
+                speech_closed
+                and speech_inventory_closed
+                and self.coordinator.calls.phase
+                is SilencePhase.TERMINATED
+                and self.coordinator.calls.is_quiescent
+                and self.adapter.terminally_closed
+                and batch_closed
+            )
+            self._pending = None if sealed else pending
+            self._cleanup_authority = (
+                None if sealed else retry_cleanup
+            )
+            self._terminal_authority = None
+            return (
+                sealed
+                and self._pending is None
+                and self._cleanup_authority is None
+                and self._terminal_authority is None
+            )
+
     @property
     def pending_count(self) -> int:
         with self._lock:
-            return 0 if self._pending is None else 1
+            return (
+                0
+                if self._pending is None
+                and self._cleanup_authority is None
+                else 1
+            )
 
     @property
     def is_terminal(self) -> bool:
         with self._lock:
             return (
                 self._pending is None
+                and self._cleanup_authority is None
                 and self.coordinator.calls.phase
                 is SilencePhase.TERMINATED
             )
@@ -787,79 +943,168 @@ class SilenceLifecycleController:
         reserved: tuple[ReservedSpeech, ...],
         authorization: VoiceEvent | None,
         at_ms: int,
-    ) -> None:
+    ) -> bool:
+        pending = self._pending
+        cleanup = self._cleanup_authority
+        if cleanup is None:
+            cleanup = _CleanupAuthority(
+                reserved=reserved,
+                authorization=authorization,
+            )
+            self._cleanup_authority = cleanup
+        if not reserved:
+            reserved = cleanup.reserved
+        if authorization is None:
+            authorization = cleanup.authorization
         success = True
         if authorization is not None:
-            if self.adapter.has_permit(authorization):
-                success = (
-                    self.adapter.retire_permit(authorization)
-                    and success
-                )
-            state = self.lifecycle.act_state(authorization)
-            if state not in {
-                None,
-                VoiceEventKind.ACT_FAILED,
-                VoiceEventKind.ACT_TIMED_OUT,
-                VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
-                VoiceEventKind.PLAYOUT_PARTIAL,
-                VoiceEventKind.PLAYOUT_CLEARED,
-                VoiceEventKind.PLAYOUT_INTERRUPTED,
-            }:
-                payload = self.lifecycle.terminal_payload(
-                    authorization
-                )
-                if payload is None:
-                    success = False
-                else:
-                    sequence, canonical_at_ms = (
-                        self.lifecycle.next_position(at_ms=at_ms)
-                    )
+            try:
+                if self.adapter.has_permit(authorization):
                     success = (
-                        self.lifecycle.ingest(
-                            VoiceEvent(
-                                schema_version=VOICE_SCHEMA_VERSION,
-                                kind=VoiceEventKind.ACT_FAILED,
-                                source=VoiceSource.LOCAL_AUTHORITATIVE,
-                                sensitivity=(
-                                    VoiceSensitivity.OPERATIONAL
-                                ),
-                                binding=self.binding,
-                                sequence=sequence,
-                                at_ms=canonical_at_ms,
-                                input_turn_id=(
-                                    authorization.input_turn_id
-                                ),
-                                generation_id=(
-                                    authorization.generation_id
-                                ),
-                                semantic_act_id=(
-                                    authorization.semantic_act_id
-                                ),
-                                semantic_act_kind=(
-                                    authorization.semantic_act_kind
-                                ),
-                                payload=payload,
-                            )
-                        )
+                        self.adapter.retire_permit(authorization)
                         and success
                     )
+                state = self.lifecycle.act_state(authorization)
+                if state not in {
+                    None,
+                    VoiceEventKind.ACT_FAILED,
+                    VoiceEventKind.ACT_TIMED_OUT,
+                    VoiceEventKind.CALLER_PLAYBACK_OBSERVED,
+                    VoiceEventKind.PLAYOUT_PARTIAL,
+                    VoiceEventKind.PLAYOUT_CLEARED,
+                    VoiceEventKind.PLAYOUT_INTERRUPTED,
+                }:
+                    payload = self.lifecycle.terminal_payload(
+                        authorization
+                    )
+                    if payload is None:
+                        success = False
+                    else:
+                        sequence, canonical_at_ms = (
+                            self.lifecycle.next_position(
+                                at_ms=at_ms
+                            )
+                        )
+                        success = (
+                            self.lifecycle.ingest(
+                                VoiceEvent(
+                                    schema_version=(
+                                        VOICE_SCHEMA_VERSION
+                                    ),
+                                    kind=VoiceEventKind.ACT_FAILED,
+                                    source=(
+                                        VoiceSource.LOCAL_AUTHORITATIVE
+                                    ),
+                                    sensitivity=(
+                                        VoiceSensitivity.OPERATIONAL
+                                    ),
+                                    binding=self.binding,
+                                    sequence=sequence,
+                                    at_ms=canonical_at_ms,
+                                    input_turn_id=(
+                                        authorization.input_turn_id
+                                    ),
+                                    generation_id=(
+                                        authorization.generation_id
+                                    ),
+                                    semantic_act_id=(
+                                        authorization.semantic_act_id
+                                    ),
+                                    semantic_act_kind=(
+                                        authorization.semantic_act_kind
+                                    ),
+                                    payload=payload,
+                                )
+                            )
+                            and success
+                        )
+            except Exception:  # noqa: BLE001
+                success = False
         for item in reserved:
-            success = (
-                self.coordinator.speech.hard_terminalize(
-                    item.act_id
+            try:
+                success = (
+                    self.coordinator.speech.hard_terminalize(
+                        item.act_id
+                    )
+                    and success
                 )
-                and success
-            )
-        if reserved:
-            success = (
-                self.coordinator.retire_batch(reserved)
-                and success
-            )
-        self.coordinator.calls.hard_terminalize()
-        success = self._hard_terminalize_speech() and success
-        self._pending = None
+            except Exception:  # noqa: BLE001
+                success = False
+        try:
+            self.coordinator.calls.hard_terminalize()
+        except Exception:  # noqa: BLE001
+            success = False
+        try:
+            success = self._hard_terminalize_speech() and success
+        except Exception:  # noqa: BLE001
+            success = False
+        batch_closed = self._verified_retire_batch(reserved)
+        try:
+            self.adapter.terminalize_permit_admission()
+        except Exception:  # noqa: BLE001
+            success = False
+        speech_inventory_closed = self._speech_inventory_closed()
+        success = speech_inventory_closed and success
+        sealed = (
+            speech_inventory_closed
+            and batch_closed
+            and self.coordinator.calls.phase
+            is SilencePhase.TERMINATED
+            and self.coordinator.calls.is_quiescent
+            and self.adapter.terminally_closed
+        )
+        self._pending = None if sealed else pending
+        self._cleanup_authority = (
+            None if sealed else cleanup
+        )
         self._terminal_authority = None
-        self.adapter.terminalize_permit_admission()
+        return (
+            success
+            and sealed
+            and self._pending is None
+            and self._cleanup_authority is None
+        )
+
+    def _verified_retire_batch(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        batch_count = self._reservation_batch_count()
+        if batch_count == 0:
+            return True
+        if batch_count < 0 or not reserved:
+            return False
+        try:
+            self.coordinator.retire_batch(reserved)
+        except Exception:  # noqa: BLE001, S110
+            pass
+        batch_count = self._reservation_batch_count()
+        if batch_count > 0:
+            try:
+                self.coordinator.force_retire_batch(reserved)
+            except Exception:  # noqa: BLE001, S110
+                pass
+        return self._reservation_batch_count() == 0
+
+    def _reservation_batch_count(self) -> int:
+        try:
+            return self.coordinator.reservation_batch_count(
+                self.binding
+            )
+        except Exception:  # noqa: BLE001
+            return -1
+
+    def _speech_inventory_closed(self) -> bool:
+        """Verify exact inventory and non-live state before clearing handles."""
+        speech = self.coordinator.speech
+        try:
+            act_ids = speech.act_ids_for_binding(self.binding)
+            return all(
+                speech.is_live(act_id) is False
+                for act_id in act_ids
+            )
+        except Exception:  # noqa: BLE001
+            return False
 
     def _hard_terminalize_speech(self) -> bool:
         """Close every durable act even if binding-wide cleanup misreports."""

@@ -91,7 +91,7 @@ _EXTRACTOR_DIGEST = hashlib.sha256(
 ).hexdigest()
 _CODEC = "mulaw_8000_mono"
 _FRAME_SCHEMA = "ordinal:u32,duration_ms:u16,payload:mutable-bytes"
-_DRIVER_SOURCE_DIGEST = "737629386faec10613d95084832589654b4f8a293c5b6c5c14e46cd32181c121"
+_DRIVER_SOURCE_DIGEST = "52e3e7625a82afa0424af8aeda82664d96bcb8eb6182f3b27137416621db02b2"
 _FACADE_CODE_DIGEST = "e5c523ecc88ff95cf173d6d4223173ef7d674814cfc1ec39dfbbd3422973a200"
 _TRACE_LOCALES = frozenset({"en", "es", "pt", "zh"})
 _FIXTURE_LOCALES = _TRACE_LOCALES | {"fr"}
@@ -99,19 +99,19 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "caller_observation_extractor":
         "a3d79ce19f2c603f47dd370789773a707016a07e430c58fcd389a67065f9d364",
     "composition":
-        "9fb562780858f0f7419d35d9d1e603deb5b42211950daee66725697d9a6d4f18",
+        "71796f1975160c33b2f6507553838cb8b8baf77c92a1ab09c4b60f21109c5f0b",
     "dialogue_planner":
         "222f332a8756eec4144bfe9ede7bb5dbae71cdbfd1ca8505df58b862dc953457",
     "materializer":
-        "4df0fa5c9c0c571e2af9865c14e9dea18a51d62ed7a71f91363a14ff0f6febeb",
+        "a9f7eb4458bc6f52fd4e4836d1c8eca0e50ca8bf8b636fd3fab88e63aa0fa9c7",
     "receptionist_state":
         "8f26251f7d9e1e534acf6178d1d5bcefac2efb87016e3b34b881decea2294845",
     "voice_bakeoff_coordinator":
-        "59c2753fc453afeb60dbfb252a74b552816188f6fadf2f738cee043590ab3ca1",
+        "664337e72857770b62f3e31673ea38259a7b154d551ecd9c614e484ae600911b",
     "voice_bakeoff_silence":
-        "4f507052b5c4b016a8956a0a7f7d5a4068058aafeaff979e3b483213e6bb1d4d",
+        "bd7e508461de09d9b4fc6da37d6cb56f72ecc6e25a8017a551898cb512e799ec",
     "voice_call_lifecycle":
-        "b2054756846ef3c2acbaeac4ff649bce085ce26c679532cbb1f39c0615d7dc5c",
+        "87a45a63d355be415864e739f1ec71397b0d7e4c5d366446c848a17884af8233",
     "voice_candidates_base":
         "1d96a31d07966f48ebb528cdd4618bc5a2c0cc7911323bef8d56431c839c7cfe",
     "voice_lifecycle":
@@ -119,7 +119,7 @@ _ASSEMBLY_CODE_DIGESTS = MappingProxyType({
     "voice_session_auth":
         "ecb56c931cfb8ddc2c8a70ef37d5e0b0834fece7382de5482aef8c7e914cf1ae",
     "voice_speech_control":
-        "77187f3f725f89f111cc139dc335c4135a05f8a6e2795065f0846c375c92cf85",
+        "baab88507dbd55bc458ce84a64b8b3fa43a3d9f52f545788f616c24f556b7b09",
 })
 _ADAPTER_TYPES = MappingProxyType({
     CandidateArm.A: NativeGeminiAdapter,
@@ -159,6 +159,7 @@ class SyntheticJourney(str, Enum):
     UNOBSERVED_QUESTION_OUTCOMES = "unobserved_question_outcomes"
     INTERRUPTION_RECONNECT = "interruption_reconnect"
     SILENCE_BOUNDARY_MORE_TIME = "silence_boundary_more_time"
+    FIXED_NONTERMINAL_FALLBACKS = "fixed_nonterminal_fallbacks"
 
 
 class DriverFailure(str, Enum):
@@ -196,6 +197,8 @@ class TraceKind(str, Enum):
     MORE_TIME_IGNORED = "more_time_ignored"
     LOCAL_TERMINAL_ELIGIBLE = "local_terminal_eligible"
     LOCAL_TERMINATED = "local_terminated"
+    FIXED_FALLBACK_REQUESTED = "fixed_fallback_requested"
+    FIXED_FALLBACK_OBSERVED = "fixed_fallback_observed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,6 +486,16 @@ _FIXTURES = MappingProxyType({
         content="Fixture caller requests a furnace repair before waiting.",
         fields=(
             ("language", "en"),
+            ("intent", "service_request"),
+            ("service_action", "repair"),
+            ("service_object", "furnace"),
+        ),
+    ),
+    SyntheticJourney.FIXED_NONTERMINAL_FALLBACKS: _Fixture(
+        locale="pt",
+        content="Fixture caller requests a furnace repair before asking for another access mode.",
+        fields=(
+            ("language", "pt"),
             ("intent", "service_request"),
             ("service_action", "repair"),
             ("service_object", "furnace"),
@@ -1041,6 +1054,18 @@ class OfflineSessionDriver:
                 now_ms=now_ms,
                 trace=trace,
             )
+        if (
+            grant.journey
+            is SyntheticJourney.FIXED_NONTERMINAL_FALLBACKS
+        ):
+            return self._execute_fixed_nonterminal_fallbacks(
+                grant=grant,
+                assembly=assembly,
+                pending=first,
+                fixture=fixture,
+                now_ms=now_ms,
+                trace=trace,
+            )
         delivery_at_ms = now_ms + 10
         if grant.journey is SyntheticJourney.SUPERSEDING_TURN:
             correction = _Fixture(
@@ -1289,6 +1314,170 @@ class OfflineSessionDriver:
             trace=trace,
         )
         return after_end_ms
+
+    def _execute_fixed_nonterminal_fallbacks(
+        self,
+        *,
+        grant: _LeaseGrant,
+        assembly: _Assembly,
+        pending: CompositionResult,
+        fixture: _Fixture,
+        now_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        """Qualify reviewed nonterminal fallbacks in isolated sessions."""
+        end_ms, timer = self._deliver_question_for_silence(
+            assembly=assembly,
+            pending=pending,
+            at_ms=now_ms + 5,
+            trace=trace,
+        )
+        end_ms = self._run_fixed_nonterminal_fallback(
+            assembly=assembly,
+            timer=timer,
+            kind=CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+            event_id="unsupported_access_at_boundary",
+            at_ms=timer.deadline_ms or end_ms,
+            trace=trace,
+        )
+
+        voicemail = self._fresh_silence_assembly(
+            grant=grant,
+            fixture=fixture,
+            suffix="simulated_voicemail",
+            epoch_offset=1,
+        )
+        voicemail_pending, start_ms = self._start_silence_question(
+            assembly=voicemail,
+            fixture=fixture,
+            turn_number=2,
+            at_ms=end_ms + 1,
+            trace=trace,
+        )
+        end_ms, voicemail_timer = (
+            self._deliver_question_for_silence(
+                assembly=voicemail,
+                pending=voicemail_pending,
+                at_ms=start_ms + 1,
+                trace=trace,
+            )
+        )
+        return self._run_fixed_nonterminal_fallback(
+            assembly=voicemail,
+            timer=voicemail_timer,
+            kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+            event_id="simulated_voicemail_before_deadline",
+            at_ms=end_ms + 1,
+            trace=trace,
+        )
+
+    def _run_fixed_nonterminal_fallback(
+        self,
+        *,
+        assembly: _Assembly,
+        timer: CallIntent,
+        kind: CallIntentKind,
+        event_id: str,
+        at_ms: int,
+        trace: list[OfflineTraceEvent],
+    ) -> int:
+        cleanup_at_ms = at_ms if type(at_ms) is int else 0
+        try:
+            if (
+                not isinstance(kind, CallIntentKind)
+                or kind
+                not in {
+                    CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+                    CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+                }
+                or not isinstance(timer, CallIntent)
+                or timer.kind is not CallIntentKind.ARM_TIMER
+                or timer.deadline_ms is None
+                or timer.turn_id is None
+                or timer.turn_sequence is None
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            sequence, canonical_at_ms = (
+                assembly.calls.next_position(at_ms=at_ms)
+            )
+            intents = assembly.calls.request_fixed_fallback(
+                kind=kind,
+                binding=assembly.binding,
+                event_id=event_id,
+                sequence=sequence,
+                at_ms=canonical_at_ms,
+                turn_id=timer.turn_id,
+                turn_sequence=timer.turn_sequence,
+            )
+            if (
+                tuple(intent.kind for intent in intents)
+                != (
+                    CallIntentKind.CANCEL_TIMER,
+                    CallIntentKind.CANCEL_ACT,
+                    kind,
+                )
+                or intents[1].act_id is None
+                or intents[2].act_id is None
+                or not assembly.speech.cancel(
+                    intents[1].act_id,
+                    reason=CancellationReason.CALLER_ACTIVITY,
+                )
+                or assembly.calls.timer_receipt() is not None
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.FIXED_FALLBACK_REQUESTED,
+                    semantic_act_kind=(
+                        VoiceSemanticActKind.ACKNOWLEDGEMENT
+                    ),
+                )
+            )
+            observed, end_ms = self._deliver_lifecycle_act(
+                assembly=assembly,
+                intent=intents[2],
+                at_ms=canonical_at_ms + 1,
+                trace=trace,
+            )
+            cleanup_at_ms = max(cleanup_at_ms, end_ms)
+            stale_sequence, stale_at_ms = (
+                assembly.calls.next_position(
+                    at_ms=max(end_ms, timer.deadline_ms)
+                )
+            )
+            if (
+                observed.status
+                is not LifecycleActStatus.OBSERVED
+                or observed.request_kind is not kind
+                or observed.emitted_intents
+                or assembly.calls.timer_fired(
+                    binding=assembly.binding,
+                    event_id=f"stale_{event_id}",
+                    sequence=stale_sequence,
+                    action_id=timer.action_id,
+                    revision=timer.revision,
+                    now_ms=stale_at_ms,
+                )
+                or not assembly.calls.is_quiescent
+                or assembly.silence.pending_count
+                or assembly.silence.is_terminal
+                or assembly.transaction.pending_response_count
+                or assembly.receipts.unconsumed_receipt_count
+                or assembly.speech.is_live(intents[1].act_id)
+                or not assembly.speech.is_live(observed.act_id)
+            ):
+                raise _DriverAbort(DriverFailure.DELIVERY)
+            return end_ms
+        finally:
+            try:
+                sealed = assembly.silence.abort(
+                    at_ms=cleanup_at_ms
+                )
+            except Exception:  # noqa: BLE001
+                sealed = False
+            if not sealed:
+                raise _DriverAbort(DriverFailure.DELIVERY)
 
     def _run_more_time_before_presence(
         self,
@@ -1716,11 +1905,33 @@ class OfflineSessionDriver:
                 semantic_act_kind=pending.semantic_act_kind,
             )
         )
-        if observed.status is LifecycleActStatus.OBSERVED:
+        if (
+            observed.status is LifecycleActStatus.OBSERVED
+            and len(observed.emitted_intents) == 1
+            and observed.emitted_intents[0].kind
+            is CallIntentKind.ARM_TIMER
+        ):
             trace.append(
                 OfflineTraceEvent(
                     ordinal=len(trace),
                     kind=TraceKind.SILENCE_TIMER_ARMED,
+                )
+            )
+        elif (
+            observed.status is LifecycleActStatus.OBSERVED
+            and not observed.emitted_intents
+            and observed.request_kind
+            in {
+                CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+                CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+            }
+        ):
+            trace.append(
+                OfflineTraceEvent(
+                    ordinal=len(trace),
+                    kind=TraceKind.FIXED_FALLBACK_OBSERVED,
+                    semantic_act_kind=pending.semantic_act_kind,
+                    locale=pending.locale,
                 )
             )
         elif (

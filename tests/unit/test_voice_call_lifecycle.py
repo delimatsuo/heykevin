@@ -78,7 +78,12 @@ def _observed(call: CallLifecycle, *, event_id: str, sequence: int, act_id: str,
 
 
 def _start(lifecycle: CallLifecycle):
-    question = QuestionIntent(slot="service", turn_id="turn_1", act_id="question_1")
+    question = QuestionIntent(
+        slot="service",
+        turn_id="turn_1",
+        act_id="question_1",
+        turn_sequence=0,
+    )
     assert lifecycle.reserve_question(binding=_binding(), event_id="reserve_1", sequence=1, at_ms=0, question=question)
     response = _confirmation_event(VoiceEventKind.RESPONSE_AUTHORIZED, 1)
     confirmation = _confirmation_event(VoiceEventKind.SEMANTIC_ACT_CONFIRMED, 2)
@@ -486,6 +491,264 @@ def test_more_time_after_deadline_does_not_steal_timer_authority():
     )
     assert len(presence) == 1
     assert presence[0].kind is CallIntentKind.REQUEST_PRESENCE_CHECK
+
+
+def test_fixed_fallback_at_exact_boundary_is_nonterminal_and_single_use():
+    for kind in (
+        CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+    ):
+        lifecycle = _lifecycle()
+        _start(lifecycle)
+        timer = _observed(
+            lifecycle,
+            event_id="question_playback",
+            sequence=3,
+            act_id="question_1",
+            kind=VoiceSemanticActKind.QUESTION,
+            at_ms=2,
+        )[0]
+        intents = lifecycle.request_fixed_fallback(
+            kind=kind,
+            binding=_binding(),
+            event_id=f"fallback_{kind.value}",
+            sequence=4,
+            at_ms=timer.deadline_ms,
+            turn_id="turn_1",
+            turn_sequence=0,
+        )
+        assert tuple(intent.kind for intent in intents) == (
+            CallIntentKind.CANCEL_TIMER,
+            CallIntentKind.CANCEL_ACT,
+            kind,
+        )
+        request = intents[2]
+        assert lifecycle.request_fixed_fallback(
+            kind=kind,
+            binding=_binding(),
+            event_id=f"fallback_{kind.value}",
+            sequence=5,
+            at_ms=timer.deadline_ms,
+            turn_id="turn_1",
+            turn_sequence=0,
+        ) == ()
+        assert _observed(
+            lifecycle,
+            event_id=f"fallback_playback_{kind.value}",
+            sequence=5,
+            act_id=request.act_id,
+            kind=VoiceSemanticActKind.ACKNOWLEDGEMENT,
+            at_ms=timer.deadline_ms + 1,
+        ) == ()
+        assert lifecycle.phase is SilencePhase.IDLE
+        assert lifecycle.is_quiescent
+        assert lifecycle.timer_fired(
+            binding=_binding(),
+            event_id=f"stale_timer_{kind.value}",
+            sequence=6,
+            action_id=timer.action_id,
+            revision=timer.revision,
+            now_ms=timer.deadline_ms,
+        ) == ()
+
+
+def test_fixed_fallback_supports_exact_inferred_playback_receipt():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    timer = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+    request = lifecycle.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        binding=_binding(),
+        event_id="fallback_request",
+        sequence=4,
+        at_ms=3,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    assert lifecycle.consume_intent(request)
+    transport = _receipt(
+        lifecycle.voice_lifecycle,
+        request.act_id,
+        VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        4,
+        playback=False,
+    )
+    assert lifecycle.transport_resolved(
+        event_id="fallback_transport",
+        sequence=5,
+        event=transport,
+    )
+    assert lifecycle.playback(
+        binding=_binding(),
+        event_id="fallback_inferred",
+        sequence=6,
+        act_id=request.act_id,
+        evidence=PlaybackEvidence.PLAYBACK_INFERRED,
+        inference_id="fallback_inference",
+        transport_id="playout_1",
+        at_ms=5,
+    ) == ()
+    assert lifecycle.phase is SilencePhase.IDLE
+    assert lifecycle.is_quiescent
+    assert lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="stale_timer",
+        sequence=7,
+        action_id=timer.action_id,
+        revision=timer.revision,
+        now_ms=timer.deadline_ms,
+    ) == ()
+
+
+def test_fixed_fallback_bounds_generated_ids_for_maximum_question_id():
+    lifecycle = _lifecycle()
+    question_id = "q" * 128
+    assert lifecycle.reserve_question(
+        binding=_binding(),
+        event_id="reserve_maximum_question",
+        sequence=1,
+        at_ms=0,
+        question=QuestionIntent(
+            "service",
+            "turn_1",
+            question_id,
+            turn_sequence=0,
+        ),
+    )
+    response = _confirmation_event(
+        VoiceEventKind.RESPONSE_AUTHORIZED,
+        1,
+        semantic_act_id=question_id,
+    )
+    confirmation = _confirmation_event(
+        VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        2,
+        semantic_act_id=question_id,
+    )
+    assert lifecycle.voice_lifecycle.ingest(response)
+    assert lifecycle.voice_lifecycle.ingest(confirmation)
+    lifecycle.voice_lifecycle._test_sequence = 3
+    assert lifecycle.semantic_confirmed(
+        event_id="confirm_maximum_question",
+        sequence=2,
+        event=confirmation,
+    )
+    timer = _observed(
+        lifecycle,
+        event_id="playback_maximum_question",
+        sequence=3,
+        act_id=question_id,
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+
+    intents = lifecycle.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        binding=_binding(),
+        event_id="maximum_question_fallback",
+        sequence=4,
+        at_ms=timer.deadline_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )
+
+    assert tuple(intent.kind for intent in intents) == (
+        CallIntentKind.CANCEL_TIMER,
+        CallIntentKind.CANCEL_ACT,
+        CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+    )
+    assert all(len(intent.action_id) <= 128 for intent in intents)
+
+
+def test_invalid_or_late_fixed_fallback_preserves_timer_authority():
+    lifecycle = _lifecycle()
+    _start(lifecycle)
+    timer = _observed(
+        lifecycle,
+        event_id="question_playback",
+        sequence=3,
+        act_id="question_1",
+        kind=VoiceSemanticActKind.QUESTION,
+        at_ms=2,
+    )[0]
+    for index, invalid_at_ms in enumerate(
+        (None, True, "12", object(), 12.0)
+    ):
+        assert lifecycle.request_fixed_fallback(
+            kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+            binding=_binding(),
+            event_id=f"invalid_fallback_{index}",
+            sequence=4,
+            at_ms=invalid_at_ms,
+            turn_id="turn_1",
+            turn_sequence=0,
+        ) == ()
+        assert lifecycle.timer_receipt() is timer
+    for index, invalid_kind in enumerate(
+        (
+            CallIntentKind.REQUEST_SIMULATED_VOICEMAIL.value,
+            [],
+            {},
+            object(),
+        )
+    ):
+        assert lifecycle.request_fixed_fallback(
+            kind=invalid_kind,
+            binding=_binding(),
+            event_id=f"invalid_fallback_kind_{index}",
+            sequence=4,
+            at_ms=timer.deadline_ms,
+            turn_id="turn_1",
+            turn_sequence=0,
+        ) == ()
+        assert lifecycle.phase is SilencePhase.FIRST_ARMED
+        assert lifecycle.timer_receipt() is timer
+        assert lifecycle.revision == timer.revision
+        assert lifecycle._deadline_ms == timer.deadline_ms
+    assert lifecycle.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_CLOSING,
+        binding=_binding(),
+        event_id="wrong_fallback_kind",
+        sequence=4,
+        at_ms=timer.deadline_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    ) == ()
+    assert lifecycle.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="wrong_fallback_turn",
+        sequence=4,
+        at_ms=timer.deadline_ms,
+        turn_id="turn_2",
+        turn_sequence=1,
+    ) == ()
+    assert lifecycle.timer_receipt() is timer
+    assert lifecycle.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="late_fallback",
+        sequence=4,
+        at_ms=timer.deadline_ms + 1,
+        turn_id="turn_1",
+        turn_sequence=0,
+    ) == ()
+    assert lifecycle.timer_receipt() is timer
+    assert lifecycle.timer_fired(
+        binding=_binding(),
+        event_id="timer_wins",
+        sequence=4,
+        action_id=timer.action_id,
+        revision=timer.revision,
+        now_ms=timer.deadline_ms,
+    )[0].kind is CallIntentKind.REQUEST_PRESENCE_CHECK
 
 
 def test_invalid_activity_timestamp_preserves_exact_timer_authority():

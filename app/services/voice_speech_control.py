@@ -334,6 +334,59 @@ class SpeechControl:
         self._reservation_batches.remove(act_ids)
         return True
 
+    def force_retire_reservation(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Drop one exact batch only after every act is permanently sealed."""
+        if not isinstance(reserved, tuple) or not reserved:
+            return False
+        act_ids = tuple(
+            item.act_id
+            for item in reserved
+            if isinstance(item, ReservedSpeech)
+        )
+        if (
+            len(act_ids) != len(reserved)
+            or len(set(act_ids)) != len(act_ids)
+            or act_ids not in self._reservation_batches
+        ):
+            return False
+        records = tuple(
+            self._records.get(item.act_id)
+            for item in reserved
+        )
+        if any(
+            record is None
+            or record.reserved != item
+            or not record.cancelled
+            for item, record in zip(
+                reserved,
+                records,
+                strict=True,
+            )
+        ):
+            return False
+        self._reservation_batches.remove(act_ids)
+        return act_ids not in self._reservation_batches
+
+    def reservation_batch_count(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> int:
+        """Return content-free pending batch count for one exact binding."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return -1
+        return sum(
+            any(
+                (record := self._records.get(act_id))
+                is not None
+                and record.reserved.binding == binding
+                for act_id in act_ids
+            )
+            for act_ids in self._reservation_batches
+        )
+
     def authorize_text(self, act_id: str, text: str) -> bool:
         record = self._records.get(act_id)
         if record is None or record.cancelled or record.authorized or text != record.reserved.text:

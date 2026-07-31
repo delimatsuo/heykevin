@@ -616,6 +616,317 @@ def test_silence_journey_closes_manual_timeout_authority(
     )
 
 
+def test_fixed_nonterminal_fallbacks_are_exact_isolated_and_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    proposals = []
+    original_materialize = FixedProposalMaterializer.lifecycle_act
+
+    def capture_proposal(materializer, **kwargs):
+        proposal = original_materialize(
+            materializer,
+            **kwargs,
+        )
+        proposals.append(proposal)
+        return proposal
+
+    monkeypatch.setattr(
+        FixedProposalMaterializer,
+        "lifecycle_act",
+        capture_proposal,
+    )
+    driver, facade = _lease(
+        journey=SyntheticJourney.FIXED_NONTERMINAL_FALLBACKS,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 4
+    assert result.outbound_audio_ms == 80
+    assert result.session_duration_ms == 10_030
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.SILENCE_TIMER_ARMED) == 2
+    assert kinds.count(TraceKind.FIXED_FALLBACK_REQUESTED) == 2
+    assert kinds.count(TraceKind.FIXED_FALLBACK_OBSERVED) == 2
+    assert TraceKind.LOCAL_TERMINAL_ELIGIBLE not in kinds
+    assert TraceKind.LOCAL_TERMINATED not in kinds
+    assert tuple(
+        event.semantic_act_kind
+        for event in result.trace
+        if event.kind is TraceKind.ACT_CONFIRMED
+    ) == (
+        VoiceSemanticActKind.QUESTION,
+        VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        VoiceSemanticActKind.QUESTION,
+        VoiceSemanticActKind.ACKNOWLEDGEMENT,
+    )
+    assert tuple(
+        proposal.plan.acts[0].text
+        for proposal in proposals
+    ) == (
+        (
+            "Este teste de voz não permite usar o teclado nem "
+            "chamadas por texto. Fale ou encerre a chamada."
+        ),
+        (
+            "Este teste não pode gravar uma mensagem. "
+            "Você pode encerrar a chamada agora."
+        ),
+    )
+    assert len(assemblies) == 2
+    assert all(
+        assembly.adapter.terminally_closed
+        and assembly.calls.is_quiescent
+        and assembly.silence.pending_count == 0
+        and assembly.silence.is_terminal
+        and assembly.transaction.pending_response_count == 0
+        and assembly.receipts.unconsumed_receipt_count == 0
+        and all(
+            not assembly.speech.is_live(act_id)
+            for act_id
+            in assembly.speech.act_ids_for_binding(
+                assembly.binding
+            )
+        )
+        for assembly in assemblies
+    )
+
+
+@pytest.mark.parametrize("failure_mode", ("false", "raise"))
+def test_fixed_fallback_failure_seals_all_capabilities_with_per_act_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.FIXED_NONTERMINAL_FALLBACKS,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        original_timer_fired = assembly.calls.timer_fired
+
+        def fail_stale_timer(*, event_id, **timer_kwargs):
+            if event_id.startswith("stale_"):
+                return (object(),)
+            return original_timer_fired(
+                event_id=event_id,
+                **timer_kwargs,
+            )
+
+        def fail_binding_cleanup(binding):
+            if failure_mode == "raise":
+                raise RuntimeError(
+                    "synthetic binding cleanup failure"
+                )
+            return False
+
+        monkeypatch.setattr(
+            assembly.calls,
+            "timer_fired",
+            fail_stale_timer,
+        )
+        monkeypatch.setattr(
+            assembly.speech,
+            "hard_terminalize_binding",
+            fail_binding_cleanup,
+        )
+        return assembly
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.DELIVERY
+    assert len(assemblies) == 1
+    assembly = assemblies[0]
+    assert assembly.silence.is_terminal
+    assert assembly.silence.pending_count == 0
+    assert assembly.calls.is_quiescent
+    assert assembly.adapter.terminally_closed
+    assert all(
+        not assembly.speech.is_live(act_id)
+        for act_id
+        in assembly.speech.act_ids_for_binding(
+            assembly.binding
+        )
+    )
+
+
+@pytest.mark.parametrize("failure_mode", ("false", "raise"))
+def test_fixed_fallback_failure_forces_pending_batch_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.FIXED_NONTERMINAL_FALLBACKS,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        coordinator = assembly.silence.coordinator
+
+        def fail_retirement(reserved):
+            if failure_mode == "raise":
+                raise RuntimeError(
+                    "synthetic normal batch retirement failure"
+                )
+            return False
+
+        monkeypatch.setattr(
+            coordinator,
+            "retire_batch",
+            fail_retirement,
+        )
+        original_prepare = assembly.silence.prepare
+
+        def prepare_then_fail_confirmation(*args, **kwargs):
+            pending = original_prepare(*args, **kwargs)
+            if pending is not None:
+                monkeypatch.setattr(
+                    assembly.adapter,
+                    "accept_semantic_confirmation",
+                    lambda event, *, lifecycle: False,
+                )
+            return pending
+
+        monkeypatch.setattr(
+            assembly.silence,
+            "prepare",
+            prepare_then_fail_confirmation,
+        )
+        return assembly
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.DELIVERY
+    assert len(assemblies) == 1
+    assembly = assemblies[0]
+    assert (
+        assembly.silence.coordinator.reservation_batch_count(
+            assembly.binding
+        )
+        == 0
+    )
+    assert assembly.silence.pending_count == 0
+    assert assembly.silence.is_terminal
+    assert assembly.calls.is_quiescent
+    assert assembly.adapter.terminally_closed
+    assert all(
+        not assembly.speech.is_live(act_id)
+        for act_id
+        in assembly.speech.act_ids_for_binding(
+            assembly.binding
+        )
+    )
+
+
+def test_driver_retains_prepermit_cleanup_authority_until_explicit_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    driver, facade = _lease(
+        journey=SyntheticJourney.FIXED_NONTERMINAL_FALLBACKS,
+    )
+    assemblies = []
+    original_assembly = driver._assembly
+    original_force_retirements = []
+
+    def capture_assembly(*args, **kwargs):
+        assembly = original_assembly(*args, **kwargs)
+        assemblies.append(assembly)
+        coordinator = assembly.silence.coordinator
+        original_force_retirements.append(
+            coordinator.force_retire_batch
+        )
+        monkeypatch.setattr(
+            coordinator,
+            "retire_batch",
+            lambda reserved: False,
+        )
+        monkeypatch.setattr(
+            coordinator,
+            "force_retire_batch",
+            lambda reserved: False,
+        )
+        original_prepare = assembly.silence.prepare
+
+        def reject_prepermit(*args, **kwargs):
+            monkeypatch.setattr(
+                assembly.adapter,
+                "accept_permit",
+                lambda event, *, lifecycle: False,
+            )
+            return original_prepare(*args, **kwargs)
+
+        monkeypatch.setattr(
+            assembly.silence,
+            "prepare",
+            reject_prepermit,
+        )
+        return assembly
+
+    monkeypatch.setattr(driver, "_assembly", capture_assembly)
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.ABORTED
+    assert result.failure is DriverFailure.DELIVERY
+    assert len(assemblies) == 1
+    assembly = assemblies[0]
+    coordinator = assembly.silence.coordinator
+    assert coordinator.reservation_batch_count(
+        assembly.binding
+    ) == 1
+    assert assembly.silence.pending_count == 1
+    assert not assembly.silence.is_terminal
+    assert assembly.adapter.terminally_closed
+    assert all(
+        not assembly.speech.is_live(act_id)
+        for act_id
+        in assembly.speech.act_ids_for_binding(
+            assembly.binding
+        )
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "force_retire_batch",
+        original_force_retirements[0],
+    )
+
+    assert assembly.silence.abort(
+        at_ms=result.session_duration_ms + 10
+    )
+    assert coordinator.reservation_batch_count(
+        assembly.binding
+    ) == 0
+    assert assembly.silence.pending_count == 0
+    assert assembly.silence.is_terminal
+
+
 def test_facade_is_single_use_and_driver_allows_only_one_live_lease():
     driver, facade = _lease()
     assert facade.state is OfflineSessionState.LEASED

@@ -19,6 +19,8 @@ class ProposalKind(str, Enum):
     INPUT_REPAIR = "input_repair"
     PRESENCE_CHECK = "presence_check"
     MORE_TIME_ACKNOWLEDGEMENT = "more_time_acknowledgement"
+    UNSUPPORTED_ACCESS_MODE = "unsupported_access_mode"
+    SIMULATED_VOICEMAIL = "simulated_voicemail"
     SILENCE_CLOSURE = "silence_closure"
 
 
@@ -137,6 +139,16 @@ class FixedProposalMaterializer:
                 VoiceSemanticActKind.ACKNOWLEDGEMENT,
                 "more_time_acknowledgement",
             ),
+            CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE: (
+                ProposalKind.UNSUPPORTED_ACCESS_MODE,
+                VoiceSemanticActKind.ACKNOWLEDGEMENT,
+                "unsupported_access_mode",
+            ),
+            CallIntentKind.REQUEST_SIMULATED_VOICEMAIL: (
+                ProposalKind.SIMULATED_VOICEMAIL,
+                VoiceSemanticActKind.ACKNOWLEDGEMENT,
+                "simulated_voicemail",
+            ),
             CallIntentKind.REQUEST_CLOSING: (
                 ProposalKind.SILENCE_CLOSURE,
                 VoiceSemanticActKind.CLOSING,
@@ -187,6 +199,10 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "presence_check": "Are you still there?",
         "more_time_acknowledgement":
             "Take your time. I’ll wait twenty more seconds.",
+        "unsupported_access_mode":
+            "This voice test cannot use keypad or text calling. Please speak, or end the call.",
+        "simulated_voicemail":
+            "This test cannot record a message. You can end the call now.",
         "silence_closure":
             "I can’t hear a response, so I’ll end this test call now. Goodbye.",
     },
@@ -209,6 +225,10 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "presence_check": "¿Sigue ahí?",
         "more_time_acknowledgement":
             "Tómese su tiempo. Esperaré veinte segundos más.",
+        "unsupported_access_mode":
+            "Esta prueba de voz no admite el teclado ni llamadas de texto. Hable o finalice la llamada.",
+        "simulated_voicemail":
+            "Esta prueba no puede grabar un mensaje. Puede finalizar la llamada ahora.",
         "silence_closure":
             "No escucho una respuesta, así que finalizaré esta llamada de prueba ahora. Adiós.",
     },
@@ -230,6 +250,10 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "input_repair": "Desculpe, não entendi. Pode repetir?",
         "presence_check": "Você ainda está aí?",
         "more_time_acknowledgement": "Sem pressa. Vou esperar mais vinte segundos.",
+        "unsupported_access_mode":
+            "Este teste de voz não permite usar o teclado nem chamadas por texto. Fale ou encerre a chamada.",
+        "simulated_voicemail":
+            "Este teste não pode gravar uma mensagem. Você pode encerrar a chamada agora.",
         "silence_closure": "Não consigo ouvir uma resposta, então vou encerrar esta chamada de teste agora. Até logo.",
     },
     "zh": {
@@ -251,6 +275,10 @@ _CATALOG_DATA: dict[str, dict[str, str]] = {
         "presence_check": "请问您还在吗？",
         "more_time_acknowledgement":
             "您慢慢来。我会再等二十秒。",
+        "unsupported_access_mode":
+            "本次语音测试不支持按键或文字通话。请直接说话，或结束通话。",
+        "simulated_voicemail":
+            "本次测试不能录制留言。您现在可以结束通话。",
         "silence_closure":
             "我没有听到回应，所以现在结束这次测试通话。再见。",
     },

@@ -55,21 +55,29 @@ _EXPECTED_ASSETS = {
     "en": (
         "Are you still there?",
         "Take your time. I’ll wait twenty more seconds.",
+        "This voice test cannot use keypad or text calling. Please speak, or end the call.",
+        "This test cannot record a message. You can end the call now.",
         "I can’t hear a response, so I’ll end this test call now. Goodbye.",
     ),
     "es": (
         "¿Sigue ahí?",
         "Tómese su tiempo. Esperaré veinte segundos más.",
+        "Esta prueba de voz no admite el teclado ni llamadas de texto. Hable o finalice la llamada.",
+        "Esta prueba no puede grabar un mensaje. Puede finalizar la llamada ahora.",
         "No escucho una respuesta, así que finalizaré esta llamada de prueba ahora. Adiós.",
     ),
     "pt": (
         "Você ainda está aí?",
         "Sem pressa. Vou esperar mais vinte segundos.",
+        "Este teste de voz não permite usar o teclado nem chamadas por texto. Fale ou encerre a chamada.",
+        "Este teste não pode gravar uma mensagem. Você pode encerrar a chamada agora.",
         "Não consigo ouvir uma resposta, então vou encerrar esta chamada de teste agora. Até logo.",
     ),
     "zh": (
         "请问您还在吗？",
         "您慢慢来。我会再等二十秒。",
+        "本次语音测试不支持按键或文字通话。请直接说话，或结束通话。",
+        "本次测试不能录制留言。您现在可以结束通话。",
         "我没有听到回应，所以现在结束这次测试通话。再见。",
     ),
 }
@@ -374,12 +382,14 @@ def _deliver(
 )
 def test_lifecycle_materializer_uses_exact_reviewed_assets(
     locale: str,
-    expected: tuple[str, str, str],
+    expected: tuple[str, str, str, str, str],
 ):
     materializer = FixedProposalMaterializer()
     kinds = (
         CallIntentKind.REQUEST_PRESENCE_CHECK,
         CallIntentKind.REQUEST_MORE_TIME_ACKNOWLEDGEMENT,
+        CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
         CallIntentKind.REQUEST_CLOSING,
     )
     assert (
@@ -425,6 +435,25 @@ def test_lifecycle_policy_is_separate_and_terminal_only_for_closure():
     assert presence_authorization.authorized_kinds == (
         VoiceSemanticActKind.PRESENCE_CHECK,
     )
+    for kind in (
+        CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+    ):
+        fallback = materializer.lifecycle_act(
+            intent_kind=kind,
+            state_version=3,
+            locale="en",
+        )
+        fallback_authorization = policy.authorize_lifecycle(
+            proposal=fallback,
+            binding=_binding(),
+            turn_id="turn_1",
+            state_version=3,
+        )
+        assert not fallback_authorization.terminal_allowed
+        assert fallback_authorization.authorized_kinds == (
+            VoiceSemanticActKind.ACKNOWLEDGEMENT,
+        )
     closing = materializer.lifecycle_act(
         intent_kind=CallIntentKind.REQUEST_CLOSING,
         state_version=3,
@@ -458,6 +487,817 @@ def test_lifecycle_policy_is_separate_and_terminal_only_for_closure():
             turn_id="turn_1",
             state_version=3,
         )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+    ),
+)
+def test_fixed_fallback_cancels_question_timer_and_completes_nonterminal(
+    kind: CallIntentKind,
+):
+    harness = _assembly(locale="pt")
+    calls = harness["calls"]
+    timer = harness["arm"]
+    sequence, at_ms = calls.next_position(at_ms=timer.deadline_ms)
+    intents = calls.request_fixed_fallback(
+        kind=kind,
+        binding=_binding(),
+        event_id=f"request_{kind.value}",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )
+    assert tuple(intent.kind for intent in intents) == (
+        CallIntentKind.CANCEL_TIMER,
+        CallIntentKind.CANCEL_ACT,
+        kind,
+    )
+    assert calls.timer_receipt() is None
+    pending = harness["controller"].prepare(
+        intents[2],
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    assert (
+        pending.semantic_act_kind
+        is VoiceSemanticActKind.ACKNOWLEDGEMENT
+    )
+    observed = _deliver(harness, pending, at_ms=at_ms + 2)
+    assert observed.status is LifecycleActStatus.OBSERVED
+    assert observed.emitted_intents == ()
+    assert calls.phase is SilencePhase.IDLE
+    assert calls.is_quiescent
+    assert calls.timer_fired(
+        binding=_binding(),
+        event_id=f"stale_timer_{kind.value}",
+        sequence=calls.next_position(at_ms=at_ms + 10)[0],
+        action_id=timer.action_id,
+        revision=timer.revision,
+        now_ms=at_ms + 10,
+    ) == ()
+    assert not harness["controller"].is_terminal
+
+
+def test_fixed_fallback_playback_exception_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    timer = harness["arm"]
+    sequence, at_ms = calls.next_position(at_ms=timer.deadline_ms)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="request_simulated_voicemail",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+
+    def fail(**kwargs):
+        raise RuntimeError("synthetic playback reducer failure")
+
+    monkeypatch.setattr(
+        harness["controller"].coordinator,
+        "caller_playback",
+        fail,
+    )
+    with pytest.raises(AssertionError):
+        _deliver(harness, pending, at_ms=at_ms + 2)
+    assert calls.phase is SilencePhase.TERMINATED
+    assert harness["controller"].pending_count == 0
+    assert harness["adapter"].terminally_closed
+    assert all(
+        not harness["speech"].is_live(act_id)
+        for act_id in harness["speech"].act_ids_for_binding(
+            _binding()
+        )
+    )
+
+
+def test_materialized_fallback_rejects_fresh_replacement_and_remains_deliverable():
+    harness = _assembly()
+    calls = harness["calls"]
+    timer = harness["arm"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    first = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_UNSUPPORTED_ACCESS_MODE,
+        binding=_binding(),
+        event_id="first_fixed_fallback",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        first,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    authorization = harness["controller"].authorization_receipt(
+        pending.act_id
+    )
+    assert authorization is not None
+    assert harness["adapter"].has_permit(authorization)
+
+    replacement_sequence, replacement_at_ms = (
+        calls.next_position(at_ms=at_ms + 2)
+    )
+    assert calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="fresh_replacement_fallback",
+        sequence=replacement_sequence,
+        at_ms=replacement_at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    ) == ()
+    assert calls.phase is SilencePhase.FALLBACK_PENDING
+    assert harness["controller"].pending_count == 1
+    assert harness["adapter"].has_permit(authorization)
+    assert calls.timer_fired(
+        binding=_binding(),
+        event_id="stale_original_timer",
+        sequence=replacement_sequence,
+        action_id=timer.action_id,
+        revision=timer.revision,
+        now_ms=timer.deadline_ms,
+    ) == ()
+
+    observed = _deliver(
+        harness,
+        pending,
+        at_ms=replacement_at_ms + 1,
+    )
+    assert observed.status is LifecycleActStatus.OBSERVED
+    assert observed.emitted_intents == ()
+    assert calls.is_quiescent
+
+
+@pytest.mark.parametrize("failure_mode", ("false", "raise"))
+def test_abort_uses_per_act_fallback_and_seals_pending_permit(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id=f"abort_fallback_{failure_mode}",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    authorization = harness["controller"].authorization_receipt(
+        pending.act_id
+    )
+    assert authorization is not None
+    assert harness["adapter"].has_permit(authorization)
+    assert harness["speech"].is_live(pending.act_id)
+
+    def replacement(binding):
+        if failure_mode == "raise":
+            raise RuntimeError("synthetic binding cleanup failure")
+        return False
+
+    monkeypatch.setattr(
+        harness["speech"],
+        "hard_terminalize_binding",
+        replacement,
+    )
+
+    assert harness["controller"].abort(at_ms=at_ms + 2)
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert calls.is_quiescent
+    assert harness["adapter"].terminally_closed
+    assert not harness["adapter"].has_permit(authorization)
+    assert all(
+        not harness["speech"].is_live(act_id)
+        for act_id in harness["speech"].act_ids_for_binding(
+            _binding()
+        )
+    )
+
+
+@pytest.mark.parametrize("failure_mode", ("false", "raise"))
+def test_abort_forces_pending_batch_retirement_after_normal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id=f"batch_abort_{failure_mode}",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    coordinator = harness["controller"].coordinator
+    assert coordinator.reservation_batch_count(_binding()) == 1
+
+    def fail_retirement(reserved):
+        if failure_mode == "raise":
+            raise RuntimeError(
+                "synthetic normal batch retirement failure"
+            )
+        return False
+
+    monkeypatch.setattr(
+        coordinator,
+        "retire_batch",
+        fail_retirement,
+    )
+
+    assert harness["controller"].abort(at_ms=at_ms + 2)
+    assert coordinator.reservation_batch_count(_binding()) == 0
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert harness["adapter"].terminally_closed
+    assert all(
+        not harness["speech"].is_live(act_id)
+        for act_id in harness["speech"].act_ids_for_binding(
+            _binding()
+        )
+    )
+
+
+def test_abort_retains_pending_authority_when_forced_batch_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="retained_batch_abort",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    coordinator = harness["controller"].coordinator
+    assert coordinator.reservation_batch_count(_binding()) == 1
+    monkeypatch.setattr(
+        coordinator,
+        "retire_batch",
+        lambda reserved: False,
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "force_retire_batch",
+        lambda reserved: False,
+    )
+
+    assert not harness["controller"].abort(at_ms=at_ms + 2)
+    assert coordinator.reservation_batch_count(_binding()) == 1
+    assert harness["controller"].pending_count == 1
+    assert not harness["controller"].is_terminal
+    assert harness["adapter"].terminally_closed
+    assert all(
+        not harness["speech"].is_live(act_id)
+        for act_id in harness["speech"].act_ids_for_binding(
+            _binding()
+        )
+    )
+
+
+@pytest.mark.parametrize("failure_mode", ("false", "raise"))
+def test_internal_fail_closed_forces_batch_retirement_before_clearing_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id=f"internal_batch_failure_{failure_mode}",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    authorization = harness["controller"].authorization_receipt(
+        pending.act_id
+    )
+    assert authorization is not None
+    confirmation = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(),
+        at_ms=at_ms + 2,
+    )
+    assert harness["lifecycle"].ingest(confirmation)
+    coordinator = harness["controller"].coordinator
+
+    def fail_retirement(reserved):
+        if failure_mode == "raise":
+            raise RuntimeError(
+                "synthetic internal retirement failure"
+            )
+        return False
+
+    monkeypatch.setattr(
+        coordinator,
+        "retire_batch",
+        fail_retirement,
+    )
+    monkeypatch.setattr(
+        harness["adapter"],
+        "accept_semantic_confirmation",
+        lambda event, *, lifecycle: False,
+    )
+
+    assert not harness["controller"].accept_semantic_confirmation(
+        event=confirmation
+    )
+    assert coordinator.reservation_batch_count(_binding()) == 0
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert harness["adapter"].terminally_closed
+    assert all(
+        not harness["speech"].is_live(act_id)
+        for act_id in harness["speech"].act_ids_for_binding(
+            _binding()
+        )
+    )
+
+
+def test_internal_fail_closed_retains_handle_until_abort_can_retry_batch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="internal_batch_retry",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    authorization = harness["controller"].authorization_receipt(
+        pending.act_id
+    )
+    assert authorization is not None
+    confirmation = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(),
+        at_ms=at_ms + 2,
+    )
+    assert harness["lifecycle"].ingest(confirmation)
+    coordinator = harness["controller"].coordinator
+    original_force_retirement = coordinator.force_retire_batch
+    monkeypatch.setattr(
+        coordinator,
+        "retire_batch",
+        lambda reserved: False,
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "force_retire_batch",
+        lambda reserved: False,
+    )
+    monkeypatch.setattr(
+        harness["adapter"],
+        "accept_semantic_confirmation",
+        lambda event, *, lifecycle: False,
+    )
+
+    assert not harness["controller"].accept_semantic_confirmation(
+        event=confirmation
+    )
+    assert coordinator.reservation_batch_count(_binding()) == 1
+    assert harness["controller"].pending_count == 1
+    monkeypatch.setattr(
+        coordinator,
+        "force_retire_batch",
+        original_force_retirement,
+    )
+
+    assert harness["controller"].abort(at_ms=at_ms + 3)
+    assert coordinator.reservation_batch_count(_binding()) == 0
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+
+
+def test_internal_fail_closed_retains_handle_until_speech_inventory_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="internal_speech_inventory_retry",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    authorization = harness["controller"].authorization_receipt(
+        pending.act_id
+    )
+    assert authorization is not None
+    confirmation = _event_after(
+        harness["lifecycle"],
+        authorization,
+        kind=VoiceEventKind.SEMANTIC_ACT_CONFIRMED,
+        source=VoiceSource.LOCAL_AUTHORITATIVE,
+        payload=VoicePayload(),
+        at_ms=at_ms + 2,
+    )
+    assert harness["lifecycle"].ingest(confirmation)
+    speech = harness["speech"]
+    original_inventory = speech.act_ids_for_binding
+    original_terminalize = speech.hard_terminalize
+    original_binding_terminalize = (
+        speech.hard_terminalize_binding
+    )
+    inventory_calls = 0
+
+    def fail_second_inventory(binding):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        if inventory_calls == 2:
+            raise RuntimeError(
+                "synthetic speech inventory verification failure"
+            )
+        return original_inventory(binding)
+
+    monkeypatch.setattr(
+        speech,
+        "act_ids_for_binding",
+        fail_second_inventory,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize",
+        lambda act_id: False,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize_binding",
+        lambda binding: False,
+    )
+    monkeypatch.setattr(
+        harness["adapter"],
+        "accept_semantic_confirmation",
+        lambda event, *, lifecycle: False,
+    )
+
+    assert not harness["controller"].accept_semantic_confirmation(
+        event=confirmation
+    )
+    assert inventory_calls == 2
+    assert harness["controller"].pending_count == 1
+    assert not harness["controller"].is_terminal
+    assert speech.is_live(pending.act_id)
+    monkeypatch.setattr(
+        speech,
+        "act_ids_for_binding",
+        original_inventory,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize",
+        original_terminalize,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize_binding",
+        original_binding_terminalize,
+    )
+
+    assert harness["controller"].abort(at_ms=at_ms + 3)
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert calls.is_quiescent
+    assert harness["adapter"].terminally_closed
+    assert harness["controller"].coordinator.reservation_batch_count(
+        _binding()
+    ) == 0
+    assert all(
+        not speech.is_live(act_id)
+        for act_id in original_inventory(_binding())
+    )
+
+
+def test_fail_closed_latches_retry_for_unknown_historical_speech_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    first = harness["arm"]
+    presence_intent = calls.timer_fired(
+        binding=_binding(),
+        event_id="historical_presence_timer",
+        sequence=4,
+        action_id=first.action_id,
+        revision=first.revision,
+        now_ms=first.deadline_ms,
+    )[0]
+    presence = harness["controller"].prepare(
+        presence_intent,
+        at_ms=first.deadline_ms,
+    )
+    assert presence is not None
+    second = _deliver(
+        harness,
+        presence,
+        at_ms=first.deadline_ms + 1,
+    ).emitted_intents[0]
+    speech = harness["speech"]
+    assert speech.is_live(presence.act_id)
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].coordinator.reservation_batch_count(
+        _binding()
+    ) == 0
+    timer_sequence, timer_at_ms = calls.next_position(
+        at_ms=second.deadline_ms
+    )
+    closing_intent = calls.timer_fired(
+        binding=_binding(),
+        event_id="historical_closing_timer",
+        sequence=timer_sequence,
+        action_id=second.action_id,
+        revision=second.revision,
+        now_ms=timer_at_ms,
+    )[0]
+    original_inventory = speech.act_ids_for_binding
+    original_terminalize = speech.hard_terminalize
+    original_binding_terminalize = (
+        speech.hard_terminalize_binding
+    )
+    inventory_calls = 0
+
+    def fail_second_inventory(binding):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        if inventory_calls == 2:
+            raise RuntimeError(
+                "synthetic historical inventory failure"
+            )
+        return original_inventory(binding)
+
+    monkeypatch.setattr(
+        harness["controller"].coordinator,
+        "reserve_batch",
+        lambda **kwargs: (),
+    )
+    monkeypatch.setattr(
+        speech,
+        "act_ids_for_binding",
+        fail_second_inventory,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize",
+        lambda act_id: False,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize_binding",
+        lambda binding: False,
+    )
+
+    assert harness["controller"].prepare(
+        closing_intent,
+        at_ms=timer_at_ms + 1,
+    ) is None
+    assert inventory_calls == 2
+    assert harness["controller"].pending_count == 1
+    assert not harness["controller"].is_terminal
+    assert speech.is_live(presence.act_id)
+    monkeypatch.setattr(
+        speech,
+        "act_ids_for_binding",
+        original_inventory,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize",
+        original_terminalize,
+    )
+    monkeypatch.setattr(
+        speech,
+        "hard_terminalize_binding",
+        original_binding_terminalize,
+    )
+
+    assert harness["controller"].abort(
+        at_ms=timer_at_ms + 2
+    )
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert calls.is_quiescent
+    assert harness["adapter"].terminally_closed
+    assert not speech.is_live(presence.act_id)
+
+
+def test_abort_retains_handle_until_speech_inventory_can_be_verified(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id="abort_speech_inventory_retry",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    pending = harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    )
+    assert pending is not None
+    speech = harness["speech"]
+    original_inventory = speech.act_ids_for_binding
+
+    def fail_inventory(binding):
+        raise RuntimeError(
+            "synthetic speech inventory verification failure"
+        )
+
+    monkeypatch.setattr(
+        speech,
+        "act_ids_for_binding",
+        fail_inventory,
+    )
+
+    assert not harness["controller"].abort(at_ms=at_ms + 2)
+    assert harness["controller"].pending_count == 1
+    assert not harness["controller"].is_terminal
+    assert harness["adapter"].terminally_closed
+    monkeypatch.setattr(
+        speech,
+        "act_ids_for_binding",
+        original_inventory,
+    )
+
+    assert harness["controller"].abort(at_ms=at_ms + 3)
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert calls.is_quiescent
+    assert harness["adapter"].terminally_closed
+    assert all(
+        not speech.is_live(act_id)
+        for act_id in original_inventory(_binding())
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ("authorization", "text", "intent", "permit"),
+)
+def test_prepare_retains_preinstall_cleanup_authority_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+):
+    harness = _assembly()
+    calls = harness["calls"]
+    sequence, at_ms = calls.next_position(at_ms=7)
+    intent = calls.request_fixed_fallback(
+        kind=CallIntentKind.REQUEST_SIMULATED_VOICEMAIL,
+        binding=_binding(),
+        event_id=f"prepare_cleanup_{failure_stage}",
+        sequence=sequence,
+        at_ms=at_ms,
+        turn_id="turn_1",
+        turn_sequence=0,
+    )[2]
+    coordinator = harness["controller"].coordinator
+    original_force_retirement = coordinator.force_retire_batch
+    monkeypatch.setattr(
+        coordinator,
+        "retire_batch",
+        lambda reserved: False,
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "force_retire_batch",
+        lambda reserved: False,
+    )
+    if failure_stage == "authorization":
+        original_next_position = (
+            harness["lifecycle"].next_position
+        )
+        calls_to_next_position = 0
+
+        def fail_authorization_position(*, at_ms):
+            nonlocal calls_to_next_position
+            calls_to_next_position += 1
+            if calls_to_next_position == 2:
+                raise RuntimeError(
+                    "synthetic authorization construction failure"
+                )
+            return original_next_position(at_ms=at_ms)
+
+        monkeypatch.setattr(
+            harness["lifecycle"],
+            "next_position",
+            fail_authorization_position,
+        )
+    elif failure_stage == "text":
+        monkeypatch.setattr(
+            harness["speech"],
+            "authorize_text",
+            lambda act_id, text: False,
+        )
+    elif failure_stage == "intent":
+        monkeypatch.setattr(
+            calls,
+            "consume_intent",
+            lambda intent, *, materialized_act_id=None: False,
+        )
+    else:
+        monkeypatch.setattr(
+            harness["adapter"],
+            "accept_permit",
+            lambda event, *, lifecycle: False,
+        )
+
+    assert harness["controller"].prepare(
+        intent,
+        at_ms=at_ms + 1,
+    ) is None
+    assert coordinator.reservation_batch_count(_binding()) == 1
+    assert harness["controller"].pending_count == 1
+    assert not harness["controller"].is_terminal
+    monkeypatch.setattr(
+        coordinator,
+        "force_retire_batch",
+        original_force_retirement,
+    )
+
+    assert harness["controller"].abort(at_ms=at_ms + 2)
+    assert coordinator.reservation_batch_count(_binding()) == 0
+    assert harness["controller"].pending_count == 0
+    assert harness["controller"].is_terminal
+    assert harness["adapter"].terminally_closed
 
 
 def test_more_time_acknowledgement_uses_canonical_chain_and_fixed_deadline():

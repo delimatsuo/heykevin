@@ -6,6 +6,7 @@ from app.services.voice_call_lifecycle import CallIntent, CallLifecycle, Questio
 from app.services.voice_lifecycle import (
     VoiceEvent,
     VoiceSemanticActKind,
+    VoiceSessionBinding,
 )
 from app.services.voice_speech_control import (
     ReservedSpeech,
@@ -141,8 +142,28 @@ class VoiceBakeoffCoordinator:
 
     def retire_batch(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
         batch_key = tuple(item.act_id for item in reserved)
+        if not self.speech.retire_reservation(reserved):
+            return False
         self._reserved_questions.pop(batch_key, None)
-        return self.speech.retire_reservation(reserved)
+        return True
+
+    def force_retire_batch(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Force-retire an exact already-sealed speech batch."""
+        batch_key = tuple(item.act_id for item in reserved)
+        if not self.speech.force_retire_reservation(reserved):
+            return False
+        self._reserved_questions.pop(batch_key, None)
+        return True
+
+    def reservation_batch_count(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> int:
+        """Return content-free batch state for cleanup verification."""
+        return self.speech.reservation_batch_count(binding)
 
     def semantic_confirmed(self, *, event: VoiceEvent, event_id: str, sequence: int) -> bool:
         return self.calls.semantic_confirmed(

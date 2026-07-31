@@ -313,6 +313,11 @@ The first driver slice implements only these closed synthetic journeys:
   and one canonical value per state fact;
 - one localized repair observed before a second low-confidence turn returns
   typed `closure_required` with no second repair or closure audio;
+- the same two-turn exhaustion path followed by either one exact generic
+  English, Spanish, or Mandarin Tier-A closure marker when every private
+  predicate is proven, or exact no-audio teardown for every injected
+  uncertainty, caller-transport loss, unsupported locale, or superseding
+  activity;
 - partial, cleared, failed, and interrupted question playouts followed by exact
   supersession without any slot becoming asked;
 - an interrupted pending question followed by canonical disconnect cleanup, a
@@ -374,9 +379,73 @@ already observed question playback: confirmed asked-slot evidence remains, while
 the old silence timer and all old-binding speech authority are permanently
 retired.
 
-This slice is not the completed synthetic-journey gate and does not claim the
-remaining journeys below. Those journeys require later offline-only increments
-and fresh exact-tree review before this driver step can be marked complete.
+### Generic-failure closure ownership and linearization
+
+The generic-failure fixture extends the typed `closure_required` outcome without
+turning a test posture into authority. A lease-bound fault selector chooses only
+which negative condition the harness injects. It is recorded for reproducibility
+but is never passed to or read by the closure authority. The no-fault case must
+still derive one coherent private proof from current owned state.
+
+| Predicate | Offline owner and evidence | Freshness and revocation |
+| --- | --- | --- |
+| Closure kind | Closure registry; exact `scripted_opt_out` or `generic_failure` enum | Domain-separated in proof, capability, stage, commit, IDs, asset lookup, and trace |
+| Lease and active execution | Driver-owned exact lease-grant objects, revisions, arm, journey, expiry, and contract digest | Revalidated before every state assignment; this is synthetic offline evidence, never live authentication |
+| Environment, tenant, call, session, stream, and epoch | One exact-primitive private binding snapshot in the closure registry | Public receipts receive distinct value copies; mismatch, mutation, expiry, or rebind invalidates |
+| Failure trigger and external outcome | Exact driver-owned `CompositionResult` with `closure_required`, zero acts, an already observed first repair, and captured intake version | Captured under the driver lock only after ordinary authority is sealed; any different or newer result is uncertain |
+| Locale | Latest unambiguous accepted caller-language fact and state version at the second failure | No configured or English fallback; missing, drifted, unsupported, or Portuguese provenance is silent |
+| General authority | Driver-owned transaction, admission, speech, silence, and general outbound inventories | All are terminal, empty, and zeroized before proof; none is referenced by the retained closure lane |
+| Destination, privacy, and local closure transport | Closed private registry enums plus an independently invalidatable local generation | Provider-free and distinct from candidate/provider transport; loss or uncertainty revokes before audio |
+| Proof, capability, stage, commit, and audio | Sole private registry ownership; public objects are identity-bound non-authoritative views | Exact, expiry-bound, copy-resistant, cross-kind/cross-binding non-transferable, and single-use |
+
+The provider-free local closure lane is the only authority retained after the
+ordinary composition assembly is terminalized. It contains no transaction,
+admission, speech, timer, general-queue, caller-content, provider, or business
+reference. Its state machine is:
+
+```text
+CLOSURE_REQUIRED
+  -> GENERAL_AUTHORITY_SEALED
+  -> PRIVATE_PROOF_LIVE
+  -> CAPABLE
+  -> STAGED
+  -> COMMITTED
+  -> FRAME_CONSUMED_FOR_SYNTHETIC_PLAYBACK
+  -> TERMINATED
+
+any uncertainty, loss, expiry, mismatch, or newer activity before consume
+  -> NO_AUDIO_TEARDOWN
+```
+
+The final consume is one latch-owned atomic operation. Under the closure latch
+it revalidates the complete private snapshot and invalidation generation, returns
+one immutable ordinal-zero frame copy, records one fixture-only synthetic
+playback marker, tombstones proof/capability/stage/commit authority, and scrubs
+the sole private mutable source before releasing the latch. If invalidation
+linearizes first, it returns no bytes and records no marker. If invalidation
+arrives after consume, it cannot create a second frame or undo the single
+fixture marker and only confirms teardown.
+
+The generic-failure lane uses semantic kind `closing`; `opt_out` remains exclusive
+to scripted opt-out. Ordinary first-repair traces may truthfully include
+`transport_resolved`, `playback_observed`, and `response_observed`. Those labels
+are forbidden for the generic-closure lane from
+`general_authority_sealed` onward. The closure lane may report only typed local
+proof retention, offline commit, atomic synthetic consume, no-audio teardown,
+and teardown completion. It never reports authentication, provider acceptance,
+delivery, caller-heard audio, or barge-in behavior.
+
+English, Spanish, and Mandarin generic-failure text is provisional source-fixture
+material only. Portuguese and every unsupported or ambiguous locale remain
+silent. This increment may prove local one-use authority, ordering, negative
+silence, cleanup, and a 160-byte/20 ms synthetic marker. Full utterance,
+pronunciation, pacing, clipping, naturalness, comprehension, and caller-heard
+timing remain blocked on separate authorized rendered-audio and native-speaker
+qualification.
+
+This slice is not the completed synthetic-journey gate. Journeys not explicitly
+listed in the current core slice still require later offline-only increments and
+fresh exact-tree review before this driver step can be marked complete.
 
 ## Synthetic journey fixtures
 
@@ -394,7 +463,7 @@ Every arm must produce the same canonical externally observable trace for:
 - unsupported language and access mode;
 - safety guidance;
 - one repair success followed by a second failure;
-- authenticated closure versus uncertain-binding no-audio teardown;
+- locally proven generic closure versus uncertain-binding no-audio teardown;
 - a superseding turn during Phase 2;
 - partial, cleared, failed, and interrupted questions never becoming asked.
 

@@ -13,6 +13,7 @@ import pytest
 
 import app.services.voice_bakeoff_closure as closure_module
 from app.services.voice_bakeoff_closure import (
+    generic_failure_text_digest,
     opt_out_text_digest,
 )
 from app.services.voice_bakeoff_materializer import (
@@ -26,6 +27,8 @@ from app.services.voice_bakeoff_session_driver import (
     _FACADE_CODE_DIGEST,
     _FIXTURES,
     DriverFailure,
+    OfflineClosureOutcome,
+    OfflineFailureInjection,
     OfflineSessionDriver,
     OfflineSessionFacade,
     OfflineSessionLimits,
@@ -827,6 +830,186 @@ def test_one_repair_success_then_second_failure_requires_silent_closure():
         for event in result.trace
         if event.kind is TraceKind.ACT_CONFIRMED
     ) == (VoiceSemanticActKind.REPAIR,)
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_digest"),
+    (
+        (
+            "en",
+            "3875698272528850f8a6097bbd9e2076b2c14441badb77574516427201bba303",
+        ),
+        (
+            "es",
+            "9cc751340092ffbdefc119d416c4b5e1ad59e939af864442ea95a2eb72f8a8be",
+        ),
+        (
+            "zh",
+            "e3c6136a7cbf0868713c392d464497af2cefc95e76802bc1eb61c1605e861fec",
+        ),
+    ),
+)
+def test_generic_failure_closure_consumes_one_tier_a_marker_per_arm(
+    locale: str,
+    expected_digest: str,
+):
+    traces = {}
+    for arm in CandidateArm:
+        driver = OfflineSessionDriver()
+        facade = driver.lease(
+            arm=arm,
+            journey=SyntheticJourney.GENERIC_FAILURE_CLOSURE,
+            now_ms=10,
+            scripted_locale=locale,
+        )
+        assert facade is not None
+
+        result = driver.run(facade, now_ms=10)
+
+        assert result is not None
+        assert result.state is OfflineSessionState.CLOSED
+        assert result.failure is None
+        assert result.pre_stop_outbound_frame_count == 1
+        assert result.post_stop_outbound_frame_delta == 1
+        assert result.post_stop_outbound_ordinals == (0,)
+        assert result.outbound_frame_count == 1
+        assert result.outbound_bytes == 160
+        assert result.outbound_audio_ms == 20
+        assert result.buffers_scrubbed
+        assert result.closure_evidence is not None
+        assert result.closure_evidence.outcome is (
+            OfflineClosureOutcome.SYNTHETIC_PLAYBACK_MARKER
+        )
+        assert result.closure_evidence.provisional_locale == locale
+        assert result.closure_evidence.content_digest == expected_digest
+        assert result.closure_evidence.injection is (
+            OfflineFailureInjection.NONE
+        )
+        assert generic_failure_text_digest(locale) == expected_digest
+        kinds = tuple(event.kind for event in result.trace)
+        seal = kinds.index(TraceKind.GENERAL_AUTHORITY_SEALED)
+        assert kinds.count(
+            TraceKind.GENERIC_FAILURE_PROOF_RETAINED
+        ) == 1
+        assert kinds.count(TraceKind.CLOSURE_STAGED) == 1
+        assert kinds.count(
+            TraceKind.OFFLINE_OUTBOUND_COMMITTED
+        ) == 1
+        assert kinds.count(
+            TraceKind.ATOMIC_SYNTHETIC_FRAME_CONSUMED
+        ) == 1
+        assert {
+            TraceKind.ACT_CONFIRMED,
+            TraceKind.TRANSPORT_RESOLVED,
+            TraceKind.PLAYBACK_OBSERVED,
+            TraceKind.RESPONSE_OBSERVED,
+        }.isdisjoint(kinds[seal + 1:])
+        lane = result.trace[seal + 1:]
+        assert all(
+            event.semantic_act_kind
+            in {None, VoiceSemanticActKind.CLOSING}
+            for event in lane
+        )
+        traces[arm] = _trace_projection(result)
+
+    assert len(set(traces.values())) == 1
+
+
+@pytest.mark.parametrize(
+    "injection",
+    tuple(
+        item
+        for item in OfflineFailureInjection
+        if item is not OfflineFailureInjection.NONE
+    ),
+)
+def test_generic_failure_uncertainty_matrix_is_exactly_no_audio(
+    injection: OfflineFailureInjection,
+):
+    driver = OfflineSessionDriver()
+    facade = driver.lease(
+        arm=CandidateArm.B1,
+        journey=SyntheticJourney.GENERIC_FAILURE_CLOSURE,
+        now_ms=10,
+        failure_injection=injection,
+    )
+    assert facade is not None
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.outbound_bytes == 0
+    assert result.outbound_audio_ms == 0
+    assert result.post_stop_outbound_frame_delta == 0
+    assert result.post_stop_outbound_ordinals == ()
+    assert result.buffers_scrubbed
+    assert result.closure_evidence is not None
+    assert result.closure_evidence.outcome is (
+        OfflineClosureOutcome.NO_AUDIO_TEARDOWN
+    )
+    assert result.closure_evidence.content_digest is None
+    assert result.closure_evidence.injection is injection
+    kinds = tuple(event.kind for event in result.trace)
+    assert kinds.count(TraceKind.NO_AUDIO_TEARDOWN) == 1
+    assert TraceKind.ATOMIC_SYNTHETIC_FRAME_CONSUMED not in kinds
+    assert TraceKind.SYNTHETIC_PLAYBACK_OBSERVED not in kinds
+
+
+def test_generic_failure_portuguese_asset_is_unapproved_and_silent():
+    driver = OfflineSessionDriver()
+    facade = driver.lease(
+        arm=CandidateArm.C,
+        journey=SyntheticJourney.GENERIC_FAILURE_CLOSURE,
+        now_ms=10,
+        scripted_locale="pt",
+    )
+    assert facade is not None
+
+    result = driver.run(facade, now_ms=10)
+
+    assert result is not None
+    assert result.state is OfflineSessionState.CLOSED
+    assert result.failure is None
+    assert result.outbound_frame_count == 0
+    assert result.closure_evidence is not None
+    assert result.closure_evidence.outcome is (
+        OfflineClosureOutcome.NO_AUDIO_TEARDOWN
+    )
+    assert generic_failure_text_digest("pt") is None
+    kinds = {event.kind for event in result.trace}
+    assert TraceKind.GENERIC_FAILURE_PROOF_RETAINED not in kinds
+    assert TraceKind.CLOSURE_CAPABILITY_RETAINED not in kinds
+    assert TraceKind.CLOSURE_STAGED not in kinds
+    assert TraceKind.OFFLINE_OUTBOUND_COMMITTED not in kinds
+
+
+def test_failure_injection_is_lease_bound_and_generic_only():
+    first = OfflineSessionDriver()
+    first_facade = first.lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.GENERIC_FAILURE_CLOSURE,
+        now_ms=10,
+        failure_injection=OfflineFailureInjection.CALL_UNCERTAIN,
+    )
+    second = OfflineSessionDriver()
+    second_facade = second.lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.GENERIC_FAILURE_CLOSURE,
+        now_ms=10,
+        failure_injection=OfflineFailureInjection.SESSION_UNCERTAIN,
+    )
+    assert first_facade is not None
+    assert second_facade is not None
+    assert first_facade._lease_id != second_facade._lease_id
+    assert OfflineSessionDriver().lease(
+        arm=CandidateArm.A,
+        journey=SyntheticJourney.DIRECT_ANSWER,
+        now_ms=10,
+        failure_injection=OfflineFailureInjection.CALL_UNCERTAIN,
+    ) is None
 
 
 def test_repeat_and_slower_replay_exact_localized_question_and_seal_every_assembly(

@@ -1,15 +1,21 @@
-"""Dedicated, offline-only authority for scripted opt-out closure."""
+"""Dedicated, offline-only authority for one-use local closure."""
 
 from __future__ import annotations
 
 import hashlib
+import json
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
 from threading import RLock
+from types import MappingProxyType
 
 from app.services.voice_lifecycle import VoiceSessionBinding
 
 _CONFIRMATION_DOMAIN = b"hey-kevin/offline-opt-out-confirmation/v1\x00"
+_FAILURE_PROOF_DOMAIN = b"hey-kevin/offline-failure-proof/v1\x00"
+_FAILURE_SNAPSHOT_DOMAIN = b"hey-kevin/offline-failure-snapshot/v1\x00"
 _CAPABILITY_DOMAIN = b"hey-kevin/offline-local-closure-capability/v1\x00"
 _STAGE_DOMAIN = b"hey-kevin/offline-local-closure-stage/v1\x00"
 _COMMIT_DOMAIN = b"hey-kevin/offline-local-closure-commit/v1\x00"
@@ -17,18 +23,30 @@ _AUDIO_DOMAIN = b"hey-kevin/offline-local-closure-audio/v1\x00"
 _DIGEST_LENGTH = 64
 _MAX_ID = 128
 
-_OPT_OUT_TEXT = {
+_OPT_OUT_TEXT = MappingProxyType({
     "en": "Okay. I’ll stop this test call now. Goodbye.",
     "es": (
         "De acuerdo. Finalizaré esta llamada de prueba ahora. "
         "Adiós."
     ),
     "zh": "好的。我现在结束这次测试通话。再见。",
-}
-_OPT_OUT_TEXT_DIGESTS = {
+})
+_OPT_OUT_TEXT_DIGESTS = MappingProxyType({
     locale: hashlib.sha256(text.encode("utf-8")).hexdigest()
     for locale, text in _OPT_OUT_TEXT.items()
-}
+})
+_GENERIC_FAILURE_TEXT = MappingProxyType({
+    "en": "I’m sorry, I can’t continue this test call. Goodbye.",
+    "es": (
+        "Lo siento, no puedo continuar con esta llamada de prueba. "
+        "Adiós."
+    ),
+    "zh": "抱歉，我无法继续这次测试通话。再见。",
+})
+_GENERIC_FAILURE_TEXT_DIGESTS = MappingProxyType({
+    locale: hashlib.sha256(text.encode("utf-8")).hexdigest()
+    for locale, text in _GENERIC_FAILURE_TEXT.items()
+})
 _INPUT_LOCALES = frozenset({"en", "es", "pt", "zh"})
 
 
@@ -46,14 +64,21 @@ class OfflineClosureTransport(str, Enum):
 
 class OfflineClosureStep(str, Enum):
     SCRIPTED_OPT_OUT = "scripted_opt_out"
+    GENERIC_FAILURE = "generic_failure"
 
 
 class OfflineClosurePhase(str, Enum):
     LEASED = "leased"
     ACTIVE = "active"
+    GENERAL_AUTHORITY_SEALED = "general_authority_sealed"
+    PRIVATE_PROOF_LIVE = "private_proof_live"
     CAPABLE = "capable"
     STAGED = "staged"
     COMMITTED = "committed"
+    FRAME_CONSUMED_FOR_SYNTHETIC_PLAYBACK = (
+        "frame_consumed_for_synthetic_playback"
+    )
+    NO_AUDIO_TEARDOWN = "no_audio_teardown"
     TERMINATED = "terminated"
 
 
@@ -139,6 +164,43 @@ class ScriptedOptOutConfirmationReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class GenericFailureProofReceipt:
+    proof_id: str
+    lease_revision: int
+    active_revision: int
+    expires_at_ms: int
+    arm: str
+    journey: str
+    contract_digest: str
+    binding: VoiceSessionBinding
+    locale: str
+    state_version: int
+    state_snapshot_digest: str
+    step: OfflineClosureStep
+
+    def __post_init__(self) -> None:
+        if (
+            not _identifier(self.proof_id)
+            or type(self.lease_revision) is not int
+            or self.lease_revision < 0
+            or type(self.active_revision) is not int
+            or self.active_revision < 1
+            or type(self.expires_at_ms) is not int
+            or self.expires_at_ms < 0
+            or not _identifier(self.arm)
+            or not _identifier(self.journey)
+            or not _digest(self.contract_digest)
+            or not isinstance(self.binding, VoiceSessionBinding)
+            or self.locale not in _GENERIC_FAILURE_TEXT
+            or type(self.state_version) is not int
+            or self.state_version < 0
+            or not _digest(self.state_snapshot_digest)
+            or self.step is not OfflineClosureStep.GENERIC_FAILURE
+        ):
+            raise ValueError("generic failure proof is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class OfflineClosureCapability:
     capability_id: str
     confirmation_id: str
@@ -152,6 +214,7 @@ class OfflineClosureCapability:
     destination: OfflineClosureDestination
     privacy: OfflineClosurePrivacy
     transport: OfflineClosureTransport
+    step: OfflineClosureStep = OfflineClosureStep.SCRIPTED_OPT_OUT
 
     def __post_init__(self) -> None:
         if (
@@ -165,7 +228,7 @@ class OfflineClosureCapability:
             or not _identifier(self.journey)
             or not _digest(self.contract_digest)
             or not isinstance(self.binding, VoiceSessionBinding)
-            or self.locale not in _OPT_OUT_TEXT
+            or self.locale not in _closure_text(self.step)
             or not isinstance(
                 self.destination,
                 OfflineClosureDestination,
@@ -188,7 +251,8 @@ class OfflineClosureCommittedFrame:
 
     def __post_init__(self) -> None:
         if (
-            self.ordinal != 0
+            type(self.ordinal) is not int
+            or self.ordinal != 0
             or type(self.duration_ms) is not int
             or self.duration_ms < 1
             or type(self.payload) is not bytes
@@ -224,6 +288,7 @@ class _OwnedClosureStage:
     frame_byte_count: int
     audio_digest: str
     frame: _OwnedClosureFrame
+    step: OfflineClosureStep
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +304,7 @@ class _OwnedClosureCommit:
     audio_ms: int
     committed_at_ms: int
     frame: _OwnedClosureFrame
+    step: OfflineClosureStep
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,18 +321,20 @@ class OfflineClosureStageReceipt:
     frame_duration_ms: int
     frame_byte_count: int
     audio_digest: str
+    step: OfflineClosureStep = OfflineClosureStep.SCRIPTED_OPT_OUT
 
     def __post_init__(self) -> None:
         if (
             not _identifier(self.stage_id)
             or not _identifier(self.capability_id)
-            or self.locale not in _OPT_OUT_TEXT
-            or self.text != _OPT_OUT_TEXT[self.locale]
+            or self.locale not in _closure_text(self.step)
+            or self.text != _closure_text(self.step)[self.locale]
             or self.text_digest
-            != _OPT_OUT_TEXT_DIGESTS[self.locale]
+            != _closure_text_digests(self.step)[self.locale]
             or not _identifier(self.audio_id)
             or not _identifier(self.playout_id)
             or self.transport is not OfflineClosureTransport.LOCAL_READY
+            or type(self.frame_ordinal) is not int
             or self.frame_ordinal != 0
             or self.frame_duration_ms != 20
             or type(self.frame_byte_count) is not int
@@ -287,15 +355,17 @@ class OfflineClosureCommitReceipt:
     byte_count: int
     audio_ms: int
     committed_at_ms: int
+    step: OfflineClosureStep = OfflineClosureStep.SCRIPTED_OPT_OUT
 
     def __post_init__(self) -> None:
         if (
             not _identifier(self.commit_id)
             or not _identifier(self.stage_id)
-            or self.locale not in _OPT_OUT_TEXT
+            or self.locale not in _closure_text(self.step)
             or self.text_digest
-            != _OPT_OUT_TEXT_DIGESTS[self.locale]
+            != _closure_text_digests(self.step)[self.locale]
             or not _digest(self.audio_digest)
+            or type(self.frame_count) is not int
             or self.frame_count != 1
             or type(self.byte_count) is not int
             or self.byte_count < 1
@@ -320,6 +390,10 @@ class OfflineClosureSnapshot:
     committed_frame_count: int
     text_digest: str | None
     synthetic_playback_observed: bool
+    step: OfflineClosureStep
+    invalidated: bool
+    invalidation_generation: int
+    frame_consumed: bool
 
     def __post_init__(self) -> None:
         if (
@@ -337,8 +411,14 @@ class OfflineClosureSnapshot:
                     self.capability_live,
                     self.capability_tombstoned,
                     self.synthetic_playback_observed,
+                    self.invalidated,
+                    self.frame_consumed,
                 )
             )
+            or not isinstance(self.step, OfflineClosureStep)
+            or type(self.invalidation_generation) is not int
+            or self.invalidation_generation < 0
+            or type(self.committed_frame_count) is not int
             or self.committed_frame_count not in {0, 1}
             or (
                 self.text_digest is not None
@@ -367,8 +447,14 @@ class _RegistryState:
     destination: OfflineClosureDestination
     privacy: OfflineClosurePrivacy
     transport: OfflineClosureTransport
+    step: OfflineClosureStep
+    failure_record_type: type | None
     withdrawn: bool = False
-    confirmation: ScriptedOptOutConfirmationReceipt | None = None
+    confirmation: (
+        ScriptedOptOutConfirmationReceipt
+        | GenericFailureProofReceipt
+        | None
+    ) = None
     confirmation_id_tombstone: str | None = None
     confirmation_tombstoned: bool = False
     capability: OfflineClosureCapability | None = None
@@ -377,6 +463,14 @@ class _RegistryState:
     commit: _OwnedClosureCommit | None = None
     inventory_sealed: bool = False
     synthetic_playback_observed: bool = False
+    failure_record: object | None = None
+    failure_state_version: int | None = None
+    failure_state_snapshot: dict[str, object] | None = None
+    failure_snapshot_digest: str | None = None
+    invalidated: bool = False
+    invalidation_generation: int = 0
+    frame_consumed: bool = False
+    consumed_text_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +483,10 @@ class _TerminalRegistryState:
     capability_tombstoned: bool
     text_digest: str | None
     synthetic_playback_observed: bool
+    step: OfflineClosureStep
+    invalidated: bool
+    invalidation_generation: int
+    frame_consumed: bool
 
 
 @dataclass(slots=True)
@@ -403,9 +501,23 @@ class OfflineLocalClosureAuthority:
     the driver lock or invokes a caller callback while holding its latch.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        generic_failure_record_type: type | None = None,
+    ) -> None:
+        if (
+            generic_failure_record_type is not None
+            and type(generic_failure_record_type) is not type
+        ):
+            raise ValueError(
+                "generic failure record type is invalid"
+            )
         self._lock = RLock()
         self._entry: _RegistryEntry | None = None
+        self._generic_failure_record_type = (
+            generic_failure_record_type
+        )
 
     def register_leased(
         self,
@@ -421,6 +533,9 @@ class OfflineLocalClosureAuthority:
         contract_digest: str,
         binding: VoiceSessionBinding,
         locale: str,
+        step: OfflineClosureStep = (
+            OfflineClosureStep.SCRIPTED_OPT_OUT
+        ),
     ) -> bool:
         private_binding = _copy_binding(binding)
         if (
@@ -437,6 +552,11 @@ class OfflineLocalClosureAuthority:
             or not _digest(contract_digest)
             or private_binding is None
             or locale not in _INPUT_LOCALES
+            or not isinstance(step, OfflineClosureStep)
+            or (
+                step is OfflineClosureStep.GENERIC_FAILURE
+                and self._generic_failure_record_type is None
+            )
         ):
             return False
         with self._lock:
@@ -470,6 +590,13 @@ class OfflineLocalClosureAuthority:
                         OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB
                     ),
                     transport=OfflineClosureTransport.LOCAL_READY,
+                    step=step,
+                    failure_record_type=(
+                        self._generic_failure_record_type
+                        if step
+                        is OfflineClosureStep.GENERIC_FAILURE
+                        else None
+                    ),
                 )
             )
             return True
@@ -498,9 +625,12 @@ class OfflineLocalClosureAuthority:
                 or state.participant_surrogate
                 is not participant_surrogate
                 or state.withdrawn
+                or state.invalidated
                 or state.confirmation is not None
                 or state.confirmation_tombstoned
                 or now_ms > state.expires_at_ms
+                or state.step
+                is not OfflineClosureStep.SCRIPTED_OPT_OUT
                 or state.locale not in _OPT_OUT_TEXT
             ):
                 return None
@@ -526,6 +656,171 @@ class OfflineLocalClosureAuthority:
                 confirmation=confirmation,
             )
             return confirmation
+
+    def admit_generic_failure(
+        self,
+        *,
+        facade: object,
+        active_record: object,
+        driver_identity: object,
+        failure_record: object,
+        state_version: int,
+        state_snapshot: dict[str, object],
+        latest_locale: str,
+        destination: OfflineClosureDestination,
+        privacy: OfflineClosurePrivacy,
+        transport: OfflineClosureTransport,
+        inventory: OfflineAuthorityInventory,
+        now_ms: int,
+    ) -> GenericFailureProofReceipt | None:
+        """Retain one exact, already-sealed generic-failure proof."""
+        if (
+            type(failure_record)
+            is not self._generic_failure_record_type
+            or type(state_version) is not int
+            or state_version < 0
+            or type(state_snapshot) is not dict
+            or type(latest_locale) is not str
+            or latest_locale not in _GENERIC_FAILURE_TEXT
+            or destination
+            is not OfflineClosureDestination.SYNTHETIC_LOOPBACK
+            or privacy
+            is not OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB
+            or transport
+            is not OfflineClosureTransport.LOCAL_READY
+            or not isinstance(inventory, OfflineAuthorityInventory)
+            or not inventory.is_sealed
+            or type(now_ms) is not int
+            or now_ms < 0
+        ):
+            return None
+        try:
+            private_state_snapshot = deepcopy(state_snapshot)
+        except Exception:  # noqa: BLE001
+            return None
+        if (
+            private_state_snapshot is state_snapshot
+            or not _generic_failure_snapshot_is_safe(
+                private_state_snapshot
+            )
+        ):
+            return None
+        failure_values = _failure_record_values(failure_record)
+        snapshot_digest = _failure_snapshot_digest(
+            private_state_snapshot
+        )
+        if (
+            failure_values
+            != (
+                "closure_required",
+                "extraction_terminal",
+                state_version,
+                (),
+                (),
+            )
+            or snapshot_digest is None
+        ):
+            return None
+        with self._lock:
+            entry = self._entry
+            if entry is None:
+                return None
+            state = entry.state
+            if (
+                not isinstance(state, _RegistryState)
+                or state.phase
+                is not OfflineClosurePhase.GENERAL_AUTHORITY_SEALED
+                or state.facade is not facade
+                or state.active_record is not active_record
+                or state.driver_identity is not driver_identity
+                or state.step
+                is not OfflineClosureStep.GENERIC_FAILURE
+                or state.failure_record_type
+                is not self._generic_failure_record_type
+                or not _generic_failure_snapshot_matches(
+                    private_state_snapshot,
+                    call_sid=state.binding.call_binding,
+                    language=latest_locale,
+                )
+                or state.withdrawn
+                or state.invalidated
+                or state.confirmation is not None
+                or state.confirmation_tombstoned
+                or state.failure_record is not None
+                or now_ms > state.expires_at_ms
+                or latest_locale != state.locale
+                or destination is not state.destination
+                or privacy is not state.privacy
+                or transport is not state.transport
+            ):
+                return None
+            proof_id = self._expected_confirmation_id(state)
+            public_binding = _copy_binding(state.binding)
+            if proof_id is None or public_binding is None:
+                return None
+            proof = GenericFailureProofReceipt(
+                proof_id=proof_id,
+                lease_revision=state.lease_revision,
+                active_revision=state.active_revision,
+                expires_at_ms=state.expires_at_ms,
+                arm=state.arm,
+                journey=state.journey,
+                contract_digest=state.contract_digest,
+                binding=public_binding,
+                locale=latest_locale,
+                state_version=state_version,
+                state_snapshot_digest=snapshot_digest,
+                step=OfflineClosureStep.GENERIC_FAILURE,
+            )
+            if entry.state is not state:
+                return None
+            entry.state = replace(
+                state,
+                phase=OfflineClosurePhase.PRIVATE_PROOF_LIVE,
+                confirmation=proof,
+                failure_record=failure_record,
+                failure_state_version=state_version,
+                failure_state_snapshot=private_state_snapshot,
+                failure_snapshot_digest=snapshot_digest,
+                inventory_sealed=True,
+            )
+            return proof
+
+    def seal_general_authority(
+        self,
+        *,
+        facade: object,
+        active_record: object,
+        inventory: OfflineAuthorityInventory,
+    ) -> bool:
+        if (
+            not isinstance(inventory, OfflineAuthorityInventory)
+            or not inventory.is_sealed
+        ):
+            return False
+        with self._lock:
+            entry = self._entry
+            if entry is None:
+                return False
+            state = entry.state
+            if (
+                not isinstance(state, _RegistryState)
+                or state.phase is not OfflineClosurePhase.ACTIVE
+                or state.facade is not facade
+                or state.active_record is not active_record
+                or state.step
+                is not OfflineClosureStep.GENERIC_FAILURE
+                or state.withdrawn
+                or state.invalidated
+                or state.inventory_sealed
+            ):
+                return False
+            entry.state = replace(
+                state,
+                phase=OfflineClosurePhase.GENERAL_AUTHORITY_SEALED,
+                inventory_sealed=True,
+            )
+            return True
 
     def activate(
         self,
@@ -582,6 +877,30 @@ class OfflineLocalClosureAuthority:
             entry.state = replace(state, withdrawn=True)
             return True
 
+    def invalidate(
+        self,
+        *,
+        facade: object,
+        active_record: object | None = None,
+    ) -> bool:
+        """Irreversibly select no-audio teardown under the closure latch."""
+        with self._lock:
+            entry = self._entry
+            if entry is None:
+                return False
+            state = self._state_for(
+                facade=facade,
+                active_record=active_record,
+            )
+            if state is None:
+                return False
+            if state.frame_consumed:
+                return True
+            if state.invalidated:
+                return True
+            self._invalidate_entry(entry=entry, state=state)
+            return True
+
     def is_withdrawn(
         self,
         *,
@@ -600,7 +919,10 @@ class OfflineLocalClosureAuthority:
         *,
         facade: object,
         active_record: object,
-        confirmation: ScriptedOptOutConfirmationReceipt,
+        confirmation: (
+            ScriptedOptOutConfirmationReceipt
+            | GenericFailureProofReceipt
+        ),
         inventory: OfflineAuthorityInventory,
         now_ms: int,
     ) -> OfflineClosureCapability | None:
@@ -617,10 +939,22 @@ class OfflineLocalClosureAuthority:
                 return None
             state = entry.state
             if (
-                state.phase is not OfflineClosurePhase.ACTIVE
+                (
+                    state.step
+                    is OfflineClosureStep.SCRIPTED_OPT_OUT
+                    and state.phase
+                    is not OfflineClosurePhase.ACTIVE
+                )
+                or (
+                    state.step
+                    is OfflineClosureStep.GENERIC_FAILURE
+                    and state.phase
+                    is not OfflineClosurePhase.PRIVATE_PROOF_LIVE
+                )
                 or state.facade is not facade
                 or state.active_record is not active_record
                 or state.withdrawn
+                or state.invalidated
                 or state.confirmation is not confirmation
                 or state.confirmation_tombstoned
                 or state.capability is not None
@@ -643,6 +977,7 @@ class OfflineLocalClosureAuthority:
             capability = OfflineClosureCapability(
                 capability_id=_token(
                     _CAPABILITY_DOMAIN,
+                    state.step.value,
                     confirmation_id,
                     str(state.active_revision),
                     state.binding.stream_binding,
@@ -658,6 +993,7 @@ class OfflineLocalClosureAuthority:
                 destination=state.destination,
                 privacy=state.privacy,
                 transport=state.transport,
+                step=state.step,
             )
             if entry.state is not state:
                 return None
@@ -726,10 +1062,15 @@ class OfflineLocalClosureAuthority:
             )
             if capability_id is None:
                 return None
-            text = _OPT_OUT_TEXT[state.locale]
-            text_digest = _OPT_OUT_TEXT_DIGESTS[state.locale]
+            texts = _closure_text(state.step)
+            text_digests = _closure_text_digests(state.step)
+            if state.locale not in texts:
+                return None
+            text = texts[state.locale]
+            text_digest = text_digests[state.locale]
             stage_id = _token(
                 _STAGE_DOMAIN,
+                state.step.value,
                 capability_id,
                 text_digest,
             )
@@ -754,6 +1095,7 @@ class OfflineLocalClosureAuthority:
                 frame_duration_ms=20,
                 frame_byte_count=len(payload),
                 audio_digest=audio_digest,
+                step=state.step,
             )
             owned_stage = _OwnedClosureStage(
                 receipt=stage,
@@ -775,6 +1117,7 @@ class OfflineLocalClosureAuthority:
                     payload=payload,
                     audio_digest=audio_digest,
                 ),
+                step=state.step,
             )
             if entry.state is not state:
                 payload[:] = b"\x00" * len(payload)
@@ -835,6 +1178,7 @@ class OfflineLocalClosureAuthority:
         commit = OfflineClosureCommitReceipt(
             commit_id=_token(
                 _COMMIT_DOMAIN,
+                captured_state.step.value,
                 captured_stage_id,
                 str(now_ms),
             ),
@@ -846,6 +1190,7 @@ class OfflineLocalClosureAuthority:
             byte_count=len(captured_frame.payload),
             audio_ms=captured_frame.duration_ms,
             committed_at_ms=now_ms,
+            step=captured_state.step,
         )
         owned_commit = _OwnedClosureCommit(
             receipt=commit,
@@ -859,6 +1204,7 @@ class OfflineLocalClosureAuthority:
             audio_ms=captured_frame.duration_ms,
             committed_at_ms=now_ms,
             frame=captured_frame,
+            step=captured_state.step,
         )
         committed_state = replace(
             captured_state,
@@ -921,6 +1267,8 @@ class OfflineLocalClosureAuthority:
             if (
                 state is None
                 or state.phase is not OfflineClosurePhase.COMMITTED
+                or state.step
+                is not OfflineClosureStep.SCRIPTED_OPT_OUT
                 or state.commit is None
                 or not self._committed_frame_matches(state)
             ):
@@ -950,6 +1298,8 @@ class OfflineLocalClosureAuthority:
                 state.phase is not OfflineClosurePhase.COMMITTED
                 or state.facade is not facade
                 or state.active_record is not active_record
+                or state.step
+                is not OfflineClosureStep.SCRIPTED_OPT_OUT
                 or state.commit is None
                 or state.commit.receipt is not commit
                 or state.synthetic_playback_observed
@@ -961,6 +1311,123 @@ class OfflineLocalClosureAuthority:
                 synthetic_playback_observed=True,
             )
             return True
+
+    def consume_for_synthetic_playback(
+        self,
+        *,
+        facade: object,
+        active_record: object,
+        commit: OfflineClosureCommitReceipt,
+        invalidation_generation: int,
+        now_ms: int,
+    ) -> OfflineClosureCommittedFrame | None:
+        """Atomically copy one generic frame, mark it, and scrub the source."""
+        inputs_valid = (
+            type(invalidation_generation) is int
+            and invalidation_generation >= 0
+            and type(now_ms) is int
+            and now_ms >= 0
+        )
+        with self._lock:
+            entry = self._entry
+            if entry is None:
+                return None
+            state = entry.state
+            if (
+                not isinstance(state, _RegistryState)
+                or state.phase is not OfflineClosurePhase.COMMITTED
+                or state.facade is not facade
+                or state.active_record is not active_record
+                or state.step
+                is not OfflineClosureStep.GENERIC_FAILURE
+            ):
+                return None
+            if (
+                not inputs_valid
+                or now_ms > state.expires_at_ms
+                or state.invalidated
+                or state.invalidation_generation
+                != invalidation_generation
+                or state.commit is None
+                or state.commit.receipt is not commit
+                or state.commit.step is not state.step
+                or state.synthetic_playback_observed
+                or state.frame_consumed
+                or not self._generic_proof_is_live(state)
+                or not self._committed_frame_matches(state)
+            ):
+                if not state.invalidated:
+                    self._invalidate_entry(
+                        entry=entry,
+                        state=state,
+                    )
+                return None
+            frame = state.commit.frame
+            public_frame = OfflineClosureCommittedFrame(
+                ordinal=frame.ordinal,
+                duration_ms=frame.duration_ms,
+                payload=bytes(frame.payload),
+                audio_digest=frame.audio_digest,
+            )
+            text_digest = state.commit.text_digest
+            frame.payload[:] = b"\x00" * len(frame.payload)
+            entry.state = replace(
+                state,
+                phase=(
+                    OfflineClosurePhase
+                    .FRAME_CONSUMED_FOR_SYNTHETIC_PLAYBACK
+                ),
+                confirmation=None,
+                confirmation_tombstoned=True,
+                capability=None,
+                capability_tombstoned=True,
+                stage=None,
+                commit=None,
+                failure_record=None,
+                failure_record_type=None,
+                failure_state_version=None,
+                failure_state_snapshot=None,
+                failure_snapshot_digest=None,
+                synthetic_playback_observed=True,
+                frame_consumed=True,
+                consumed_text_digest=text_digest,
+            )
+            return public_frame
+
+    @classmethod
+    def _invalidate_entry(
+        cls,
+        *,
+        entry: _RegistryEntry,
+        state: _RegistryState,
+    ) -> None:
+        for payload in cls._payloads(state):
+            payload[:] = b"\x00" * len(payload)
+        entry.state = replace(
+            state,
+            phase=OfflineClosurePhase.NO_AUDIO_TEARDOWN,
+            confirmation=None,
+            confirmation_tombstoned=(
+                state.confirmation_tombstoned
+                or state.confirmation is not None
+            ),
+            capability=None,
+            capability_tombstoned=(
+                state.capability_tombstoned
+                or state.capability is not None
+            ),
+            stage=None,
+            commit=None,
+            failure_record=None,
+            failure_record_type=None,
+            failure_state_version=None,
+            failure_state_snapshot=None,
+            failure_snapshot_digest=None,
+            invalidated=True,
+            invalidation_generation=(
+                state.invalidation_generation + 1
+            ),
+        )
 
     def snapshot(
         self,
@@ -1015,11 +1482,17 @@ class OfflineLocalClosureAuthority:
                 text_digest=(
                     state.commit.text_digest
                     if state.commit is not None
-                    else None
+                    else state.consumed_text_digest
                 ),
                 synthetic_playback_observed=(
                     state.synthetic_playback_observed
                 ),
+                step=state.step,
+                invalidated=state.invalidated,
+                invalidation_generation=(
+                    state.invalidation_generation
+                ),
+                frame_consumed=state.frame_consumed,
             )
             entry.state = terminal_state
             for payload in payloads:
@@ -1068,17 +1541,30 @@ class OfflineLocalClosureAuthority:
             or not _valid_binding(state.binding)
             or type(state.lease_revision) is not int
             or type(state.locale) is not str
-            or state.locale not in _OPT_OUT_TEXT
+            or state.locale not in _closure_text(state.step)
         ):
             return None
-        return _token(
-            _CONFIRMATION_DOMAIN,
+        domain = (
+            _CONFIRMATION_DOMAIN
+            if state.step
+            is OfflineClosureStep.SCRIPTED_OPT_OUT
+            else _FAILURE_PROOF_DOMAIN
+        )
+        parts = (
+            state.step.value,
             state.contract_digest,
             state.binding.call_binding,
             str(state.binding.epoch),
             str(state.lease_revision),
+            *(
+                (str(state.active_revision),)
+                if state.step
+                is OfflineClosureStep.GENERIC_FAILURE
+                else ()
+            ),
             state.locale,
         )
+        return _token(domain, *parts)
 
     @staticmethod
     def _expected_capability_id(
@@ -1098,6 +1584,7 @@ class OfflineLocalClosureAuthority:
             return None
         return _token(
             _CAPABILITY_DOMAIN,
+            state.step.value,
             confirmation_id,
             str(state.active_revision),
             state.binding.stream_binding,
@@ -1107,8 +1594,16 @@ class OfflineLocalClosureAuthority:
     def _confirmation_matches(
         cls,
         state: _RegistryState,
-        confirmation: ScriptedOptOutConfirmationReceipt,
+        confirmation: (
+            ScriptedOptOutConfirmationReceipt
+            | GenericFailureProofReceipt
+        ),
     ) -> bool:
+        if state.step is OfflineClosureStep.GENERIC_FAILURE:
+            return cls._generic_proof_matches(
+                state,
+                confirmation,
+            )
         if (
             type(confirmation)
             is not ScriptedOptOutConfirmationReceipt
@@ -1145,6 +1640,89 @@ class OfflineLocalClosureAuthority:
         )
 
     @classmethod
+    def _generic_proof_matches(
+        cls,
+        state: _RegistryState,
+        proof: object,
+    ) -> bool:
+        return not (
+            type(proof) is not GenericFailureProofReceipt
+            or state.step
+            is not OfflineClosureStep.GENERIC_FAILURE
+            or state.failure_record is None
+            or state.failure_record_type is None
+            or type(state.failure_record)
+            is not state.failure_record_type
+            or type(state.failure_state_version) is not int
+            or type(state.failure_state_snapshot) is not dict
+            or not _digest(state.failure_snapshot_digest)
+            or not _generic_failure_snapshot_matches(
+                state.failure_state_snapshot,
+                call_sid=state.binding.call_binding,
+                language=state.locale,
+            )
+            or _failure_snapshot_digest(
+                state.failure_state_snapshot
+            )
+            != state.failure_snapshot_digest
+            or _failure_record_values(state.failure_record)
+            != (
+                "closure_required",
+                "extraction_terminal",
+                state.failure_state_version,
+                (),
+                (),
+            )
+            or proof.proof_id != cls._expected_confirmation_id(state)
+            or proof.lease_revision != state.lease_revision
+            or proof.active_revision != state.active_revision
+            or proof.expires_at_ms != state.expires_at_ms
+            or proof.arm != state.arm
+            or proof.journey != state.journey
+            or proof.contract_digest != state.contract_digest
+            or not _bindings_match(proof.binding, state.binding)
+            or proof.locale != state.locale
+            or proof.state_version != state.failure_state_version
+            or proof.state_snapshot_digest
+            != state.failure_snapshot_digest
+            or proof.step is not state.step
+        )
+
+    @classmethod
+    def _generic_proof_is_live(
+        cls,
+        state: _RegistryState,
+    ) -> bool:
+        return (
+            state.step is OfflineClosureStep.GENERIC_FAILURE
+            and state.failure_record is not None
+            and state.failure_record_type is not None
+            and type(state.failure_record)
+            is state.failure_record_type
+            and type(state.failure_state_version) is int
+            and type(state.failure_state_snapshot) is dict
+            and _digest(state.failure_snapshot_digest)
+            and _generic_failure_snapshot_matches(
+                state.failure_state_snapshot,
+                call_sid=state.binding.call_binding,
+                language=state.locale,
+            )
+            and _failure_snapshot_digest(
+                state.failure_state_snapshot
+            )
+            == state.failure_snapshot_digest
+            and _failure_record_values(state.failure_record)
+            == (
+                "closure_required",
+                "extraction_terminal",
+                state.failure_state_version,
+                (),
+                (),
+            )
+            and not state.invalidated
+        )
+
+    @classmethod
     def _capability_matches(
         cls,
         state: _RegistryState,
@@ -1164,7 +1742,7 @@ class OfflineLocalClosureAuthority:
                 state.binding,
             )
             or type(capability.locale) is not str
-            or capability.locale not in _OPT_OUT_TEXT
+            or capability.locale not in _closure_text(capability.step)
             or not isinstance(
                 capability.destination,
                 OfflineClosureDestination,
@@ -1197,6 +1775,12 @@ class OfflineLocalClosureAuthority:
             and capability.destination is state.destination
             and capability.privacy is state.privacy
             and capability.transport is state.transport
+            and capability.step is state.step
+            and (
+                state.step
+                is not OfflineClosureStep.GENERIC_FAILURE
+                or cls._generic_proof_is_live(state)
+            )
         )
 
     @classmethod
@@ -1215,6 +1799,7 @@ class OfflineLocalClosureAuthority:
             and state.facade is facade
             and state.active_record is active_record
             and not state.withdrawn
+            and not state.invalidated
             and state.inventory_sealed
             and state.capability is capability
             and not state.capability_tombstoned
@@ -1314,13 +1899,14 @@ class OfflineLocalClosureAuthority:
             or not _identifier(receipt.commit_id)
             or not _identifier(receipt.stage_id)
             or type(receipt.locale) is not str
-            or receipt.locale not in _OPT_OUT_TEXT
+            or receipt.locale not in _closure_text(receipt.step)
             or not _digest(receipt.text_digest)
             or not _digest(receipt.audio_digest)
             or type(receipt.frame_count) is not int
             or type(receipt.byte_count) is not int
             or type(receipt.audio_ms) is not int
             or type(receipt.committed_at_ms) is not int
+            or not isinstance(receipt.step, OfflineClosureStep)
         ):
             return False
         return (
@@ -1333,9 +1919,10 @@ class OfflineLocalClosureAuthority:
             and receipt.byte_count == commit.byte_count
             and receipt.audio_ms == commit.audio_ms
             and receipt.committed_at_ms == commit.committed_at_ms
-            and commit.locale in _OPT_OUT_TEXT
+            and receipt.step is commit.step
+            and commit.locale in _closure_text(commit.step)
             and commit.text_digest
-            == _OPT_OUT_TEXT_DIGESTS[commit.locale]
+            == _closure_text_digests(commit.step)[commit.locale]
             and commit.frame_count == 1
             and commit.byte_count > 0
             and commit.audio_ms == 20
@@ -1384,14 +1971,19 @@ class OfflineLocalClosureAuthority:
             or type(stage.frame_duration_ms) is not int
             or type(stage.frame_byte_count) is not int
             or not _digest(stage.audio_digest)
-            or state.locale not in _OPT_OUT_TEXT
+            or not isinstance(stage.step, OfflineClosureStep)
+            or not isinstance(receipt.step, OfflineClosureStep)
+            or state.locale not in _closure_text(state.step)
             or type(frame.payload) is not bytearray
         ):
             return False
-        text = _OPT_OUT_TEXT[state.locale]
-        text_digest = _OPT_OUT_TEXT_DIGESTS[state.locale]
+        text = _closure_text(state.step)[state.locale]
+        text_digest = _closure_text_digests(state.step)[
+            state.locale
+        ]
         stage_id = _token(
             _STAGE_DOMAIN,
+            state.step.value,
             capability_id,
             text_digest,
         )
@@ -1414,6 +2006,7 @@ class OfflineLocalClosureAuthority:
             and stage.frame_duration_ms == 20
             and stage.frame_byte_count == len(payload)
             and stage.audio_digest == audio_digest
+            and stage.step is state.step
             and receipt.capability_id == stage.capability_id
             and receipt.stage_id == stage.stage_id
             and receipt.locale == stage.locale
@@ -1429,6 +2022,7 @@ class OfflineLocalClosureAuthority:
             and receipt.frame_byte_count
             == stage.frame_byte_count
             and receipt.audio_digest == stage.audio_digest
+            and receipt.step is stage.step
             and frame.ordinal == stage.frame_ordinal
             and frame.duration_ms == stage.frame_duration_ms
             and frame.audio_digest == stage.audio_digest
@@ -1468,6 +2062,7 @@ class OfflineLocalClosureAuthority:
     ) -> bool:
         expected_commit_id = _token(
             _COMMIT_DOMAIN,
+            stage.step.value,
             stage.stage_id,
             str(now_ms),
         )
@@ -1483,6 +2078,7 @@ class OfflineLocalClosureAuthority:
             and commit.audio_ms == stage.frame_duration_ms
             and commit.committed_at_ms == now_ms
             and commit.frame is stage.frame
+            and commit.step is stage.step
             and cls._commit_receipt_matches(commit)
         )
 
@@ -1540,16 +2136,133 @@ class OfflineLocalClosureAuthority:
                 if terminal
                 else state.commit.text_digest
                 if state.commit is not None
-                else None
+                else state.consumed_text_digest
             ),
             synthetic_playback_observed=(
                 state.synthetic_playback_observed
             ),
+            step=state.step,
+            invalidated=state.invalidated,
+            invalidation_generation=state.invalidation_generation,
+            frame_consumed=state.frame_consumed,
         )
 
 
 def opt_out_text_digest(locale: str) -> str | None:
     return _OPT_OUT_TEXT_DIGESTS.get(locale)
+
+
+def generic_failure_text_digest(locale: str) -> str | None:
+    return _GENERIC_FAILURE_TEXT_DIGESTS.get(locale)
+
+
+def _failure_record_values(
+    record: object,
+) -> tuple[
+    str,
+    str,
+    int,
+    tuple[object, ...],
+    tuple[object, ...],
+] | None:
+    try:
+        status = record.status
+        phase = record.phase
+        state_version = record.state_version
+        act_ids = record.act_ids
+        act_kinds = record.act_kinds
+        status_value = status.value
+        phase_value = phase.value
+    except AttributeError:
+        return None
+    if (
+        type(status_value) is not str
+        or type(phase_value) is not str
+        or type(state_version) is not int
+        or state_version < 0
+        or type(act_ids) is not tuple
+        or type(act_kinds) is not tuple
+    ):
+        return None
+    return (
+        status_value,
+        phase_value,
+        state_version,
+        act_ids,
+        act_kinds,
+    )
+
+
+def _failure_snapshot_digest(
+    snapshot: object,
+) -> str | None:
+    if type(snapshot) is not dict:
+        return None
+    try:
+        encoded = json.dumps(
+            snapshot,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(
+        _FAILURE_SNAPSHOT_DOMAIN + encoded
+    ).hexdigest()
+
+
+def _generic_failure_snapshot_matches(
+    snapshot: object,
+    *,
+    call_sid: str,
+    language: str,
+) -> bool:
+    return (
+        _generic_failure_snapshot_is_safe(snapshot)
+        and snapshot.get("call_sid") == call_sid
+        and snapshot.get("language") == language
+    )
+
+
+def _generic_failure_snapshot_is_safe(
+    snapshot: object,
+) -> bool:
+    return (
+        type(snapshot) is dict
+        and len(snapshot) == 3
+        and all(type(key) is str for key in snapshot)
+        and frozenset(snapshot)
+        == {
+            "call_sid",
+            "language",
+            "side_effects_allowed",
+        }
+        and type(snapshot.get("call_sid")) is str
+        and type(snapshot.get("language")) is str
+        and snapshot.get("side_effects_allowed") is False
+    )
+
+
+def _closure_text(
+    step: object,
+) -> Mapping[str, str]:
+    if step is OfflineClosureStep.SCRIPTED_OPT_OUT:
+        return _OPT_OUT_TEXT
+    if step is OfflineClosureStep.GENERIC_FAILURE:
+        return _GENERIC_FAILURE_TEXT
+    return {}
+
+
+def _closure_text_digests(
+    step: object,
+) -> Mapping[str, str]:
+    if step is OfflineClosureStep.SCRIPTED_OPT_OUT:
+        return _OPT_OUT_TEXT_DIGESTS
+    if step is OfflineClosureStep.GENERIC_FAILURE:
+        return _GENERIC_FAILURE_TEXT_DIGESTS
+    return {}
 
 
 def _identifier(value: object) -> bool:
@@ -1656,6 +2369,7 @@ def _token(domain: bytes, *parts: str) -> str:
 
 
 __all__ = [
+    "GenericFailureProofReceipt",
     "OfflineAuthorityInventory",
     "OfflineClosureCapability",
     "OfflineClosureCommitReceipt",
@@ -1669,5 +2383,6 @@ __all__ = [
     "OfflineClosureTransport",
     "OfflineLocalClosureAuthority",
     "ScriptedOptOutConfirmationReceipt",
+    "generic_failure_text_digest",
     "opt_out_text_digest",
 ]

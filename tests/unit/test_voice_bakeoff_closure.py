@@ -12,13 +12,21 @@ import pytest
 
 import app.services.voice_bakeoff_closure as closure_module
 from app.services.voice_bakeoff_closure import (
+    GenericFailureProofReceipt,
     OfflineAuthorityInventory,
     OfflineClosureDestination,
     OfflineClosurePhase,
     OfflineClosurePrivacy,
+    OfflineClosureStep,
     OfflineClosureTransport,
     OfflineLocalClosureAuthority,
+    generic_failure_text_digest,
     opt_out_text_digest,
+)
+from app.services.voice_bakeoff_turn_composition import (
+    CompositionPhase,
+    CompositionResult,
+    CompositionStatus,
 )
 from app.services.voice_lifecycle import VoiceSessionBinding
 
@@ -53,6 +61,26 @@ def _sealed_inventory() -> OfflineAuthorityInventory:
         call_terminated=True,
         adapter_terminally_closed=True,
     )
+
+
+def _failure_record() -> CompositionResult:
+    return CompositionResult(
+        status=CompositionStatus.CLOSURE_REQUIRED,
+        phase=CompositionPhase.EXTRACTION_TERMINAL,
+        receipt_id="receipt_generic_failure",
+        input_turn_id="turn_generic_failure",
+        state_version=2,
+    )
+
+
+def _failure_snapshot(
+    *, locale: str = "en",
+) -> dict[str, object]:
+    return {
+        "call_sid": "synthetic_call",
+        "language": locale,
+        "side_effects_allowed": False,
+    }
 
 
 def _registered(*, locale: str = "en"):
@@ -148,6 +176,273 @@ def _owned_stage_payload(
     return stage.frame.payload
 
 
+def _generic_active(*, locale: str = "en"):
+    authority = OfflineLocalClosureAuthority(
+        generic_failure_record_type=CompositionResult,
+    )
+    facade = object()
+    leased = object()
+    active = object()
+    driver = object()
+    assert authority.register_leased(
+        facade=facade,
+        leased_record=leased,
+        driver_identity=driver,
+        participant_surrogate=object(),
+        lease_revision=0,
+        expires_at_ms=1_000,
+        arm="b1",
+        journey="generic_failure_closure",
+        contract_digest=_CONTRACT_DIGEST,
+        binding=_binding(),
+        locale=locale,
+        step=OfflineClosureStep.GENERIC_FAILURE,
+    )
+    assert authority.activate(
+        facade=facade,
+        leased_record=leased,
+        active_record=active,
+        driver_identity=driver,
+        active_revision=1,
+    )
+    return authority, facade, active, driver
+
+
+def _generic_capable(*, locale: str = "en"):
+    authority, facade, active, driver = _generic_active(
+        locale=locale
+    )
+    failure_record = _failure_record()
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+    proof = authority.admit_generic_failure(
+        facade=facade,
+        active_record=active,
+        driver_identity=driver,
+        failure_record=failure_record,
+        state_version=2,
+        state_snapshot=_failure_snapshot(locale=locale),
+        latest_locale=locale,
+        destination=OfflineClosureDestination.SYNTHETIC_LOOPBACK,
+        privacy=OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB,
+        transport=OfflineClosureTransport.LOCAL_READY,
+        inventory=_sealed_inventory(),
+        now_ms=2,
+    )
+    assert proof is not None
+    capability = authority.mint_capability(
+        facade=facade,
+        active_record=active,
+        confirmation=proof,
+        inventory=_sealed_inventory(),
+        now_ms=3,
+    )
+    assert capability is not None
+    return authority, facade, active, proof, capability
+
+
+def _generic_committed(*, locale: str = "en"):
+    authority, facade, active, proof, capability = (
+        _generic_capable(locale=locale)
+    )
+    stage = authority.stage(
+        facade=facade,
+        active_record=active,
+        capability=capability,
+        now_ms=4,
+        max_frame_bytes=320,
+        max_outbound_frames=1,
+        max_outbound_bytes=320,
+        max_outbound_audio_ms=20,
+    )
+    assert stage is not None
+    commit = authority.commit(
+        facade=facade,
+        active_record=active,
+        capability=capability,
+        stage=stage,
+        now_ms=5,
+    )
+    assert commit is not None
+    return authority, facade, active, proof, capability, stage, commit
+
+
+def test_generic_registration_requires_an_exact_record_type():
+    authority = OfflineLocalClosureAuthority()
+
+    assert not authority.register_leased(
+        facade=object(),
+        leased_record=object(),
+        driver_identity=object(),
+        participant_surrogate=object(),
+        lease_revision=0,
+        expires_at_ms=1_000,
+        arm="b1",
+        journey="generic_failure_closure",
+        contract_digest=_CONTRACT_DIGEST,
+        binding=_binding(),
+        locale="en",
+        step=OfflineClosureStep.GENERIC_FAILURE,
+    )
+
+
+def test_generic_proof_rejects_a_duck_typed_failure_record():
+    class DuckFailureRecord:
+        status = CompositionStatus.CLOSURE_REQUIRED
+        phase = CompositionPhase.EXTRACTION_TERMINAL
+        state_version = 2
+        act_ids = ()
+        act_kinds = ()
+
+    authority, facade, active, driver = _generic_active()
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+
+    assert authority.admit_generic_failure(
+        facade=facade,
+        active_record=active,
+        driver_identity=driver,
+        failure_record=DuckFailureRecord(),
+        state_version=2,
+        state_snapshot=_failure_snapshot(),
+        latest_locale="en",
+        destination=OfflineClosureDestination.SYNTHETIC_LOOPBACK,
+        privacy=OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB,
+        transport=OfflineClosureTransport.LOCAL_READY,
+        inventory=_sealed_inventory(),
+        now_ms=2,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    (
+        {
+            "call_sid": "other_call",
+            "language": "en",
+            "side_effects_allowed": False,
+        },
+        {
+            "call_sid": "synthetic_call",
+            "language": "es",
+            "side_effects_allowed": False,
+        },
+        {
+            "call_sid": "synthetic_call",
+            "language": "en",
+            "side_effects_allowed": True,
+        },
+        {
+            "call_sid": "synthetic_call",
+            "language": "en",
+        },
+        {
+            "call_sid": "synthetic_call",
+            "language": "en",
+            "side_effects_allowed": False,
+            "caller_identity": "must_not_be_retained",
+        },
+    ),
+)
+def test_generic_proof_requires_semantically_bound_snapshot(
+    snapshot: dict[str, object],
+):
+    authority, facade, active, driver = _generic_active()
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+
+    assert authority.admit_generic_failure(
+        facade=facade,
+        active_record=active,
+        driver_identity=driver,
+        failure_record=_failure_record(),
+        state_version=2,
+        state_snapshot=snapshot,
+        latest_locale="en",
+        destination=OfflineClosureDestination.SYNTHETIC_LOOPBACK,
+        privacy=OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB,
+        transport=OfflineClosureTransport.LOCAL_READY,
+        inventory=_sealed_inventory(),
+        now_ms=2,
+    ) is None
+
+
+def test_generic_proof_validates_only_its_private_snapshot_copy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    authority, facade, active, driver = _generic_active()
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+    caller_snapshot = _failure_snapshot()
+    copy_started = threading.Event()
+    allow_copy = threading.Event()
+    original_deepcopy = closure_module.deepcopy
+
+    def blocked_deepcopy(value):
+        if value is caller_snapshot:
+            copy_started.set()
+            assert allow_copy.wait(timeout=2)
+        return original_deepcopy(value)
+
+    monkeypatch.setattr(
+        closure_module,
+        "deepcopy",
+        blocked_deepcopy,
+    )
+    proofs = []
+    worker = threading.Thread(
+        target=lambda: proofs.append(
+            authority.admit_generic_failure(
+                facade=facade,
+                active_record=active,
+                driver_identity=driver,
+                failure_record=_failure_record(),
+                state_version=2,
+                state_snapshot=caller_snapshot,
+                latest_locale="en",
+                destination=(
+                    OfflineClosureDestination.SYNTHETIC_LOOPBACK
+                ),
+                privacy=(
+                    OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB
+                ),
+                transport=OfflineClosureTransport.LOCAL_READY,
+                inventory=_sealed_inventory(),
+                now_ms=2,
+            )
+        )
+    )
+    worker.start()
+    assert copy_started.wait(timeout=2)
+    caller_snapshot["side_effects_allowed"] = True
+    allow_copy.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert proofs == [None]
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.phase is (
+        OfflineClosurePhase.GENERAL_AUTHORITY_SEALED
+    )
+    assert not snapshot.confirmation_live
+
+
 @pytest.mark.parametrize(
     ("locale", "expected_text", "expected_digest"),
     (
@@ -215,6 +510,517 @@ def test_exact_reviewed_assets_stage_and_commit_once(
     assert snapshot.confirmation_tombstoned
     assert snapshot.capability_tombstoned
     assert not snapshot.capability_live
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_text", "expected_digest"),
+    (
+        (
+            "en",
+            "I’m sorry, I can’t continue this test call. Goodbye.",
+            "3875698272528850f8a6097bbd9e2076b2c14441badb77574516427201bba303",
+        ),
+        (
+            "es",
+            (
+                "Lo siento, no puedo continuar con esta llamada "
+                "de prueba. Adiós."
+            ),
+            "9cc751340092ffbdefc119d416c4b5e1ad59e939af864442ea95a2eb72f8a8be",
+        ),
+        (
+            "zh",
+            "抱歉，我无法继续这次测试通话。再见。",
+            "e3c6136a7cbf0868713c392d464497af2cefc95e76802bc1eb61c1605e861fec",
+        ),
+    ),
+)
+def test_generic_failure_assets_are_kind_bound_and_consumed_atomically(
+    locale: str,
+    expected_text: str,
+    expected_digest: str,
+):
+    (
+        authority,
+        facade,
+        active,
+        proof,
+        capability,
+        stage,
+        commit,
+    ) = _generic_committed(locale=locale)
+    entry = authority._entry
+    assert entry is not None
+    owned_payload = entry.state.commit.frame.payload
+
+    assert type(proof) is GenericFailureProofReceipt
+    assert proof.step is OfflineClosureStep.GENERIC_FAILURE
+    assert proof.binding is not entry.state.binding
+    assert proof.state_snapshot_digest == (
+        closure_module._failure_snapshot_digest(
+            _failure_snapshot(locale=locale)
+        )
+    )
+    assert capability.step is OfflineClosureStep.GENERIC_FAILURE
+    assert stage.step is OfflineClosureStep.GENERIC_FAILURE
+    assert stage.text == expected_text
+    assert stage.text_digest == expected_digest
+    assert commit.step is OfflineClosureStep.GENERIC_FAILURE
+    assert generic_failure_text_digest(locale) == expected_digest
+    assert authority.committed_frame(
+        facade=facade,
+        active_record=active,
+    ) is None
+    assert not authority.mark_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+    )
+
+    frame = authority.consume_for_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+        invalidation_generation=0,
+        now_ms=6,
+    )
+
+    assert frame is not None
+    assert frame.ordinal == 0
+    assert frame.duration_ms == 20
+    assert len(frame.payload) == 160
+    assert not any(owned_payload)
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.phase is (
+        OfflineClosurePhase.FRAME_CONSUMED_FOR_SYNTHETIC_PLAYBACK
+    )
+    assert snapshot.frame_consumed
+    assert snapshot.synthetic_playback_observed
+    assert snapshot.committed_frame_count == 0
+    assert authority.committed_frame(
+        facade=facade,
+        active_record=active,
+    ) is None
+    assert authority.consume_for_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+        invalidation_generation=0,
+        now_ms=6,
+    ) is None
+
+
+def test_generic_invalidation_before_atomic_consume_is_silent_and_scrubs():
+    (
+        authority,
+        facade,
+        active,
+        _proof,
+        _capability,
+        _stage,
+        commit,
+    ) = _generic_committed()
+    entry = authority._entry
+    assert entry is not None
+    owned_payload = entry.state.commit.frame.payload
+
+    assert authority.invalidate(
+        facade=facade,
+        active_record=active,
+    )
+    assert not any(owned_payload)
+    assert authority.consume_for_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+        invalidation_generation=0,
+        now_ms=6,
+    ) is None
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.phase is OfflineClosurePhase.NO_AUDIO_TEARDOWN
+    assert snapshot.invalidated
+    assert snapshot.invalidation_generation == 1
+    assert not snapshot.synthetic_playback_observed
+
+
+def test_generic_expiry_before_atomic_consume_selects_no_audio():
+    (
+        authority,
+        facade,
+        active,
+        _proof,
+        _capability,
+        _stage,
+        commit,
+    ) = _generic_committed()
+    entry = authority._entry
+    assert entry is not None
+    owned_payload = entry.state.commit.frame.payload
+
+    assert authority.consume_for_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+        invalidation_generation=0,
+        now_ms=1_001,
+    ) is None
+
+    assert not any(owned_payload)
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.phase is OfflineClosurePhase.NO_AUDIO_TEARDOWN
+    assert snapshot.invalidated
+    assert snapshot.invalidation_generation == 1
+    assert not snapshot.frame_consumed
+    assert not snapshot.synthetic_playback_observed
+
+
+@pytest.mark.parametrize(
+    ("invalidation_generation", "now_ms"),
+    (
+        (-1, 6),
+        (0, -1),
+        (True, 6),
+        (0, True),
+    ),
+)
+def test_malformed_consume_input_irreversibly_selects_no_audio(
+    invalidation_generation: object,
+    now_ms: object,
+):
+    (
+        authority,
+        facade,
+        active,
+        _proof,
+        _capability,
+        _stage,
+        commit,
+    ) = _generic_committed()
+    entry = authority._entry
+    assert entry is not None
+    owned_payload = entry.state.commit.frame.payload
+
+    assert authority.consume_for_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+        invalidation_generation=invalidation_generation,
+        now_ms=now_ms,
+    ) is None
+    assert not any(owned_payload)
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.phase is OfflineClosurePhase.NO_AUDIO_TEARDOWN
+    assert snapshot.invalidated
+    assert snapshot.invalidation_generation == 1
+    assert not snapshot.frame_consumed
+    assert not snapshot.synthetic_playback_observed
+    assert authority.consume_for_synthetic_playback(
+        facade=facade,
+        active_record=active,
+        commit=commit,
+        invalidation_generation=1,
+        now_ms=7,
+    ) is None
+
+
+def test_generic_invalidation_during_commit_construction_wins_silently(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    authority, facade, active, _proof, capability = (
+        _generic_capable()
+    )
+    stage = authority.stage(
+        facade=facade,
+        active_record=active,
+        capability=capability,
+        now_ms=4,
+        max_frame_bytes=320,
+        max_outbound_frames=1,
+        max_outbound_bytes=320,
+        max_outbound_audio_ms=20,
+    )
+    assert stage is not None
+    owned_payload = _owned_stage_payload(authority)
+    commit_build_started = threading.Event()
+    allow_commit_build = threading.Event()
+    original_token = closure_module._token
+
+    def blocked_token(domain: bytes, *parts: str) -> str:
+        if domain == closure_module._COMMIT_DOMAIN:
+            commit_build_started.set()
+            assert allow_commit_build.wait(timeout=2)
+        return original_token(domain, *parts)
+
+    monkeypatch.setattr(closure_module, "_token", blocked_token)
+    commits = []
+    worker = threading.Thread(
+        target=lambda: commits.append(
+            authority.commit(
+                facade=facade,
+                active_record=active,
+                capability=capability,
+                stage=stage,
+                now_ms=5,
+            )
+        )
+    )
+    worker.start()
+    assert commit_build_started.wait(timeout=2)
+
+    assert authority.invalidate(
+        facade=facade,
+        active_record=active,
+    )
+    allow_commit_build.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert commits == [None]
+    assert not any(owned_payload)
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.phase is OfflineClosurePhase.NO_AUDIO_TEARDOWN
+    assert snapshot.invalidated
+    assert snapshot.committed_frame_count == 0
+    assert not snapshot.synthetic_playback_observed
+
+
+def test_atomic_consume_linearizes_before_concurrent_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (
+        authority,
+        facade,
+        active,
+        _proof,
+        _capability,
+        _stage,
+        commit,
+    ) = _generic_committed()
+    copy_started = threading.Event()
+    allow_copy = threading.Event()
+    original_frame = closure_module.OfflineClosureCommittedFrame
+
+    def blocked_frame(**kwargs):
+        copy_started.set()
+        assert allow_copy.wait(timeout=2)
+        return original_frame(**kwargs)
+
+    monkeypatch.setattr(
+        closure_module,
+        "OfflineClosureCommittedFrame",
+        blocked_frame,
+    )
+    consumed = []
+    invalidated = []
+    consume_thread = threading.Thread(
+        target=lambda: consumed.append(
+            authority.consume_for_synthetic_playback(
+                facade=facade,
+                active_record=active,
+                commit=commit,
+                invalidation_generation=0,
+                now_ms=6,
+            )
+        )
+    )
+    consume_thread.start()
+    assert copy_started.wait(timeout=2)
+    invalidate_thread = threading.Thread(
+        target=lambda: invalidated.append(
+            authority.invalidate(
+                facade=facade,
+                active_record=active,
+            )
+        )
+    )
+    invalidate_thread.start()
+    allow_copy.set()
+    consume_thread.join(timeout=2)
+    invalidate_thread.join(timeout=2)
+
+    assert not consume_thread.is_alive()
+    assert not invalidate_thread.is_alive()
+    assert len(consumed) == 1
+    assert consumed[0] is not None
+    assert invalidated == [True]
+    snapshot = authority.snapshot(
+        facade=facade,
+        active_record=active,
+    )
+    assert snapshot is not None
+    assert snapshot.frame_consumed
+    assert snapshot.synthetic_playback_observed
+    assert not snapshot.invalidated
+
+
+def test_generic_failure_rejects_unapproved_locale_and_cross_kind_copy():
+    authority, facade, active, driver = _generic_active(locale="pt")
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+    assert authority.admit_generic_failure(
+        facade=facade,
+        active_record=active,
+        driver_identity=driver,
+        failure_record=object(),
+        state_version=2,
+        state_snapshot=_failure_snapshot(locale="pt"),
+        latest_locale="pt",
+        destination=OfflineClosureDestination.SYNTHETIC_LOOPBACK,
+        privacy=OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB,
+        transport=OfflineClosureTransport.LOCAL_READY,
+        inventory=_sealed_inventory(),
+        now_ms=2,
+    ) is None
+    assert generic_failure_text_digest("pt") is None
+
+    authority, facade, active, _proof, capability = (
+        _generic_capable()
+    )
+    copied = replace(
+        capability,
+        step=OfflineClosureStep.SCRIPTED_OPT_OUT,
+    )
+    assert authority.stage(
+        facade=facade,
+        active_record=active,
+        capability=copied,
+        now_ms=4,
+        max_frame_bytes=320,
+        max_outbound_frames=1,
+        max_outbound_bytes=320,
+        max_outbound_audio_ms=20,
+    ) is None
+
+
+def test_generic_proof_derives_and_revalidates_record_and_snapshot():
+    authority, facade, active, driver = _generic_active()
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+    assert authority.admit_generic_failure(
+        facade=facade,
+        active_record=active,
+        driver_identity=driver,
+        failure_record=object(),
+        state_version=2,
+        state_snapshot=_failure_snapshot(),
+        latest_locale="en",
+        destination=OfflineClosureDestination.SYNTHETIC_LOOPBACK,
+        privacy=OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB,
+        transport=OfflineClosureTransport.LOCAL_READY,
+        inventory=_sealed_inventory(),
+        now_ms=2,
+    ) is None
+
+    authority, facade, active, driver = _generic_active()
+    assert authority.seal_general_authority(
+        facade=facade,
+        active_record=active,
+        inventory=_sealed_inventory(),
+    )
+    caller_snapshot = _failure_snapshot()
+    proof = authority.admit_generic_failure(
+        facade=facade,
+        active_record=active,
+        driver_identity=driver,
+        failure_record=_failure_record(),
+        state_version=2,
+        state_snapshot=caller_snapshot,
+        latest_locale="en",
+        destination=OfflineClosureDestination.SYNTHETIC_LOOPBACK,
+        privacy=OfflineClosurePrivacy.LOCAL_BUFFER_SCRUB,
+        transport=OfflineClosureTransport.LOCAL_READY,
+        inventory=_sealed_inventory(),
+        now_ms=2,
+    )
+    assert proof is not None
+    caller_snapshot["language"] = "zh"
+    capability = authority.mint_capability(
+        facade=facade,
+        active_record=active,
+        confirmation=proof,
+        inventory=_sealed_inventory(),
+        now_ms=3,
+    )
+    assert capability is not None
+
+    authority, facade, active, proof, _capability = (
+        _generic_capable()
+    )
+    entry = authority._entry
+    assert entry is not None
+    entry.state.failure_state_snapshot["language"] = "zh"
+    assert authority.stage(
+        facade=facade,
+        active_record=active,
+        capability=entry.state.capability,
+        now_ms=4,
+        max_frame_bytes=320,
+        max_outbound_frames=1,
+        max_outbound_bytes=320,
+        max_outbound_audio_ms=20,
+    ) is None
+
+    authority, facade, active, _proof, _capability = (
+        _generic_capable()
+    )
+    entry = authority._entry
+    assert entry is not None
+    entry.state.failure_state_snapshot[
+        "side_effects_allowed"
+    ] = True
+    entry.state = replace(
+        entry.state,
+        failure_snapshot_digest=(
+            closure_module._failure_snapshot_digest(
+                entry.state.failure_state_snapshot
+            )
+        ),
+    )
+    assert authority.stage(
+        facade=facade,
+        active_record=active,
+        capability=entry.state.capability,
+        now_ms=4,
+        max_frame_bytes=320,
+        max_outbound_frames=1,
+        max_outbound_bytes=320,
+        max_outbound_audio_ms=20,
+    ) is None
+
+
+def test_closure_asset_catalogs_are_immutable():
+    with pytest.raises(TypeError):
+        closure_module._GENERIC_FAILURE_TEXT["en"] = "changed"
+    with pytest.raises(TypeError):
+        closure_module._GENERIC_FAILURE_TEXT_DIGESTS["en"] = "0" * 64
+    with pytest.raises(TypeError):
+        closure_module._OPT_OUT_TEXT["en"] = "changed"
 
 
 def test_confirmation_copy_cannot_mint_and_cleanup_failure_retains_original():
@@ -1009,7 +1815,13 @@ def test_transient_public_stage_metadata_cannot_cross_commit_boundary(
     object.__setattr__(stage, "stage_id", "e" * 64)
     allow_capture.set()
     assert commit_token_started.wait(timeout=2)
-    assert commit_token_parts == [(canonical_stage_id, "4")]
+    assert commit_token_parts == [
+        (
+            OfflineClosureStep.SCRIPTED_OPT_OUT.value,
+            canonical_stage_id,
+            "4",
+        )
+    ]
     object.__setattr__(stage, "stage_id", canonical_stage_id)
     allow_second_validation.set()
     worker.join(timeout=2)
@@ -1461,6 +2273,10 @@ def test_teardown_zeroizes_without_synthetic_playback_and_drops_authority():
         "capability_tombstoned",
         "text_digest",
         "synthetic_playback_observed",
+        "step",
+        "invalidated",
+        "invalidation_generation",
+        "frame_consumed",
     }
 
 
@@ -1522,6 +2338,7 @@ def test_closure_authority_has_no_candidate_provider_or_live_route_imports():
     }
     assert direct_services == {"app.services.voice_lifecycle"}
     source = _SOURCE_PATH.read_text(encoding="utf-8").casefold()
+    assert "offlinefailureinjection" not in source
     forbidden = {
         "twilio",
         "gemini",

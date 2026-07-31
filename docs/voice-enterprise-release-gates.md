@@ -11,7 +11,42 @@ The voice-only candidate must not acquire PR #76 Jobber customer memory or live
 controller wiring. Customer-memory behavior and controller integration remain
 separate release decisions.
 
+## Bakeoff evidence overlay
+
+The following gates apply to any future voice-architecture bakeoff and do not
+supersede the disclosure, transcript-encryption, tenant-isolation, retention,
+deletion, export, or counsel-review blockers below. A bakeoff result is not staging
+or production authorization.
+
+- Measure two clocks: common caller-harness ground-truth last-speech sample to
+  first caller-side playback evidence for selection, and candidate-detected
+  activity-end to first media sent for endpointing diagnosis. A transcript fragment
+  is neither clock.
+- Keep generated, `transport_resolved`, caller-side `caller_playback_observed`,
+  `playback_inferred`, partial, clear, interruption, semantic-act, and terminal
+  evidence distinct. A Twilio mark, provider completion, output text, or dashboard
+  event is never a caller-heard or semantic-completion claim.
+- Require hard gates for complete thoughts, answer-before-follow-up, one question,
+  silence/presence/closure sequencing, safety-content completeness, repair,
+  interruption, reconnect, language/accessibility fallback, and zero premature
+  terminal action.
+- Require pre-media ingress authentication, a dedicated nonproduction identity,
+  no production reachability, privacy-setting attestation, payload-safe logs,
+  one-use sole-owner authorization after independent advisory review with no
+  unresolved P1, revision/source/configuration/manifest/evaluator digests, and
+  caller-side evidence for every selectable arm.
+- A runtime without caller-side observation may use only a preregistered,
+  cancellable conservative playback inference; transport resolution alone cannot
+  arm a silence timer or authorize closure.
+
 ## Automated Voice Gates
+
+This legacy automated/staging matrix applies only to the existing production-shaped
+candidate and is non-authorizing diagnostic history. It is inapplicable to bakeoff
+selection: a bakeoff must use the isolated Task-4.7 application, caller harness,
+and new evaluator, and may not deploy or call `kevin-api-staging`. Staging becomes
+eligible only after a winner is selected, a separate winner-specific integration
+plan passes review, and the owner explicitly authorizes staging in that session.
 
 Export only `voice_timing` log events and pipe them directly to the evaluator:
 

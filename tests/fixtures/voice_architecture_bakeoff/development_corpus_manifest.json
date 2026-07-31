@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "status": "development_only_unsealed",
+  "provenance": {
+    "synthetic_phone_codec_audio_only": true,
+    "real_calls_prohibited": true,
+    "customer_content_prohibited": true,
+    "purpose_recorded_audio_requires_separate_consent_gate": true
+  },
+  "release_language_contract": {
+    "status": "owner_decision_required_before_sealing",
+    "qualified_languages": [],
+    "qualified_code_switch_pairs": [],
+    "unsupported_language_fallback": "REPLACE_WITH_APPROVED_TRUTHFUL_FALLBACK_ID"
+  },
+  "scenario_families": [
+    "direct_answer_before_follow_up",
+    "one_question_maximum",
+    "phone_confirmation_and_correction",
+    "correction_name",
+    "correction_service",
+    "correction_urgency",
+    "correction_address",
+    "correction_callback_intent",
+    "silence_and_long_pause",
+    "brief_acknowledgement",
+    "non_interrupting_backchannel",
+    "non_interrupting_noise",
+    "early_middle_final_interruption",
+    "noise_and_pcmu_variation",
+    "pricing_and_callback_boundaries",
+    "plumbing_safety_guidance",
+    "electrical_safety_guidance",
+    "exact_quote_refusal",
+    "unsupported_promise_refusal",
+    "private_memory_nondisclosure",
+    "provider_disconnect",
+    "reconnect",
+    "low_confidence_repair",
+    "output_ceiling_repair",
+    "generation_timeout_repair",
+    "stt_failure_repair",
+    "tts_failure_repair",
+    "playout_failure_repair",
+    "reconnect_failure_repair",
+    "uncertain_state_fail_closed_no_retry",
+    "security_or_privacy_failure_fail_closed_no_retry",
+    "irrecoverable_transport_no_spoken_repair",
+    "repeat_slower_wait_opt_out_and_voicemail",
+    "development_multilingual_case",
+    "development_code_switch_case",
+    "development_unsupported_language_fallback"
+  ],
+  "development_cases": [],
+  "sealed_holdout": {
+    "status": "external_access_controlled_store_required",
+    "reference": "REPLACE_WITH_SEALED_HOLDOUT_CUSTODY_REFERENCE"
+  }
+}

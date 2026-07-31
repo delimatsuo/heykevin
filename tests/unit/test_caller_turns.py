@@ -13,6 +13,7 @@ from app.services.caller_turns import (
     CallerTurnCompletionStatus,
     CallerTurnEvent,
     CallerTurnEventKind,
+    retrospective_turn_observation,
 )
 
 
@@ -418,3 +419,14 @@ def test_redacted_report_excludes_transcript_and_event_payloads():
     assert "text" not in json.dumps(report)
     assert report["transcript_codepoints"] == len("Synthetic caller text")
     assert report["status"] == "retrospective_complete"
+
+
+def test_retrospective_observation_excludes_transcript_and_live_authority():
+    assembler = CallerTurnAssembler(active_epoch=1, quiescence_ms=100)
+    assembler.ingest(_event(CallerTurnEventKind.INPUT_TRANSCRIPT_FRAGMENT, at_ms=1, sequence=1, text="Synthetic caller text"))
+    assembler.ingest(_event(CallerTurnEventKind.TURN_COMPLETE, at_ms=2, sequence=2))
+    observation = retrospective_turn_observation(assembler.advance_time(102)[0])
+
+    assert observation["scope"] == "retrospective_telemetry_only"
+    assert "transcript" not in observation
+    assert "authorization" not in observation

@@ -1,0 +1,277 @@
+"""Bakeoff-only coordinator joining shared speech and lifecycle contracts."""
+
+from __future__ import annotations
+
+from app.services.voice_call_lifecycle import CallIntent, CallLifecycle, QuestionIntent
+from app.services.voice_lifecycle import (
+    VoiceEvent,
+    VoiceSemanticActKind,
+    VoiceSessionBinding,
+)
+from app.services.voice_speech_control import (
+    ReplayMode,
+    ReplaySource,
+    ReservedSpeech,
+    SpeechAuthorization,
+    SpeechControl,
+    SpokenPlan,
+)
+
+
+class VoiceBakeoffCoordinator:
+    """Provider-neutral coordinator; emits inert lifecycle intents only."""
+
+    def __init__(
+        self,
+        *,
+        speech: SpeechControl,
+        calls: CallLifecycle,
+    ) -> None:
+        self.speech = speech
+        self.calls = calls
+        self._reserved_questions: dict[tuple[str, ...], QuestionIntent] = {}
+
+    def reserve_plan(
+        self,
+        *,
+        plan: SpokenPlan,
+        authorization: SpeechAuthorization,
+        event_id: str,
+        sequence: int,
+        at_ms: int,
+        turn_sequence: int | None = None,
+    ) -> tuple[str, ...]:
+        return tuple(
+            act.act_id
+            for act in self.reserve_batch(
+                plan=plan,
+                authorization=authorization,
+                event_id=event_id,
+                sequence=sequence,
+                at_ms=at_ms,
+                turn_sequence=turn_sequence,
+            )
+        )
+
+    def reserve_batch(
+        self,
+        *,
+        plan: SpokenPlan,
+        authorization: SpeechAuthorization,
+        event_id: str,
+        sequence: int,
+        at_ms: int,
+        turn_sequence: int | None = None,
+    ) -> tuple[ReservedSpeech, ...]:
+        if (
+            authorization.binding != self.calls.binding
+            or (
+                turn_sequence is not None
+                and (
+                    type(turn_sequence) is not int
+                    or turn_sequence < 0
+                )
+            )
+        ):
+            return ()
+        try:
+            acts = self.speech.reserve(plan, authorization)
+        except ValueError:
+            return ()
+        question = next(
+            ((planned, reserved) for planned, reserved in zip(plan.acts, acts, strict=True) if reserved.kind is VoiceSemanticActKind.QUESTION),
+            None,
+        )
+        if question is not None:
+            planned, reserved = question
+            assert planned.question_slot is not None
+            intent = QuestionIntent(
+                slot=planned.question_slot,
+                turn_id=reserved.turn_id,
+                act_id=reserved.act_id,
+                turn_sequence=turn_sequence,
+            )
+        if question is not None and not self.calls.reserve_question(
+            binding=authorization.binding,
+            event_id=event_id,
+            sequence=sequence,
+            at_ms=at_ms,
+            question=intent,
+        ):
+            if not self.speech.rollback_reservation(acts):
+                raise RuntimeError("speech reservation rollback failed")
+            return ()
+        if question is not None:
+            self._reserved_questions[tuple(act.act_id for act in acts)] = intent
+        return acts
+
+    def reserve_replay_batch(
+        self,
+        *,
+        source: ReplaySource,
+        request_id: str,
+        mode: ReplayMode,
+        authorization: SpeechAuthorization,
+        event_id: str,
+        sequence: int,
+        at_ms: int,
+        turn_sequence: int,
+    ) -> tuple[ReservedSpeech, ...]:
+        """Join one exact replay reservation to question lifecycle state."""
+        if (
+            authorization.binding != self.calls.binding
+            or type(turn_sequence) is not int
+            or turn_sequence < 0
+        ):
+            return ()
+        try:
+            acts = self.speech.reserve_replay(
+                source=source,
+                request_id=request_id,
+                mode=mode,
+                authorization=authorization,
+            )
+        except ValueError:
+            return ()
+        if len(acts) != 1:
+            return ()
+        reserved = acts[0]
+        question = None
+        if reserved.kind is VoiceSemanticActKind.QUESTION:
+            if source.question_slot is None:
+                if not self.speech.rollback_reservation(acts):
+                    self._seal_failed_replay(acts)
+                    raise RuntimeError(
+                        "invalid replay reservation rollback failed"
+                    )
+                return ()
+            question = QuestionIntent(
+                slot=source.question_slot,
+                turn_id=reserved.turn_id,
+                act_id=reserved.act_id,
+                turn_sequence=turn_sequence,
+            )
+            if not self.calls.reserve_question(
+                binding=authorization.binding,
+                event_id=event_id,
+                sequence=sequence,
+                at_ms=at_ms,
+                question=question,
+            ):
+                if not self.speech.rollback_reservation(acts):
+                    self._seal_failed_replay(acts)
+                    raise RuntimeError(
+                        "replay reservation rollback failed"
+                    )
+                return ()
+            self._reserved_questions[
+                tuple(act.act_id for act in acts)
+            ] = question
+        return acts
+
+    def _seal_failed_replay(
+        self,
+        acts: tuple[ReservedSpeech, ...],
+    ) -> None:
+        """Seal exact replay remnants after pristine rollback fails."""
+        speech_closed = True
+        for item in acts:
+            try:
+                speech_closed = (
+                    self.speech.hard_terminalize(
+                        item.act_id
+                    )
+                    and speech_closed
+                )
+            except Exception:  # noqa: BLE001
+                speech_closed = False
+        try:
+            batch_closed = (
+                self.speech.force_retire_reservation(acts)
+            )
+        except Exception:  # noqa: BLE001
+            batch_closed = False
+        try:
+            self.calls.hard_terminalize()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        if (
+            not speech_closed
+            or not batch_closed
+            or not self.calls.is_quiescent
+        ):
+            raise RuntimeError(
+                "replay reservation fail-closed cleanup failed"
+            )
+
+    def rollback_batch(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        batch_key = tuple(item.act_id for item in reserved)
+        question = self._reserved_questions.get(batch_key)
+        if question is not None and not self.calls.rollback_question_reservation(
+            binding=reserved[0].binding,
+            question=question,
+        ):
+            return False
+        if self.speech.rollback_reservation(reserved):
+            self._reserved_questions.pop(batch_key, None)
+            return True
+        if question is not None:
+            raise RuntimeError("question rollback succeeded but speech rollback failed")
+        return False
+
+    def rollback_pristine_question(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Clear only the call-side question for a batch being compensated."""
+        batch_key = tuple(item.act_id for item in reserved)
+        question = self._reserved_questions.get(batch_key)
+        if question is None:
+            return True
+        if not self.calls.rollback_question_reservation(
+            binding=reserved[0].binding,
+            question=question,
+        ):
+            return False
+        self._reserved_questions.pop(batch_key, None)
+        return True
+
+    def complete_batch(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        batch_key = tuple(item.act_id for item in reserved)
+        self._reserved_questions.pop(batch_key, None)
+        return self.speech.complete_reservation(reserved)
+
+    def retire_batch(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        batch_key = tuple(item.act_id for item in reserved)
+        if not self.speech.retire_reservation(reserved):
+            return False
+        self._reserved_questions.pop(batch_key, None)
+        return True
+
+    def force_retire_batch(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Force-retire an exact already-sealed speech batch."""
+        batch_key = tuple(item.act_id for item in reserved)
+        if not self.speech.force_retire_reservation(reserved):
+            return False
+        self._reserved_questions.pop(batch_key, None)
+        return True
+
+    def reservation_batch_count(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> int:
+        """Return content-free batch state for cleanup verification."""
+        return self.speech.reservation_batch_count(binding)
+
+    def semantic_confirmed(self, *, event: VoiceEvent, event_id: str, sequence: int) -> bool:
+        return self.calls.semantic_confirmed(
+            event=event,
+            event_id=event_id,
+            sequence=sequence,
+        )
+
+    def caller_playback(self, *, event: VoiceEvent, event_id: str, sequence: int) -> tuple[CallIntent, ...]:
+        return self.calls.observed_playback(event_id=event_id, sequence=sequence, event=event)

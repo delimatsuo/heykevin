@@ -15,7 +15,11 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from app.services.voice_bakeoff_credential_broker import NonproductionCredentialBroker
 from app.services.voice_bakeoff_nonce_ledger import FileBackedNonceLedger
-from app.services.voice_bakeoff_security_contracts import approval_signature_message
+from app.services.voice_bakeoff_security_contracts import (
+    _APPROVAL_DOMAIN,
+    approval_signature_message,
+)
+from scripts.sign_voice_bakeoff_approval import sign_payload
 from scripts.voice_bakeoff_caller import development_harness_manifest
 
 _SCRIPT = Path("scripts/run_voice_architecture_bakeoff.py")
@@ -532,7 +536,7 @@ _OFFLINE_SOURCE_PATHS = {
 }
 _OFFLINE_APPROVED_SOURCE_DIGESTS = {
     "scripts.run_voice_architecture_bakeoff": (
-        "5927721778d8c96724c697daf813530bbb1ea8eb8b51f0b5bcac54ba6b4869a7"
+        "64c474c32f94323193ae8540044aa61b92890fe666ed44a0daeccd85f6f2d110"
     ),
     "scripts.voice_bakeoff_caller": (
         "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
@@ -541,7 +545,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "2a102679528d82ac46170053cdd76b475bec8984a9ba1b20f7bbff2ad9ccf8e6"
     ),
     "app.services.voice_bakeoff_credential_broker": (
-        "c3d39899a0a537dcbe18c80e029c05d07eb43086cc39d8aa34a2d7ac2bbc31fc"
+        "d40630fe20fb0a930a59aa8e80a071e466b78725a239e6de74812ea65e6fd2ca"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
         "a6d52edb8850170d134a804d84aae92f15c3beb3be0fb0b81b753d80a0980b8e"
@@ -550,7 +554,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "542c08bacd6e6c2ea81b0b746368a359b4b71b38229860dbd8aae9fa1e8ce0cb"
     ),
     "app.services.voice_bakeoff_security_contracts": (
-        "77948e3a357699ee1738379380e2cc0f76612ce3aea75f455dffdd1e17ab5b74"
+        "0f49fcd1dce75d05d205c9349765720e316c0f5955f373d99f64bdc174f3ea12"
     ),
 }
 _OFFLINE_ALLOWED_IMPORTS = {
@@ -670,6 +674,12 @@ _OFFLINE_ALLOWED_IMPORTS = {
             "from",
             "app.services.voice_bakeoff_security_contracts",
             "TrustedSignerKey",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "approval_signature_payload",
             "",
         ),
         (
@@ -827,6 +837,7 @@ _OFFLINE_ALLOWED_FILE_IO = {
                 "path.stat()",
                 'path.read_text(encoding="utf-8")',
                 "args.manifest.read_bytes()",
+                'args.emit_signing_payload.write_text(payload_text, encoding="utf-8")',
             )
         ]
     ),
@@ -1130,6 +1141,10 @@ def test_execute_provider_is_rejected_before_inputs_or_subprocess(
             "--approval",
             "must_not_be_read.json",
             "--dry-run",
+            "--nonce-ledger",
+            "must_not_be_read_ledger.json",
+            "--residue-destination",
+            "must_not_be_read_residue",
             "--execute-provider",
         ],
     )
@@ -1301,3 +1316,119 @@ def test_cli_rejects_replayed_nonce_on_second_invocation(tmp_path: Path):
     second_payload = json.loads(second.stdout)
     assert second_payload["verdict"] == "rejected_local_preflight"
     assert second_payload["error_count"] == 1
+
+
+def test_emit_signing_payload_closes_the_loop_with_the_real_signing_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """End-to-end proof that --emit-signing-payload actually closes the gap:
+    an operator with only scripts/sign_voice_bakeoff_approval.py's real
+    sign_payload() — never reaching into runner-private helpers like
+    _build_trust_material/_build_signed_approval the way this file's own
+    _sign_with_key test fixture does — can produce a signature
+    OfflineApprovalVerifier.verify() actually accepts.
+
+    1. Write a valid approval/manifest pair to disk with a syntactically
+       valid but not-yet-real placeholder owner_authorization.signature.
+    2. Run the runner's real --emit-signing-payload CLI mode as a subprocess
+       (the actual new interface, not an in-process shortcut) to produce a
+       JSON payload file.
+    3. Sign that exact payload with sign_voice_bakeoff_approval.sign_payload()
+       — Task 4's real, independent signing function — under the real
+       _APPROVAL_DOMAIN, exactly as the brief for this fix specifies.
+    4. Embed the resulting signature into the approval dict's
+       owner_authorization.signature and confirm runner.validate(...) now
+       reaches errors == [] — the same "blocked_external_verification_required
+       with zero errors" outcome the pre-existing valid-envelope tests check
+       (test_valid_shape_still_requires_external_verification,
+       test_cli_valid_local_envelope_stops_at_external_verification) —
+       proving this is a genuinely verifiable signature, not just a
+       plausible-looking one.
+    """
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    manifest = _manifest()
+    manifest["candidate"]["source_sha"] = source_sha
+    approval = _approval()
+    approval["issued_at_ms"] = int(time.time() * 1000)
+    approval["expires_at_ms"] = approval["issued_at_ms"] + 60_000
+    approval["source_sha"] = source_sha
+    approval["technical_review"]["source_sha"] = source_sha
+    new_dependencies, env_vars = _nonprod_dependency_overrides(approval["dependencies"])
+    approval["dependencies"] = new_dependencies
+    approval["dependency_inventory_digest"] = runner._dependency_inventory_digest(
+        new_dependencies
+    )
+    manifest["candidate"]["dependency_inventory_digest"] = approval[
+        "dependency_inventory_digest"
+    ]
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+    approval["manifest_digest"] = runner._manifest_digest_bytes(manifest_path.read_bytes())
+    approval["technical_review"]["manifest_digest"] = approval["manifest_digest"]
+
+    # Placeholder: syntactically valid 64-byte hex, so --emit-signing-payload's
+    # _build_signed_approval (DetachedApprovalSignature construction)
+    # succeeds. Its value is excluded from self_digest by _canonical_digest
+    # and does not appear in approval_signature_message's payload at all —
+    # only the fields that DO affect the message need to already be final,
+    # and they are.
+    approval["owner_authorization"]["signature"] = "0" * 128
+    _resign(approval)
+
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(approval, separators=(",", ":")), encoding="utf-8")
+
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    trust_owner_public_key_hex = private_key.public_key().public_bytes_raw().hex()
+    payload_path = tmp_path / "signing_payload.json"
+
+    emit_result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(tmp_path / "unused_ledger.json"),
+            "--residue-destination",
+            str(tmp_path / "unused_residue"),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+            "--emit-signing-payload",
+            str(payload_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+    )
+    assert emit_result.returncode == 0, (emit_result.stdout, emit_result.stderr)
+    assert json.loads(emit_result.stdout) == {
+        "verdict": "signing_payload_emitted",
+        "error_count": 0,
+    }
+    assert emit_result.stderr == ""
+
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    signature = sign_payload(private_key, domain=_APPROVAL_DOMAIN, payload=payload)
+
+    approval["owner_authorization"]["signature"] = signature.hex()
+    _resign(approval)
+
+    for key, value in env_vars.items():
+        monkeypatch.setenv(key, value)
+
+    errors = runner.validate(
+        approval,
+        manifest,
+        "B1",
+        source_sha,
+        trust_owner_public_key_hex=trust_owner_public_key_hex,
+    )
+    assert errors == []

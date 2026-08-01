@@ -34,10 +34,16 @@ from typing import Mapping
 # Comprehensive, per-provider production-identity/destination denylisting
 # is a separate, independent mechanism: DeclaredProductionDenylist /
 # ExecutionFirewallResolver in voice_bakeoff_execution_firewall_contracts.py.
-# Task 6 of the provider-approval-rebuild plan wires both this broker and
-# that resolver into the runner as two independent checks run side by side
-# — this denylist is a narrow, specific backstop, not the sole production
-# guard.
+# Task 6 investigated wiring that mechanism into the runner alongside this
+# broker, and deliberately deferred it: ExecutionFirewallResolver requires
+# real production destination/identity data (as SHA-256 digests) for every
+# provider dependency, which does not exist anywhere in this plan and was
+# not something Task 6 should fabricate. That decision means this denylist
+# is, for now, the sole production guard the runner actually enforces — not
+# a narrow backstop alongside a broader mechanism. Wiring in the broader
+# mechanism remains a live option, pending a future decision with real
+# per-provider production data to populate it; it is not scheduled as part
+# of this plan.
 PRODUCTION_ACCOUNT_REGION_DENYLIST: tuple[str, ...] = (
     "kevin-491315:us-central1",
 )

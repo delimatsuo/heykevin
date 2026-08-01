@@ -32,6 +32,7 @@ from app.services.voice_bakeoff_security_contracts import (
     TrustSnapshot,
     TrustSnapshotRootSigner,
     TrustSnapshotRootVerifier,
+    approval_signature_payload,
 )
 
 try:
@@ -307,7 +308,38 @@ def _dependency_inventory_digest(dependencies: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def validate(approval: dict[str, object], manifest: dict[str, object], arm: str, source_sha: str, now_ms: int | None = None, schema: dict[str, object] | None = None, manifest_digest: str | None = None, trust_owner_public_key_hex: str | None = None) -> list[str]:
+def _validate_and_build_signed_approval(
+    approval: dict[str, object],
+    manifest: dict[str, object],
+    arm: str,
+    source_sha: str,
+    current_ms: int,
+    schema: dict[str, object] | None,
+    manifest_digest: str | None,
+    trust_owner_public_key_hex: str | None,
+) -> tuple[list[str], SignedApproval | None, tuple[TrustSnapshot, OfflineApprovalVerifier] | None]:
+    """Run every `validate()` check that does not require an already-verified
+    signature — shape/digest/binding shape, reviewer/signer separation, and
+    (pre-verification) `SignedApproval` construction against an ephemeral
+    trust snapshot bound to `trust_owner_public_key_hex` — and return
+    `(errors, signed_approval, trust_material)`.
+
+    `signed_approval`/`trust_material` are `None` whenever `errors` is
+    non-empty. `signed_approval` can still come back non-`None` with
+    `trust_material` still `None` (an absent/malformed
+    `trust_owner_public_key_hex` never itself appends to `errors` here — see
+    `_build_trust_material`'s call site below); callers that need a
+    genuinely trust-anchored `signed_approval` (not one built against the
+    `_ZERO_DIGEST` fallback) must check `trust_material is not None`
+    themselves, exactly as `validate()`'s own `verifier.verify()` step below
+    does.
+
+    Shared by `validate()` (which continues on to call
+    `OfflineApprovalVerifier.verify()` and the credential broker) and
+    `main()`'s `--emit-signing-payload` mode (which stops here, before real
+    signature verification — there is no real signature yet — to hand an
+    operator the exact bytes a real owner signature must cover).
+    """
     required = {"approval_id", "nonce", "issued_at_ms", "expires_at_ms", "self_digest", "environment", "arm", "source_sha", "manifest_digest", "dependency_inventory_digest", "artifact_digests", "dependencies", "caps", "disabled_features", "custody_references", "trust_metadata", "authorization_model", "owner_authorization", "technical_review"}
     errors = []
     if arm not in _OFFLINE_ADAPTERS:
@@ -400,7 +432,6 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
     artifacts = approval.get("artifact_digests")
     if not isinstance(artifacts, dict) or set(artifacts) != _ARTIFACT_DIGESTS or any(not _digest(value) for value in artifacts.values()):
         errors.append("artifact digest set invalid")
-    current_ms = int(time.time() * 1000) if now_ms is None else now_ms
     if isinstance(approval.get("issued_at_ms"), bool) or not isinstance(approval.get("issued_at_ms"), int) or isinstance(approval.get("expires_at_ms"), bool) or not isinstance(approval.get("expires_at_ms"), int) or approval["issued_at_ms"] >= approval["expires_at_ms"] or approval["expires_at_ms"] <= current_ms:
         errors.append("approval is expired or timestamps invalid")
 
@@ -435,6 +466,22 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
         except (ValueError, TypeError) as exc:
             errors.append(f"signed approval construction failed: {exc}")
 
+    return errors, signed_approval, trust_material
+
+
+def validate(approval: dict[str, object], manifest: dict[str, object], arm: str, source_sha: str, now_ms: int | None = None, schema: dict[str, object] | None = None, manifest_digest: str | None = None, trust_owner_public_key_hex: str | None = None) -> list[str]:
+    current_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    errors, signed_approval, trust_material = _validate_and_build_signed_approval(
+        approval,
+        manifest,
+        arm,
+        source_sha,
+        current_ms,
+        schema,
+        manifest_digest,
+        trust_owner_public_key_hex,
+    )
+
     if not errors:
         verified = None
         if signed_approval is not None and trust_material is not None:
@@ -457,6 +504,72 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
     return errors
 
 
+def _load_inputs(
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, object], dict[str, object], dict[str, object], str]:
+    """Load and return `(source_sha, manifest, approval, schema,
+    manifest_digest)` — the local inputs both `main()`'s normal
+    validate-and-admit path and its `--emit-signing-payload` mode need
+    before their behavior diverges. Propagates whatever `_load()`/
+    `read_bytes()`/`subprocess` itself raises; callers are responsible for
+    catching `(OSError, ValueError, json.JSONDecodeError)`, exactly as
+    `main()` already did for this same loading sequence before it moved
+    here."""
+    root = Path(__file__).resolve().parents[1]
+    source_sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    manifest_bytes = args.manifest.read_bytes()
+    manifest = _load(args.manifest)
+    approval = _load(args.approval)
+    schema = _load(root / _SCHEMA_PATH)
+    manifest_digest = _manifest_digest_bytes(manifest_bytes)
+    return source_sha, manifest, approval, schema, manifest_digest
+
+
+def _run_emit_signing_payload(args: argparse.Namespace) -> int:
+    """`--emit-signing-payload` mode: compute and write the exact JSON
+    payload dict a real owner signature must cover for this
+    approval/manifest/arm/--trust-owner-public-key combination — everything
+    `validate()` checks up to, but not including, verifying a real
+    signature. Never admits a nonce and never runs the residue audit:
+    neither applies yet — there is no real signature to admit a nonce for,
+    and nothing here executes.
+
+    Feed the written file to
+    `scripts/sign_voice_bakeoff_approval.py --payload <path> --domain-name
+    approval` to produce a signature `OfflineApprovalVerifier.verify()` will
+    accept once it is embedded into the approval JSON's
+    `owner_authorization.signature`. Until then, that field only needs to be
+    present and syntactically valid 128-hex-character text to satisfy this
+    mode's own shape/construction checks (e.g. 128 zeros) — its value is
+    excluded from `self_digest` (see `_canonical_digest`) and ignored by
+    `approval_signature_payload`, so a placeholder there does not change the
+    bytes this mode emits.
+    """
+    try:
+        source_sha, manifest, approval, schema, manifest_digest = _load_inputs(args)
+        current_ms = int(time.time() * 1000)
+        errors, signed_approval, trust_material = _validate_and_build_signed_approval(
+            approval,
+            manifest,
+            args.arm,
+            source_sha,
+            current_ms,
+            schema,
+            manifest_digest,
+            args.trust_owner_public_key,
+        )
+        if not errors and trust_material is None:
+            errors = ["cannot emit signing payload without a valid --trust-owner-public-key"]
+        if not errors and signed_approval is not None:
+            payload_text = json.dumps(approval_signature_payload(signed_approval), indent=2, sort_keys=True)
+            args.emit_signing_payload.write_text(payload_text, encoding="utf-8")
+    except (OSError, ValueError, json.JSONDecodeError):
+        errors = ["invalid local input"]
+    verdict = "signing_payload_emitted" if not errors else "rejected_local_preflight"
+    print(json.dumps({"verdict": verdict, "error_count": len(errors)}, sort_keys=True))
+    return 0 if not errors else 2
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arm", required=True)
@@ -466,20 +579,31 @@ def main() -> int:
     parser.add_argument("--nonce-ledger", type=Path, required=True)
     parser.add_argument("--residue-destination", type=Path, required=True)
     parser.add_argument("--trust-owner-public-key", default=None)
+    parser.add_argument(
+        "--emit-signing-payload",
+        type=Path,
+        default=None,
+        help=(
+            "Write the canonical JSON payload a real owner signature must "
+            "cover for --approval/--manifest/--arm/--trust-owner-public-key "
+            "to this path, then exit — do not validate a signature, admit a "
+            "nonce, or audit residue. --dry-run/--nonce-ledger/"
+            "--residue-destination are still required by argparse but are "
+            "not read in this mode."
+        ),
+    )
     args = parser.parse_args()
+    if args.emit_signing_payload is not None:
+        return _run_emit_signing_payload(args)
     try:
-        root = Path(__file__).resolve().parents[1]
-        source_sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-        manifest_bytes = args.manifest.read_bytes()
-        manifest = _load(args.manifest)
-        approval = _load(args.approval)
+        source_sha, manifest, approval, schema, manifest_digest = _load_inputs(args)
         errors = validate(
             approval,
             manifest,
             args.arm,
             source_sha,
-            schema=_load(root / _SCHEMA_PATH),
-            manifest_digest=_manifest_digest_bytes(manifest_bytes),
+            schema=schema,
+            manifest_digest=manifest_digest,
             trust_owner_public_key_hex=args.trust_owner_public_key,
         )
         if not errors and not run_offline_self_check(arm=args.arm, manifest=manifest):
@@ -487,7 +611,7 @@ def main() -> int:
         if not errors and not FileBackedNonceLedger(args.nonce_ledger).admit(
             nonce_digest=approval["nonce"],
             approval_id_digest=approval["approval_id"],
-            binding_digest=approval["self_digest"],
+            binding_digest=approval["manifest_digest"],
             epoch=1,
         ):
             errors.append("nonce already consumed")

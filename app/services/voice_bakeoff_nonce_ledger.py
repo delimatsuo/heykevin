@@ -13,7 +13,9 @@ from __future__ import annotations
 import dataclasses
 import fcntl
 import json
+import os
 import pathlib
+import tempfile
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -48,19 +50,6 @@ class FileBackedNonceLedger:
     def __init__(self, ledger_path: pathlib.Path) -> None:
         self._path = ledger_path
 
-    def _read_locked(self) -> _LedgerState:
-        if not self._path.exists():
-            return _LedgerState.empty()
-        with self._path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle, fcntl.LOCK_SH)
-            try:
-                raw = handle.read().strip()
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-        if not raw:
-            return _LedgerState.empty()
-        return _LedgerState.from_json(json.loads(raw))
-
     def admit(
         self,
         *,
@@ -75,7 +64,19 @@ class FileBackedNonceLedger:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
                 raw = handle.read().strip()
-                state = _LedgerState.from_json(json.loads(raw)) if raw else _LedgerState.empty()
+                if not raw:
+                    state = _LedgerState.empty()
+                else:
+                    try:
+                        state = _LedgerState.from_json(json.loads(raw))
+                    except json.JSONDecodeError:
+                        # The ledger exists but its contents are not valid
+                        # JSON (e.g. a prior writer was killed mid-write,
+                        # before the atomic replace in _write_atomic below
+                        # landed). We cannot recover what was already
+                        # consumed, so fail closed instead of risking a
+                        # replay by treating the corrupt file as empty.
+                        return False
 
                 if nonce_digest in state.consumed_nonces:
                     return False
@@ -91,9 +92,36 @@ class FileBackedNonceLedger:
                     consumed_approval_ids=state.consumed_approval_ids | {approval_id_digest},
                     binding_epochs={**state.binding_epochs, binding_key: approval_id_digest},
                 )
-                handle.seek(0)
-                handle.truncate()
-                json.dump(new_state.to_json(), handle, indent=2, sort_keys=True)
+                self._write_atomic(new_state)
                 return True
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _write_atomic(self, state: _LedgerState) -> None:
+        """Durably replace the ledger contents with `state`.
+
+        Writes to a fresh temp file in the same directory, fsyncs it, then
+        os.replace()s it onto self._path. os.replace() is an atomic rename
+        on POSIX, so any observer (including a process that opens the path
+        after a kill -9 of this one) always sees either the previous fully
+        valid contents or the new fully valid contents — never a truncated
+        or partially written file. Must be called from within the caller's
+        fcntl.flock critical section on self._path.
+        """
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self._path.parent,
+            prefix=f".{self._path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_handle:
+                json.dump(state.to_json(), tmp_handle, indent=2, sort_keys=True)
+                tmp_handle.flush()
+                os.fsync(tmp_handle.fileno())
+            os.replace(tmp_name, self._path)
+        except BaseException:
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+            raise

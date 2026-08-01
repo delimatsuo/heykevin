@@ -2,6 +2,14 @@ Synthetic preparation only — no runtime authorization — do not use for calls
 
 # Task 4.8 synthetic preparation package
 
+**Superseded.** This package has been superseded by
+`docs/security/task-4-8-provider-approval-mechanism.md`, which documents the
+real provider-approval mechanism built after this package's review —
+cryptographic sole-owner signature verification, a persisted nonce ledger, and
+nonproduction-only credential resolution. Everything below this notice is left
+byte-for-byte unchanged to preserve the reviewed audit trail; do not edit or
+delete it.
+
 ## Operator state
 
 This is a source-controlled, payload-free preparation record. It contains no

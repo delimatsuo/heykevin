@@ -5,6 +5,11 @@ references match environment-provided nonproduction values exactly, and
 the resolved account/region is not on the hardcoded production denylist.
 Never returns, logs, or stores the raw credential value — only a digest
 proving the correct value was present.
+
+Scope note: the denylist check below guards a single, specific failure
+mode (see PRODUCTION_ACCOUNT_REGION_DENYLIST's docstring). It is not a
+comprehensive production guard for every provider this broker resolves
+credentials for.
 """
 
 from __future__ import annotations
@@ -15,8 +20,36 @@ from typing import Mapping
 
 # Hardcoded, not derived from any input the approval envelope controls —
 # kevin-491315 is this project's one production GCP project (see CLAUDE.md).
+#
+# Scope boundary: this denylist exists to catch exactly one failure mode —
+# a resolution whose account/region value is *this project's own* GCP
+# hosting account/region. This broker resolves credentials for several
+# dependency roles backed by unrelated providers (telephony/Twilio,
+# speech_to_text/Deepgram, text_generation, text_to_speech/ElevenLabs, and
+# more — see FirewallDependency in voice_bakeoff_execution_firewall_contracts.py),
+# each with its own production-account identifiers that this module has no
+# legitimate source for and therefore does not attempt to enumerate here.
+# Do not add fabricated entries to "cover" those providers.
+#
+# Comprehensive, per-provider production-identity/destination denylisting
+# is a separate, independent mechanism: DeclaredProductionDenylist /
+# ExecutionFirewallResolver in voice_bakeoff_execution_firewall_contracts.py.
+# Task 6 of the provider-approval-rebuild plan wires both this broker and
+# that resolver into the runner as two independent checks run side by side
+# — this denylist is a narrow, specific backstop, not the sole production
+# guard.
 PRODUCTION_ACCOUNT_REGION_DENYLIST: tuple[str, ...] = (
     "kevin-491315:us-central1",
+)
+
+# Case/whitespace-normalized view of the denylist, used only for the
+# membership test in resolve(). A differently-cased or whitespace-padded
+# variant of a denylisted identifier (e.g. "Kevin-491315:us-central1" or
+# "kevin-491315:us-central1 ") is semantically the same production
+# identifier and must not be able to slip past the check. This normalized
+# view is never used for digest computation — see resolve() below.
+_NORMALIZED_PRODUCTION_ACCOUNT_REGION_DENYLIST: frozenset[str] = frozenset(
+    entry.strip().casefold() for entry in PRODUCTION_ACCOUNT_REGION_DENYLIST
 )
 
 
@@ -47,7 +80,13 @@ class NonproductionCredentialBroker:
 
         if credential_value is None or account_region_value is None:
             return None
-        if account_region_value in PRODUCTION_ACCOUNT_REGION_DENYLIST:
+        # Normalize only for the denylist membership test; the digest
+        # checks below must still hash the exact, unnormalized value the
+        # approval envelope pinned.
+        if (
+            account_region_value.strip().casefold()
+            in _NORMALIZED_PRODUCTION_ACCOUNT_REGION_DENYLIST
+        ):
             return None
         if _digest(credential_value) != approved_credential_ref:
             return None

@@ -26,9 +26,16 @@ def audit_residue(
     remaining: list[str] = []
     if destination.exists():
         for path in sorted(destination.rglob("*")):
-            if not path.is_file():
+            if path.is_symlink():
+                # A symlink is residue in its own right, evaluated by its own
+                # age. lstat() reports the link entry itself and never
+                # follows it, so this is correct even for dangling symlinks
+                # (which is_file()/stat() would silently treat as absent).
+                mtime_ms = int(path.lstat().st_mtime * 1000)
+            elif path.is_file():
+                mtime_ms = int(path.stat().st_mtime * 1000)
+            else:
                 continue
-            mtime_ms = int(path.stat().st_mtime * 1000)
             age_ms = now_ms - mtime_ms
             if age_ms > artifact_ttl_ms:
                 remaining.append(str(path))

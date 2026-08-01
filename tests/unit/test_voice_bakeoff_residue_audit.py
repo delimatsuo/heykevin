@@ -2,8 +2,6 @@ import ast
 import os
 import pathlib
 
-import pytest
-
 from app.services.voice_bakeoff_residue_audit import audit_residue
 
 
@@ -33,6 +31,19 @@ def test_fails_when_a_file_exceeds_ttl(tmp_path):
     assert str(old) in result.remaining_paths
 
 
+def test_passes_when_age_equals_ttl_boundary(tmp_path):
+    # The threshold check is strict `>`, so a file whose age is exactly
+    # equal to the TTL has not yet exceeded it.
+    boundary = tmp_path / "boundary.json"
+    boundary.write_text("{}")
+    mtime_ms = int(boundary.stat().st_mtime * 1000)
+    now_ms = mtime_ms + 1000
+
+    result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
+    assert result.passed is True
+    assert result.remaining_paths == ()
+
+
 def test_checks_nested_directories(tmp_path):
     nested = tmp_path / "nested" / "deep"
     nested.mkdir(parents=True)
@@ -44,6 +55,67 @@ def test_checks_nested_directories(tmp_path):
     result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
     assert result.passed is False
     assert str(old) in result.remaining_paths
+
+
+def test_dangling_symlink_past_ttl_is_reported(tmp_path):
+    # A symlink whose target has been removed is still residue: it is a
+    # filesystem entry left behind under `destination`. is_file()/stat()
+    # would silently ignore it (they follow the link and find nothing),
+    # so this proves the symlink itself is evaluated via lstat().
+    target = tmp_path / "target.json"
+    target.write_text("{}")
+    link = tmp_path / "dangling.json"
+    link.symlink_to(target)
+    target.unlink()
+
+    old_ts = 1_000_000
+    os.utime(link, (old_ts, old_ts), follow_symlinks=False)
+    now_ms = (old_ts * 1000) + 5000
+
+    result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
+    assert result.passed is False
+    assert str(link) in result.remaining_paths
+
+
+def test_dangling_symlink_within_ttl_is_not_reported(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text("{}")
+    link = tmp_path / "dangling.json"
+    link.symlink_to(target)
+    target.unlink()
+
+    recent_ts = 1_000_000
+    os.utime(link, (recent_ts, recent_ts), follow_symlinks=False)
+    now_ms = (recent_ts * 1000) + 500
+
+    result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
+    assert result.passed is True
+    assert result.remaining_paths == ()
+
+
+def test_live_symlink_uses_its_own_age_not_the_targets(tmp_path, tmp_path_factory):
+    # A live symlink pointing outside `destination` must be judged by how
+    # long the *link* has sat under `destination` (lstat), not by the
+    # target's mtime (stat) — the two can differ arbitrarily.
+    external_dir = tmp_path_factory.mktemp("external")
+    target = external_dir / "target.json"
+    target.write_text("{}")
+    old_target_ts = 1_000_000
+    os.utime(target, (old_target_ts, old_target_ts))
+
+    link = tmp_path / "live_link.json"
+    link.symlink_to(target)
+    recent_link_ts = 2_000_000
+    os.utime(link, (recent_link_ts, recent_link_ts), follow_symlinks=False)
+
+    # "now" is just past the link's own (recent) mtime. If age were taken
+    # from the target's (much older) mtime, this would fail the TTL by a
+    # wide margin instead of passing.
+    now_ms = (recent_link_ts * 1000) + 500
+
+    result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
+    assert result.passed is True
+    assert result.remaining_paths == ()
 
 
 def test_module_performs_no_network_or_subprocess_calls():

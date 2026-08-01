@@ -55,17 +55,29 @@ subprocess, harness, secret, or network authority can be reached.
 This digest-pinned AST contract has since been extended (Task 6) to cover five
 additional modules alongside the runner and harness — the nonce ledger,
 credential broker, residue audit, security contracts, and review-receipt
-request script — with one narrow, deliberately allowlisted exception: the
-credential broker's own `os.environ.get(...)` lookup of a single
-nonproduction-prefixed variable name per dependency role, which never logs or
-returns the raw value it reads. `os.getenv` itself remains on the forbidden
-dynamic/authority-call list; only the allowlisted `os.environ.get(...)` call
-shape is permitted, and only inside the credential broker. See
-`docs/security/task-4-8-provider-approval-mechanism.md` for what that lookup
-is for. The exact current allowlist is the authoritative source and lives in
-`tests/unit/test_run_voice_architecture_bakeoff.py`'s
-`_OFFLINE_ALLOWED_IMPORTS`/`_OFFLINE_ALLOWED_GETATTR`/`_OFFLINE_ALLOWED_FILE_IO`;
-it is not reproduced here.
+request script. Plain `.get(...)` dict/mapping access (as opposed to the
+`os.getenv`/dynamic-call shapes above) is not restricted by this contract: the
+AST check's `forbidden_attributes` blocklist bans specific dangerous
+attribute-call names — `getenv`, `popen`, `system`, `urlopen`, and similar —
+and `"get"` was never added to that list. This is an absence from a
+blocklist, not a dedicated allowlist entry, and it is not scoped to the
+credential broker: `.get(...)` is unrestricted across every digest-pinned
+module the contract walks, including the runner itself, which uses it
+pervasively (for example `manifest.get("candidate")` and
+`approval.get("owner_authorization")` in
+`scripts/run_voice_architecture_bakeoff.py`). The credential broker
+(`app/services/voice_bakeoff_credential_broker.py`) does not import `os` at
+all — it receives an already-opened `Mapping` and calls `self._env.get(...)`
+on it; the literal `os.environ` reference (passed as `env=os.environ`) lives
+in the runner, not the credential broker. `os.getenv` itself remains on the
+forbidden dynamic/authority-call list. See
+`docs/security/task-4-8-provider-approval-mechanism.md` for what the
+credential broker's lookup is for. The authoritative source for this
+mechanism is the `forbidden_attributes` set inside `_offline_firewall_errors()`
+in `tests/unit/test_run_voice_architecture_bakeoff.py` (the
+`_OFFLINE_ALLOWED_IMPORTS`/`_OFFLINE_ALLOWED_GETATTR`/`_OFFLINE_ALLOWED_FILE_IO`
+dicts in that same file govern imports, the `getattr` builtin, and file I/O
+calls respectively — not `.get(...)`); none of it is reproduced here.
 
 ## Trust boundary
 

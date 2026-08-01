@@ -55,7 +55,7 @@ the owner's own signature.
 
 The runner's new/changed CLI surface (confirmed against `--help` output):
 
-- `--nonce-ledger <path>` — **required**. Path to the `FileBackedNonceLedger` JSON file (created if missing).
+- `--nonce-ledger <path>` — **required**. Path to the `FileBackedNonceLedger` JSON file (created if missing). **Limitation:** the runner hardcodes `epoch=1` for every admission keyed on `manifest_digest` (there is no `--epoch` flag). That means a given manifest can be successfully admitted **at most once, ever**, against a given ledger file — a second, legitimately re-signed approval for the *same* manifest (for example, after fixing a typo and re-signing) is rejected forever by that same ledger. If you need to re-issue an approval for the same manifest, do not reuse the same `--nonce-ledger` file — point `--nonce-ledger` at a fresh path instead. The runner's `"nonce already consumed"` rejection message covers this binding/epoch collision case too, not only literal nonce replay, so that message does not always mean the nonce string itself was reused. Adding a `--epoch` flag to make this operator-controlled is deferred, out of scope for this fix.
 - `--residue-destination <path>` — **required**. Directory the residue audit inspects after every run (created lazily; if it doesn't exist yet, the audit trivially passes with `remaining_paths: []` — that is not proof anything was actually checked).
 - `--trust-owner-public-key <hex>` — **optional**, but verification always fails closed without it. The owner's Ed25519 public key as 64 hex characters (32 bytes). This is **not a secret** — the same trust model as an SSH `authorized_keys` entry. Must be the exact same value at `--emit-signing-payload` time and at final-verification time (see below); it is bound into the signed message, so a mismatch produces a payload the real signature won't verify against.
 - `--emit-signing-payload <path>` — **optional** mode switch. Runs every shape/digest/binding check that doesn't require a signature yet, then writes the exact JSON payload dict the verifier will check a signature against.
@@ -65,6 +65,48 @@ The runner's new/changed CLI surface (confirmed against `--help` output):
 This did not exist end-to-end before Task 6's fix round, and nothing else
 currently documents it start to finish. All flag names below are copied from
 the runner's actual `argparse` definitions, not paraphrased.
+
+**0. Create your owner key.** On a first run, the owner's Ed25519 private
+key does not exist yet — but Step 1 below requires `--trust-owner-public-key`
+(derived from that key), and Step 2 (`sign_voice_bakeoff_approval.py`) needs
+a `--payload` file that only Step 1 produces. Neither step can go first on
+its own, so start here instead. Break the cycle by running the signing CLI
+once against a throwaway placeholder payload, purely to mint the key file —
+`load_or_create_owner_key()` creates `--key` (if it doesn't already exist,
+mode `0600`) *before* it ever reads `--payload`, so the payload's actual
+content does not matter for this one call. There is no dedicated
+"create-key" flag; this is the real, minimal command that accomplishes it:
+
+```bash
+mkdir -p ~/.config/hey-kevin
+echo '{}' > /tmp/bootstrap_placeholder_payload.json
+python scripts/sign_voice_bakeoff_approval.py \
+  --key ~/.config/hey-kevin/bakeoff_owner_key.pem \
+  --payload /tmp/bootstrap_placeholder_payload.json \
+  --domain-name approval
+```
+
+This prints a signature to stdout — discard it; it is not tied to any real
+approval and is not used anywhere. What matters is the key file this
+command leaves behind at `~/.config/hey-kevin/bakeoff_owner_key.pem`. Every
+later invocation of `sign_voice_bakeoff_approval.py` against the same
+`--key` path reuses that same file (`load_or_create_owner_key()` loads an
+existing key rather than regenerating it), so you only do this once, ever,
+per key path.
+
+Now derive the matching **public** key hex from that same private key
+file — the value `--trust-owner-public-key` needs below, in Step 1. There is
+currently no shipped helper for this (a known, deliberate documentation-only
+gap — not something this task built new code for). Derive it manually:
+
+```bash
+python3 -c "
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+import pathlib
+raw = pathlib.Path('~/.config/hey-kevin/bakeoff_owner_key.pem').expanduser().read_bytes()
+print(Ed25519PrivateKey.from_private_bytes(raw).public_key().public_bytes_raw().hex())
+"
+```
 
 **1. Emit the signing payload.** Run the normal arguments plus
 `--emit-signing-payload`:
@@ -107,23 +149,12 @@ in `voice_bakeoff_security_contracts.py` are NUL-terminated
 byte cannot survive as a process argv element, so free-text domains could
 never reproduce the exact bytes `OfflineApprovalVerifier.verify()` checks
 against. `--domain-name approval` is a symbolic name that maps to the real
-constant internally. If `~/.config/hey-kevin/bakeoff_owner_key.pem` doesn't
-exist yet, this command creates a fresh Ed25519 key there (mode `0600`) and
-uses it. The command prints the hex-encoded signature to stdout.
-
-There is currently no shipped helper for deriving the matching **public**
-key hex from that private key file (the value `--trust-owner-public-key`
-needs above). This is a known, deliberate documentation-only gap — not
-something this task built new code for. Derive it manually:
-
-```bash
-python3 -c "
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-import pathlib
-raw = pathlib.Path('~/.config/hey-kevin/bakeoff_owner_key.pem').expanduser().read_bytes()
-print(Ed25519PrivateKey.from_private_bytes(raw).public_key().public_bytes_raw().hex())
-"
-```
+constant internally. This reuses the same key file Step 0 already created
+at `~/.config/hey-kevin/bakeoff_owner_key.pem` — `load_or_create_owner_key()`
+loads an existing key file rather than regenerating it, so this step signs
+with the same key whose public half you already derived and passed as
+`--trust-owner-public-key` in Step 1. The command prints the hex-encoded
+signature to stdout.
 
 **3. Embed the signature.** Paste step 2's stdout into the approval JSON's
 `owner_authorization.signature` field, replacing the placeholder.

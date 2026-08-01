@@ -548,7 +548,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "d40630fe20fb0a930a59aa8e80a071e466b78725a239e6de74812ea65e6fd2ca"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
-        "a6d52edb8850170d134a804d84aae92f15c3beb3be0fb0b81b753d80a0980b8e"
+        "934811b874a039401ca1a5e5e191d855544053b1d545ce98450532980e4d3f09"
     ),
     "app.services.voice_bakeoff_residue_audit": (
         "542c08bacd6e6c2ea81b0b746368a359b4b71b38229860dbd8aae9fa1e8ce0cb"
@@ -1316,6 +1316,57 @@ def test_cli_rejects_replayed_nonce_on_second_invocation(tmp_path: Path):
     second_payload = json.loads(second.stdout)
     assert second_payload["verdict"] == "rejected_local_preflight"
     assert second_payload["error_count"] == 1
+
+
+def test_cli_shape_corrupted_nonce_ledger_fails_closed_not_crashes(tmp_path: Path):
+    """Regression test for a reviewer-confirmed crash: a nonce-ledger file
+    containing valid-JSON-but-wrong-shape content (e.g. a bare `[]` instead
+    of the expected {"consumed_nonces": [...], ...} object) used to raise
+    an uncaught AttributeError out of FileBackedNonceLedger.admit() —
+    'list' object has no attribute 'get' — which propagated past main()'s
+    own `except (OSError, ValueError, json.JSONDecodeError)` (AttributeError
+    is not in that tuple), crashing the process with exit 1 and a raw
+    traceback on stderr instead of the documented JSON-on-stdout contract.
+    `_LedgerState.from_json`'s except clause now also catches
+    (AttributeError, TypeError, ValueError), so this must produce the same
+    clean `rejected_local_preflight` / exit 2 outcome truncated JSON already
+    did before this fix — never a crash.
+    """
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    nonce_ledger_path = tmp_path / "ledger.json"
+    nonce_ledger_path.write_text("[]", encoding="utf-8")
+    residue_destination_path = tmp_path / "residue"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(nonce_ledger_path),
+            "--residue-destination",
+            str(residue_destination_path),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
+    )
+    assert result.returncode == 2
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "rejected_local_preflight"
+    assert payload["error_count"] == 1
 
 
 def test_emit_signing_payload_closes_the_loop_with_the_real_signing_cli(

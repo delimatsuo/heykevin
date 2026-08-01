@@ -88,6 +88,47 @@ def test_corrupted_ledger_fails_closed(tmp_path):
     ) is False
 
 
+def test_shape_corrupted_ledger_top_level_list_fails_closed(tmp_path):
+    """A syntactically valid JSON document with the wrong top-level shape
+    must fail closed the same clean way truncated/invalid JSON does — not
+    raise an uncaught exception out of admit(). This is the exact shape a
+    reviewer found crashing the runner with an undocumented exit 1:
+    _LedgerState.from_json called `[].get(...)`, which raises AttributeError
+    because list has no `.get` method.
+    """
+    ledger_path = tmp_path / "nonce_ledger.json"
+    ledger_path.write_text("[]", encoding="utf-8")
+    ledger = FileBackedNonceLedger(ledger_path)
+
+    assert ledger.admit(
+        nonce_digest="a" * 64,
+        approval_id_digest="b" * 64,
+        binding_digest="c" * 64,
+        epoch=1,
+    ) is False
+
+
+def test_shape_corrupted_ledger_wrong_field_type_fails_closed(tmp_path):
+    """A different flavor of syntactically-valid-but-wrong-shaped JSON: the
+    top-level object is present, but a field holds a type from_json()
+    cannot coerce. `dict("not-a-mapping")` raises ValueError (not
+    AttributeError), proving the widened except clause is not accidentally
+    narrowed to only the list-shaped case above.
+    """
+    ledger_path = tmp_path / "nonce_ledger.json"
+    ledger_path.write_text(
+        json.dumps({"binding_epochs": "not-a-mapping"}), encoding="utf-8"
+    )
+    ledger = FileBackedNonceLedger(ledger_path)
+
+    assert ledger.admit(
+        nonce_digest="a" * 64,
+        approval_id_digest="b" * 64,
+        binding_digest="c" * 64,
+        epoch=1,
+    ) is False
+
+
 def test_admission_writes_are_atomic_and_leave_no_temp_files(tmp_path):
     ledger_path = tmp_path / "nonce_ledger.json"
     ledger = FileBackedNonceLedger(ledger_path)

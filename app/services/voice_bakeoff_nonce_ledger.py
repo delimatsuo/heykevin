@@ -94,13 +94,22 @@ class FileBackedNonceLedger:
                 else:
                     try:
                         state = _LedgerState.from_json(json.loads(raw))
-                    except json.JSONDecodeError:
-                        # The ledger exists but its contents are not valid
-                        # JSON (e.g. a prior writer was killed mid-write,
-                        # before the atomic replace in _write_atomic below
-                        # landed). We cannot recover what was already
-                        # consumed, so fail closed instead of risking a
-                        # replay by treating the corrupt file as empty.
+                    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                        # The ledger exists but its contents are not usable:
+                        # either not valid JSON at all (e.g. a prior writer
+                        # was killed mid-write, before the atomic replace in
+                        # _write_atomic below landed), or valid JSON in the
+                        # wrong shape (e.g. a bare `[]` instead of the
+                        # expected {"consumed_nonces": [...], ...} object,
+                        # or a field holding a type from_json() cannot
+                        # coerce). The latter surfaces as AttributeError
+                        # (payload.get on a non-dict), TypeError (e.g.
+                        # frozenset() on a non-iterable), or ValueError
+                        # (e.g. dict() on a string) out of _LedgerState.
+                        # from_json's own field constructors. Either way we
+                        # cannot recover what was already consumed, so fail
+                        # closed instead of risking a replay by treating
+                        # the corrupt file as empty.
                         return False
 
                 if nonce_digest in state.consumed_nonces:

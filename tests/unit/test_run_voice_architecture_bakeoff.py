@@ -548,7 +548,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "d40630fe20fb0a930a59aa8e80a071e466b78725a239e6de74812ea65e6fd2ca"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
-        "934811b874a039401ca1a5e5e191d855544053b1d545ce98450532980e4d3f09"
+        "ce50cec8a5c10279e3e88e419e248a72d52a13dccb6872eb9cfbd678ba1ac43b"
     ),
     "app.services.voice_bakeoff_residue_audit": (
         "542c08bacd6e6c2ea81b0b746368a359b4b71b38229860dbd8aae9fa1e8ce0cb"
@@ -1363,6 +1363,140 @@ def test_cli_shape_corrupted_nonce_ledger_fails_closed_not_crashes(tmp_path: Pat
         env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
     )
     assert result.returncode == 2
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "rejected_local_preflight"
+    assert payload["error_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "ledger_content",
+    (
+        '{"consumed_nonces": [1, "a"]}',
+        '{"consumed_nonces": ["a", null]}',
+        '{"binding_epochs": [[1, 2]]}',
+    ),
+    ids=(
+        "consumed_nonces_int_element",
+        "consumed_nonces_null_element",
+        "binding_epochs_list_value",
+    ),
+)
+def test_cli_shape_corrupted_nonce_ledger_field_types_fail_closed_not_crash(
+    tmp_path: Path, ledger_content: str
+):
+    """Confirmation-review follow-up to
+    test_cli_shape_corrupted_nonce_ledger_fails_closed_not_crashes above.
+    That test proved the one reported shape (a bare `[]`) fails closed, but
+    a confirmation reviewer then drove a broader exploratory matrix of
+    malformed ledger shapes through the real CLI and found the underlying
+    gap was NOT actually closed — only that one specific shape stopped
+    crashing. These three shapes are syntactically-valid top-level objects
+    (so `_LedgerState.from_json`'s old `payload.get(...)` calls succeeded)
+    whose FIELDS held the wrong element/value types, so the crash only
+    surfaced one layer deeper, inside admit()'s write-back path:
+    `sorted(self.consumed_nonces)` inside `_write_atomic` raised an
+    uncaught TypeError when a list element wasn't a str (int/None don't
+    order against str), crashing the runner with exit 1 and a raw
+    traceback — same class of bug as the `[]` case, just deferred past
+    from_json instead of happening inside it.
+    `_LedgerState.from_json` now validates every field's element/value
+    types directly (see `_require_string_list`/`_require_string_mapping` in
+    app/services/voice_bakeoff_nonce_ledger.py), so each of these must now
+    produce the same clean `rejected_local_preflight` / exit 2 outcome the
+    `[]` case already did, never a crash.
+    """
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    nonce_ledger_path = tmp_path / "ledger.json"
+    nonce_ledger_path.write_text(ledger_content, encoding="utf-8")
+    residue_destination_path = tmp_path / "residue"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(nonce_ledger_path),
+            "--residue-destination",
+            str(residue_destination_path),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
+    )
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "rejected_local_preflight"
+    assert payload["error_count"] == 1
+
+
+def test_cli_shape_corrupted_nonce_ledger_string_field_does_not_fail_open(
+    tmp_path: Path,
+):
+    """CLI-level regression test for a pre-existing (not prior-fix-
+    introduced) fail-open gap the same confirmation-review sweep also
+    found: before strict shape validation, `_LedgerState.from_json` did
+    `frozenset(payload.get("consumed_nonces", []))`. Python's frozenset()
+    silently iterates a STRING value character-by-character instead of
+    raising, so a ledger file recording the real nonce as a bare string
+    (instead of the expected single-element list) would be read back as a
+    set of individual characters that the real (multi-character) nonce
+    string can never equal — so `nonce_digest in state.consumed_nonces`
+    would find no match and let the runner wrongly admit (and report
+    success for) a nonce the ledger file was actually recording as already
+    consumed. That is fail-OPEN on corrupted/tampered state, the opposite
+    of what a one-use replay ledger exists to guarantee. This must now
+    produce the same clean `rejected_local_preflight` / exit 2 outcome an
+    actual detected replay already does — never a silent wrongful
+    admission.
+    """
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    approval_nonce = json.loads(approval_path.read_text(encoding="utf-8"))["nonce"]
+    nonce_ledger_path = tmp_path / "ledger.json"
+    nonce_ledger_path.write_text(
+        json.dumps({"consumed_nonces": approval_nonce}), encoding="utf-8"
+    )
+    residue_destination_path = tmp_path / "residue"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(nonce_ledger_path),
+            "--residue-destination",
+            str(residue_destination_path),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
+    )
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
     assert result.stderr == ""
     payload = json.loads(result.stdout)
     assert payload["verdict"] == "rejected_local_preflight"

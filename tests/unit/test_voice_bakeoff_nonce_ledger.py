@@ -3,6 +3,8 @@ import json
 import pathlib
 import threading
 
+import pytest
+
 from app.services import voice_bakeoff_nonce_ledger
 from app.services.voice_bakeoff_nonce_ledger import FileBackedNonceLedger
 
@@ -127,6 +129,142 @@ def test_shape_corrupted_ledger_wrong_field_type_fails_closed(tmp_path):
         binding_digest="c" * 64,
         epoch=1,
     ) is False
+
+
+def test_shape_corrupted_ledger_non_string_nonce_list_item_fails_closed(tmp_path):
+    """A confirmation-review-found gap: from_json accepted a
+    consumed_nonces list containing a non-string element (e.g. an int)
+    without validating it, so the TypeError only surfaced much later, in
+    admit()'s write-back path (`sorted(self.consumed_nonces)` inside
+    `_write_atomic` -> `json.dump(..., sort_keys=True)`) — an uncaught
+    crash, not the documented clean fail-closed rejection. from_json must
+    now reject this shape itself, as a ValueError, before any of that.
+    """
+    ledger_path = tmp_path / "nonce_ledger.json"
+    ledger_path.write_text(
+        json.dumps({"consumed_nonces": [1, "a"]}), encoding="utf-8"
+    )
+    ledger = FileBackedNonceLedger(ledger_path)
+
+    assert ledger.admit(
+        nonce_digest="a" * 64,
+        approval_id_digest="b" * 64,
+        binding_digest="c" * 64,
+        epoch=1,
+    ) is False
+
+
+def test_shape_corrupted_ledger_null_nonce_list_item_fails_closed(tmp_path):
+    """Same root cause as the int-element case above, with a JSON `null`
+    (Python None) list element instead — a different non-string type,
+    proving the validation isn't accidentally narrowed to only reject
+    ints.
+    """
+    ledger_path = tmp_path / "nonce_ledger.json"
+    ledger_path.write_text(
+        json.dumps({"consumed_nonces": ["a", None]}), encoding="utf-8"
+    )
+    ledger = FileBackedNonceLedger(ledger_path)
+
+    assert ledger.admit(
+        nonce_digest="a" * 64,
+        approval_id_digest="b" * 64,
+        binding_digest="c" * 64,
+        epoch=1,
+    ) is False
+
+
+def test_shape_corrupted_ledger_binding_epochs_list_value_fails_closed(tmp_path):
+    """binding_epochs must be a str -> str mapping. A JSON array value at
+    the top level (not even a dict) used to pass straight through
+    `dict(payload.get("binding_epochs", {}))` uncaught until some later
+    consumer choked on it; from_json must reject it directly.
+    """
+    ledger_path = tmp_path / "nonce_ledger.json"
+    ledger_path.write_text(
+        json.dumps({"binding_epochs": [[1, 2]]}), encoding="utf-8"
+    )
+    ledger = FileBackedNonceLedger(ledger_path)
+
+    assert ledger.admit(
+        nonce_digest="a" * 64,
+        approval_id_digest="b" * 64,
+        binding_digest="c" * 64,
+        epoch=1,
+    ) is False
+
+
+def test_shape_corrupted_ledger_string_nonces_field_does_not_fail_open(tmp_path):
+    """Pre-existing fail-open gap (not introduced by the prior fix): before
+    strict shape validation, `frozenset(payload.get("consumed_nonces", []))`
+    would silently iterate a STRING value character-by-character instead of
+    raising — `frozenset("abc")` is `{"a", "b", "c"}`, not an error. A
+    ledger file recording one already-consumed 64-char nonce digest as a
+    bare string (instead of the expected `[<digest>]` single-element list)
+    would therefore be accepted as a set of 64 individual single-character
+    "nonces", none of which match the real digest — so `admit()` would
+    wrongly return True (admit) for a nonce the ledger was actually
+    recording as consumed. That is a fail-OPEN on corrupted state, the
+    opposite of what a replay-prevention ledger must guarantee. This must
+    now raise ValueError (via `_require_string_list` rejecting a non-list)
+    and therefore fail closed (admit() returns False), never fail open.
+    """
+    ledger_path = tmp_path / "nonce_ledger.json"
+    already_consumed_nonce = "a" * 64
+    ledger_path.write_text(
+        json.dumps({"consumed_nonces": already_consumed_nonce}), encoding="utf-8"
+    )
+    ledger = FileBackedNonceLedger(ledger_path)
+
+    # If from_json's validation is missing/insufficient, this would
+    # (wrongly) return True: none of the single characters "a" match the
+    # full 64-char digest, so a naive character-set membership test would
+    # find `nonce_digest not in state.consumed_nonces` and let it through.
+    assert ledger.admit(
+        nonce_digest=already_consumed_nonce,
+        approval_id_digest="b" * 64,
+        binding_digest="c" * 64,
+        epoch=1,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"consumed_nonces": [1, "a"]},
+        {"consumed_nonces": ["a", None]},
+        {"consumed_approval_ids": [1, "a"]},
+        {"consumed_approval_ids": ["a", None]},
+        {"binding_epochs": [[1, 2]]},
+        {"binding_epochs": {"a": 1}},
+        {"binding_epochs": {1: "a"}},
+        {"consumed_nonces": "a" * 64},
+        [],
+        "not-a-dict",
+    ),
+    ids=(
+        "consumed_nonces_int_element",
+        "consumed_nonces_null_element",
+        "consumed_approval_ids_int_element",
+        "consumed_approval_ids_null_element",
+        "binding_epochs_list_value",
+        "binding_epochs_non_string_value",
+        "binding_epochs_non_string_key",
+        "consumed_nonces_bare_string_fail_open_shape",
+        "top_level_list",
+        "top_level_non_dict_scalar",
+    ),
+)
+def test_from_json_raises_value_error_for_every_malformed_shape(payload):
+    """Direct unit-level proof, at the exact boundary where the shape
+    validation lives, that _LedgerState.from_json — not some downstream
+    consumer — is what rejects each malformed shape, and that it does so
+    by raising ValueError (which admit()'s except clause already catches,
+    see the other tests in this file for the resulting end-to-end
+    fail-closed behavior via FileBackedNonceLedger.admit()).
+    """
+    with pytest.raises(ValueError):
+        voice_bakeoff_nonce_ledger._LedgerState.from_json(payload)
 
 
 def test_admission_writes_are_atomic_and_leave_no_temp_files(tmp_path):

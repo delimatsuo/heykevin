@@ -18,6 +18,35 @@ import pathlib
 import tempfile
 
 
+def _require_string_list(value: object, field_name: str) -> None:
+    """Raise ValueError unless `value` is a list of only str elements.
+
+    Deliberately checks `isinstance(value, list)` before ever inspecting
+    elements: a plain string (e.g. a nonce digest written where a
+    single-element list was intended) is iterable character-by-character,
+    so a caller that instead did `all(isinstance(c, str) for c in value)`
+    without first ruling out `str` would silently accept it — every
+    character of a string is itself a `str` — and a downstream
+    `frozenset(value)` would then admit a set of individual letters instead
+    of the one intended token. That would make `admit()` fail OPEN (wrongly
+    treat an already-consumed nonce/approval-id as unseen) on exactly the
+    corrupt-shape input this ledger exists to guard against.
+    """
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError(f"{field_name} must be a list of strings")
+
+
+def _require_string_mapping(value: object, field_name: str) -> None:
+    """Raise ValueError unless `value` is a dict with only str keys/values."""
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise ValueError(f"{field_name} must be a mapping of strings to strings")
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class _LedgerState:
     consumed_nonces: frozenset[str]
@@ -30,10 +59,32 @@ class _LedgerState:
 
     @classmethod
     def from_json(cls, payload: dict) -> "_LedgerState":
+        """Strictly validate `payload`'s shape before building a state.
+
+        `json.loads` only guarantees `payload` is syntactically valid JSON —
+        it says nothing about the shape this ledger needs. Every field is
+        validated here (when present; missing fields still default to
+        empty) so that malformed input is rejected right here, as a clean
+        ValueError, rather than either being silently miscoerced (e.g. a
+        string admitted as a set of individual characters, see
+        `_require_string_list`) or crashing much later downstream (e.g.
+        `sorted()` on a list containing a non-str element, inside
+        `_write_atomic`'s `json.dump(..., sort_keys=True)`).
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("ledger payload must be a JSON object")
+
+        consumed_nonces = payload.get("consumed_nonces", [])
+        _require_string_list(consumed_nonces, "consumed_nonces")
+        consumed_approval_ids = payload.get("consumed_approval_ids", [])
+        _require_string_list(consumed_approval_ids, "consumed_approval_ids")
+        binding_epochs = payload.get("binding_epochs", {})
+        _require_string_mapping(binding_epochs, "binding_epochs")
+
         return cls(
-            consumed_nonces=frozenset(payload.get("consumed_nonces", [])),
-            consumed_approval_ids=frozenset(payload.get("consumed_approval_ids", [])),
-            binding_epochs=dict(payload.get("binding_epochs", {})),
+            consumed_nonces=frozenset(consumed_nonces),
+            consumed_approval_ids=frozenset(consumed_approval_ids),
+            binding_epochs=dict(binding_epochs),
         )
 
     def to_json(self) -> dict:
@@ -100,16 +151,19 @@ class FileBackedNonceLedger:
                         # was killed mid-write, before the atomic replace in
                         # _write_atomic below landed), or valid JSON in the
                         # wrong shape (e.g. a bare `[]` instead of the
-                        # expected {"consumed_nonces": [...], ...} object,
-                        # or a field holding a type from_json() cannot
-                        # coerce). The latter surfaces as AttributeError
-                        # (payload.get on a non-dict), TypeError (e.g.
-                        # frozenset() on a non-iterable), or ValueError
-                        # (e.g. dict() on a string) out of _LedgerState.
-                        # from_json's own field constructors. Either way we
-                        # cannot recover what was already consumed, so fail
-                        # closed instead of risking a replay by treating
-                        # the corrupt file as empty.
+                        # expected {"consumed_nonces": [...], ...} object, a
+                        # list element or mapping key/value of the wrong
+                        # type, etc). _LedgerState.from_json's own explicit
+                        # isinstance checks now deliberately raise
+                        # ValueError for every shape violation it detects —
+                        # AttributeError/TypeError are kept in this tuple
+                        # only as defense in depth against a future,
+                        # differently-shaped failure inside from_json, not
+                        # because from_json is currently expected to raise
+                        # them. Either way we cannot recover what was
+                        # already consumed, so fail closed instead of
+                        # risking a replay by treating the corrupt file as
+                        # empty.
                         return False
 
                 if nonce_digest in state.consumed_nonces:

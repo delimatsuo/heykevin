@@ -1679,10 +1679,18 @@ def test_security_contract_module_is_offline_and_not_runtime_wired():
         and isinstance(node.func, ast.Name)
         and node.func.id in {"open", "exec", "eval", "compile", "__import__"}
     }
+    # scripts/run_voice_architecture_bakeoff.py is deliberately excluded from
+    # this list: Task 6 of the provider-approval-rebuild plan
+    # (docs/superpowers/plans/2026-08-01-task-4-8-provider-approval-rebuild.md)
+    # wires the runner's validate() to the real OfflineApprovalVerifier in
+    # this module by design — that file has its own independent AST-based
+    # import/digest firewall (tests/unit/test_run_voice_architecture_bakeoff.py,
+    # test_runner_and_reachable_offline_harness_have_no_execution_escape_hatches)
+    # that recursively audits exactly what the runner can reach through that
+    # wiring. The other three files below remain intentionally unwired.
     for path in (
         Path("app/experiments/voice_bakeoff_app.py"),
         Path("app/services/voice_session_auth.py"),
-        Path("scripts/run_voice_architecture_bakeoff.py"),
         Path("app/main.py"),
     ):
         assert "voice_bakeoff_security_contracts" not in path.read_text(

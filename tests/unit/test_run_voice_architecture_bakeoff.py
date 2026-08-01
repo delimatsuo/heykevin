@@ -4,13 +4,18 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from app.services.voice_bakeoff_credential_broker import NonproductionCredentialBroker
+from app.services.voice_bakeoff_nonce_ledger import FileBackedNonceLedger
+from app.services.voice_bakeoff_security_contracts import approval_signature_message
 from scripts.voice_bakeoff_caller import development_harness_manifest
 
 _SCRIPT = Path("scripts/run_voice_architecture_bakeoff.py")
@@ -18,6 +23,14 @@ _SPEC = importlib.util.spec_from_file_location("bakeoff_runner", _SCRIPT)
 assert _SPEC and _SPEC.loader
 runner = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(runner)
+
+# When the runner is launched as a subprocess via a direct file path (as the
+# CLI tests below do), Python sets sys.path[0] to the script's own directory
+# (scripts/), not the repository root — so its `from app.services... import`
+# statements need the repo root on PYTHONPATH to resolve. In-process imports
+# (like the ones above) don't need this: pytest already puts the repo root
+# on sys.path for this process.
+_REPO_ROOT = _SCRIPT.resolve().parents[1]
 
 
 def _approval() -> dict[str, object]:
@@ -40,14 +53,14 @@ def _approval() -> dict[str, object]:
         "authorization_model": "sole_owner",
         "owner_authorization": {
             "role": "owner",
-            "identity": "owner_1",
-            "key_id": "key_1",
+            "identity": "ref_owner_1",
+            "key_id": "ref_key_1",
             "algorithm": "ed25519",
             "signature": "detached_1",
         },
         "technical_review": {
             "review_digest": "d" * 64,
-            "provenance_ref": "technical_review_1",
+            "provenance_ref": "ref_technical_review_1",
             "source_sha": "a" * 40,
             "manifest_digest": "0" * 64,
             "unresolved_p1_count": 0,
@@ -95,9 +108,122 @@ def _rebind_manifest(approval: dict[str, object], manifest: dict[str, object]) -
     _resign(approval)
 
 
-def test_valid_shape_still_requires_external_verification():
+def _sign_with_key(
+    approval: dict[str, object],
+    private_key: ed25519.Ed25519PrivateKey,
+    trust_owner_public_key_hex: str,
+) -> None:
+    """(Re-)sign `approval` with `private_key`.
+
+    The signed message is computed against the ephemeral trust snapshot
+    `runner._build_trust_material` derives for `trust_owner_public_key_hex`
+    — which need not correspond to `private_key`. Tests use a deliberate
+    mismatch between the two to prove a wrong-key signature is rejected.
+    """
+    approval["owner_authorization"]["signature"] = "0" * 128
+    _resign(approval)
+    owner_public_key = bytes.fromhex(trust_owner_public_key_hex)
+    snapshot, _ = runner._build_trust_material(approval, owner_public_key)
+    unsigned = runner._build_signed_approval(
+        approval, snapshot.snapshot_digest, snapshot.signer_set_digest
+    )
+    message = approval_signature_message(unsigned)
+    approval["owner_authorization"]["signature"] = private_key.sign(message).hex()
+    _resign(approval)
+
+
+def _signed_approval(
+    manifest: dict[str, object],
+) -> tuple[dict[str, object], ed25519.Ed25519PrivateKey, str]:
+    """Build an approval bound to `manifest` and genuinely Ed25519-signed.
+
+    Returns (approval, private_key, trust_owner_public_key_hex) — the hex
+    string is what a caller passes as validate()'s/main()'s
+    trust_owner_public_key_hex so the signature verifies.
+    """
+    approval = _bound_approval(manifest)
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    trust_owner_public_key_hex = private_key.public_key().public_bytes_raw().hex()
+    _sign_with_key(approval, private_key, trust_owner_public_key_hex)
+    return approval, private_key, trust_owner_public_key_hex
+
+
+def _nonprod_dependency_overrides(
+    dependencies: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, str]]:
+    """Return (new_dependencies, env_vars).
+
+    Exporting env_vars makes NonproductionCredentialBroker grant every
+    dependency in new_dependencies — each dependency's credential_ref/
+    account_region_ref is replaced with the real SHA-256 digest of a
+    synthetic nonproduction value the broker will look up by role.
+    """
+    new_dependencies = []
+    env_vars: dict[str, str] = {}
+    for dependency in dependencies:
+        role = dependency["role"]
+        credential_value = f"nonprod-credential-{role}"
+        account_region_value = f"bakeoff-nonprod-{role}:us-west1"
+        env_vars[f"BAKEOFF_NONPROD_CREDENTIAL__{role.upper()}"] = credential_value
+        env_vars[f"BAKEOFF_NONPROD_ACCOUNT_REGION__{role.upper()}"] = account_region_value
+        updated = dict(dependency)
+        updated["credential_ref"] = hashlib.sha256(
+            credential_value.encode("utf-8")
+        ).hexdigest()
+        updated["account_region_ref"] = hashlib.sha256(
+            account_region_value.encode("utf-8")
+        ).hexdigest()
+        new_dependencies.append(updated)
+    return new_dependencies, env_vars
+
+
+def _bind_nonprod_dependencies(
+    approval: dict[str, object], manifest: dict[str, object]
+) -> dict[str, str]:
+    """Mutate approval['dependencies'] in place to real broker-grantable
+    values and rebind/resign the envelope. Returns the env vars a caller
+    must export for the broker to grant them. Must run before signing —
+    it changes self_digest."""
+    new_dependencies, env_vars = _nonprod_dependency_overrides(approval["dependencies"])
+    approval["dependencies"] = new_dependencies
+    approval["dependency_inventory_digest"] = runner._dependency_inventory_digest(
+        new_dependencies
+    )
+    manifest["candidate"]["dependency_inventory_digest"] = approval[
+        "dependency_inventory_digest"
+    ]
+    _rebind_manifest(approval, manifest)
+    return env_vars
+
+
+def _configure_nonprod_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    approval: dict[str, object],
+    manifest: dict[str, object],
+) -> None:
+    env_vars = _bind_nonprod_dependencies(approval, manifest)
+    for key, value in env_vars.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_valid_shape_still_requires_external_verification(monkeypatch: pytest.MonkeyPatch):
     manifest = _manifest()
-    assert runner.validate(_bound_approval(manifest), manifest, "B1", "a" * 40, now_ms=1_000) == []
+    approval = _bound_approval(manifest)
+    _configure_nonprod_dependencies(monkeypatch, approval, manifest)
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    trust_owner_public_key_hex = private_key.public_key().public_bytes_raw().hex()
+    _sign_with_key(approval, private_key, trust_owner_public_key_hex)
+    assert (
+        runner.validate(
+            approval,
+            manifest,
+            "B1",
+            "a" * 40,
+            now_ms=1_000,
+            trust_owner_public_key_hex=trust_owner_public_key_hex,
+        )
+        == []
+    )
 
 
 def test_rejects_template_wrong_binding_digest_authorization_caps_and_risky_features():
@@ -228,6 +354,147 @@ def test_b2_requires_text_generation_dependency():
     assert "dependency" in runner.validate(approval, manifest, "B2", "a" * 40, now_ms=1_000)[0]
 
 
+def test_forged_signature_is_rejected_before_credential_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    manifest = _manifest()
+    approval, _key, trust_owner_public_key_hex = _signed_approval(manifest)
+    approval["owner_authorization"]["signature"] = "f" * 128  # syntactically-valid hex, wrong signature
+    _resign(approval)
+
+    read_credential_keys: list[str] = []
+    monkeypatch.setattr(
+        runner.os.environ,
+        "get",
+        lambda key, *a: (read_credential_keys.append(key) or None) if "CREDENTIAL" in key else None,
+    )
+
+    errors = runner.validate(
+        approval,
+        manifest,
+        "B1",
+        "a" * 40,
+        now_ms=1_000,
+        trust_owner_public_key_hex=trust_owner_public_key_hex,
+    )
+    assert any("signature" in e or "verification" in e for e in errors)
+    assert read_credential_keys == []
+
+
+def test_wrong_owner_key_is_rejected():
+    manifest = _manifest()
+    approval, _real_key, trust_owner_public_key_hex = _signed_approval(manifest)
+    wrong_key = ed25519.Ed25519PrivateKey.generate()
+    # Re-sign with a different key while validate() still trusts the real
+    # owner's public key — proves a signature from the wrong key is caught,
+    # not just an absent/malformed trust configuration.
+    _sign_with_key(approval, wrong_key, trust_owner_public_key_hex)
+
+    errors = runner.validate(
+        approval,
+        manifest,
+        "B1",
+        "a" * 40,
+        now_ms=1_000,
+        trust_owner_public_key_hex=trust_owner_public_key_hex,
+    )
+    assert any("signature" in e or "verification" in e for e in errors)
+
+
+def test_unconfigured_trust_key_is_rejected():
+    manifest = _manifest()
+    approval, _key, _trust_hex = _signed_approval(manifest)
+
+    errors = runner.validate(approval, manifest, "B1", "a" * 40, now_ms=1_000)
+    assert any("signature" in e or "verification" in e for e in errors)
+
+
+def test_replayed_nonce_is_rejected_on_second_invocation(tmp_path: Path):
+    manifest = _manifest()
+    approval, _key, _trust_hex = _signed_approval(manifest)
+    ledger = FileBackedNonceLedger(tmp_path / "ledger.json")
+
+    first = ledger.admit(
+        nonce_digest=approval["nonce"],
+        approval_id_digest=approval["approval_id"],
+        binding_digest=approval["self_digest"],
+        epoch=1,
+    )
+    second = ledger.admit(
+        nonce_digest=approval["nonce"],
+        approval_id_digest=approval["approval_id"],
+        binding_digest=approval["self_digest"],
+        epoch=1,
+    )
+    assert first is True
+    assert second is False
+
+
+def test_credential_swapped_dependency_is_rejected():
+    broker = NonproductionCredentialBroker(env={"BAKEOFF_NONPROD_CREDENTIAL__TELEPHONY": "wrong"})
+    grant = broker.resolve(
+        dependency_role="telephony",
+        approved_credential_ref="0" * 64,
+        approved_account_region_ref="0" * 64,
+    )
+    assert grant is None
+
+
+def test_destination_mismatched_dependency_is_rejected():
+    broker = NonproductionCredentialBroker(
+        env={
+            "BAKEOFF_NONPROD_CREDENTIAL__TELEPHONY": "cred",
+            "BAKEOFF_NONPROD_ACCOUNT_REGION__TELEPHONY": "kevin-491315:us-central1",
+        }
+    )
+    grant = broker.resolve(
+        dependency_role="telephony",
+        approved_credential_ref=hashlib.sha256(b"cred").hexdigest(),
+        approved_account_region_ref=hashlib.sha256(b"kevin-491315:us-central1").hexdigest(),
+    )
+    assert grant is None  # production account/region is denylisted unconditionally
+
+
+def test_credential_denial_surfaces_through_validate_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    manifest = _manifest()
+    approval, _key, trust_owner_public_key_hex = _signed_approval(manifest)
+    # No BAKEOFF_NONPROD_CREDENTIAL__* / BAKEOFF_NONPROD_ACCOUNT_REGION__*
+    # env vars are configured, so the broker denies every dependency.
+    for key in list(os.environ):
+        if key.startswith("BAKEOFF_NONPROD_"):
+            monkeypatch.delenv(key, raising=False)
+
+    errors = runner.validate(
+        approval,
+        manifest,
+        "B1",
+        "a" * 40,
+        now_ms=1_000,
+        trust_owner_public_key_hex=trust_owner_public_key_hex,
+    )
+    assert any("credential broker denied dependency" in e for e in errors)
+
+
+def test_reviewer_same_as_signer_is_rejected():
+    manifest = _manifest()
+    approval, _key, trust_owner_public_key_hex = _signed_approval(manifest)
+    approval["owner_authorization"]["identity"] = "ref_same_session"
+    approval["technical_review"]["provenance_ref"] = "ref_same_session"
+    _resign(approval)
+
+    errors = runner.validate(
+        approval,
+        manifest,
+        "B1",
+        "a" * 40,
+        now_ms=1_000,
+        trust_owner_public_key_hex=trust_owner_public_key_hex,
+    )
+    assert any("reviewer" in e or "provenance" in e for e in errors)
+
+
 def test_runner_contains_no_network_or_credential_imports():
     source = _SCRIPT.read_text(encoding="utf-8")
     imports = {
@@ -247,13 +514,43 @@ def test_runner_contains_no_network_or_credential_imports():
 _OFFLINE_SOURCE_PATHS = {
     "scripts.run_voice_architecture_bakeoff": _SCRIPT,
     "scripts.voice_bakeoff_caller": Path("scripts/voice_bakeoff_caller.py"),
+    "scripts.request_voice_bakeoff_review": Path(
+        "scripts/request_voice_bakeoff_review.py"
+    ),
+    "app.services.voice_bakeoff_credential_broker": Path(
+        "app/services/voice_bakeoff_credential_broker.py"
+    ),
+    "app.services.voice_bakeoff_nonce_ledger": Path(
+        "app/services/voice_bakeoff_nonce_ledger.py"
+    ),
+    "app.services.voice_bakeoff_residue_audit": Path(
+        "app/services/voice_bakeoff_residue_audit.py"
+    ),
+    "app.services.voice_bakeoff_security_contracts": Path(
+        "app/services/voice_bakeoff_security_contracts.py"
+    ),
 }
 _OFFLINE_APPROVED_SOURCE_DIGESTS = {
     "scripts.run_voice_architecture_bakeoff": (
-        "12756f6defdcc0c45f88921b3f12221db0ad4d858cc7e637f91b809ce9632272"
+        "5927721778d8c96724c697daf813530bbb1ea8eb8b51f0b5bcac54ba6b4869a7"
     ),
     "scripts.voice_bakeoff_caller": (
         "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
+    ),
+    "scripts.request_voice_bakeoff_review": (
+        "2a102679528d82ac46170053cdd76b475bec8984a9ba1b20f7bbff2ad9ccf8e6"
+    ),
+    "app.services.voice_bakeoff_credential_broker": (
+        "c3d39899a0a537dcbe18c80e029c05d07eb43086cc39d8aa34a2d7ac2bbc31fc"
+    ),
+    "app.services.voice_bakeoff_nonce_ledger": (
+        "a6d52edb8850170d134a804d84aae92f15c3beb3be0fb0b81b753d80a0980b8e"
+    ),
+    "app.services.voice_bakeoff_residue_audit": (
+        "542c08bacd6e6c2ea81b0b746368a359b4b71b38229860dbd8aae9fa1e8ce0cb"
+    ),
+    "app.services.voice_bakeoff_security_contracts": (
+        "77948e3a357699ee1738379380e2cc0f76612ce3aea75f455dffdd1e17ab5b74"
     ),
 }
 _OFFLINE_ALLOWED_IMPORTS = {
@@ -262,10 +559,119 @@ _OFFLINE_ALLOWED_IMPORTS = {
         ("import", "argparse", "", ""),
         ("import", "hashlib", "", ""),
         ("import", "json", "", ""),
+        ("import", "os", "", ""),
         ("import", "re", "", ""),
         ("import", "subprocess", "", ""),
         ("import", "time", "", ""),
         ("from", "pathlib", "Path", ""),
+        (
+            "from",
+            "cryptography.hazmat.primitives.asymmetric.ed25519",
+            "Ed25519PrivateKey",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_credential_broker",
+            "NonproductionCredentialBroker",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_nonce_ledger",
+            "FileBackedNonceLedger",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_residue_audit",
+            "audit_residue",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "ApprovalArm",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "ApprovalCaps",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "ApprovalProvenanceSigner",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "DetachedApprovalSignature",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "InMemoryTrustGenerationPinStore",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "OfflineApprovalVerifier",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "SignedApproval",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "SignerRole",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TechnicalReviewReceipt",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TrustGenerationPin",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TrustSnapshot",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TrustSnapshotRootSigner",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TrustSnapshotRootVerifier",
+            "",
+        ),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TrustedSignerKey",
+            "",
+        ),
         (
             "from",
             "scripts.voice_bakeoff_caller",
@@ -273,6 +679,18 @@ _OFFLINE_ALLOWED_IMPORTS = {
             "",
         ),
         ("from", "voice_bakeoff_caller", "run_offline_self_check", ""),
+        (
+            "from",
+            "scripts.request_voice_bakeoff_review",
+            "reviewer_is_procedurally_separate",
+            "",
+        ),
+        (
+            "from",
+            "request_voice_bakeoff_review",
+            "reviewer_is_procedurally_separate",
+            "",
+        ),
     },
     "scripts.voice_bakeoff_caller": {
         ("from", "__future__", "annotations", ""),
@@ -295,6 +713,51 @@ _OFFLINE_ALLOWED_IMPORTS = {
             "",
         ),
     },
+    "scripts.request_voice_bakeoff_review": {
+        ("from", "__future__", "annotations", ""),
+        (
+            "from",
+            "app.services.voice_bakeoff_security_contracts",
+            "TechnicalReviewReceipt",
+            "",
+        ),
+    },
+    "app.services.voice_bakeoff_credential_broker": {
+        ("from", "__future__", "annotations", ""),
+        ("import", "dataclasses", "", ""),
+        ("import", "hashlib", "", ""),
+        ("from", "typing", "Mapping", ""),
+    },
+    "app.services.voice_bakeoff_nonce_ledger": {
+        ("from", "__future__", "annotations", ""),
+        ("import", "dataclasses", "", ""),
+        ("import", "fcntl", "", ""),
+        ("import", "json", "", ""),
+        ("import", "os", "", ""),
+        ("import", "pathlib", "", ""),
+        ("import", "tempfile", "", ""),
+    },
+    "app.services.voice_bakeoff_residue_audit": {
+        ("from", "__future__", "annotations", ""),
+        ("import", "dataclasses", "", ""),
+        ("import", "pathlib", "", ""),
+    },
+    "app.services.voice_bakeoff_security_contracts": {
+        ("import", "dataclasses", "", ""),
+        ("import", "enum", "", ""),
+        ("import", "hashlib", "", ""),
+        ("import", "hmac", "", ""),
+        ("import", "json", "", ""),
+        ("import", "secrets", "", ""),
+        ("import", "threading", "", ""),
+        ("import", "cryptography.exceptions", "", ""),
+        (
+            "import",
+            "cryptography.hazmat.primitives.asymmetric.ed25519",
+            "",
+            "",
+        ),
+    },
 }
 _OFFLINE_ALLOWED_GETATTR = {
     "scripts.run_voice_architecture_bakeoff": [],
@@ -312,6 +775,43 @@ _OFFLINE_ALLOWED_GETATTR = {
                 'getattr(session_runner, "budget", None)',
                 'getattr(session_runner, "run", None)',
                 'getattr(result, "returned_audio", None)',
+            )
+        ]
+    ),
+    "scripts.request_voice_bakeoff_review": [],
+    "app.services.voice_bakeoff_credential_broker": [],
+    "app.services.voice_bakeoff_nonce_ledger": [],
+    "app.services.voice_bakeoff_residue_audit": [],
+    "app.services.voice_bakeoff_security_contracts": sorted(
+        [
+            ast.dump(
+                ast.parse(expression, mode="eval").body,
+                include_attributes=False,
+            )
+            for expression in (
+                # ApprovalCaps.canonical_value, VerifiedApproval field loops,
+                # and every other dataclass's field-name-driven __post_init__
+                # digest checks — 12 occurrences of getattr(self, field_name)
+                # and 6 of getattr(self, field.name), counted directly from
+                # the source (see the runner report for how this was derived).
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field_name)",
+                "getattr(self, field.name)",
+                "getattr(self, field.name)",
+                "getattr(self, field.name)",
+                "getattr(self, field.name)",
+                "getattr(self, field.name)",
+                "getattr(self, field.name)",
             )
         ]
     ),
@@ -342,6 +842,30 @@ _OFFLINE_ALLOWED_FILE_IO = {
             )
         ]
     ),
+    "scripts.request_voice_bakeoff_review": [],
+    "app.services.voice_bakeoff_credential_broker": [],
+    "app.services.voice_bakeoff_nonce_ledger": sorted(
+        [
+            ast.dump(
+                ast.parse(expression, mode="eval").body,
+                include_attributes=False,
+            )
+            for expression in (
+                'self._lock_path.open("r+", encoding="utf-8")',
+                'self._path.read_text(encoding="utf-8")',
+            )
+        ]
+    ),
+    "app.services.voice_bakeoff_residue_audit": sorted(
+        [
+            ast.dump(
+                ast.parse(expression, mode="eval").body,
+                include_attributes=False,
+            )
+            for expression in ("path.stat()",)
+        ]
+    ),
+    "app.services.voice_bakeoff_security_contracts": [],
 }
 
 
@@ -369,15 +893,15 @@ def _import_contract(
         if isinstance(node, ast.Import):
             for alias in node.names:
                 records.add(("import", alias.name, "", alias.asname or ""))
-                if alias.name.startswith("scripts."):
+                if alias.name.startswith(("scripts.", "app.services.voice_bakeoff_")):
                     local_dependencies.add(alias.name)
         elif isinstance(node, ast.ImportFrom):
             base = _resolved_from_module(module_name, node)
             for alias in node.names:
                 records.add(("from", base, alias.name, alias.asname or ""))
-            if base == "voice_bakeoff_caller":
-                local_dependencies.add("scripts.voice_bakeoff_caller")
-            elif base.startswith("scripts."):
+            if base in ("voice_bakeoff_caller", "request_voice_bakeoff_review"):
+                local_dependencies.add(f"scripts.{base}")
+            elif base.startswith(("scripts.", "app.services.voice_bakeoff_")):
                 local_dependencies.add(base)
     return records, local_dependencies
 
@@ -387,12 +911,24 @@ def _offline_firewall_errors(
 ) -> list[str]:
     source_overrides = overrides or {}
     errors: list[str] = []
+    # app.services.* (unlike scripts/, a namespace package) has a real,
+    # pre-existing __init__.py per directory — app/__init__.py and
+    # app/services/__init__.py both predate this plan and are part of the
+    # unrelated FastAPI application layout. A non-empty initializer could
+    # hide code that runs on import without ever appearing in the AST walk
+    # below, so this still fails closed on content — it only stops
+    # rejecting an initializer's mere *existence* once confirmed empty.
     package_initializers = {
         path.parent / "__init__.py"
         for path in _OFFLINE_SOURCE_PATHS.values()
         if (path.parent / "__init__.py").exists()
     }
-    if package_initializers:
+    non_empty_initializers = {
+        path
+        for path in package_initializers
+        if path.read_text(encoding="utf-8").strip()
+    }
+    if non_empty_initializers:
         errors.append("unapproved package initializer")
     pending = ["scripts.run_voice_architecture_bakeoff"]
     visited: set[str] = set()
@@ -653,7 +1189,14 @@ def test_all_offline_candidate_adapters_are_registered_without_importing_them():
     )
 
 
-def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path):
+def _write_valid_cli_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, str], str]:
+    """Write a fully valid, genuinely-signed manifest/approval pair to disk.
+
+    Returns (manifest_path, approval_path, nonprod_env_vars,
+    trust_owner_public_key_hex) ready to drive the CLI end-to-end.
+    """
     source_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True
     ).strip()
@@ -664,15 +1207,35 @@ def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path)
     approval["expires_at_ms"] = approval["issued_at_ms"] + 60_000
     approval["source_sha"] = source_sha
     approval["technical_review"]["source_sha"] = source_sha
-    approval["dependency_inventory_digest"] = runner._dependency_inventory_digest(approval["dependencies"])
-    manifest["candidate"]["dependency_inventory_digest"] = approval["dependency_inventory_digest"]
+    new_dependencies, env_vars = _nonprod_dependency_overrides(approval["dependencies"])
+    approval["dependencies"] = new_dependencies
+    approval["dependency_inventory_digest"] = runner._dependency_inventory_digest(
+        new_dependencies
+    )
+    manifest["candidate"]["dependency_inventory_digest"] = approval[
+        "dependency_inventory_digest"
+    ]
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
     approval["manifest_digest"] = runner._manifest_digest_bytes(manifest_path.read_bytes())
     approval["technical_review"]["manifest_digest"] = approval["manifest_digest"]
     _resign(approval)
+
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    trust_owner_public_key_hex = private_key.public_key().public_bytes_raw().hex()
+    _sign_with_key(approval, private_key, trust_owner_public_key_hex)
+
     approval_path = tmp_path / "approval.json"
     approval_path.write_text(json.dumps(approval, separators=(",", ":")), encoding="utf-8")
+    return manifest_path, approval_path, env_vars, trust_owner_public_key_hex
+
+
+def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path):
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    nonce_ledger_path = tmp_path / "ledger.json"
+    residue_destination_path = tmp_path / "residue"
 
     result = subprocess.run(
         [
@@ -685,14 +1248,56 @@ def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path)
             "--approval",
             str(approval_path),
             "--dry-run",
+            "--nonce-ledger",
+            str(nonce_ledger_path),
+            "--residue-destination",
+            str(residue_destination_path),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
         ],
         check=False,
         capture_output=True,
         text=True,
+        env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
     )
     assert result.returncode == 3
-    assert json.loads(result.stdout) == {
-        "error_count": 0,
-        "verdict": "blocked_external_verification_required",
-    }
+    payload = json.loads(result.stdout)
+    assert payload["error_count"] == 0
+    assert payload["verdict"] == "blocked_external_verification_required"
+    assert payload["residue_audit"] == {"passed": True, "remaining_paths": []}
     assert result.stderr == ""
+
+
+def test_cli_rejects_replayed_nonce_on_second_invocation(tmp_path: Path):
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    nonce_ledger_path = tmp_path / "ledger.json"
+    residue_destination_path = tmp_path / "residue"
+    argv = [
+        sys.executable,
+        str(_SCRIPT),
+        "--arm",
+        "B1",
+        "--manifest",
+        str(manifest_path),
+        "--approval",
+        str(approval_path),
+        "--dry-run",
+        "--nonce-ledger",
+        str(nonce_ledger_path),
+        "--residue-destination",
+        str(residue_destination_path),
+        "--trust-owner-public-key",
+        trust_owner_public_key_hex,
+    ]
+    run_env = {**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)}
+
+    first = subprocess.run(argv, check=False, capture_output=True, text=True, env=run_env)
+    second = subprocess.run(argv, check=False, capture_output=True, text=True, env=run_env)
+
+    assert first.returncode == 3
+    assert second.returncode == 2
+    second_payload = json.loads(second.stdout)
+    assert second_payload["verdict"] == "rejected_local_preflight"
+    assert second_payload["error_count"] == 1

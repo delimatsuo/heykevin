@@ -6,15 +6,43 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from app.services.voice_bakeoff_credential_broker import NonproductionCredentialBroker
+from app.services.voice_bakeoff_nonce_ledger import FileBackedNonceLedger
+from app.services.voice_bakeoff_residue_audit import audit_residue
+from app.services.voice_bakeoff_security_contracts import (
+    ApprovalArm,
+    ApprovalCaps,
+    ApprovalProvenanceSigner,
+    DetachedApprovalSignature,
+    InMemoryTrustGenerationPinStore,
+    OfflineApprovalVerifier,
+    SignedApproval,
+    SignerRole,
+    TechnicalReviewReceipt,
+    TrustedSignerKey,
+    TrustGenerationPin,
+    TrustSnapshot,
+    TrustSnapshotRootSigner,
+    TrustSnapshotRootVerifier,
+)
+
 try:
     from scripts.voice_bakeoff_caller import run_offline_self_check
 except ModuleNotFoundError:
     from voice_bakeoff_caller import run_offline_self_check
+
+try:
+    from scripts.request_voice_bakeoff_review import reviewer_is_procedurally_separate
+except ModuleNotFoundError:
+    from request_voice_bakeoff_review import reviewer_is_procedurally_separate
 
 
 _MAX_FILE_BYTES = 131_072
@@ -59,6 +87,166 @@ _OFFLINE_ADAPTERS = {
     "C": "app.services.voice_candidates.manual_native:ManualNativeAdapter",
 }
 _OFFLINE_HARNESS = "scripts/voice_bakeoff_caller.py:run_offline_self_check"
+
+# --- Task 6: real cryptographic/replay/broker verification -----------------
+#
+# There is no persisted, externally-provisioned trust store yet (no task in
+# this plan builds one — see docs/security/voice-architecture-bakeoff-controls.md,
+# "Gates that keep Task 3.4 and Task 4.8 blocked": "cryptographic signer
+# keys, current trust store... do not exist in this slice"). Rather than
+# skip real Ed25519 verification until that lands, or fabricate an
+# unconditionally-self-signed snapshot that would make verification a
+# no-op, the runner accepts the sole owner's Ed25519 *public* key (not a
+# secret) as an operator-supplied --trust-owner-public-key hex string. When
+# absent or malformed, verification fails closed. When present, the runner
+# builds a minimal, self-consistent TrustSnapshot around that one public
+# key and a fresh, single-use, ephemeral "root" keypair — the root keypair
+# carries no external trust meaning of its own; it exists only to satisfy
+# OfflineApprovalVerifier's constructor shape, which requires a
+# self-authenticating snapshot. The only externally-meaningful comparison
+# is: does the approval's signature verify against the operator-configured
+# owner public key. This is a deliberate, documented scope boundary — see
+# the report for this task.
+_TRUST_POLICY_DIGEST = hashlib.sha256(
+    b"bakeoff-runner-ephemeral-trust-policy/v1"
+).hexdigest()
+_TRUST_CAS_DIGEST = hashlib.sha256(
+    b"bakeoff-runner-ephemeral-trust-cas/v1"
+).hexdigest()
+_ZERO_DIGEST = "0" * 64
+# The approval schema's caps dict (_CAPS, 9 fields) does not yet track
+# ApprovalCaps' "calls" or "artifact_ttl_ms" fields separately. "calls" is
+# conservatively defaulted to the already-approved "requests" bound;
+# artifact_ttl_ms uses this fixed default (also reused for the residue
+# audit below) until the schema grows a dedicated field.
+_DEFAULT_ARTIFACT_TTL_MS = 86_400_000
+
+
+def _string_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _build_trust_material(
+    approval: dict[str, object],
+    owner_public_key: bytes,
+) -> tuple[TrustSnapshot, OfflineApprovalVerifier]:
+    """Build a minimal, self-consistent trust snapshot bound to
+    `owner_public_key`, plus a verifier that can check a SignedApproval
+    against it. See the module-level comment above for what is and is not
+    externally trustworthy about this."""
+    owner_authorization = approval["owner_authorization"]
+    expires_at_ms = approval["expires_at_ms"] + 1
+    signer = TrustedSignerKey(
+        role=SignerRole.OWNER,
+        identity_ref=owner_authorization["identity"],
+        key_id=owner_authorization["key_id"],
+        public_key=owner_public_key,
+        effective_at_ms=0,
+        expires_at_ms=expires_at_ms,
+        revoked_at_ms=None,
+    )
+    ephemeral_key = Ed25519PrivateKey.generate()
+    unsigned_snapshot = TrustSnapshot(
+        generation=1,
+        version_ref="ref_bakeoff_runner_trust_generation_1",
+        policy_digest=_TRUST_POLICY_DIGEST,
+        immutable_custody_ref="ref_bakeoff_runner_trust_custody",
+        effective_at_ms=0,
+        expires_at_ms=expires_at_ms,
+        signers=(signer,),
+        sole_owner_authorization=True,
+        no_break_glass=True,
+        root_signature=b"\x00" * 64,
+    )
+    snapshot = TrustSnapshotRootSigner(ephemeral_key).issue(unsigned_snapshot)
+    root_verifier = TrustSnapshotRootVerifier(
+        ephemeral_key.public_key().public_bytes_raw()
+    )
+    pin_store = InMemoryTrustGenerationPinStore(
+        TrustGenerationPin(
+            generation=1,
+            snapshot_digest=snapshot.snapshot_digest,
+            root_key_fingerprint=root_verifier.key_fingerprint,
+            persistence_ref="ref_bakeoff_runner_trust_pin",
+            cas_version_digest=_TRUST_CAS_DIGEST,
+        )
+    )
+    verifier = OfflineApprovalVerifier(
+        provenance_signer=ApprovalProvenanceSigner(ephemeral_key),
+        snapshot_root_verifier=root_verifier,
+        generation_pin_store=pin_store,
+    )
+    return snapshot, verifier
+
+
+def _resolve_trust_owner_public_key(trust_owner_public_key_hex: str | None) -> bytes | None:
+    if not isinstance(trust_owner_public_key_hex, str):
+        return None
+    try:
+        candidate = bytes.fromhex(trust_owner_public_key_hex)
+    except ValueError:
+        return None
+    return candidate if len(candidate) == 32 else None
+
+
+def _build_signed_approval(
+    approval: dict[str, object],
+    trust_snapshot_digest: str,
+    signer_set_digest: str,
+) -> SignedApproval:
+    """Construct the real SignedApproval envelope from the runner's
+    already-shape-validated approval dict. May raise ValueError/TypeError
+    if a field does not additionally satisfy the real dataclasses'
+    stricter invariants (e.g. opaque refs need a "ref_" prefix) — callers
+    must treat that as a rejection, not a bug; see Task 5's cross-task
+    note on this exact mismatch."""
+    owner_authorization = approval["owner_authorization"]
+    technical_review = approval["technical_review"]
+    caps = approval["caps"]
+    payload_digest = approval["self_digest"]
+    binding_digest = approval["manifest_digest"]
+    return SignedApproval(
+        payload_digest=payload_digest,
+        approval_id_digest=_string_digest(approval["approval_id"]),
+        nonce_digest=_string_digest(approval["nonce"]),
+        binding_digest=binding_digest,
+        trust_snapshot_digest=trust_snapshot_digest,
+        signer_set_digest=signer_set_digest,
+        environment=approval["environment"],
+        arm=ApprovalArm(approval["arm"]),
+        epoch=1,
+        issued_at_ms=approval["issued_at_ms"],
+        expires_at_ms=approval["expires_at_ms"],
+        caps=ApprovalCaps(
+            requests=caps["requests"],
+            attempts=caps["attempts"],
+            calls=caps["requests"],
+            concurrency=caps["concurrency"],
+            duration_ms=caps["duration_ms"],
+            bytes=caps["bytes"],
+            audio_ms=caps["audio_ms"],
+            retries=caps["retries"],
+            tokens=caps["tokens"],
+            cost_minor_units=caps["cost_minor_units"],
+            artifact_ttl_ms=_DEFAULT_ARTIFACT_TTL_MS,
+        ),
+        technical_review=TechnicalReviewReceipt(
+            review_digest=technical_review["review_digest"],
+            provenance_ref=technical_review["provenance_ref"],
+            reviewed_payload_digest=payload_digest,
+            reviewed_binding_digest=binding_digest,
+            unresolved_p1_count=technical_review["unresolved_p1_count"],
+            advisory_only=technical_review["advisory_only"],
+        ),
+        signatures=(
+            DetachedApprovalSignature(
+                role=SignerRole(owner_authorization["role"]),
+                identity_ref=owner_authorization["identity"],
+                key_id=owner_authorization["key_id"],
+                signature=bytes.fromhex(owner_authorization["signature"]),
+            ),
+        ),
+    )
 
 
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -119,7 +307,7 @@ def _dependency_inventory_digest(dependencies: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def validate(approval: dict[str, object], manifest: dict[str, object], arm: str, source_sha: str, now_ms: int | None = None, schema: dict[str, object] | None = None, manifest_digest: str | None = None) -> list[str]:
+def validate(approval: dict[str, object], manifest: dict[str, object], arm: str, source_sha: str, now_ms: int | None = None, schema: dict[str, object] | None = None, manifest_digest: str | None = None, trust_owner_public_key_hex: str | None = None) -> list[str]:
     required = {"approval_id", "nonce", "issued_at_ms", "expires_at_ms", "self_digest", "environment", "arm", "source_sha", "manifest_digest", "dependency_inventory_digest", "artifact_digests", "dependencies", "caps", "disabled_features", "custody_references", "trust_metadata", "authorization_model", "owner_authorization", "technical_review"}
     errors = []
     if arm not in _OFFLINE_ADAPTERS:
@@ -215,6 +403,57 @@ def validate(approval: dict[str, object], manifest: dict[str, object], arm: str,
     current_ms = int(time.time() * 1000) if now_ms is None else now_ms
     if isinstance(approval.get("issued_at_ms"), bool) or not isinstance(approval.get("issued_at_ms"), int) or isinstance(approval.get("expires_at_ms"), bool) or not isinstance(approval.get("expires_at_ms"), int) or approval["issued_at_ms"] >= approval["expires_at_ms"] or approval["expires_at_ms"] <= current_ms:
         errors.append("approval is expired or timestamps invalid")
+
+    # --- Task 6: cryptographic/replay/broker verification, earliest-boundary-first ---
+    # Each step below is gated on "if not errors" so it only runs once every
+    # shape check above it has already passed — this both matches Task 3.4's
+    # earliest-boundary-first spec text and prevents an unhandled exception
+    # from indexing into a field an earlier check already found malformed.
+    if not errors:
+        if not reviewer_is_procedurally_separate(
+            signer_provenance_ref=owner_authorization["identity"],
+            reviewer_provenance_ref=technical_review["provenance_ref"],
+        ):
+            errors.append("reviewer is not procedurally separate from signer")
+
+    trust_material = None
+    if not errors:
+        owner_public_key = _resolve_trust_owner_public_key(trust_owner_public_key_hex)
+        if owner_public_key is not None:
+            try:
+                trust_material = _build_trust_material(approval, owner_public_key)
+            except (ValueError, TypeError):
+                trust_material = None
+
+    trust_snapshot_digest = trust_material[0].snapshot_digest if trust_material else _ZERO_DIGEST
+    signer_set_digest = trust_material[0].signer_set_digest if trust_material else _ZERO_DIGEST
+
+    signed_approval = None
+    if not errors:
+        try:
+            signed_approval = _build_signed_approval(approval, trust_snapshot_digest, signer_set_digest)
+        except (ValueError, TypeError) as exc:
+            errors.append(f"signed approval construction failed: {exc}")
+
+    if not errors:
+        verified = None
+        if signed_approval is not None and trust_material is not None:
+            snapshot, verifier = trust_material
+            verified = verifier.verify(signed_approval, snapshot, now_ms=current_ms)
+        if verified is None:
+            errors.append("signature or trust verification failed")
+
+    if not errors:
+        broker = NonproductionCredentialBroker(env=os.environ)
+        for dependency in approval["dependencies"]:
+            grant = broker.resolve(
+                dependency_role=dependency["role"],
+                approved_credential_ref=dependency["credential_ref"],
+                approved_account_region_ref=dependency["account_region_ref"],
+            )
+            if grant is None:
+                errors.append(f"credential broker denied dependency: {dependency['role']}")
+
     return errors
 
 
@@ -224,19 +463,56 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--approval", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true", required=True)
+    parser.add_argument("--nonce-ledger", type=Path, required=True)
+    parser.add_argument("--residue-destination", type=Path, required=True)
+    parser.add_argument("--trust-owner-public-key", default=None)
     args = parser.parse_args()
     try:
         root = Path(__file__).resolve().parents[1]
         source_sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
         manifest_bytes = args.manifest.read_bytes()
         manifest = _load(args.manifest)
-        errors = validate(_load(args.approval), manifest, args.arm, source_sha, schema=_load(root / _SCHEMA_PATH), manifest_digest=_manifest_digest_bytes(manifest_bytes))
+        approval = _load(args.approval)
+        errors = validate(
+            approval,
+            manifest,
+            args.arm,
+            source_sha,
+            schema=_load(root / _SCHEMA_PATH),
+            manifest_digest=_manifest_digest_bytes(manifest_bytes),
+            trust_owner_public_key_hex=args.trust_owner_public_key,
+        )
         if not errors and not run_offline_self_check(arm=args.arm, manifest=manifest):
             errors.append("offline caller harness self-check failed")
+        if not errors and not FileBackedNonceLedger(args.nonce_ledger).admit(
+            nonce_digest=approval["nonce"],
+            approval_id_digest=approval["approval_id"],
+            binding_digest=approval["self_digest"],
+            epoch=1,
+        ):
+            errors.append("nonce already consumed")
     except (OSError, ValueError, json.JSONDecodeError):
         errors = ["invalid local input"]
     verdict = "blocked_external_verification_required" if not errors else "rejected_local_preflight"
-    print(json.dumps({"verdict": verdict, "error_count": len(errors)}, sort_keys=True))
+    current_ms = int(time.time() * 1000)
+    residue_result = audit_residue(
+        args.residue_destination,
+        artifact_ttl_ms=_DEFAULT_ARTIFACT_TTL_MS,
+        now_ms=current_ms,
+    )
+    print(
+        json.dumps(
+            {
+                "verdict": verdict,
+                "error_count": len(errors),
+                "residue_audit": {
+                    "passed": residue_result.passed,
+                    "remaining_paths": list(residue_result.remaining_paths),
+                },
+            },
+            sort_keys=True,
+        )
+    )
     return 3 if verdict == "blocked_external_verification_required" else 2
 
 

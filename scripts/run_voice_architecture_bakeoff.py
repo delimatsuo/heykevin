@@ -563,7 +563,7 @@ def _run_emit_signing_payload(args: argparse.Namespace) -> int:
         if not errors and signed_approval is not None:
             payload_text = json.dumps(approval_signature_payload(signed_approval), indent=2, sort_keys=True)
             args.emit_signing_payload.write_text(payload_text, encoding="utf-8")
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError, RecursionError):
         errors = ["invalid local input"]
     verdict = "signing_payload_emitted" if not errors else "rejected_local_preflight"
     print(json.dumps({"verdict": verdict, "error_count": len(errors)}, sort_keys=True))
@@ -615,7 +615,7 @@ def main() -> int:
             epoch=1,
         ):
             errors.append("nonce already consumed")
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError, RecursionError):
         errors = ["invalid local input"]
     verdict = "blocked_external_verification_required" if not errors else "rejected_local_preflight"
     current_ms = int(time.time() * 1000)

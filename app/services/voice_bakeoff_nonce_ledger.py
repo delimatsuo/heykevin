@@ -145,7 +145,7 @@ class FileBackedNonceLedger:
                 else:
                     try:
                         state = _LedgerState.from_json(json.loads(raw))
-                    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                    except (json.JSONDecodeError, AttributeError, TypeError, ValueError, RecursionError):
                         # The ledger exists but its contents are not usable:
                         # either not valid JSON at all (e.g. a prior writer
                         # was killed mid-write, before the atomic replace in

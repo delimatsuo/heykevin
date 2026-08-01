@@ -536,7 +536,7 @@ _OFFLINE_SOURCE_PATHS = {
 }
 _OFFLINE_APPROVED_SOURCE_DIGESTS = {
     "scripts.run_voice_architecture_bakeoff": (
-        "64c474c32f94323193ae8540044aa61b92890fe666ed44a0daeccd85f6f2d110"
+        "7e4faf1a6df3b5e1a8440de6981e8458f10422fb212140e909d04f74d8e1fb8e"
     ),
     "scripts.voice_bakeoff_caller": (
         "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
@@ -548,7 +548,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "d40630fe20fb0a930a59aa8e80a071e466b78725a239e6de74812ea65e6fd2ca"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
-        "ce50cec8a5c10279e3e88e419e248a72d52a13dccb6872eb9cfbd678ba1ac43b"
+        "ce23e77690a32725e543c55665e430273b2fde5e28ebfb3705a52f4c86042e45"
     ),
     "app.services.voice_bakeoff_residue_audit": (
         "542c08bacd6e6c2ea81b0b746368a359b4b71b38229860dbd8aae9fa1e8ce0cb"
@@ -1337,6 +1337,56 @@ def test_cli_shape_corrupted_nonce_ledger_fails_closed_not_crashes(tmp_path: Pat
     )
     nonce_ledger_path = tmp_path / "ledger.json"
     nonce_ledger_path.write_text("[]", encoding="utf-8")
+    residue_destination_path = tmp_path / "residue"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(nonce_ledger_path),
+            "--residue-destination",
+            str(residue_destination_path),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
+    )
+    assert result.returncode == 2
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "rejected_local_preflight"
+    assert payload["error_count"] == 1
+
+
+def test_cli_deeply_nested_nonce_ledger_fails_closed_not_crashes(tmp_path: Path):
+    """Regression test for a confirmation-review-found crash: a nonce-ledger
+    file containing deeply-nested JSON (e.g. 20,000 levels of `[[[...]]]`)
+    makes `json.loads` itself raise RecursionError while parsing — before
+    `_LedgerState.from_json` is even reached. RecursionError subclasses
+    RuntimeError, not any of (json.JSONDecodeError, AttributeError,
+    TypeError, ValueError), so it escaped both FileBackedNonceLedger.admit()'s
+    except tuple and main()'s outer except tuple, crashing with exit 1 and a
+    raw traceback instead of the documented JSON-on-stdout contract. Both
+    tuples now include RecursionError; this must produce the same clean
+    rejected_local_preflight / exit 2 outcome the other corruption shapes do.
+    """
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    nonce_ledger_path = tmp_path / "ledger.json"
+    depth = 20_000
+    nonce_ledger_path.write_text("[" * depth + "]" * depth, encoding="utf-8")
     residue_destination_path = tmp_path / "residue"
 
     result = subprocess.run(

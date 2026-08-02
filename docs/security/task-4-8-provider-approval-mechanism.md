@@ -298,15 +298,27 @@ verdict/exit-code table for what it does and does not affect.
 
 ### `residue_audit` is informational only
 
-`residue_audit` never affects `verdict` or the exit code in the table
-above, in either mode — this is a deliberate design decision, not an
-oversight. It reports whether `--residue-destination` holds artifacts older
-than their TTL, which is a separate operational concern from whether *this*
-run's approval is contract-consistent: residue is typically left over from
-a *previous* run, and an operator scripting on exit code alone should not
-have a stale-artifact finding silently change the meaning of "did this
-approval verify." Read `residue_audit.passed` yourself if you care about
-residue; do not infer it from the exit code.
+`residue_audit`'s *finding* — whether `--residue-destination` holds
+artifacts older than their TTL — never affects `verdict` or the exit code
+in the table above. This is a deliberate design decision, not an
+oversight: residue is typically left over from a *previous* run, a
+separate operational concern from whether *this* run's approval is
+contract-consistent, and an operator scripting on exit code alone should
+not have a stale-artifact finding silently change the meaning of "did
+this approval verify." Read `residue_audit.passed` yourself if you care
+about residue; do not infer it from the exit code.
+
+That is distinct from the audit *erroring* while it runs. Anticipated
+failure modes (an unreadable subdirectory, a destination that turns out
+to be a file, not a directory) are reported as a clean `passed: false`
+with the offending path in `unreadable_paths` — not an error. But if
+something genuinely unexpected happens while the audit runs, that
+exception is caught by the same handling as any other local-input error
+and *does* produce `rejected_local_preflight`/exit 2 — even for an
+otherwise fully valid approval. This is intentional fail-closed handling
+for the unexpected case, but it means the residue audit is not purely
+inert with respect to the exit code: it can only ever cause a rejection
+that wouldn't otherwise have happened, never an unearned success.
 
 The key is present in every mode, but its value depends on whether an
 audit actually ran:
@@ -317,10 +329,13 @@ audit actually ran:
   is) whenever the audit could not inspect something it walked over — e.g.
   a subdirectory it lacked permission to list — rather than silently
   skipping it; see `app/services/voice_bakeoff_residue_audit.py`.
-- Normal mode, a filesystem error severe enough to abort the run before or
-  during the audit (caught the same way every other local-input error in
-  this runner is caught): `null`. The run has already failed for its own
-  reason (`rejected_local_preflight`) by this point regardless.
+- Normal mode, an unexpected error while the audit itself runs (caught the
+  same way every other local-input error in this runner is caught):
+  `null`, and the run reports `rejected_local_preflight` — even if the
+  approval envelope was otherwise fully valid. This is the one case where
+  the residue audit's own failure, not the approval's content, determines
+  the verdict; see "`residue_audit` is informational only" above for why
+  that's still the intended tradeoff.
 - `--emit-signing-payload` mode, either outcome: always `null` — this mode
   never runs a residue audit at all (see step 2 above and
   `_run_emit_signing_payload`'s own docstring), and reports `null` rather
@@ -423,7 +438,11 @@ latter signs a real payload with the actual `sign_payload()` function from
 `scripts/sign_voice_bakeoff_approval.py` (not a runner-internal shortcut)
 and confirms the runner's own verifier accepts it.
 `::test_documented_step_order_technical_review_before_emit_produces_valid_signature`
-goes a step further: it drives the exact numbered step order above (review
-first, then emit, sign, embed, run) as real subprocess CLI calls, so it
-would fail if this document's step order ever regressed to signing before
-the review again.
+goes a step further: it drives the same step order this document specifies
+(review first, then emit, sign, embed, run) as real subprocess CLI calls,
+proving that order genuinely produces a valid signature. It hardcodes that
+order in Python rather than parsing this document, so it cannot catch this
+prose drifting out of sync with the code — only a human comparing this
+section against the test can do that. What it does prove is that the order
+above is not merely plausible-looking prose: it is exactly what was
+executed and verified.

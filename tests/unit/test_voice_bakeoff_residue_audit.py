@@ -1,6 +1,9 @@
 import ast
 import os
 import pathlib
+import sys
+
+import pytest
 
 from app.services.voice_bakeoff_residue_audit import audit_residue
 
@@ -55,6 +58,50 @@ def test_checks_nested_directories(tmp_path):
     result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
     assert result.passed is False
     assert str(old) in result.remaining_paths
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits only; chmod(0o000) is not meaningful on Windows",
+)
+def test_unreadable_subdirectory_fails_closed_and_is_reported(tmp_path):
+    """Reviewer-confirmed fail-open bug: the old implementation walked with
+    Path.rglob("*"), which silently swallows PermissionError while listing a
+    directory it cannot read — so an unreadable subdirectory was treated as
+    if it simply did not exist, and the audit reported passed=True for a
+    tree it never actually finished inspecting. An audit that cannot prove
+    a directory is clean must not report it as clean.
+
+    This is skipped when running as root: root bypasses POSIX permission
+    bits on both Linux and macOS, so chmod(0o000) would not actually make
+    the subdirectory unreadable and the test would spuriously fail.
+    """
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("chmod(0o000) does not restrict root")
+
+    old = tmp_path / "old.json"
+    old.write_text("{}")
+    mtime_ms = int(old.stat().st_mtime * 1000)
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "secret.json").write_text("{}")
+
+    os.chmod(locked, 0o000)
+    try:
+        now_ms = mtime_ms + 5000
+        result = audit_residue(tmp_path, artifact_ttl_ms=1000, now_ms=now_ms)
+
+        assert result.passed is False
+        assert any("locked" in path for path in result.unreadable_paths)
+        # The unreadable subdirectory must not silently suppress reporting
+        # of residue the audit *could* inspect elsewhere in the same tree.
+        assert str(old) in result.remaining_paths
+    finally:
+        # Restore permissions before tmp_path's own fixture teardown runs,
+        # or pytest's cleanup of this directory will itself fail to remove
+        # an unreadable subdirectory.
+        os.chmod(locked, 0o755)
 
 
 def test_dangling_symlink_past_ttl_is_reported(tmp_path):

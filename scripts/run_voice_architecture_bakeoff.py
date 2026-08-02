@@ -532,7 +532,11 @@ def _run_emit_signing_payload(args: argparse.Namespace) -> int:
     `validate()` checks up to, but not including, verifying a real
     signature. Never admits a nonce and never runs the residue audit:
     neither applies yet — there is no real signature to admit a nonce for,
-    and nothing here executes.
+    and nothing here executes. The printed JSON still includes a
+    `"residue_audit": null` key (rather than omitting it) so the top-level
+    shape — `error_count`, `verdict`, `residue_audit` — is stable across
+    both this mode and the normal run mode; see
+    docs/security/task-4-8-provider-approval-mechanism.md.
 
     Feed the written file to
     `scripts/sign_voice_bakeoff_approval.py --payload <path> --domain-name
@@ -566,7 +570,12 @@ def _run_emit_signing_payload(args: argparse.Namespace) -> int:
     except (OSError, ValueError, json.JSONDecodeError, RecursionError):
         errors = ["invalid local input"]
     verdict = "signing_payload_emitted" if not errors else "rejected_local_preflight"
-    print(json.dumps({"verdict": verdict, "error_count": len(errors)}, sort_keys=True))
+    print(
+        json.dumps(
+            {"verdict": verdict, "error_count": len(errors), "residue_audit": None},
+            sort_keys=True,
+        )
+    )
     return 0 if not errors else 2
 
 
@@ -595,6 +604,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.emit_signing_payload is not None:
         return _run_emit_signing_payload(args)
+    residue_result = None
     try:
         source_sha, manifest, approval, schema, manifest_digest = _load_inputs(args)
         errors = validate(
@@ -615,24 +625,41 @@ def main() -> int:
             epoch=1,
         ):
             errors.append("nonce already consumed")
+        # Residue is a separate, informational-only operational concern —
+        # see docs/security/task-4-8-provider-approval-mechanism.md's
+        # exit-code/verdict reference: it never gates `verdict`/the exit
+        # code below, and it deliberately still runs here even when the
+        # checks above already found errors (it audits *this*
+        # `--residue-destination`, unrelated to whether *this* approval was
+        # admitted). It must stay inside this same try/except: filesystem
+        # inspection during the walk can still raise for reasons
+        # audit_residue() itself cannot convert into a fail-closed result
+        # (e.g. a path removed mid-walk, after the walk's own listing of it
+        # already succeeded) — and this runner's contract is to always
+        # print JSON and never crash with a bare traceback, the same
+        # contract already enforced for the nonce ledger above.
+        residue_result = audit_residue(
+            args.residue_destination,
+            artifact_ttl_ms=_DEFAULT_ARTIFACT_TTL_MS,
+            now_ms=int(time.time() * 1000),
+        )
     except (OSError, ValueError, json.JSONDecodeError, RecursionError):
         errors = ["invalid local input"]
     verdict = "blocked_external_verification_required" if not errors else "rejected_local_preflight"
-    current_ms = int(time.time() * 1000)
-    residue_result = audit_residue(
-        args.residue_destination,
-        artifact_ttl_ms=_DEFAULT_ARTIFACT_TTL_MS,
-        now_ms=current_ms,
-    )
     print(
         json.dumps(
             {
                 "verdict": verdict,
                 "error_count": len(errors),
-                "residue_audit": {
-                    "passed": residue_result.passed,
-                    "remaining_paths": list(residue_result.remaining_paths),
-                },
+                "residue_audit": (
+                    {
+                        "passed": residue_result.passed,
+                        "remaining_paths": list(residue_result.remaining_paths),
+                        "unreadable_paths": list(residue_result.unreadable_paths),
+                    }
+                    if residue_result is not None
+                    else None
+                ),
             },
             sort_keys=True,
         )

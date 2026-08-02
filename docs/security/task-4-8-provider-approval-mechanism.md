@@ -48,15 +48,15 @@ the owner's own signature.
 | --- | --- |
 | `app/services/voice_bakeoff_nonce_ledger.py` | `FileBackedNonceLedger` — a persisted, file-locked, one-use nonce/approval-id/binding admission ledger. Replay of a consumed nonce, approval ID, or `binding_digest:epoch` pair is rejected, even across separate process invocations. |
 | `app/services/voice_bakeoff_credential_broker.py` | `NonproductionCredentialBroker` — resolves a credential grant only when environment-provided nonproduction values match the approval's own digest-pinned references exactly, and the resolved account/region is not on a hardcoded single-entry production denylist (`kevin-491315:us-central1` — this project's own GCP hosting project; see "Scope boundary" below). |
-| `app/services/voice_bakeoff_residue_audit.py` | `audit_residue()` — inspects (never deletes) a destination directory for files or symlinks older than a TTL. Read-only; a human decides what to do with anything it finds. |
+| `app/services/voice_bakeoff_residue_audit.py` | `audit_residue()` — inspects (never deletes) a destination directory for files or symlinks older than a TTL. Read-only; a human decides what to do with anything it finds. Fails closed: if anything under the destination could not be inspected (e.g. an unreadable subdirectory), that path is reported in `unreadable_paths` and `passed` is `false` — it never silently reports a tree it could not fully walk as clean. |
 | `scripts/sign_voice_bakeoff_approval.py` | The owner's personal signing CLI. Signs a canonical JSON payload with the owner's own Ed25519 key under the real `_APPROVAL_DOMAIN` domain-separation constant from `app/services/voice_bakeoff_security_contracts.py`. |
 | `scripts/request_voice_bakeoff_review.py` | Builds a digest-only review request package (never the raw approval contents) and validates/parses an independent reviewer's response into a `TechnicalReviewReceipt`. **Not a standalone CLI** — it has no `argparse`/`__main__` entry point; it is a small function library (`build_receipt_request`, `parse_review_response`, `reviewer_is_procedurally_separate`) meant to be driven from a Python shell or a short script you write. |
-| `scripts/run_voice_architecture_bakeoff.py` | The runner. Performs real Ed25519 verification (via `OfflineApprovalVerifier`), real nonce-ledger admission, real credential-broker checks, and a post-verdict residue audit, gated in earliest-boundary-first order. |
+| `scripts/run_voice_architecture_bakeoff.py` | The runner. Performs real Ed25519 verification (via `OfflineApprovalVerifier`), real nonce-ledger admission, and real credential-broker checks, gated in earliest-boundary-first order — plus a residue audit that runs alongside them but never gates `verdict` (see "`residue_audit` is informational only" below). |
 
 The runner's new/changed CLI surface (confirmed against `--help` output):
 
 - `--nonce-ledger <path>` — **required**. Path to the `FileBackedNonceLedger` JSON file (created if missing). **Limitation:** the runner hardcodes `epoch=1` for every admission keyed on `manifest_digest` (there is no `--epoch` flag). That means a given manifest can be successfully admitted **at most once, ever**, against a given ledger file — a second, legitimately re-signed approval for the *same* manifest (for example, after fixing a typo and re-signing) is rejected forever by that same ledger. If you need to re-issue an approval for the same manifest, do not reuse the same `--nonce-ledger` file — point `--nonce-ledger` at a fresh path instead. The runner's `"nonce already consumed"` rejection message covers this binding/epoch collision case too, not only literal nonce replay, so that message does not always mean the nonce string itself was reused. Adding a `--epoch` flag to make this operator-controlled is deferred, out of scope for this fix.
-- `--residue-destination <path>` — **required**. Directory the residue audit inspects after every run (created lazily; if it doesn't exist yet, the audit trivially passes with `remaining_paths: []` — that is not proof anything was actually checked).
+- `--residue-destination <path>` — **required**. Directory the residue audit inspects after every run (created lazily; if it doesn't exist yet, the audit trivially passes with `remaining_paths: []`/`unreadable_paths: []` — that is not proof anything was actually checked). See "`residue_audit` is informational only" below for what this does and does not affect.
 - `--trust-owner-public-key <hex>` — **optional**, but verification always fails closed without it. The owner's Ed25519 public key as 64 hex characters (32 bytes). This is **not a secret** — the same trust model as an SSH `authorized_keys` entry. Must be the exact same value at `--emit-signing-payload` time and at final-verification time (see below); it is bound into the signed message, so a mismatch produces a payload the real signature won't verify against.
 - `--emit-signing-payload <path>` — **optional** mode switch. Runs every shape/digest/binding check that doesn't require a signature yet, then writes the exact JSON payload dict the verifier will check a signature against.
 
@@ -67,9 +67,9 @@ currently documents it start to finish. All flag names below are copied from
 the runner's actual `argparse` definitions, not paraphrased.
 
 **0. Create your owner key.** On a first run, the owner's Ed25519 private
-key does not exist yet — but Step 1 below requires `--trust-owner-public-key`
-(derived from that key), and Step 2 (`sign_voice_bakeoff_approval.py`) needs
-a `--payload` file that only Step 1 produces. Neither step can go first on
+key does not exist yet — but Step 2 below requires `--trust-owner-public-key`
+(derived from that key), and Step 3 (`sign_voice_bakeoff_approval.py`) needs
+a `--payload` file that only Step 2 produces. Neither step can go first on
 its own, so start here instead. Break the cycle by running the signing CLI
 once against a throwaway placeholder payload, purely to mint the key file —
 `load_or_create_owner_key()` creates `--key` (if it doesn't already exist,
@@ -95,7 +95,7 @@ existing key rather than regenerating it), so you only do this once, ever,
 per key path.
 
 Now derive the matching **public** key hex from that same private key
-file — the value `--trust-owner-public-key` needs below, in Step 1. There is
+file — the value `--trust-owner-public-key` needs below, in Step 2. There is
 currently no shipped helper for this (a known, deliberate documentation-only
 gap — not something this task built new code for). Derive it manually:
 
@@ -108,7 +108,87 @@ print(Ed25519PrivateKey.from_private_bytes(raw).public_key().public_bytes_raw().
 "
 ```
 
-**1. Emit the signing payload.** Run the normal arguments plus
+**1. Obtain an independent technical review receipt and populate
+`technical_review` — before you do anything else below.** This has to come
+first, not last. `technical_review` is covered by two things that only get
+computed later in this workflow, so it must already be final before either
+exists:
+
+- `self_digest` (see `_canonical_digest` in the runner) is a digest over
+  the *entire* approval object, `technical_review` included.
+- The owner's signature itself covers `technical_review` too —
+  `approval_signature_payload`'s `_approval_message_value` embeds
+  `technical_review`'s canonical value directly (see
+  `app/services/voice_bakeoff_security_contracts.py`). Populating or
+  editing `technical_review` after that payload has been signed silently
+  invalidates the signature — see the warning after step 3.
+
+Step 2 below (`--emit-signing-payload`) runs the same shape check
+`validate()` does, and that check requires `technical_review` to already be
+the complete, real receipt — `unresolved_p1_count == 0`, `advisory_only` is
+`true`, and its `source_sha`/`manifest_digest` already matching the
+approval's own — before it will emit anything at all. So step 2 cannot
+succeed until this step has already happened; do this first.
+
+Get the review from a procedurally separate reviewer — not yourself, and
+not the identity that will appear as `owner_authorization.identity` once
+you sign in step 3 below. `scripts/request_voice_bakeoff_review.py`
+provides the functions for this, called from a Python shell or short
+driver script (it has no CLI of its own):
+
+```python
+from scripts.request_voice_bakeoff_review import (
+    build_receipt_request,
+    parse_review_response,
+)
+
+# Digests and metadata only — never the raw approval contents — so a
+# compromised or careless reviewer process can't leak sensitive detail it
+# was never given. `technical_review` doesn't exist yet at this point — it
+# is what this step produces — so the digest sent to the reviewer here is
+# necessarily computed over the approval's other, already-decided terms
+# (arm, caps, dependencies, disabled_features, manifest binding, and so
+# on), not the approval's eventual self_digest, which cannot exist before
+# the review outcome does. Any stable digest over that pre-review state
+# works as the correlator `build_receipt_request`/`parse_review_response`
+# round-trip; it does not need to be, and cannot be, the final self_digest.
+request = build_receipt_request(
+    predraft_payload_digest,
+    approval["manifest_digest"],
+    source_sha=approval["source_sha"],
+    manifest_digest=approval["manifest_digest"],
+)
+# ... send `request` to a procedurally separate reviewer and get their
+# response back as a dict ...
+
+receipt = parse_review_response(
+    reviewer_response,
+    expected_payload_digest=request["payload_digest"],
+    expected_binding_digest=request["binding_digest"],
+)
+```
+
+The runner rejects a receipt whose `provenance_ref` equals the signer's
+`owner_authorization.identity` (`reviewer_is_procedurally_separate()`), so
+signing and reviewing from the same session cannot satisfy both
+requirements. The approval JSON's `technical_review` object needs exactly
+six fields — `review_digest`, `provenance_ref`, `source_sha`,
+`manifest_digest`, `unresolved_p1_count` (must be `0`), and `advisory_only`
+(must be `true`) — populate them from the receipt plus the approval's own
+`source_sha`/`manifest_digest`. Only once `technical_review` holds this
+final content do you compute `self_digest` for the first time, over the
+now-complete envelope — every step below uses that value. For a complete
+worked example of every required field on both the manifest and the
+approval envelope, see
+`tests/unit/test_run_voice_architecture_bakeoff.py`'s
+`_write_valid_cli_fixture`/`_approval()` helpers (which hand you an
+already-populated `technical_review`) and
+`test_documented_step_order_technical_review_before_emit_produces_valid_signature`
+(which drives this exact request-then-populate-then-digest order end to
+end) — those are the authoritative, tested shapes; not duplicated in full
+here to avoid a second copy that can drift out of sync.
+
+**2. Emit the signing payload.** Run the normal arguments plus
 `--emit-signing-payload`:
 
 ```bash
@@ -123,18 +203,22 @@ python scripts/run_voice_architecture_bakeoff.py \
   --emit-signing-payload /path/to/signing_payload.json
 ```
 
-`--approval` still needs a syntactically valid but not-yet-real
-`owner_authorization.signature` value at this point (128 hex characters,
+`--approval`'s `technical_review` must already be the complete, real
+receipt from step 1 above — not a placeholder — because it is covered by
+`self_digest`, which this step's shape check recomputes and compares.
+`owner_authorization.signature`, by contrast, still only needs to be
+syntactically valid but not-yet-real at this point (128 hex characters,
 e.g. 128 zeros) — its value is excluded from the approval's own
 `self_digest` and from the signed message itself, so a placeholder there
 doesn't change the bytes this mode emits. On success this prints
-`{"error_count": 0, "verdict": "signing_payload_emitted"}` and exits **0**,
-and writes the canonical payload to `signing_payload.json`. On any local
-failure it prints `rejected_local_preflight` and exits **2** — including
-when `--trust-owner-public-key` is absent or malformed
+`{"error_count": 0, "verdict": "signing_payload_emitted", "residue_audit": null}`
+and exits **0**, and writes the canonical payload to `signing_payload.json`.
+On any local failure it prints `rejected_local_preflight` (with the same
+`"residue_audit": null` key) and exits **2** — including when
+`--trust-owner-public-key` is absent or malformed
 (`"cannot emit signing payload without a valid --trust-owner-public-key"`).
 
-**2. Sign the payload with your own key.**
+**3. Sign the payload with your own key.**
 
 ```bash
 python scripts/sign_voice_bakeoff_approval.py \
@@ -153,58 +237,27 @@ constant internally. This reuses the same key file Step 0 already created
 at `~/.config/hey-kevin/bakeoff_owner_key.pem` — `load_or_create_owner_key()`
 loads an existing key file rather than regenerating it, so this step signs
 with the same key whose public half you already derived and passed as
-`--trust-owner-public-key` in Step 1. The command prints the hex-encoded
+`--trust-owner-public-key` in Step 2. The command prints the hex-encoded
 signature to stdout.
 
-**3. Embed the signature.** Paste step 2's stdout into the approval JSON's
-`owner_authorization.signature` field, replacing the placeholder.
+> **Warning: once this produces a signature, stop editing.** Everything
+> that signature covers — the entire approval payload, `technical_review`
+> included (see step 1's explanation above) — must now stay frozen. Step 4
+> below is the *only* change you make to the approval JSON from this point
+> on: pasting the signature itself into a field (`owner_authorization.signature`)
+> that is itself excluded from both `self_digest` and the signed message.
+> Editing any other field — including going back to "fix" `technical_review`,
+> a cap, a dependency, anything — silently invalidates the signature. There
+> is no field-specific error for this: the runner's verifier just reports
+> `"signature or trust verification failed"`, indistinguishable from a
+> wrong key or a forged signature. If anything needs to change after this
+> point, start over from step 1.
 
-**4. Obtain an independent technical review receipt**, from a procedurally
-separate reviewer — not yourself, not the same session that produced the
-signature in step 2. `scripts/request_voice_bakeoff_review.py` provides the
-functions for this, called from a Python shell or short driver script (it
-has no CLI of its own):
+**4. Embed the signature.** Paste step 3's stdout into the approval JSON's
+`owner_authorization.signature` field, replacing the placeholder — and
+nothing else (see the warning above).
 
-```python
-from scripts.request_voice_bakeoff_review import (
-    build_receipt_request,
-    parse_review_response,
-)
-
-# Digests and metadata only — never the raw approval contents — so a
-# compromised or careless reviewer process can't leak sensitive detail it
-# was never given.
-request = build_receipt_request(
-    approval["self_digest"],
-    approval["manifest_digest"],
-    source_sha=approval["source_sha"],
-    manifest_digest=approval["manifest_digest"],
-)
-# ... send `request` to a procedurally separate reviewer and get their
-# response back as a dict ...
-
-receipt = parse_review_response(
-    reviewer_response,
-    expected_payload_digest=approval["self_digest"],
-    expected_binding_digest=approval["manifest_digest"],
-)
-```
-
-The runner rejects a receipt whose `provenance_ref` equals the signer's
-`owner_authorization.identity` (`reviewer_is_procedurally_separate()`), so
-signing and reviewing from the same session cannot satisfy both
-requirements. The approval JSON's `technical_review` object needs exactly
-six fields — `review_digest`, `provenance_ref`, `source_sha`,
-`manifest_digest`, `unresolved_p1_count` (must be `0`), and `advisory_only`
-(must be `true`) — populate them from the receipt plus the approval's own
-`source_sha`/`manifest_digest`. For a complete worked example of every
-required field on both the manifest and the approval envelope, see
-`tests/unit/test_run_voice_architecture_bakeoff.py`'s `_write_valid_cli_fixture`
-and `_approval()` helpers — that is the authoritative, tested shape; it is
-not duplicated in full here to avoid a second copy that can drift out of
-sync.
-
-**5. Run the runner normally** — the same command as step 1, minus
+**5. Run the runner normally** — the same command as step 2, minus
 `--emit-signing-payload`:
 
 ```bash
@@ -215,11 +268,11 @@ python scripts/run_voice_architecture_bakeoff.py \
   --dry-run \
   --nonce-ledger /path/to/nonce_ledger.json \
   --residue-destination /path/to/residue \
-  --trust-owner-public-key <the same 64-hex-char public key as step 1>
+  --trust-owner-public-key <the same 64-hex-char public key as step 2>
 ```
 
 A fully signed, reviewed, valid envelope now reaches
-`{"error_count": 0, "verdict": "blocked_external_verification_required", "residue_audit": {"passed": true, "remaining_paths": []}}`
+`{"error_count": 0, "verdict": "blocked_external_verification_required", "residue_audit": {"passed": true, "remaining_paths": [], "unreadable_paths": []}}`
 and exits **3**. `error_count: 0` means local verification passes
 completely — signature, nonce admission, and credential-broker checks all
 genuinely ran and genuinely succeeded. It does **not** mean a provider was
@@ -228,6 +281,10 @@ permanently rejected regardless of this outcome** — see below. Re-running
 the exact same envelope a second time now fails with `rejected_local_preflight`
 (exit 2, one error) because the nonce ledger has already admitted it — nonces
 are genuinely one-use, durably, across process invocations.
+
+`residue_audit` here is a report on `--residue-destination`, not on this
+run's approval — see "`residue_audit` is informational only" below the
+verdict/exit-code table for what it does and does not affect.
 
 ### Verdict and exit-code reference
 
@@ -238,6 +295,38 @@ are genuinely one-use, durably, across process invocations.
 | `--emit-signing-payload` | any local check fails, or `--trust-owner-public-key` absent/invalid | `rejected_local_preflight` | 2 |
 | `--emit-signing-payload` | every check up to (not including) real signature verification passes | `signing_payload_emitted` | **0** |
 | any mode | `--execute-provider` passed, or a required argument is missing | (argparse usage error — no JSON printed) | 2 |
+
+### `residue_audit` is informational only
+
+`residue_audit` never affects `verdict` or the exit code in the table
+above, in either mode — this is a deliberate design decision, not an
+oversight. It reports whether `--residue-destination` holds artifacts older
+than their TTL, which is a separate operational concern from whether *this*
+run's approval is contract-consistent: residue is typically left over from
+a *previous* run, and an operator scripting on exit code alone should not
+have a stale-artifact finding silently change the meaning of "did this
+approval verify." Read `residue_audit.passed` yourself if you care about
+residue; do not infer it from the exit code.
+
+The key is present in every mode, but its value depends on whether an
+audit actually ran:
+
+- Normal mode, no filesystem error during the audit itself: a real object,
+  `{"passed": ..., "remaining_paths": [...], "unreadable_paths": [...]}`.
+  `unreadable_paths` is non-empty (and `passed` is always `false` when it
+  is) whenever the audit could not inspect something it walked over — e.g.
+  a subdirectory it lacked permission to list — rather than silently
+  skipping it; see `app/services/voice_bakeoff_residue_audit.py`.
+- Normal mode, a filesystem error severe enough to abort the run before or
+  during the audit (caught the same way every other local-input error in
+  this runner is caught): `null`. The run has already failed for its own
+  reason (`rejected_local_preflight`) by this point regardless.
+- `--emit-signing-payload` mode, either outcome: always `null` — this mode
+  never runs a residue audit at all (see step 2 above and
+  `_run_emit_signing_payload`'s own docstring), and reports `null` rather
+  than omitting the key so the top-level JSON shape
+  (`error_count`/`verdict`/`residue_audit`) is the same three keys in every
+  mode.
 
 `--execute-provider` is not a recognized argument at all — it isn't in the
 parser's `add_argument` calls — so passing it is rejected by `argparse`
@@ -333,3 +422,8 @@ are the closest things to an executable spec of the workflow above — the
 latter signs a real payload with the actual `sign_payload()` function from
 `scripts/sign_voice_bakeoff_approval.py` (not a runner-internal shortcut)
 and confirms the runner's own verifier accepts it.
+`::test_documented_step_order_technical_review_before_emit_produces_valid_signature`
+goes a step further: it drives the exact numbered step order above (review
+first, then emit, sign, embed, run) as real subprocess CLI calls, so it
+would fail if this document's step order ever regressed to signing before
+the review again.

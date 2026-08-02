@@ -19,6 +19,11 @@ from app.services.voice_bakeoff_security_contracts import (
     _APPROVAL_DOMAIN,
     approval_signature_message,
 )
+from scripts.request_voice_bakeoff_review import (
+    build_receipt_request,
+    parse_review_response,
+    reviewer_is_procedurally_separate,
+)
 from scripts.sign_voice_bakeoff_approval import sign_payload
 from scripts.voice_bakeoff_caller import development_harness_manifest
 
@@ -536,7 +541,7 @@ _OFFLINE_SOURCE_PATHS = {
 }
 _OFFLINE_APPROVED_SOURCE_DIGESTS = {
     "scripts.run_voice_architecture_bakeoff": (
-        "7e4faf1a6df3b5e1a8440de6981e8458f10422fb212140e909d04f74d8e1fb8e"
+        "a69dd22dc599e696654205af2d3adc10570013740575a9cfd6da4d945c3020be"
     ),
     "scripts.voice_bakeoff_caller": (
         "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
@@ -551,7 +556,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "ce23e77690a32725e543c55665e430273b2fde5e28ebfb3705a52f4c86042e45"
     ),
     "app.services.voice_bakeoff_residue_audit": (
-        "542c08bacd6e6c2ea81b0b746368a359b4b71b38229860dbd8aae9fa1e8ce0cb"
+        "236deb489c68e27aaeec0439d5e411aa50f1d2c7461f17ee4f80214d0441d574"
     ),
     "app.services.voice_bakeoff_security_contracts": (
         "0f49fcd1dce75d05d205c9349765720e316c0f5955f373d99f64bdc174f3ea12"
@@ -750,6 +755,7 @@ _OFFLINE_ALLOWED_IMPORTS = {
     "app.services.voice_bakeoff_residue_audit": {
         ("from", "__future__", "annotations", ""),
         ("import", "dataclasses", "", ""),
+        ("import", "os", "", ""),
         ("import", "pathlib", "", ""),
     },
     "app.services.voice_bakeoff_security_contracts": {
@@ -1279,7 +1285,11 @@ def test_cli_valid_local_envelope_stops_at_external_verification(tmp_path: Path)
     payload = json.loads(result.stdout)
     assert payload["error_count"] == 0
     assert payload["verdict"] == "blocked_external_verification_required"
-    assert payload["residue_audit"] == {"passed": True, "remaining_paths": []}
+    assert payload["residue_audit"] == {
+        "passed": True,
+        "remaining_paths": [],
+        "unreadable_paths": [],
+    }
     assert result.stderr == ""
 
 
@@ -1553,6 +1563,123 @@ def test_cli_shape_corrupted_nonce_ledger_string_field_does_not_fail_open(
     assert payload["error_count"] == 1
 
 
+def test_residue_audit_filesystem_error_fails_closed_not_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """Regression test for a reviewer-confirmed crash: main() used to call
+    audit_residue() entirely outside its try/except block — after that
+    block had already closed — so any exception it raised escaped uncaught,
+    crashing the process with exit 1 and a raw traceback on stderr instead
+    of the documented always-print-JSON contract. Same bug class already
+    fixed twice elsewhere in this file for the nonce ledger (see
+    test_cli_shape_corrupted_nonce_ledger_fails_closed_not_crashes and
+    test_cli_deeply_nested_nonce_ledger_fails_closed_not_crashes).
+
+    audit_residue() now runs from inside the same try block that already
+    wraps input loading/validation/nonce admission, so any
+    OSError/ValueError/RecursionError it raises is caught the same way
+    those steps' own errors already are. After the residue-audit module's
+    own fail-closed fix (Finding 1), a merely-unreadable directory no
+    longer makes audit_residue() raise at all — it fails closed via its
+    return value instead — so this is deliberately about defense-in-depth
+    against a DIFFERENT filesystem failure audit_residue() cannot itself
+    convert into a result (e.g. a path vanishing mid-walk after os.walk's
+    own listing of it already succeeded). Simulated directly by making
+    audit_residue() raise, rather than trying to reproduce a real
+    filesystem race, which would be slow and flaky.
+    """
+    manifest_path, approval_path, env_vars, trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    for key, value in env_vars.items():
+        monkeypatch.setenv(key, value)
+
+    def _raise_mid_walk_error(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated: path removed mid-walk")
+
+    monkeypatch.setattr(runner, "audit_residue", _raise_mid_walk_error)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(tmp_path / "ledger.json"),
+            "--residue-destination",
+            str(tmp_path / "residue"),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+        ],
+    )
+
+    exit_code = runner.main()
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "rejected_local_preflight"
+    assert payload["error_count"] == 1
+    assert payload["residue_audit"] is None
+
+
+def test_emit_signing_payload_rejection_also_reports_null_residue_audit(
+    tmp_path: Path,
+):
+    """Companion to test_emit_signing_payload_closes_the_loop_with_the_real_
+    signing_cli's happy-path shape assertion below: --emit-signing-payload's
+    REJECTED path must report the same stable top-level JSON shape
+    (error_count/verdict/residue_audit) its success path and normal mode
+    both do — not have the key appear only when things go well. Omitting
+    --trust-owner-public-key is the simplest way to force
+    rejected_local_preflight here without constructing an otherwise-invalid
+    envelope.
+    """
+    manifest_path, approval_path, env_vars, _trust_owner_public_key_hex = (
+        _write_valid_cli_fixture(tmp_path)
+    )
+    payload_path = tmp_path / "signing_payload.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(tmp_path / "unused_ledger.json"),
+            "--residue-destination",
+            str(tmp_path / "unused_residue"),
+            "--emit-signing-payload",
+            str(payload_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)},
+    )
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "verdict": "rejected_local_preflight",
+        "error_count": 1,
+        "residue_audit": None,
+    }
+    assert not payload_path.exists()
+
+
 def test_emit_signing_payload_closes_the_loop_with_the_real_signing_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1647,6 +1774,7 @@ def test_emit_signing_payload_closes_the_loop_with_the_real_signing_cli(
     assert json.loads(emit_result.stdout) == {
         "verdict": "signing_payload_emitted",
         "error_count": 0,
+        "residue_audit": None,
     }
     assert emit_result.stderr == ""
 
@@ -1667,3 +1795,213 @@ def test_emit_signing_payload_closes_the_loop_with_the_real_signing_cli(
         trust_owner_public_key_hex=trust_owner_public_key_hex,
     )
     assert errors == []
+
+
+def test_documented_step_order_technical_review_before_emit_produces_valid_signature(
+    tmp_path: Path,
+):
+    """Regression test for a reviewer-confirmed doc bug: the workflow in
+    docs/security/task-4-8-provider-approval-mechanism.md used to order its
+    steps emit (1) -> sign (2) -> embed (3) -> obtain review receipt and
+    populate technical_review (4) -> run (5). That is backwards on both
+    ends:
+
+    - `technical_review` is covered by `self_digest` (see
+      `runner._canonical_digest`) AND by the signed message itself
+      (`approval_signature_payload`'s `_approval_message_value` embeds
+      `technical_review.canonical_value()` directly — see
+      `app/services/voice_bakeoff_security_contracts.py`), so populating it
+      after signing silently invalidates the signature.
+    - `--emit-signing-payload` runs the same shape check `validate()` does,
+      which requires a COMPLETE, valid `technical_review` already present
+      (`unresolved_p1_count == 0`, `advisory_only is True`, matching
+      `source_sha`/`manifest_digest`) before it will emit anything — so the
+      old step 1 could not even succeed before the old step 4 ran.
+
+    The doc now orders review-and-populate first. This test drives that
+    corrected order literally — technical_review populated first, then
+    emit, then sign, then embed, then run — as real subprocess CLI calls
+    for the runner (mirroring
+    test_emit_signing_payload_closes_the_loop_with_the_real_signing_cli),
+    to prove the DOCUMENTED sequence itself produces a valid, verifiable
+    approval the real runner CLI accepts end to end — not just that some
+    working order exists. This is the test that should have existed before
+    the doc bug shipped, and didn't.
+    """
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+    # --- Doc step 0 (unchanged): the owner already has an Ed25519 keypair.
+    # (The doc's bootstrap dance is about minting
+    # sign_voice_bakeoff_approval.py's on-disk key file the first time;
+    # here, like the other CLI tests in this file, we only need the
+    # keypair itself.)
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    trust_owner_public_key_hex = private_key.public_key().public_bytes_raw().hex()
+
+    # Everything the approval needs to state its terms — arm, caps,
+    # dependencies, disabled features, the manifest binding — decided
+    # before any review can happen, since that is what the reviewer
+    # reviews. owner_authorization.signature stays a placeholder; it is
+    # excluded from self_digest and the signed message either way, so it
+    # does not matter yet.
+    manifest = _manifest()
+    manifest["candidate"]["source_sha"] = source_sha
+    approval = _approval()
+    approval["issued_at_ms"] = int(time.time() * 1000)
+    approval["expires_at_ms"] = approval["issued_at_ms"] + 60_000
+    approval["source_sha"] = source_sha
+    new_dependencies, env_vars = _nonprod_dependency_overrides(approval["dependencies"])
+    approval["dependencies"] = new_dependencies
+    approval["dependency_inventory_digest"] = runner._dependency_inventory_digest(
+        new_dependencies
+    )
+    manifest["candidate"]["dependency_inventory_digest"] = approval[
+        "dependency_inventory_digest"
+    ]
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+    approval["manifest_digest"] = runner._manifest_digest_bytes(manifest_path.read_bytes())
+
+    owner_identity = "ref_documented_order_owner"
+    reviewer_identity = "ref_documented_order_reviewer"
+    approval["owner_authorization"] = {
+        "role": "owner",
+        "identity": owner_identity,
+        "key_id": "ref_documented_order_key",
+        "algorithm": "ed25519",
+        "signature": "0" * 128,
+    }
+
+    # --- Doc step 1 (the corrected position — before emit): obtain the
+    # independent technical review receipt and populate technical_review.
+    #
+    # technical_review does not exist yet, so the digest sent to the
+    # reviewer for correlation is computed over the approval without it —
+    # not the eventual self_digest, which cannot exist before the review
+    # outcome does (exactly as the doc's step 1 now explains).
+    predraft_digest = runner._canonical_digest(
+        {key: value for key, value in approval.items() if key != "technical_review"}
+    )
+    request = build_receipt_request(
+        predraft_digest,
+        approval["manifest_digest"],
+        source_sha=source_sha,
+        manifest_digest=approval["manifest_digest"],
+    )
+    # Simulate the procedurally separate reviewer's response coming back.
+    reviewer_response = {
+        "review_digest": hashlib.sha256(
+            b"documented-order regression review, no P1s"
+        ).hexdigest(),
+        "provenance_ref": reviewer_identity,
+        "reviewed_payload_digest": request["payload_digest"],
+        "reviewed_binding_digest": request["binding_digest"],
+        "unresolved_p1_count": 0,
+        "advisory_only": True,
+    }
+    receipt = parse_review_response(
+        reviewer_response,
+        expected_payload_digest=request["payload_digest"],
+        expected_binding_digest=request["binding_digest"],
+    )
+    assert reviewer_is_procedurally_separate(
+        signer_provenance_ref=owner_identity,
+        reviewer_provenance_ref=receipt.provenance_ref,
+    )
+    approval["technical_review"] = {
+        "review_digest": receipt.review_digest,
+        "provenance_ref": receipt.provenance_ref,
+        "source_sha": source_sha,
+        "manifest_digest": approval["manifest_digest"],
+        "unresolved_p1_count": receipt.unresolved_p1_count,
+        "advisory_only": receipt.advisory_only,
+    }
+    # Only now, with technical_review final, can self_digest be computed —
+    # exactly as the doc's step 1 says.
+    _resign(approval)
+
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(approval, separators=(",", ":")), encoding="utf-8")
+    run_env = {**os.environ, **env_vars, "PYTHONPATH": str(_REPO_ROOT)}
+
+    # --- Doc step 2 (was step 1): emit the signing payload. This is the
+    # step that used to run BEFORE technical_review existed at all; it can
+    # only succeed now because technical_review — and therefore self_digest
+    # — is already final.
+    payload_path = tmp_path / "signing_payload.json"
+    emit_result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(tmp_path / "ledger.json"),
+            "--residue-destination",
+            str(tmp_path / "residue"),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+            "--emit-signing-payload",
+            str(payload_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=run_env,
+    )
+    assert emit_result.returncode == 0, (emit_result.stdout, emit_result.stderr)
+    assert json.loads(emit_result.stdout) == {
+        "verdict": "signing_payload_emitted",
+        "error_count": 0,
+        "residue_audit": None,
+    }
+    assert emit_result.stderr == ""
+
+    # --- Doc step 3 (was step 2): sign the payload with the owner's key,
+    # using the real, independent signing function from
+    # scripts/sign_voice_bakeoff_approval.py — not a runner-internal
+    # shortcut.
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    signature = sign_payload(private_key, domain=_APPROVAL_DOMAIN, payload=payload)
+
+    # --- Doc step 4 (was step 3): embed the signature — and, per the new
+    # doc warning, nothing else.
+    approval["owner_authorization"]["signature"] = signature.hex()
+    _resign(approval)  # No-op on the value: signature is excluded from self_digest.
+    approval_path.write_text(json.dumps(approval, separators=(",", ":")), encoding="utf-8")
+
+    # --- Doc step 5: run the runner normally — a real subprocess CLI call,
+    # end to end, on the exact documented order.
+    run_result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--arm",
+            "B1",
+            "--manifest",
+            str(manifest_path),
+            "--approval",
+            str(approval_path),
+            "--dry-run",
+            "--nonce-ledger",
+            str(tmp_path / "final_ledger.json"),
+            "--residue-destination",
+            str(tmp_path / "final_residue"),
+            "--trust-owner-public-key",
+            trust_owner_public_key_hex,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=run_env,
+    )
+    assert run_result.returncode == 3, (run_result.stdout, run_result.stderr)
+    assert run_result.stderr == ""
+    run_payload = json.loads(run_result.stdout)
+    assert run_payload["verdict"] == "blocked_external_verification_required"
+    assert run_payload["error_count"] == 0

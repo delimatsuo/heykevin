@@ -510,10 +510,28 @@ def _approval_message_value(approval: SignedApproval) -> dict[str, object]:
     }
 
 
+def approval_signature_payload(approval: SignedApproval) -> dict[str, object]:
+    """Return the exact JSON-able payload `approval_signature_message` signs.
+
+    This is everything `OfflineApprovalVerifier.verify()` authenticates a
+    signature against, except the domain prefix — i.e. the same dict
+    `approval_signature_message` domain-separates and hashes-into-a-signature
+    below. Exposed publicly (not just as the private `_approval_message_value`
+    helper) so external tooling can produce a `--payload` file for
+    `scripts/sign_voice_bakeoff_approval.py` that reproduces the exact bytes
+    this module's verifier checks, without re-deriving this shape by hand and
+    risking silent drift from the real one. See
+    `scripts/run_voice_architecture_bakeoff.py`'s `--emit-signing-payload`
+    mode, the intended caller.
+    """
+
+    return _approval_message_value(approval)
+
+
 def approval_signature_message(approval: SignedApproval) -> bytes:
     """Return the domain-separated canonical approval message."""
 
-    return _APPROVAL_DOMAIN + _json_bytes(_approval_message_value(approval))
+    return _APPROVAL_DOMAIN + _json_bytes(approval_signature_payload(approval))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

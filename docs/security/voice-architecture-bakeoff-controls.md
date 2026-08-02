@@ -2,15 +2,26 @@
 
 Status: Task 3.4A non-executable offline contract preparation. Task 3.4 remains
 incomplete. No provider execution, participant activity, manifest sealing,
-credential resolution, network access, Task 4.8, staging, or production action is
-authorized.
+production credential resolution, network access, Task 4.8, staging, or
+production action is authorized.
 
-The current repository runner performs local shape and digest preflight only. It
-does not cryptographically verify a signature, consult a real trust store, prove
-immutable custody, persist or consume a nonce, resolve a credential, attest an
-account, construct a provider, or open a network connection. The CLI intentionally
-rejects `--execute-provider`; the approval schema remains
-`x-execution: unsupported`, and the manifest remains `template_only`.
+The current repository runner performs local shape and digest preflight, plus
+real cryptographic signature verification, durable nonce-ledger admission, and
+nonproduction-only credential resolution that checks the resolved account/region
+against a hardcoded single-entry production denylist (this project's own GCP
+hosting project). See `docs/security/task-4-8-provider-approval-mechanism.md`
+for the full mechanism, real example commands, and its scope boundary. The
+runner still does not consult a persisted, externally-provisioned trust store —
+each invocation verifies against a minimal, self-consistent trust snapshot the
+runner builds fresh in memory around an operator-supplied
+`--trust-owner-public-key`, not a durable trust store with rotation/revocation
+history — nor does it prove immutable custody, attest a live provider
+account/region setting, construct a provider, or open a network connection.
+`--execute-provider` is not a recognized CLI argument, so passing it is rejected
+by argument parsing itself, before any local input, subprocess, or harness
+authority can be reached; the approval schema remains
+`x-execution: unsupported`, and the repository's tracked manifest template
+remains `template_only`.
 
 ## Task 3.4A production firewall
 
@@ -40,6 +51,33 @@ calls. The only subprocess reference is the AST-exact
 `git -C <repo> rev-parse HEAD` source-SHA read. A separate test proves
 `--execute-provider` is rejected during argument parsing before any local input,
 subprocess, harness, secret, or network authority can be reached.
+
+This digest-pinned AST contract has since been extended (Task 6) to cover five
+additional modules alongside the runner and harness — the nonce ledger,
+credential broker, residue audit, security contracts, and review-receipt
+request script. Plain `.get(...)` dict/mapping access (as opposed to the
+`os.getenv`/dynamic-call shapes above) is not restricted by this contract: the
+AST check's `forbidden_attributes` blocklist bans specific dangerous
+attribute-call names — `getenv`, `popen`, `system`, `urlopen`, and similar —
+and `"get"` was never added to that list. This is an absence from a
+blocklist, not a dedicated allowlist entry, and it is not scoped to the
+credential broker: `.get(...)` is unrestricted across every digest-pinned
+module the contract walks, including the runner itself, which uses it
+pervasively (for example `manifest.get("candidate")` and
+`approval.get("owner_authorization")` in
+`scripts/run_voice_architecture_bakeoff.py`). The credential broker
+(`app/services/voice_bakeoff_credential_broker.py`) does not import `os` at
+all — it receives an already-opened `Mapping` and calls `self._env.get(...)`
+on it; the literal `os.environ` reference (passed as `env=os.environ`) lives
+in the runner, not the credential broker. `os.getenv` itself remains on the
+forbidden dynamic/authority-call list. See
+`docs/security/task-4-8-provider-approval-mechanism.md` for what the
+credential broker's lookup is for. The authoritative source for this
+mechanism is the `forbidden_attributes` set inside `_offline_firewall_errors()`
+in `tests/unit/test_run_voice_architecture_bakeoff.py` (the
+`_OFFLINE_ALLOWED_IMPORTS`/`_OFFLINE_ALLOWED_GETATTR`/`_OFFLINE_ALLOWED_FILE_IO`
+dicts in that same file govern imports, the `getattr` builtin, and file I/O
+calls respectively — not `.get(...)`); none of it is reproduced here.
 
 ## Trust boundary
 
@@ -178,24 +216,45 @@ network access, or provider integration. A later connected implementation must
 establish those controls independently and must not treat this offline model or
 its tests as Task 4.8 authorization.
 
+The runner's real credential broker (`NonproductionCredentialBroker` in
+`app/services/voice_bakeoff_credential_broker.py`) evaluated wiring this model
+in as a second, broader, multi-provider production denylist alongside its own
+single-entry check. That was investigated and deliberately deferred: this
+model's grants require real production destination/identity digests for
+Twilio, Deepgram, Gemini, and ElevenLabs that do not exist anywhere in this
+plan, and nobody should invent placeholder production identifiers to supply
+them. See `docs/security/task-4-8-provider-approval-mechanism.md` for the full
+scope-boundary rationale. Wiring this model into the runner remains real
+future work, gated on sourcing real per-provider production identity/
+destination data first — it is not scheduled.
+
 ## Gates that keep Task 3.4 and Task 4.8 blocked
 
 The following do not exist in this slice and cannot be inferred from protocols,
 templates, or passing offline tests:
 
-- concrete provider-specific launcher, credential broker, attestors, adapters,
-  evidence reader, residue auditor, or connected denial probes;
+- a concrete provider-specific launcher, attestors, adapters, evidence reader, or
+  connected denial probes (the nonproduction-only credential broker and the
+  offline residue auditor now exist and are wired into the runner — see
+  `docs/security/task-4-8-provider-approval-mechanism.md` — but neither connects
+  to a real provider or network; nothing above them does either);
 - an execution-ready dedicated nonproduction Twilio/provider account, principal,
   destination, token-store implementation, evidence sink, or credential
   inventory; the reference-only Firestore observation does not supply any of
   these;
-- cryptographic signer keys, current trust store, immutable custody service, or
-  durable atomic nonce store;
+- a persisted, externally-provisioned trust store with rotation/revocation
+  history, or an immutable custody service (a personal owner Ed25519 signing key
+  and a durable, file-locked, one-use nonce ledger now exist and are wired into
+  the runner — see the mechanism document above — but each run still verifies
+  against a minimal trust snapshot the runner builds fresh in memory, not a
+  persisted store);
 - provider account/region/privacy attestations and verified deletion procedures;
 - a clean exact-SHA worktree with the complete executable bundle and dependency
   digests;
-- a sealed sole-owner authorization following an advisory technical review with no
-  unresolved P1, and a just-in-time one-use envelope bound to that exact bundle.
+- an actual sealed sole-owner authorization following an actual independent
+  advisory technical review with no unresolved P1, bound to a specific exact
+  bundle (the mechanism to produce and verify one now exists — see the mechanism
+  document above — but no such envelope has been sealed for a real run).
 
 Those controls require a fresh exact-SHA advisory technical review with no
 unresolved P1 and a later sealed sole-owner authorization. Until then, a successful

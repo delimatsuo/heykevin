@@ -77,7 +77,7 @@ Kevin/
 │   │       ├── CallManager.swift      # Twilio Voice SDK
 │   │       ├── ContactSyncManager.swift   # Contacts sync
 │   │       └── KeychainManager.swift  # Secure storage wrapper
-├── .Codex/
+├── .claude/
 │   └── deploy-config.yaml        # Deployment config read by /deploy-staging skill
 ├── .github/workflows/
 │   ├── deploy.yml                # CI: tests → deploy to Cloud Run on push to main/staging
@@ -141,7 +141,7 @@ Founding member promo: 75% off for 3 months, first 1,000 users. Atomic Firestore
 - `APPSTORE_KEY_ID=DZBPCD46KP` — In-App Purchase signing key (for promo offer signatures)
 - `APPSTORE_ISSUER_ID=4b083963-2537-4f41-80ac-8976760521aa`
 - `APPSTORE_BUNDLE_ID=com.kevin.callscreen`
-- `APPSTORE_ENVIRONMENT=sandbox` (change to `production` for App Store launch)
+- `APPSTORE_ENVIRONMENT` — `production` on the production service, `sandbox` on staging (see Environments table). The app is live in the App Store; do not read this row as "pre-launch".
 
 ---
 
@@ -235,7 +235,7 @@ Key variables — full list managed via `gcloud run services update`:
 | `TWILIO_AUTH_TOKEN` | Twilio auth |
 | `DEEPGRAM_API_KEY` | Speech-to-text |
 | `ELEVENLABS_API_KEY` | Text-to-speech |
-| `ANTHROPIC_API_KEY` | Codex (call summaries) |
+| `ANTHROPIC_API_KEY` | Claude (call summaries) |
 | `GEMINI_API_KEY` | Gemini Live (voice AI) |
 | `APNS_KEY_CONTENT` | APNs .p8 key (pipe-separated newlines) |
 | `APNS_KEY_ID` | APNs key ID |
@@ -247,51 +247,8 @@ Key variables — full list managed via `gcloud run services update`:
 | `APPSTORE_PRIVATE_KEY` | In-App Purchase .p8 key (pipe-separated) |
 | `APPSTORE_ENVIRONMENT` | `sandbox` or `production` |
 | `API_BEARER_TOKEN` | Global admin token |
-
-
-<claude-mem-context>
-# Memory Context
-
-# [Kevin] recent context, 2026-07-27 8:41am EDT
-
-Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
-Format: ID TIME TYPE TITLE
-Fetch details: get_observations([IDs]) | Search: mem-search skill
-
-Stats: 20 obs (11,154t read) | 196,763t work | 94% savings
-
-### Jul 23, 2026
-S1027 GitHub sign-in prompt during voice bakeoff offline auth hardening session (Jul 23 at 3:41 PM)
-S1029 Voice completion instrumentation architecture deployed to staging (PR #130, SHA c817fdf) and bakeoff corpus scaffold committed — user caller test pending (Jul 23 at 3:41 PM)
-S1030 Bakeoff plan context re-reads between task transitions — no new state (Jul 23 at 3:42 PM)
-S1031 Offline auth contract negative security test expansion — beginning implementation after repeated context-load attempts (Jul 23 at 3:42 PM)
-S1032 Architectural diagnosis and design pivot: Kevin lacks a dialogue owner; new direction is native-audio Gemini Live as conversational owner (Jul 23 at 3:43 PM)
-S1033 Architectural diagnosis confirmed and repeated: Kevin lacks a dialogue owner; pivoting to native-audio Gemini Live as conversational owner; awaiting GitHub sign-in (Jul 23 at 3:43 PM)
-S1034 Offline voice session auth contract committed and verified on bakeoff branch; next is qualification environment contract (Jul 23 at 3:44 PM)
-S1035 Bakeoff offline scaffolding progressing: evaluator P1s blocked commit, qualification contract committed (1f413c1), corpus scaffold committed (0ad3d5e); auth negative tests next (Jul 23 at 3:44 PM)
-S1036 Voice architecture bakeoff offline scaffolding — Task 3.4 provider approval preflight script, tests, and schema (Jul 23 at 3:45 PM)
-S1038 Voice architecture bakeoff Task 3.4 — provider approval preflight script, tests, and schema (observed live execution) (Jul 23 at 5:23 PM)
-### Jul 25, 2026
-17783 8:50a 🔴 Post-Review: 25 Tests Pass After Ruff E731 Fix; All Checks Clean
-17785 8:51a 🟣 Two Gate Reviews Approved; SHA-256 Pins Established; Task 4.8 Gate Still Running
-17786 " 🟣 Task 4.8 Gate Implementation File Does Not Exist Yet; task48_staff_gate_review Still Running
-17787 8:52a 🔵 CandidateArm and EvidenceTier Enums Located in voice_session_auth.py; send_message to task48_staff_gate_review Returned Empty String
-17788 " 🔴 ApprovalArm Expanded to Four-Arm Set with Corrected Wire Values; New SHA-256 Pins Established
-17789 8:55a 🔵 Primary Session Sent a Second Distinct Encrypted Message to task48_staff_gate_review (Shorter Payload — Likely a Ping or Nudge)
-17790 " 🔵 task48_staff_gate_review Running for 5+ Minutes Across 10+ Consecutive wait_agent Timeouts
-17795 8:58a ⚖️ Primary Session Interrupted task48_staff_gate_review After ~6.5 Minutes — Review Agent Killed
-17796 " 🔵 Second interrupt_agent + New followup_task Tool Used on task48_staff_gate_review with Fresh Long Payload
-17798 " 🔵 task48_staff_gate_review Still Running at 13:00:36Z Despite Earlier "Wait completed" — Fourth Interrupt Issued
-17799 " ⚖️ task48_staff_gate_review Rejected First Draft — Five P1s and Three P2s; Plan Reset to In-Progress for Rework
-17797 8:59a ⚖️ wait_agent Returned "Wait completed" (timed_out=false) at 12:59:11Z — task48_staff_gate_review Has Responded
-17800 9:01a 🔴 P1/P2 Rework Begins: Two New HMAC Domains, _require_exact_int Helper, Two Ed25519 Crypto Helpers, bool-subclass Rejection
-17801 9:02a 🔴 Major P1 Rework: VerifiedApproval Gets verification_proof + Validation; ApprovalProvenanceSigner/Verifier Added; OfflineApprovalVerifier Gets Trust Anchor Seed + Time-Bounds Checks
-17802 " 🔴 __post_init__ Validation Added to Four Protocol Dataclasses: AdmissionReceipt, PreAuthActivationGrant, PreAuthActivationAcknowledgement, ControlActivationProof
-17803 9:03a 🔴 HmacActivationGrantAuthenticator Fully Replaced by 6 Ed25519 Classes with Strict Capability Separation — HMAC Symmetric Signing Eliminated
-17804 " 🔴 InMemoryExecutionControlStore Gains Four-Arg Constructor, Dual Nonce Deduplication, Binding-Epoch Guard, Provenance Verification, and authorizes_session() Method
-17805 9:04a 🔴 Three More Patches Applied: PreAuthStore Gets New Constructor, IssuedPreAuthToken/ActiveSecuritySession Validated, Saga Gets RLock for TOCTOU Fix; Test File Now Broken — Needs Major Updates
-17806 " 🔴 Test File Updated: HmacActivationGrantAuthenticator Removed; _verifier_for() / _public_key_bytes() Added; _verified() Returns 4-Tuple; _stores() Wired with Cross-Role Ed25519 Key Pairs; Minimum-Generation Bootstrap Test Added
-17807 9:05a 🔵 Two Remaining Stale _verified()/_stores() Calls Found at Lines 684-685 in test_preauth_record_schema Test
-
-Access 197k tokens of past work via get_observations([IDs]) or mem-search skill.
-</claude-mem-context>
+| `VCARD_HMAC_SECRET` | Dedicated HMAC key for signing vCard download URLs (F-08). Decoupled from `API_BEARER_TOKEN` so rotating the admin token doesn't break already-shared vCards and a bearer-token leak doesn't allow vCard URL forgery. Required in production; if unset, signing falls back to a value derived from `API_BEARER_TOKEN` and a warning is logged. |
+| `PIN_RATE_LIMIT` | Max dial-in PIN attempts per source key per window (F-15). Default `10`. |
+| `PIN_RATE_WINDOW_SECONDS` | Rolling-window length for `PIN_RATE_LIMIT`, in seconds (F-15). Default `3600` (60 min). |
+| `MAX_UPLOAD_BYTES` | Hard cap on `/api/estimates/{token}/upload` request bodies (F-10). Default `52428800` (50 MiB). The endpoint streams the body and aborts with HTTP 413 the moment the running total exceeds this value, preventing DoS via memory exhaustion. |
+| `TRANSCRIPT_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key applied to call transcripts at rest (F-11). Generate with `python scripts/gen_transcript_key.py`. When unset, transcripts are written in plaintext (legacy mode); reads remain backwards compatible. |

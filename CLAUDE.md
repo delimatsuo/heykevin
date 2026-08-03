@@ -141,7 +141,7 @@ Founding member promo: 75% off for 3 months, first 1,000 users. Atomic Firestore
 - `APPSTORE_KEY_ID=DZBPCD46KP` — In-App Purchase signing key (for promo offer signatures)
 - `APPSTORE_ISSUER_ID=4b083963-2537-4f41-80ac-8976760521aa`
 - `APPSTORE_BUNDLE_ID=com.kevin.callscreen`
-- `APPSTORE_ENVIRONMENT=sandbox` (change to `production` for App Store launch)
+- `APPSTORE_ENVIRONMENT` — `production` on the production service, `sandbox` on staging (see Environments table). The app is live in the App Store; do not read this row as "pre-launch".
 
 ---
 
@@ -167,11 +167,11 @@ Kevin speaks and understands **all languages automatically**. Deepgram runs in `
 
 ### Backend
 ```bash
-# Deploy to production
-gcloud run deploy kevin-api --source . --project kevin-491315 --region us-central1 --allow-unauthenticated
+# Normal production deploy: use the manual GitHub Actions workflow from main
+gh workflow run deploy.yml -f target=production --ref main
 
-# Or just push to main — GitHub Actions deploys automatically
-git push origin main
+# Smoke-test staging before production
+scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging
 ```
 
 ### iOS

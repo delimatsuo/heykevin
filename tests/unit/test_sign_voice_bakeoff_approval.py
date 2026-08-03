@@ -134,6 +134,36 @@ def test_create_key_mints_once_then_later_runs_reuse_it(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == first_signature
 
 
+def test_create_key_passed_again_on_existing_key_loads_same_key(tmp_path, capsys):
+    payload = tmp_path / "payload.json"
+    payload.write_text("{}")
+    key = tmp_path / "owner_key.pem"
+
+    rc_first = main(
+        [
+            "--key", str(key),
+            "--payload", str(payload),
+            "--domain-name", "approval",
+            "--create-key",
+        ]
+    )
+    assert rc_first == 0
+    first_signature = capsys.readouterr().out.strip()
+    key_bytes = key.read_bytes()
+
+    rc_second = main(
+        [
+            "--key", str(key),
+            "--payload", str(payload),
+            "--domain-name", "approval",
+            "--create-key",
+        ]
+    )
+    assert rc_second == 0
+    assert capsys.readouterr().out.strip() == first_signature
+    assert key.read_bytes() == key_bytes
+
+
 def test_module_performs_no_network_calls():
     source = pathlib.Path("scripts/sign_voice_bakeoff_approval.py").read_text()
     tree = ast.parse(source)

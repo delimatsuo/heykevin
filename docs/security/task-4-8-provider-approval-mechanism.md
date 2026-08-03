@@ -239,7 +239,7 @@ byte cannot survive as a process argv element, so free-text domains could
 never reproduce the exact bytes `OfflineApprovalVerifier.verify()` checks
 against. `--domain-name approval` is a symbolic name that maps to the real
 constant internally. This reuses the same key file Step 0 already created
-at `~/.config/hey-kevin/bakeoff_owner_key.pem` — `load_or_create_owner_key()`
+at `~/.config/hey-kevin/bakeoff_owner_key.pem` — `load_owner_key()`
 loads an existing key file rather than regenerating it, so this step signs
 with the same key whose public half you already derived and passed as
 `--trust-owner-public-key` in Step 2. The command prints the hex-encoded

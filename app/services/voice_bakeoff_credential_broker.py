@@ -32,19 +32,11 @@ from typing import Mapping
 # legitimate source for and therefore does not attempt to enumerate here.
 # Do not add fabricated entries to "cover" those providers.
 #
-# Comprehensive, per-provider production-identity/destination denylisting
-# is a separate, independent mechanism: DeclaredProductionDenylist /
-# ExecutionFirewallResolver in voice_bakeoff_execution_firewall_contracts.py.
-# Task 6 investigated wiring that mechanism into the runner alongside this
-# broker, and deliberately deferred it: ExecutionFirewallResolver requires
-# real production destination/identity data (as SHA-256 digests) for every
-# provider dependency, which does not exist anywhere in this plan and was
-# not something Task 6 should fabricate. That decision means this denylist
-# is, for now, the sole production guard the runner actually enforces — not
-# a narrow backstop alongside a broader mechanism. Wiring in the broader
-# mechanism remains a live option, pending a future decision with real
-# per-provider production data to populate it; it is not scheduled as part
-# of this plan.
+# Comprehensive, per-provider production-identity denylisting is a
+# separate mechanism (DeclaredProductionDenylist / ExecutionFirewallResolver
+# in voice_bakeoff_execution_firewall_contracts.py), deliberately not wired
+# in yet — this denylist is, for now, the sole production guard the runner
+# enforces. See docs/security/task-4-8-provider-approval-mechanism.md.
 PRODUCTION_ACCOUNT_REGION_DENYLIST: tuple[str, ...] = (
     "kevin-491315:us-central1",
 )

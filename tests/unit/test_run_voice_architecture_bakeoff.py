@@ -547,13 +547,13 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
     ),
     "scripts.request_voice_bakeoff_review": (
-        "2a102679528d82ac46170053cdd76b475bec8984a9ba1b20f7bbff2ad9ccf8e6"
+        "09efca12dd862c32f7ac8d527d7c7fd0e53d6164f5977a332ec74dd92a211445"
     ),
     "app.services.voice_bakeoff_credential_broker": (
-        "d0e88a87de0772491aabfbb1456b57bdbf8db8ebd93166022f5de592d64beb84"
+        "cf6df51adc68cba36f49e117290d2eacb04f125a1a83ce9b12edb4ff082d772c"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
-        "ce23e77690a32725e543c55665e430273b2fde5e28ebfb3705a52f4c86042e45"
+        "70ea255ad960f11470a25c7f941ecc13abb492e0e4e9533fcd5c823c85e8f231"
     ),
     "app.services.voice_bakeoff_residue_audit": (
         "236deb489c68e27aaeec0439d5e411aa50f1d2c7461f17ee4f80214d0441d574"

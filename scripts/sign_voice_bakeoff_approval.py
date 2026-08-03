@@ -25,20 +25,19 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from app.services.voice_bakeoff_security_contracts import APPROVAL_DOMAIN
 
-# Symbolic names for the domain-separation constants a sole-owner signer is
-# allowed to produce signatures under, mapped to the real byte strings
-# defined in app/services/voice_bakeoff_security_contracts.py.
+# Symbolic names for the domain-separation constants a sole-owner signer
+# may sign under, mapped to the real byte strings in
+# app/services/voice_bakeoff_security_contracts.py.
 #
 # Free-text --domain was removed on purpose: the real domain constants are
 # NUL-terminated (e.g. b"hey-kevin/voice-bakeoff/approval/v1\x00"), and a NUL
 # byte cannot survive as a process argv element, so free text could never
 # reproduce the exact domain OfflineApprovalVerifier.verify() checks against.
 #
-# Only the approval domain is listed here. The module's other domains
-# (provenance, trust-snapshot-root, preauth-grant, preauth-ack,
-# control-proof, custody-lock-attestation) belong to purely internal system
-# authorities — not the external owner role this CLI signs for — so they are
-# intentionally not exposed as a choice.
+# Only "approval" is exposed: the module's other domains (provenance,
+# trust-snapshot-root, preauth-grant, preauth-ack, control-proof,
+# custody-lock-attestation) belong to internal system authorities, not
+# the external owner role this CLI signs for.
 _DOMAIN_NAME_TO_BYTES: dict[str, bytes] = {
     "approval": APPROVAL_DOMAIN,
 }

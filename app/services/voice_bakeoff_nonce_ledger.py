@@ -21,15 +21,10 @@ import tempfile
 def _require_string_list(value: object, field_name: str) -> None:
     """Raise ValueError unless `value` is a list of only str elements.
 
-    Deliberately checks `isinstance(value, list)` before ever inspecting
-    elements: a plain string (e.g. a nonce digest written where a
-    single-element list was intended) is iterable character-by-character,
-    so a caller that instead did `all(isinstance(c, str) for c in value)`
-    without first ruling out `str` would silently accept it — every
-    character of a string is itself a `str` — and a downstream
-    `frozenset(value)` would then admit a set of individual letters instead
-    of the one intended token. That would make `admit()` fail OPEN (wrongly
-    treat an already-consumed nonce/approval-id as unseen) on exactly the
+    Checks `isinstance(value, list)` before checking element types: a bare
+    str is itself an iterable of (single-character) str, so testing
+    element type first would silently accept a string as a list of its
+    own characters — making `admit()` fail OPEN on exactly the
     corrupt-shape input this ledger exists to guard against.
     """
     if not isinstance(value, list) or not all(
@@ -61,15 +56,12 @@ class _LedgerState:
     def from_json(cls, payload: dict) -> "_LedgerState":
         """Strictly validate `payload`'s shape before building a state.
 
-        `json.loads` only guarantees `payload` is syntactically valid JSON —
-        it says nothing about the shape this ledger needs. Every field is
-        validated here (when present; missing fields still default to
-        empty) so that malformed input is rejected right here, as a clean
-        ValueError, rather than either being silently miscoerced (e.g. a
-        string admitted as a set of individual characters, see
-        `_require_string_list`) or crashing much later downstream (e.g.
-        `sorted()` on a list containing a non-str element, inside
-        `_write_atomic`'s `json.dump(..., sort_keys=True)`).
+        `json.loads` only guarantees syntactically valid JSON, not the
+        shape this ledger needs. Validating every field here — rather
+        than letting a malformed value surface later as a silent
+        miscoercion (see `_require_string_list`) or a downstream crash in
+        `_write_atomic` — means bad input fails as a clean ValueError at
+        the boundary.
         """
         if not isinstance(payload, dict):
             raise ValueError("ledger payload must be a JSON object")
@@ -131,14 +123,11 @@ class FileBackedNonceLedger:
         with self._lock_path.open("r+", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
             try:
-                # Always re-read self._path fresh from disk, AFTER
-                # acquiring the lock — never from a handle opened before
-                # the lock was held. self._path may have just been
-                # replaced (a new inode) by whichever caller held the lock
-                # immediately before us; a pre-lock read would risk
-                # missing that caller's committed write. See the
-                # self._lock_path comment in __init__ for why the lock
-                # itself is never on self._path.
+                # Read self._path only AFTER acquiring the lock, never
+                # from a handle opened earlier: self._path may have just
+                # been replaced by the previous lock holder, and a
+                # pre-lock read would miss that write. See the
+                # self._lock_path comment in __init__.
                 raw = self._path.read_text(encoding="utf-8").strip()
                 if not raw:
                     state = _LedgerState.empty()
@@ -146,24 +135,17 @@ class FileBackedNonceLedger:
                     try:
                         state = _LedgerState.from_json(json.loads(raw))
                     except (json.JSONDecodeError, AttributeError, TypeError, ValueError, RecursionError):
-                        # The ledger exists but its contents are not usable:
-                        # either not valid JSON at all (e.g. a prior writer
-                        # was killed mid-write, before the atomic replace in
-                        # _write_atomic below landed), or valid JSON in the
-                        # wrong shape (e.g. a bare `[]` instead of the
-                        # expected {"consumed_nonces": [...], ...} object, a
-                        # list element or mapping key/value of the wrong
-                        # type, etc). _LedgerState.from_json's own explicit
-                        # isinstance checks now deliberately raise
-                        # ValueError for every shape violation it detects —
-                        # AttributeError/TypeError are kept in this tuple
-                        # only as defense in depth against a future,
-                        # differently-shaped failure inside from_json, not
-                        # because from_json is currently expected to raise
-                        # them. Either way we cannot recover what was
-                        # already consumed, so fail closed instead of
-                        # risking a replay by treating the corrupt file as
-                        # empty.
+                        # Ledger contents unusable: not valid JSON (e.g. a
+                        # prior writer killed mid-write before
+                        # _write_atomic's replace landed), or valid JSON in
+                        # the wrong shape. from_json's own isinstance
+                        # checks now raise ValueError for every shape
+                        # violation; AttributeError/TypeError stay in this
+                        # tuple only as defense in depth against a future
+                        # failure mode inside from_json, not because
+                        # they're currently expected. Either way, fail
+                        # closed rather than risk a replay by treating the
+                        # corrupt file as empty.
                         return False
 
                 if nonce_digest in state.consumed_nonces:
@@ -189,15 +171,13 @@ class FileBackedNonceLedger:
         """Durably replace the ledger contents with `state`.
 
         Writes to a fresh temp file in the same directory, fsyncs it, then
-        os.replace()s it onto self._path. os.replace() is an atomic rename
-        on POSIX, so any observer (including a process that opens the path
-        after a kill -9 of this one) always sees either the previous fully
-        valid contents or the new fully valid contents — never a truncated
-        or partially written file. Must be called from within the caller's
-        fcntl.flock critical section on self._lock_path (never on
-        self._path itself — self._path is the file this method replaces,
-        and a lock bound to it would be lost on every successful write;
-        see the self._lock_path comment in __init__).
+        os.replace()s it onto self._path — an atomic POSIX rename, so any
+        observer (even one opening the path after a kill -9 of this
+        process) always sees either the fully-old or fully-new contents,
+        never a partial write. Must be called only while holding the
+        caller's fcntl.flock on self._lock_path — never on self._path
+        itself, which this method replaces (see the self._lock_path
+        comment in __init__).
         """
         fd, tmp_name = tempfile.mkstemp(
             dir=self._path.parent,

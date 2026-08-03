@@ -72,10 +72,13 @@ key does not exist yet — but Step 2 below requires `--trust-owner-public-key`
 a `--payload` file that only Step 2 produces. Neither step can go first on
 its own, so start here instead. Break the cycle by running the signing CLI
 once against a throwaway placeholder payload, purely to mint the key file —
-`load_or_create_owner_key()` creates `--key` (if it doesn't already exist,
-mode `0600`) *before* it ever reads `--payload`, so the payload's actual
-content does not matter for this one call. There is no dedicated
-"create-key" flag; this is the real, minimal command that accomplishes it:
+`load_owner_key()` creates `--key` (mode `0600`) *before* it ever reads
+`--payload`, so the payload's actual content does not matter for this one
+call — but only when you pass `--create-key`. That flag now exists and is
+required the first time: without it, a missing key file is a loud error
+instead of silently minting a new identity, so a mistyped `--key` path can
+never mint a throwaway key by accident. This is the real, minimal command
+that accomplishes it:
 
 ```bash
 mkdir -p ~/.config/hey-kevin
@@ -83,16 +86,18 @@ echo '{}' > /tmp/bootstrap_placeholder_payload.json
 python scripts/sign_voice_bakeoff_approval.py \
   --key ~/.config/hey-kevin/bakeoff_owner_key.pem \
   --payload /tmp/bootstrap_placeholder_payload.json \
-  --domain-name approval
+  --domain-name approval \
+  --create-key
 ```
 
 This prints a signature to stdout — discard it; it is not tied to any real
 approval and is not used anywhere. What matters is the key file this
 command leaves behind at `~/.config/hey-kevin/bakeoff_owner_key.pem`. Every
 later invocation of `sign_voice_bakeoff_approval.py` against the same
-`--key` path reuses that same file (`load_or_create_owner_key()` loads an
-existing key rather than regenerating it), so you only do this once, ever,
-per key path.
+`--key` path reuses that same file (`load_owner_key()` loads an existing
+key rather than regenerating it, regardless of whether `--create-key` is
+passed), so you only need `--create-key` this once, ever, per key path —
+every subsequent invocation (including Step 3 below) omits it.
 
 Now derive the matching **public** key hex from that same private key
 file — the value `--trust-owner-public-key` needs below, in Step 2. There is

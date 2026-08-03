@@ -3,18 +3,17 @@ import json
 import pathlib
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from app.services.voice_bakeoff_security_contracts import (
     _APPROVAL_DOMAIN,
     _verify_ed25519,
 )
-from scripts.sign_voice_bakeoff_approval import load_or_create_owner_key, sign_payload
+from scripts.sign_voice_bakeoff_approval import load_owner_key, main, sign_payload
 
 
 def test_creates_key_with_restrictive_permissions(tmp_path):
     key_path = tmp_path / "owner_key.pem"
-    load_or_create_owner_key(key_path)
+    load_owner_key(key_path, create=True)
 
     assert key_path.exists()
     assert oct(key_path.stat().st_mode)[-3:] == "600"
@@ -22,8 +21,8 @@ def test_creates_key_with_restrictive_permissions(tmp_path):
 
 def test_reuses_existing_key_across_calls(tmp_path):
     key_path = tmp_path / "owner_key.pem"
-    first = load_or_create_owner_key(key_path)
-    second = load_or_create_owner_key(key_path)
+    first = load_owner_key(key_path, create=True)
+    second = load_owner_key(key_path, create=True)
 
     first_public = first.public_key().public_bytes_raw()
     second_public = second.public_key().public_bytes_raw()
@@ -32,7 +31,7 @@ def test_reuses_existing_key_across_calls(tmp_path):
 
 def test_signature_verifies_against_the_matching_public_key(tmp_path):
     key_path = tmp_path / "owner_key.pem"
-    private_key = load_or_create_owner_key(key_path)
+    private_key = load_owner_key(key_path, create=True)
     payload = {"approval_id": "abc123", "arm": "A"}
     domain = b"hey-kevin/bakeoff/owner-signature/v1"
 
@@ -46,7 +45,7 @@ def test_signature_verifies_against_the_matching_public_key(tmp_path):
 
 def test_different_payloads_produce_different_signatures(tmp_path):
     key_path = tmp_path / "owner_key.pem"
-    private_key = load_or_create_owner_key(key_path)
+    private_key = load_owner_key(key_path, create=True)
     domain = b"hey-kevin/bakeoff/owner-signature/v1"
 
     sig_a = sign_payload(private_key, domain=domain, payload={"approval_id": "a"})
@@ -65,7 +64,7 @@ def test_signature_interoperates_with_the_real_approval_verifier(tmp_path):
     signature minted by this CLI's sign_payload() actually verifies there.
     """
     key_path = tmp_path / "owner_key.pem"
-    private_key = load_or_create_owner_key(key_path)
+    private_key = load_owner_key(key_path, create=True)
     payload = {"approval_id": "abc123", "arm": "A"}
 
     signature = sign_payload(private_key, domain=_APPROVAL_DOMAIN, payload=payload)
@@ -82,12 +81,57 @@ def test_signature_interoperates_with_the_real_approval_verifier(tmp_path):
 
 def test_refuses_to_load_key_whose_permissions_were_loosened(tmp_path):
     key_path = tmp_path / "owner_key.pem"
-    load_or_create_owner_key(key_path)
+    load_owner_key(key_path, create=True)
 
     key_path.chmod(0o644)
 
     with pytest.raises(PermissionError):
-        load_or_create_owner_key(key_path)
+        load_owner_key(key_path, create=True)
+
+
+def test_missing_key_without_create_key_flag_is_an_error(tmp_path, capsys):
+    payload = tmp_path / "payload.json"
+    payload.write_text("{}")
+    missing = tmp_path / "typo-dir" / "owner_key.pem"
+
+    rc = main(
+        [
+            "--key", str(missing),
+            "--payload", str(payload),
+            "--domain-name", "approval",
+        ]
+    )
+
+    assert rc == 2
+    assert not missing.exists()
+    assert "--create-key" in capsys.readouterr().err
+
+
+def test_create_key_mints_once_then_later_runs_reuse_it(tmp_path, capsys):
+    payload = tmp_path / "payload.json"
+    payload.write_text("{}")
+    key = tmp_path / "owner_key.pem"
+
+    rc_first = main(
+        [
+            "--key", str(key),
+            "--payload", str(payload),
+            "--domain-name", "approval",
+            "--create-key",
+        ]
+    )
+    assert rc_first == 0
+    first_signature = capsys.readouterr().out.strip()
+
+    rc_second = main(
+        [
+            "--key", str(key),
+            "--payload", str(payload),
+            "--domain-name", "approval",
+        ]
+    )
+    assert rc_second == 0
+    assert capsys.readouterr().out.strip() == first_signature
 
 
 def test_module_performs_no_network_calls():

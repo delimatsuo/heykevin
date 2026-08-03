@@ -44,18 +44,26 @@ _DOMAIN_NAME_TO_BYTES: dict[str, bytes] = {
 }
 
 
-def load_or_create_owner_key(key_path: pathlib.Path) -> ed25519.Ed25519PrivateKey:
+def load_owner_key(
+    key_path: pathlib.Path, *, create: bool
+) -> ed25519.Ed25519PrivateKey:
     if key_path.exists():
         _require_owner_only_permissions(key_path)
         raw = key_path.read_bytes()
         return ed25519.Ed25519PrivateKey.from_private_bytes(raw)
 
+    if not create:
+        raise FileNotFoundError(
+            f"owner key not found at {key_path}; pass --create-key to mint a "
+            "new keypair. A missing key file must fail loudly — a mistyped "
+            "--key path must not silently sign under a fresh identity."
+        )
+
     key_path.parent.mkdir(parents=True, exist_ok=True)
     private_key = ed25519.Ed25519PrivateKey.generate()
     raw = private_key.private_bytes_raw()
     # Bake the restrictive mode into the creation syscall itself so the file
-    # never exists, even momentarily, at the default umask-widened mode —
-    # write_bytes() + chmod() afterward leaves exactly that window open.
+    # never exists, even momentarily, at the default umask-widened mode.
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(raw)
@@ -97,9 +105,22 @@ def main(argv: list[str] | None = None) -> int:
             "NUL byte, which cannot be passed as a process argv argument."
         ),
     )
+    parser.add_argument(
+        "--create-key",
+        action="store_true",
+        help=(
+            "Explicitly allow minting a new Ed25519 keypair at --key when no "
+            "file exists there. Without this flag a missing key file is an "
+            "error, so a typo'd path cannot create a fresh signing identity."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    private_key = load_or_create_owner_key(args.key)
+    try:
+        private_key = load_owner_key(args.key, create=args.create_key)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     payload = json.loads(args.payload.read_text())
     domain = _DOMAIN_NAME_TO_BYTES[args.domain_name]
     signature = sign_payload(private_key, domain=domain, payload=payload)

@@ -52,6 +52,25 @@ def test_rejects_credential_swap_even_if_digest_looks_close():
     ) is None
 
 
+def test_rejects_account_region_swap_even_if_digest_looks_close():
+    # Mirrors test_rejects_credential_swap_even_if_digest_looks_close but for
+    # the other parameter: credential matches, and the account/region value
+    # is not on the production denylist, so this isolates the
+    # approved_account_region_ref digest-mismatch branch specifically (the
+    # denylist tests below reject via denylist membership, never reaching
+    # this comparison).
+    env = {
+        "BAKEOFF_NONPROD_CREDENTIAL__DEEPGRAM": "sandbox-key-123",
+        "BAKEOFF_NONPROD_ACCOUNT_REGION__DEEPGRAM": "swapped-project:us-central1",
+    }
+    broker = NonproductionCredentialBroker(env=env)
+    assert broker.resolve(
+        dependency_role="deepgram",
+        approved_credential_ref=_digest("sandbox-key-123"),
+        approved_account_region_ref=_digest("sandbox-project:us-central1"),
+    ) is None
+
+
 def test_rejects_known_production_account_region_unconditionally():
     env = {
         "BAKEOFF_NONPROD_CREDENTIAL__DEEPGRAM": "prod-key",

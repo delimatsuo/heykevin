@@ -550,7 +550,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "2a102679528d82ac46170053cdd76b475bec8984a9ba1b20f7bbff2ad9ccf8e6"
     ),
     "app.services.voice_bakeoff_credential_broker": (
-        "d40630fe20fb0a930a59aa8e80a071e466b78725a239e6de74812ea65e6fd2ca"
+        "d0e88a87de0772491aabfbb1456b57bdbf8db8ebd93166022f5de592d64beb84"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
         "ce23e77690a32725e543c55665e430273b2fde5e28ebfb3705a52f4c86042e45"
@@ -559,7 +559,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "236deb489c68e27aaeec0439d5e411aa50f1d2c7461f17ee4f80214d0441d574"
     ),
     "app.services.voice_bakeoff_security_contracts": (
-        "0f49fcd1dce75d05d205c9349765720e316c0f5955f373d99f64bdc174f3ea12"
+        "f1dc62a157b94127b764c9bec030090ea52bcb2d322d16ac09fef4e28f0596be"
     ),
 }
 _OFFLINE_ALLOWED_IMPORTS = {
@@ -741,6 +741,7 @@ _OFFLINE_ALLOWED_IMPORTS = {
         ("from", "__future__", "annotations", ""),
         ("import", "dataclasses", "", ""),
         ("import", "hashlib", "", ""),
+        ("import", "hmac", "", ""),
         ("from", "typing", "Mapping", ""),
     },
     "app.services.voice_bakeoff_nonce_ledger": {

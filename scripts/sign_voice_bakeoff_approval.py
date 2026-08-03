@@ -23,7 +23,7 @@ import sys
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from app.services.voice_bakeoff_security_contracts import _APPROVAL_DOMAIN
+from app.services.voice_bakeoff_security_contracts import APPROVAL_DOMAIN
 
 # Symbolic names for the domain-separation constants a sole-owner signer is
 # allowed to produce signatures under, mapped to the real byte strings
@@ -40,7 +40,7 @@ from app.services.voice_bakeoff_security_contracts import _APPROVAL_DOMAIN
 # authorities — not the external owner role this CLI signs for — so they are
 # intentionally not exposed as a choice.
 _DOMAIN_NAME_TO_BYTES: dict[str, bytes] = {
-    "approval": _APPROVAL_DOMAIN,
+    "approval": APPROVAL_DOMAIN,
 }
 
 

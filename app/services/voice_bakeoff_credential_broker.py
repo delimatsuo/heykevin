@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import hmac
 from typing import Mapping
 
 # Hardcoded, not derived from any input the approval envelope controls —
@@ -94,9 +95,11 @@ class NonproductionCredentialBroker:
             in _NORMALIZED_PRODUCTION_ACCOUNT_REGION_DENYLIST
         ):
             return None
-        if _digest(credential_value) != approved_credential_ref:
+        if not hmac.compare_digest(_digest(credential_value), approved_credential_ref):
             return None
-        if _digest(account_region_value) != approved_account_region_ref:
+        if not hmac.compare_digest(
+            _digest(account_region_value), approved_account_region_ref
+        ):
             return None
 
         return ResolvedNonproductionCredential(

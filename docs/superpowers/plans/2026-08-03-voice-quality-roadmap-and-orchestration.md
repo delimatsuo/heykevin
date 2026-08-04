@@ -105,7 +105,7 @@ Dependencies are strictly ordered except where noted. Each phase states objectiv
 ### Phase 1 — Scope decision and caller-UX contract revision
 
 - **Objective:** resolve G2, then revise `docs/voice-architecture-caller-ux-acceptance.md` to match the decided scope so it can seal in Phase 3.
-- **Entry:** Phase 0 gate report green.
+- **Entry:** Phase 0 gate report accepted at G1 (every gate green, closed, or owner-accepted per Phase 0's exit).
 - **Work:** (a) Orchestrator (Fable) writes a **decision brief** presenting, at minimum: probe all four arms vs. a subset (recommendation: probe all four — probes are bounded and cheap relative to what elimination evidence saves later); declared language matrix as drafted (en/es/zh + 2 code-switch pairs) vs. `en_us_general`-first (collapses rater-fluency and participant-strata requirements dramatically; note the product markets all-language support, but the bakeoff only ever evidences the declared matrix either way — master plan Task 3.1); participant window as drafted (360+32 participants, ~482 recruited) vs. a narrowed pre-seal design with an independently validated power calculation. Every option cites the governing text permitting it. (b) Owner decides (G2). (c) A builder revises the contract per the decision; the revision untangles the seal-prerequisite list so items that gate only the participant window (participant-data protocol, recording authorization) are explicitly separately-sealed later, per the master plan's own "separately approved" language for Task 5.5. (d) L3 panel review to P1-zero.
 - **Exit:** revised contract text L3-clean and awaiting only Phase 2's estate values. **Owner:** G2. **Scale:** ~8–12 dispatches.
 

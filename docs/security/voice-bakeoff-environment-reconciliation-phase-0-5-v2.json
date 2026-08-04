@@ -1,0 +1,1033 @@
+{
+  "schema_version": 2,
+  "package_kind": "voice_bakeoff_environment_reconciliation_phase_0_5",
+  "package_status": "source_only_exact_review_candidate",
+  "source_binding": {
+    "repository": "https://github.com/delimatsuo/heykevin",
+    "worktree": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan",
+    "branch": "codex/voice-architecture-bakeoff-plan",
+    "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+    "package_is_authorization": false
+  },
+  "provenance": {
+    "successor_of": {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.json",
+      "sha256": "5d4f7dd2d492fe3bf8f26a32ec137f4485d4601fddd81f8890c56927c86507f9",
+      "review_outcome": "rejected_for_connected_read_contract_preserved_as_freeze_evidence"
+    },
+    "governing_artifacts": [
+      {
+        "path": "docs/superpowers/plans/2026-07-22-voice-architecture-bakeoff-and-lifecycle-control.md",
+        "sha256": "74aed6bec9f03e0ba16660ff116d20c4bdde598635b538b03a75b9e9c14cd68b",
+        "relationship": "governing_plan_extended_by_phase_0_5"
+      },
+      {
+        "path": "docs/voice-architecture-bakeoff-qualification.md",
+        "sha256": "23e1d7baf5d3fe636a45f60163638b2a6d542ec37c8b802d63f0ffba4747bf73",
+        "relationship": "qualification_contract_not_replaced"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-sealed-composition-and-iam-packet.md",
+        "sha256": "67bf2095288221658cf0ac6226094da5daf7201600764a38ad347dca05de36d9",
+        "relationship": "sealed_runtime_reference_not_authorized"
+      },
+      {
+        "path": ".github/workflows/deploy.yml",
+        "sha256": "7ccd5dfeab4cfea7c078a6fb7e0ffc9779046099ecfda7eef760db8a554c53ba",
+        "relationship": "source_evidence_for_split_staging_control_plane"
+      }
+    ]
+  },
+  "authority": {
+    "authorized_scope": "source_only_phase_0_5_successor",
+    "connected_inventory_status": "not_authorized",
+    "mutation_status": "not_authorized",
+    "execution_status": "not_authorized",
+    "task_4_8_status": "sealed",
+    "owner_authorization_required_for_each_connected_request": true,
+    "audit_and_quota_effect_acknowledgement_required_for_each_connected_request": true,
+    "advisory_review_is_owner_authorization": false
+  },
+  "status_model": {
+    "current": {
+      "inventory": "incomplete",
+      "governance": "undecided",
+      "default_disposition": "retain_frozen",
+      "review": "pending_exact_artifact_review",
+      "connected_read": "not_authorized",
+      "mutation": "mutation_not_authorized",
+      "execution": "execution_not_authorized"
+    },
+    "dominant_display_precedence": [
+      "execution_not_authorized",
+      "mutation_not_authorized",
+      "not_authorized",
+      "pending_exact_artifact_review",
+      "undecided",
+      "incomplete"
+    ],
+    "rules": [
+      "Receipt pass changes inventory evidence only and never changes connected-read, mutation, or execution authority.",
+      "Default disposition retain_frozen is not a long-term governance decision.",
+      "Advisory review may close review findings but cannot authorize a connected request.",
+      "Missing, stale, denied, ambiguous, over-cap, unpaginated, or uncustodied evidence yields incomplete.",
+      "The operator banner always displays the highest-precedence blocking state."
+    ],
+    "allowed_transitions": [
+      "pending_exact_artifact_review -> externally_bound_advisory_pass",
+      "externally_bound_advisory_pass -> separately_owner_authorized_single_read_request",
+      "separately_owner_authorized_single_read_request -> consumed_or_expired",
+      "incomplete -> complete only after every receipt pass predicate is true",
+      "undecided -> retain_frozen or move_approved or replace_approved only through a separate owner decision",
+      "execution_not_authorized -> no transition in Phase 0.5"
+    ]
+  },
+  "identity_model": {
+    "identity_aliases": [
+      {
+        "identity_ref": "organization_operator_identity",
+        "checked_in_account_identifier": null,
+        "checked_in_credential_material": false,
+        "local_configuration_ref": "required_but_not_bound"
+      },
+      {
+        "identity_ref": "isolated_bakeoff_operator_identity",
+        "checked_in_account_identifier": null,
+        "checked_in_credential_material": false,
+        "local_configuration_ref": "required_but_not_bound"
+      }
+    ],
+    "designated_query_identity_by_project": {
+      "kevin-491315": "organization_operator_identity",
+      "kevin-staging-491315": "organization_operator_identity",
+      "hk-voice-bakeoff-0724-iso": "isolated_bakeoff_operator_identity",
+      "hk-voice-bakeoff-preauth-iso": "isolated_bakeoff_operator_identity"
+    },
+    "observed_visibility_claims": [],
+    "visibility_claim_schema": {
+      "required_fields": [
+        "identity_ref",
+        "local_configuration_digest",
+        "project_id",
+        "project_number",
+        "ancestry_digest",
+        "observed_at_ms",
+        "expires_at_ms",
+        "visibility_result"
+      ],
+      "visibility_results": [
+        "visible",
+        "not_visible",
+        "incomplete"
+      ]
+    },
+    "rules": [
+      "Designated query identity is not an ownership claim and is not an exclusivity claim.",
+      "One project may be visible to multiple identities without being duplicated.",
+      "A visibility claim is current only when exact project ID, immutable project number, ancestry digest, identity, local configuration, and freshness are bound.",
+      "Account emails, billing IDs, credentials, and local configuration names stay outside Git."
+    ]
+  },
+  "environment_registry": {
+    "registry_status": "source_derived_not_currently_observed",
+    "inventory_status": "incomplete",
+    "governance_status": "undecided",
+    "default_disposition": "retain_frozen",
+    "review_status": "pending_exact_artifact_review",
+    "project_identity_rule": "project_id_plus_immutable_project_number_not_display_name_or_account_visibility",
+    "projects": [
+      {
+        "project_id": "kevin-491315",
+        "project_number": null,
+        "source_declared_container_role": "mixed_production_and_staging_control_plane_container",
+        "inventory_status": "incomplete",
+        "governance_status": "undecided",
+        "default_disposition": "retain_frozen",
+        "connected_read_status": "not_authorized"
+      },
+      {
+        "project_id": "kevin-staging-491315",
+        "project_number": null,
+        "source_declared_container_role": "staging_data_plane_container",
+        "inventory_status": "incomplete",
+        "governance_status": "undecided",
+        "default_disposition": "retain_frozen",
+        "connected_read_status": "not_authorized"
+      },
+      {
+        "project_id": "hk-voice-bakeoff-0724-iso",
+        "project_number": null,
+        "source_declared_container_role": "bakeoff_execution_control_container",
+        "inventory_status": "incomplete",
+        "governance_status": "undecided",
+        "default_disposition": "retain_frozen",
+        "connected_read_status": "not_authorized"
+      },
+      {
+        "project_id": "hk-voice-bakeoff-preauth-iso",
+        "project_number": null,
+        "source_declared_container_role": "bakeoff_preauth_container",
+        "inventory_status": "incomplete",
+        "governance_status": "undecided",
+        "default_disposition": "retain_frozen",
+        "connected_read_status": "not_authorized"
+      }
+    ],
+    "resources": [
+      {
+        "resource_ref": "project_container_kevin_491315",
+        "project_id": "kevin-491315",
+        "resource_type": "gcp_project_container",
+        "canonical_resource_role": "project_container_kevin_491315",
+        "environment_role": "mixed_control_plane_container",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "project_container_kevin_staging_491315",
+        "project_id": "kevin-staging-491315",
+        "resource_type": "gcp_project_container",
+        "canonical_resource_role": "project_container_kevin_staging_491315",
+        "environment_role": "staging_data_container",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "project_container_bakeoff_control",
+        "project_id": "hk-voice-bakeoff-0724-iso",
+        "resource_type": "gcp_project_container",
+        "canonical_resource_role": "project_container_bakeoff_control",
+        "environment_role": "bakeoff_control_container",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "project_container_bakeoff_preauth",
+        "project_id": "hk-voice-bakeoff-preauth-iso",
+        "resource_type": "gcp_project_container",
+        "canonical_resource_role": "project_container_bakeoff_preauth",
+        "environment_role": "bakeoff_preauth_container",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "production_cloud_run",
+        "project_id": "kevin-491315",
+        "resource_type": "cloud_run_service",
+        "source_declared_name": "kevin-api",
+        "canonical_resource_role": "production_runtime_service",
+        "environment_role": "production",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "staging_cloud_run",
+        "project_id": "kevin-491315",
+        "resource_type": "cloud_run_service",
+        "source_declared_name": "kevin-api-staging",
+        "canonical_resource_role": "staging_runtime_service",
+        "environment_role": "staging",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "production_firestore",
+        "project_id": "kevin-491315",
+        "resource_type": "firestore_database",
+        "source_declared_name": "(default)",
+        "canonical_resource_role": "production_firestore",
+        "environment_role": "production",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "production_rtdb",
+        "project_id": "kevin-491315",
+        "resource_type": "firebase_rtdb_instance",
+        "source_declared_name": null,
+        "canonical_resource_role": "production_rtdb",
+        "environment_role": "production",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "staging_firestore",
+        "project_id": "kevin-staging-491315",
+        "resource_type": "firestore_database",
+        "source_declared_name": "(default)",
+        "canonical_resource_role": "staging_firestore",
+        "environment_role": "staging",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "staging_rtdb",
+        "project_id": "kevin-staging-491315",
+        "resource_type": "firebase_rtdb_instance",
+        "source_declared_name": null,
+        "canonical_resource_role": "staging_rtdb",
+        "environment_role": "staging",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "bakeoff_control_firestore",
+        "project_id": "hk-voice-bakeoff-0724-iso",
+        "resource_type": "firestore_database",
+        "source_declared_name": "voice-bakeoff-control",
+        "canonical_resource_role": "bakeoff_execution_control_store",
+        "environment_role": "bakeoff_control",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      },
+      {
+        "resource_ref": "bakeoff_preauth_firestore",
+        "project_id": "hk-voice-bakeoff-preauth-iso",
+        "resource_type": "firestore_database",
+        "source_declared_name": "voice-bakeoff-preauth",
+        "canonical_resource_role": "bakeoff_preauth_store",
+        "environment_role": "bakeoff_preauth",
+        "inventory_status": "incomplete",
+        "resource_authority_status": "candidate"
+      }
+    ],
+    "edges": [
+      ["production_cloud_run", "hosted_by", "project_container_kevin_491315"],
+      ["staging_cloud_run", "hosted_by", "project_container_kevin_491315"],
+      ["production_firestore", "hosted_by", "project_container_kevin_491315"],
+      ["production_rtdb", "hosted_by", "project_container_kevin_491315"],
+      ["staging_firestore", "hosted_by", "project_container_kevin_staging_491315"],
+      ["staging_rtdb", "hosted_by", "project_container_kevin_staging_491315"],
+      ["bakeoff_control_firestore", "hosted_by", "project_container_bakeoff_control"],
+      ["bakeoff_preauth_firestore", "hosted_by", "project_container_bakeoff_preauth"],
+      ["production_cloud_run", "source_declared_reads_from", "production_firestore"],
+      ["production_cloud_run", "source_declared_reads_from", "production_rtdb"],
+      ["staging_cloud_run", "source_declared_reads_from", "staging_firestore"],
+      ["staging_cloud_run", "source_declared_reads_from", "staging_rtdb"],
+      ["bakeoff_control_firestore", "must_remain_distinct_from", "bakeoff_preauth_firestore"],
+      ["project_container_bakeoff_control", "must_remain_distinct_from", "project_container_bakeoff_preauth"],
+      ["bakeoff_control_firestore", "must_not_reach", "production_firestore"],
+      ["bakeoff_control_firestore", "must_not_reach", "staging_firestore"],
+      ["bakeoff_preauth_firestore", "must_not_reach", "production_firestore"],
+      ["bakeoff_preauth_firestore", "must_not_reach", "staging_firestore"]
+    ],
+    "authority_cardinality": {
+      "key": "canonical_resource_role",
+      "maximum_authoritative_resources_per_key": 1,
+      "zero_authoritative_resources_allowed_while_inventory_incomplete": true
+    },
+    "invariants": [
+      "Exactly four project IDs are in scope; no unlisted project may be discovered or queried.",
+      "Project identity is exact project ID plus immutable project number, never display name or account visibility.",
+      "Project-container nodes are neutral containers and do not inherit one child resource's environment role.",
+      "Multiple identity visibility claims for one project number do not create a duplicate-project recommendation.",
+      "Execution-control and preauth projects and databases remain physically distinct.",
+      "No bakeoff identity, store, or workload may reach production or staging.",
+      "Authority uniqueness applies per canonical resource role, not per multi-resource security domain.",
+      "Missing, denied, stale, ambiguous, partial, over-cap, or unpaginated visibility is incomplete.",
+      "No project creation, move, replacement, deletion, IAM change, API enablement, credential, workload, provider/PSTN, staging, production, or Task 4.8 action is permitted.",
+      "The mixed staging control plane is separate environment debt and is not repaired in Phase 0.5."
+    ]
+  },
+  "operator_targeting_contract": {
+    "banner_literal": "CONNECTED EXECUTION SEALED — READ-ONLY RECONCILIATION NOT AUTHORIZED",
+    "required_banner_fields": [
+      "operation_class",
+      "source_sha",
+      "contract_digest",
+      "single_request_authorization_digest",
+      "local_configuration_digest",
+      "identity_ref",
+      "target_project_id",
+      "expected_project_number",
+      "expected_ancestry_digest",
+      "quota_project_id",
+      "api_method",
+      "request_field_mask",
+      "raw_evidence_class",
+      "inventory_status",
+      "governance_status",
+      "connected_read_status",
+      "mutation_status",
+      "execution_status",
+      "freshness_expires_at"
+    ],
+    "bootstrap_state_machine": [
+      {
+        "state": "sealed",
+        "bound_inputs": ["exact_project_id"],
+        "only_permitted_connected_method_ref": null,
+        "transition": "separate owner authorization for one project_identity_get request"
+      },
+      {
+        "state": "project_identity_only",
+        "bound_inputs": ["exact_project_id", "single_request_authorization_digest"],
+        "only_permitted_connected_method_ref": "project_identity_get",
+        "transition": "bind exact project number and immediate-parent digest, consume authorization, return to sealed"
+      },
+      {
+        "state": "ancestry_only",
+        "bound_inputs": [
+          "exact_project_id",
+          "exact_project_number",
+          "immediate_parent_digest",
+          "new_single_request_authorization_digest"
+        ],
+        "only_permitted_connected_method_ref": "project_ancestry_get",
+        "transition": "bind complete ancestry digest, consume authorization, return to sealed"
+      },
+      {
+        "state": "bound_single_read",
+        "bound_inputs": [
+          "exact_project_id",
+          "exact_project_number",
+          "ancestry_digest",
+          "exact_method_ref",
+          "exact_request_digest",
+          "new_single_request_authorization_digest"
+        ],
+        "only_permitted_connected_method_ref": "authorization_bound_exact_method_ref",
+        "transition": "emit one payload-safe request receipt, consume authorization, return to sealed"
+      }
+    ],
+    "status_examples": [
+      {
+        "example": "current_source_only",
+        "project_number_display": "UNBOUND — NO CONNECTED CALL AUTHORIZED",
+        "ancestry_display": "UNBOUND",
+        "connected_read_status": "not_authorized",
+        "dominant_banner": "CONNECTED EXECUTION SEALED — READ-ONLY RECONCILIATION NOT AUTHORIZED"
+      },
+      {
+        "example": "future_first_bind_after_separate_owner_authorization",
+        "project_number_display": "UNBOUND — PROJECT GET ONLY",
+        "ancestry_display": "UNBOUND — ANCESTRY CALL NOT YET AUTHORIZED",
+        "connected_read_status": "read_only_reconciliation_only",
+        "dominant_banner": "ONE AUTHORIZED READ — PROJECT IDENTITY ONLY — EXECUTION SEALED"
+      },
+      {
+        "example": "future_bound_single_read",
+        "project_number_display": "EXACT_BOUND_VALUE",
+        "ancestry_display": "EXACT_BOUND_DIGEST",
+        "connected_read_status": "read_only_reconciliation_only",
+        "dominant_banner": "ONE AUTHORIZED READ — EXACT METHOD ONLY — EXECUTION SEALED"
+      },
+      {
+        "example": "blocked_incomplete",
+        "project_number_display": "MISMATCH_OR_STALE",
+        "ancestry_display": "INCOMPLETE",
+        "connected_read_status": "not_authorized",
+        "dominant_banner": "INCOMPLETE — NO FALLBACK — EXECUTION SEALED"
+      }
+    ],
+    "tabletop_cases": [
+      {
+        "scenario_id": "wrong_google_account",
+        "trigger": "active identity digest differs from the single-request envelope",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_before_request",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "wrong_local_configuration",
+        "trigger": "local configuration digest differs from the single-request envelope",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_before_request",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "wrong_project_id_or_number",
+        "trigger": "project ID is unlisted or immutable number differs from the bound value",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_and_consume_if_request_started",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "same_project_visible_from_two_accounts",
+        "trigger": "two identities report the same exact project ID and immutable project number",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "record_separate_visibility_claims_and_require_owner_binding",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "stale_project_number_ancestry_or_receipt",
+        "trigger": "a bound value or freshness window is stale",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_before_next_request",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "permission_denied_or_partial_visibility",
+        "trigger": "403, omitted field, ambiguous response, or partial visibility",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_without_inference_of_absence_or_safety",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "missing_ancestry",
+        "trigger": "ancestry is empty, truncated, malformed, or over cap",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_before_non_bootstrap_reads",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "ambient_quota_project",
+        "trigger": "quota project is absent or differs from the exact target project",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_before_request",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "unexpected_response_field_or_over_cap",
+        "trigger": "response exceeds field mask, page, byte, request, or time cap",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_and_consume_authorization",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      },
+      {
+        "scenario_id": "unbound_raw_evidence_custody",
+        "trigger": "restricted external custody digest is absent or mismatched",
+        "expected_inventory_status": "incomplete",
+        "expected_action": "abort_before_request",
+        "fallback_allowed": false,
+        "duplicate_project_recommendation_allowed": false
+      }
+    ]
+  },
+  "read_contract": {
+    "contract_status": "non_executable_not_owner_signable",
+    "connected_execution_supported": false,
+    "target_project_ids": [
+      "kevin-491315",
+      "kevin-staging-491315",
+      "hk-voice-bakeoff-0724-iso",
+      "hk-voice-bakeoff-preauth-iso"
+    ],
+    "exact_service_name_allowlist": [
+      "cloudasset.googleapis.com",
+      "cloudbilling.googleapis.com",
+      "cloudkms.googleapis.com",
+      "cloudresourcemanager.googleapis.com",
+      "firebasedatabase.googleapis.com",
+      "firestore.googleapis.com",
+      "iam.googleapis.com",
+      "orgpolicy.googleapis.com",
+      "policytroubleshooter.googleapis.com",
+      "run.googleapis.com",
+      "secretmanager.googleapis.com",
+      "serviceusage.googleapis.com"
+    ],
+    "exact_detailed_asset_type_allowlist": [
+      "cloudkms.googleapis.com/CryptoKey",
+      "cloudkms.googleapis.com/KeyRing",
+      "firestore.googleapis.com/Database",
+      "iam.googleapis.com/ServiceAccount",
+      "logging.googleapis.com/LogSink",
+      "run.googleapis.com/Service",
+      "secretmanager.googleapis.com/Secret"
+    ],
+    "exact_source_declared_cloud_run_services": [
+      "projects/kevin-491315/locations/us-central1/services/kevin-api",
+      "projects/kevin-491315/locations/us-central1/services/kevin-api-staging"
+    ],
+    "exact_source_declared_firestore_databases": [
+      "projects/kevin-491315/databases/(default)",
+      "projects/kevin-staging-491315/databases/(default)",
+      "projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+      "projects/hk-voice-bakeoff-preauth-iso/databases/voice-bakeoff-preauth"
+    ],
+    "parameter_binding_rules": {
+      "EXACT_TARGET_PROJECT_ID": "one exact member of target_project_ids",
+      "EXACT_TARGET_PROJECT_NUMBER": "fresh project_identity_get receipt bound to the same exact project ID",
+      "EXACT_ANCESTOR_FOLDER_NUMBER": "one exact folder returned by the bound complete ancestry receipt",
+      "EXACT_ANCESTOR_ORGANIZATION_NUMBER": "the exact organization returned by the bound complete ancestry receipt",
+      "EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT": "the exact target project number or one exact bound ancestor, URL-encoded where the API requires it",
+      "EACH_EXACT_ALLOWLISTED_SERVICE_NAME": "one exact member of exact_service_name_allowlist",
+      "EXACT_DETAILED_ASSET_TYPE_ALLOWLIST": "the complete ordered exact_detailed_asset_type_allowlist without widening",
+      "EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE": "one exact member of exact_source_declared_cloud_run_services",
+      "EXACT_DATABASE_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by firestore_database_list for the same target",
+      "EXACT_INSTANCE_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by firebase_rtdb_instance_list for the same target",
+      "EXACT_DENY_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by deny_policy_list for the same attachment point",
+      "EXACT_ENUMERATED_SERVICE_ACCOUNT": "one exact account returned by service_account_list for the same target",
+      "EXACT_MATCHED_PREDEFINED_ROLE_NAME": "one exact predefined role found in a bound allow-policy result",
+      "EXACT_MATCHED_ROLE_ID": "one exact custom role ID found in a bound allow-policy result and same project or organization scope",
+      "EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by pab_policy_list for the bound organization",
+      "EACH_EXACT_ENUMERATED_CONSTRAINT": "one exact name returned by org_policy_constraint_list for the same target",
+      "EXACT_OWNER_BOUND_MEMBER_QUERY": "one of the exact future control principal, each owner-bound encompassing Resource Manager principal set, allUsers, or allAuthenticatedUsers",
+      "EXACT_OWNER_BOUND_EFFECTIVE_ACCESS_TUPLE": "one exact principal-resource-permission tuple from effective_access_matrix",
+      "unbound_ambiguous_mismatched_or_extra_parameter_action": "incomplete_and_abort_without_fallback"
+    },
+    "caps": {
+      "target_projects": 4,
+      "connected_requests_per_owner_authorization": 1,
+      "ancestor_resources_per_project": 8,
+      "service_names_per_project": 12,
+      "service_accounts_per_project": 100,
+      "resource_types": 64,
+      "resources_per_project": 5000,
+      "policies_per_attachment_point": 500,
+      "roles_to_resolve": 500,
+      "pages_per_paginated_method_per_target": 10,
+      "page_size": 500,
+      "raw_response_bytes_per_request": 1048576,
+      "total_raw_response_bytes_per_inventory": 20971520,
+      "wall_clock_ms_per_request": 30000,
+      "total_wall_clock_ms": 900000,
+      "retries": 0,
+      "concurrency": 1,
+      "project_creation": 0,
+      "mutating_operations": 0,
+      "api_enablement_operations": 0,
+      "service_account_impersonations": 0,
+      "access_tokens_exported": 0,
+      "firestore_document_reads": 0,
+      "firebase_record_reads": 0,
+      "secret_payload_reads": 0,
+      "cloud_run_invocations": 0,
+      "provider_or_pstn_requests": 0
+    },
+    "request_rules": {
+      "one_request_per_separately_consumed_owner_authorization": true,
+      "explicit_identity_and_local_configuration_digest_required": true,
+      "target_project_is_own_quota_project": true,
+      "audit_and_quota_effects_acknowledged_per_request": true,
+      "ambient_project_quota_identity_and_credentials_forbidden": true,
+      "application_default_credential_discovery_forbidden": true,
+      "service_account_impersonation_forbidden": true,
+      "credential_or_access_token_export_forbidden": true,
+      "api_enablement_forbidden": true,
+      "project_or_resource_discovery_outside_exact_scope_forbidden": true,
+      "fallback_retry_concurrency_and_request_expansion_forbidden": true,
+      "raw_output_to_git_or_chat_forbidden": true,
+      "mutation_workload_provider_pstn_staging_production_and_task_4_8_forbidden": true
+    },
+    "methods": {
+      "project_identity_get": {
+        "api_method": "cloudresourcemanager.projects.get",
+        "http_method": "GET",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}",
+        "request_body": null,
+        "response_field_mask": ["projectId", "projectNumber", "lifecycleState", "parent"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "project_provenance_get": {
+        "api_method": "cloudresourcemanager.projects.get",
+        "http_method": "GET",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v3/projects/{EXACT_TARGET_PROJECT_NUMBER}",
+        "request_body": null,
+        "response_field_mask": ["createTime", "name", "parent", "projectId", "state"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "project_ancestry_get": {
+        "api_method": "cloudresourcemanager.projects.getAncestry",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}:getAncestry",
+        "request_body": null,
+        "response_field_mask": ["ancestor.resourceId.id", "ancestor.resourceId.type"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "project_billing_get": {
+        "api_method": "cloudbilling.projects.getBillingInfo",
+        "http_method": "GET",
+        "endpoint": "cloudbilling.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/billingInfo",
+        "request_body": null,
+        "response_field_mask": ["billingAccountName", "billingEnabled", "name", "projectId"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "service_state_get": {
+        "api_method": "serviceusage.services.get",
+        "http_method": "GET",
+        "endpoint": "serviceusage.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}/services/{EACH_EXACT_ALLOWLISTED_SERVICE_NAME}",
+        "request_body": null,
+        "response_field_mask": ["config.name", "name", "state"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "payload_safe"
+      },
+      "asset_type_inventory_search": {
+        "api_method": "cloudasset.assets.searchAllResources",
+        "http_method": "GET",
+        "endpoint": "cloudasset.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}:searchAllResources?pageSize=500&readMask=assetType",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "results.assetType"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "payload_safe"
+      },
+      "detailed_asset_inventory_search": {
+        "api_method": "cloudasset.assets.searchAllResources",
+        "http_method": "GET",
+        "endpoint": "cloudasset.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}:searchAllResources?assetTypes={EXACT_DETAILED_ASSET_TYPE_ALLOWLIST}&pageSize=500&readMask=assetType,name,location,project",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "results.assetType", "results.location", "results.name", "results.project"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "asset_iam_policy_search": {
+        "api_method": "cloudasset.assets.searchAllIamPolicies",
+        "http_method": "GET",
+        "endpoint": "cloudasset.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}:searchAllIamPolicies?assetTypes={EXACT_DETAILED_ASSET_TYPE_ALLOWLIST}&pageSize=500&query={EXACT_OWNER_BOUND_MEMBER_QUERY}",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "results.assetType", "results.policy", "results.resource"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "project_iam_policy_get": {
+        "api_method": "cloudresourcemanager.projects.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["auditConfigs", "bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "folder_iam_policy_get": {
+        "api_method": "cloudresourcemanager.folders.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v2/folders/{EXACT_ANCESTOR_FOLDER_NUMBER}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["auditConfigs", "bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "organization_iam_policy_get": {
+        "api_method": "cloudresourcemanager.organizations.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v1/organizations/{EXACT_ANCESTOR_ORGANIZATION_NUMBER}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["auditConfigs", "bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "deny_policy_list": {
+        "api_method": "iam.policies.list",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v2/policies?parent={EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT}&kind=denypolicies&pageSize=100",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "policies.kind", "policies.name", "policies.uid"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "deny_policy_get": {
+        "api_method": "iam.policies.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v2/{EXACT_DENY_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+        "request_body": null,
+        "response_field_mask": ["etag", "kind", "name", "rules", "uid"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "service_account_list": {
+        "api_method": "iam.projects.serviceAccounts.list",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/serviceAccounts?pageSize=100",
+        "request_body": null,
+        "response_field_mask": ["accounts.disabled", "accounts.email", "accounts.name", "accounts.oauth2ClientId", "accounts.uniqueId", "nextPageToken"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "service_account_iam_policy_get": {
+        "api_method": "iam.projects.serviceAccounts.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/serviceAccounts/{EXACT_ENUMERATED_SERVICE_ACCOUNT}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "predefined_role_get": {
+        "api_method": "iam.roles.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/{EXACT_MATCHED_PREDEFINED_ROLE_NAME}",
+        "request_body": null,
+        "response_field_mask": ["deleted", "includedPermissions", "name", "stage"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "project_custom_role_get": {
+        "api_method": "iam.projects.roles.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/roles/{EXACT_MATCHED_ROLE_ID}",
+        "request_body": null,
+        "response_field_mask": ["deleted", "includedPermissions", "name", "stage"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "organization_custom_role_get": {
+        "api_method": "iam.organizations.roles.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/organizations/{EXACT_ANCESTOR_ORGANIZATION_NUMBER}/roles/{EXACT_MATCHED_ROLE_ID}",
+        "request_body": null,
+        "response_field_mask": ["deleted", "includedPermissions", "name", "stage"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "pab_policy_list": {
+        "api_method": "iam.organizations.locations.principalAccessBoundaryPolicies.list",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v3/organizations/{EXACT_ANCESTOR_ORGANIZATION_NUMBER}/locations/global/principalAccessBoundaryPolicies?pageSize=500",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "principalAccessBoundaryPolicies.name", "principalAccessBoundaryPolicies.uid"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "pab_policy_get": {
+        "api_method": "iam.organizations.locations.principalAccessBoundaryPolicies.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v3/{EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+        "request_body": null,
+        "response_field_mask": ["details", "etag", "name", "uid"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "pab_policy_binding_search": {
+        "api_method": "iam.organizations.locations.principalAccessBoundaryPolicies.searchPolicyBindings",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v3/{EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST}:searchPolicyBindings?pageSize=500",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "policyBindings.annotations", "policyBindings.displayName", "policyBindings.name", "policyBindings.policy", "policyBindings.principalSet", "policyBindings.target"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "org_policy_constraint_list": {
+        "api_method": "orgpolicy.projects.constraints.list",
+        "http_method": "GET",
+        "endpoint": "orgpolicy.googleapis.com",
+        "path": "/v2/projects/{EXACT_TARGET_PROJECT_NUMBER}/constraints?pageSize=500",
+        "request_body": null,
+        "response_field_mask": ["constraints.name", "nextPageToken"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "org_policy_list": {
+        "api_method": "orgpolicy.policies.list",
+        "http_method": "GET",
+        "endpoint": "orgpolicy.googleapis.com",
+        "path": "/v2/{EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT}/policies?pageSize=500",
+        "request_body": null,
+        "response_field_mask": ["nextPageToken", "policies.etag", "policies.name", "policies.spec", "policies.alternate"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "org_policy_effective_get": {
+        "api_method": "orgpolicy.policies.getEffectivePolicy",
+        "http_method": "GET",
+        "endpoint": "orgpolicy.googleapis.com",
+        "path": "/v2/projects/{EXACT_TARGET_PROJECT_NUMBER}/policies/{EACH_EXACT_ENUMERATED_CONSTRAINT}:getEffectivePolicy",
+        "request_body": null,
+        "response_field_mask": ["dryRunSpec", "etag", "name", "spec"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "policy_troubleshooter": {
+        "api_method": "policytroubleshooter.iam.troubleshoot",
+        "http_method": "POST",
+        "endpoint": "policytroubleshooter.googleapis.com",
+        "path": "/v3/iam:troubleshoot",
+        "request_body": {"accessTuple": "{EXACT_OWNER_BOUND_EFFECTIVE_ACCESS_TUPLE}"},
+        "response_field_mask": ["accessTuple", "allowPolicyExplanation", "denyPolicyExplanation", "overallAccessState"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "firestore_database_list": {
+        "api_method": "firestore.projects.databases.list",
+        "http_method": "GET",
+        "endpoint": "firestore.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/databases?pageSize=500",
+        "request_body": null,
+        "response_field_mask": ["databases.name", "nextPageToken", "unreachable"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "firestore_database_get": {
+        "api_method": "firestore.projects.databases.get",
+        "http_method": "GET",
+        "endpoint": "firestore.googleapis.com",
+        "path": "/v1/{EXACT_DATABASE_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+        "request_body": null,
+        "response_field_mask": ["cmekConfig", "concurrencyMode", "createTime", "databaseEdition", "deleteProtectionState", "etag", "locationId", "name", "pointInTimeRecoveryEnablement", "sourceInfo", "type", "uid", "updateTime", "versionRetentionPeriod"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "firebase_rtdb_instance_list": {
+        "api_method": "firebasedatabase.projects.locations.instances.list",
+        "http_method": "GET",
+        "endpoint": "firebasedatabase.googleapis.com",
+        "path": "/v1beta/projects/{EXACT_TARGET_PROJECT_NUMBER}/locations/-/instances?pageSize=500&showDeleted=true",
+        "request_body": null,
+        "response_field_mask": ["instances.name", "instances.project", "instances.state", "instances.type", "nextPageToken"],
+        "pagination": "all_pages_required",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "firebase_rtdb_instance_get": {
+        "api_method": "firebasedatabase.projects.locations.instances.get",
+        "http_method": "GET",
+        "endpoint": "firebasedatabase.googleapis.com",
+        "path": "/v1beta/{EXACT_INSTANCE_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+        "request_body": null,
+        "response_field_mask": ["name", "project", "state", "type"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "cloud_run_service_get": {
+        "api_method": "run.projects.locations.services.get",
+        "http_method": "GET",
+        "endpoint": "run.googleapis.com",
+        "path": "/v2/{EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE}",
+        "request_body": null,
+        "response_field_mask": ["createTime", "etag", "generation", "name", "observedGeneration", "uid", "updateTime"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      },
+      "cloud_run_service_iam_policy_get": {
+        "api_method": "run.projects.locations.services.getIamPolicy",
+        "http_method": "GET",
+        "endpoint": "run.googleapis.com",
+        "path": "/v2/{EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE}:getIamPolicy?options.requestedPolicyVersion=3",
+        "request_body": null,
+        "response_field_mask": ["bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "coverage_matrix": [
+      ["project_identity_lifecycle_and_immediate_parent", ["project_identity_get", "project_provenance_get"], "required_complete_all_four"],
+      ["complete_ancestry", ["project_ancestry_get"], "required_complete_all_four"],
+      ["billing_association", ["project_billing_get"], "required_complete_all_four_raw_id_digest_only"],
+      ["required_api_state", ["service_state_get"], "required_all_allowlisted_names_observed_no_enablement"],
+      ["all_resource_type_inventory", ["asset_type_inventory_search"], "required_all_pages_within_cap"],
+      ["detailed_known_resource_metadata", ["detailed_asset_inventory_search", "firestore_database_list", "firestore_database_get", "cloud_run_service_get"], "required_all_pages_and_all_list_items_fetched"],
+      ["kms_keyring_and_cryptokey_metadata", ["detailed_asset_inventory_search"], "required_count_and_digest_no_raw_names"],
+      ["rtdb_instance_metadata", ["firebase_rtdb_instance_list", "firebase_rtdb_instance_get"], "required_all_pages_and_all_list_items_fetched_no_record_reads"],
+      ["secret_metadata_without_payload", ["detailed_asset_inventory_search"], "required_count_and_digest_no_secret_payload"],
+      ["audit_sink_metadata", ["detailed_asset_inventory_search"], "required_count_and_digest_no_log_entries"],
+      ["project_and_ancestor_allow_iam", ["project_iam_policy_get", "folder_iam_policy_get", "organization_iam_policy_get"], "required_version_3_complete_or_not_applicable_from_complete_ancestry"],
+      ["resource_allow_iam", ["asset_iam_policy_search", "service_account_iam_policy_get", "cloud_run_service_iam_policy_get"], "required_exact_member_queries_all_pages"],
+      ["deny_iam", ["deny_policy_list", "deny_policy_get"], "required_every_attachment_point_every_list_item_fetched"],
+      ["service_account_inventory_and_impersonation_policy", ["service_account_list", "service_account_iam_policy_get"], "required_every_account_within_cap"],
+      ["role_permission_resolution", ["predefined_role_get", "project_custom_role_get", "organization_custom_role_get"], "required_every_matched_role"],
+      ["principal_access_boundary_policy_and_bindings", ["pab_policy_list", "pab_policy_get", "pab_policy_binding_search"], "required_complete_or_not_applicable_from_complete_no_org_ancestry"],
+      ["organization_policy_inheritance", ["org_policy_constraint_list", "org_policy_list", "org_policy_effective_get"], "required_every_constraint_effective_policy"],
+      ["supplementary_effective_access", ["policy_troubleshooter"], "required_complete_or_incomplete_if_absent_principal_unsupported"],
+      ["owner_identity_recovery_and_account_custody", [], "required_separately_custodied_owner_attestation"],
+      ["raw_evidence_private_custody", [], "required_bound_digest_before_each_restricted_read"]
+    ],
+    "effective_access_matrix": {
+      "future_principal": "voice-bakeoff-control-adapter@hk-voice-bakeoff-0724-iso.iam.gserviceaccount.com",
+      "static_resources": [
+        ["//firestore.googleapis.com/projects/kevin-491315/databases/(default)", ["datastore.databases.get", "datastore.entities.create", "datastore.entities.delete", "datastore.entities.get", "datastore.entities.list", "datastore.entities.update"], "NOT_GRANTED"],
+        ["//firestore.googleapis.com/projects/kevin-staging-491315/databases/(default)", ["datastore.databases.get", "datastore.entities.create", "datastore.entities.delete", "datastore.entities.get", "datastore.entities.list", "datastore.entities.update"], "NOT_GRANTED"],
+        ["//run.googleapis.com/projects/kevin-491315/locations/us-central1/services/kevin-api", ["run.services.get", "run.services.update"], "NOT_GRANTED"],
+        ["//run.googleapis.com/projects/kevin-491315/locations/us-central1/services/kevin-api-staging", ["run.services.get", "run.services.update"], "NOT_GRANTED"]
+      ],
+      "dynamic_service_account_permissions": [
+        "iam.serviceAccounts.actAs",
+        "iam.serviceAccounts.getAccessToken",
+        "iam.serviceAccounts.implicitDelegation",
+        "iam.serviceAccounts.signBlob",
+        "iam.serviceAccounts.signJwt"
+      ],
+      "unknown_unavailable_ambiguous_or_unsupported_result": "incomplete"
+    },
+    "raw_evidence_custody": {
+      "repository_storage_allowed": false,
+      "chat_storage_allowed": false,
+      "external_private_custody_required": true,
+      "custody_mechanism_bound": false,
+      "connected_read_precondition_satisfied": false
+    }
+  },
+  "receipt_contract": {
+    "schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.schema.json#/$defs/payload_safe_receipt",
+    "allowed_results": ["pass", "fail", "incomplete"],
+    "pass_requires": [
+      "exactly_four_target_results",
+      "every_project_id_and_immutable_number_exact",
+      "every_ancestry_complete_and_fresh",
+      "every_required_service_observed",
+      "every_list_and_search_fully_paginated_within_cap",
+      "every_coverage_matrix_row_complete_or_explicitly_not_applicable_from_complete_ancestry",
+      "every_list_item_requiring_get_was_fetched",
+      "every_matched_role_resolved",
+      "every_restricted_request_has_matching_private_custody_digest",
+      "billing_account_identifiers_reduced_to_digests",
+      "no_raw_identity_policy_resource_kms_secret_log_application_or_provider_payload_in_receipt",
+      "owner_identity_recovery_and_account_custody_attestation_digest_present",
+      "all_single_request_authorizations_consumed_once",
+      "freshness_window_not_expired",
+      "zero_completeness_errors"
+    ],
+    "pass_does_not_authorize_mutation_execution_bootstrap_runtime_or_task_4_8": true
+  },
+  "transition_policy": {
+    "recommended_path": "exact_v2_review_then_separate_owner_authorized_single_reads_then_registry_freeze_then_versioned_successor_packages",
+    "retain_path": [
+      "separately_authorized_single_read_inventory",
+      "registry_freeze",
+      "versioned_successor_bootstrap_and_runtime_packages"
+    ],
+    "move_or_replace_path": [
+      "separate_transition_plan_review_and_owner_authorization",
+      "transition",
+      "post_transition_single_read_inventory",
+      "registry_freeze",
+      "versioned_successor_bootstrap_and_runtime_packages"
+    ],
+    "project_creation_cap": 0,
+    "mixed_staging_control_plane": "separate_environment_debt_no_phase_0_5_remediation"
+  },
+  "historical_artifact_policy": {
+    "in_place_revision_allowed": false,
+    "future_corrections_require_versioned_successor": true,
+    "protected_artifacts": [
+      ["docs/handoffs/2026-07-24-voice-bakeoff-continuation-handoff.md", "91857cde3c1f0780bdfa2f2dcc417c12530effb712a56df0685691dd95156c01"],
+      ["docs/handoffs/2026-07-24-voice-bakeoff-continuation-new-session-prompt.md", "a25e90ad0bbb2c421367b05bccab27ef582fc9f592fe6f2dd664c7059fd8eaa4"],
+      ["docs/handoffs/2026-07-28-voice-bakeoff-external-gate-handoff.md", "b46683ddc0cf2d05cd8cdb6b93812c1dbf921337d17860b6ee9038a92f909bf1"],
+      ["docs/handoffs/2026-07-28-voice-bakeoff-external-gate-new-session-prompt.md", "d26b527f25392b8aad8f02790476f1570a7f65a26274bc0d7d841fda2e2d10e8"],
+      ["docs/security/voice-bakeoff-bootstrap-readonly-inventory-2026-07-28.json", "4f84facc3d04fb1111a02662e0291a2b788ef48cba34a6338d6a0e36a510e570"],
+      ["docs/security/voice-bakeoff-bootstrap-revalidation-state-2026-07-28.json", "7741073e1cb7057a9c65de6ae947f8f7b11ebf4128e14fdd59845eadfc06ab76"],
+      ["docs/security/voice-bakeoff-bootstrap-runtime-authorization-package.md", "f2a291f57e9b735adc0f682ee4f00565a47cfe5e7d95334d4a8f11eee020bacf"],
+      ["docs/security/voice-bakeoff-bootstrap-runtime-authorization.review.json", "e23f03fc25dc9fc4c378c9a9159d64c38f8071587a9033c7a5c0348943163bdc"],
+      ["docs/security/voice-bakeoff-cross-environment-iam-attestation-authorization-package.md", "1885d946717284ac61f5bbd96a3f52e3bcc67b02a4fa10b36fad76aadd7d7d4e"],
+      ["docs/security/voice-bakeoff-cross-environment-iam-attestation-authorization.review.json", "c23034bba9fc36e8cdea384a2bc0793a343f16c0547713675d905635f89358f1"],
+      ["tests/unit/test_voice_bakeoff_bootstrap_runtime_authorization_package.py", "297880fadd3a8bbf51095fd927f6236edfd1b53fa45c6986e80a75c2aadee9d8"],
+      ["tests/unit/test_voice_bakeoff_cross_environment_iam_attestation_authorization_package.py", "6df7d93721ecd7c7198b017de58ad189248aaa2ce31f8258b63e63f041b81d40"],
+      ["docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.schema.json", "71231423063f60f856452f261e24fed5549c81ba08d73c401314a06235421cc2"],
+      ["docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.json", "5d4f7dd2d492fe3bf8f26a32ec137f4485d4601fddd81f8890c56927c86507f9"],
+      ["docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.md", "d9b506878fbb6018efe3bfe108b69383222f2ebc62367cb01a41ae324420b53e"],
+      ["tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5.py", "1304b40feee5b5e3796ac020893e44962b099946226befb998708ff778f2ba13"]
+    ]
+  }
+}

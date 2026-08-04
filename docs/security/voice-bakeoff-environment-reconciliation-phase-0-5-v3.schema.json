@@ -1,0 +1,929 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.invalid/schemas/voice-bakeoff-environment-reconciliation-phase-0-5-v3.schema.json",
+  "title": "Hey Kevin voice bakeoff environment reconciliation Phase 0.5 v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_kind",
+    "package_status",
+    "source_binding",
+    "provenance",
+    "authority",
+    "environment_recommendation",
+    "identity_contract",
+    "bounded_inventory_envelope_contract",
+    "request_safety_amendments",
+    "effective_access_contract",
+    "receipt_contract",
+    "operator_targeting_contract",
+    "transition_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "package_kind": {
+      "const": "voice_bakeoff_environment_reconciliation_phase_0_5_amendment"
+    },
+    "package_status": {
+      "const": "source_only_exact_review_candidate"
+    },
+    "source_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "worktree",
+        "branch",
+        "source_sha",
+        "package_is_authorization"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/delimatsuo/heykevin"
+        },
+        "worktree": {
+          "const": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan"
+        },
+        "branch": {
+          "const": "codex/voice-architecture-bakeoff-plan"
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "package_is_authorization": {
+          "const": false
+        }
+      }
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorized_scope",
+        "connected_inventory_status",
+        "mutation_status",
+        "execution_status",
+        "task_4_8_status",
+        "owner_signable_package_status",
+        "advisory_review_is_owner_authorization",
+        "reviewed_contract_is_owner_authorization"
+      ],
+      "properties": {
+        "authorized_scope": {
+          "const": "source_only_phase_0_5_v3_amendment"
+        },
+        "connected_inventory_status": {
+          "const": "not_authorized"
+        },
+        "mutation_status": {
+          "const": "not_authorized"
+        },
+        "execution_status": {
+          "const": "not_authorized"
+        },
+        "task_4_8_status": {
+          "const": "sealed"
+        },
+        "owner_signable_package_status": {
+          "const": "not_generated"
+        },
+        "advisory_review_is_owner_authorization": {
+          "const": false
+        },
+        "reviewed_contract_is_owner_authorization": {
+          "const": false
+        }
+      }
+    },
+    "environment_recommendation": {
+      "type": "object"
+    },
+    "identity_contract": {
+      "type": "object"
+    },
+    "bounded_inventory_envelope_contract": {
+      "type": "object"
+    },
+    "request_safety_amendments": {
+      "type": "object"
+    },
+    "effective_access_contract": {
+      "type": "object"
+    },
+    "receipt_contract": {
+      "type": "object"
+    },
+    "operator_targeting_contract": {
+      "type": "object"
+    },
+    "transition_policy": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "project_id": {
+      "type": "string",
+      "enum": [
+        "kevin-491315",
+        "kevin-staging-491315",
+        "hk-voice-bakeoff-0724-iso",
+        "hk-voice-bakeoff-preauth-iso"
+      ]
+    },
+    "identity_ref": {
+      "type": "string",
+      "enum": [
+        "organization_operator_identity",
+        "isolated_bakeoff_operator_identity"
+      ]
+    },
+    "method_ref": {
+      "type": "string",
+      "enum": [
+        "project_identity_get",
+        "project_provenance_get",
+        "project_ancestry_get",
+        "project_billing_get",
+        "service_state_get",
+        "asset_type_inventory_search",
+        "detailed_asset_inventory_search",
+        "ancestor_log_sink_asset_search",
+        "firestore_database_list",
+        "firestore_database_get",
+        "firebase_rtdb_instance_list_v3",
+        "firebase_rtdb_instance_get_v3",
+        "cloud_run_service_get_v3",
+        "asset_iam_policy_search",
+        "project_iam_policy_get",
+        "folder_iam_policy_get",
+        "organization_iam_policy_get",
+        "deny_policy_list",
+        "deny_policy_get",
+        "service_account_list",
+        "service_account_iam_policy_get",
+        "predefined_role_get",
+        "project_custom_role_get",
+        "organization_custom_role_get",
+        "pab_policy_list",
+        "pab_policy_get",
+        "pab_policy_binding_search",
+        "org_policy_constraint_list",
+        "org_policy_list",
+        "org_policy_effective_get",
+        "policy_troubleshooter",
+        "cloud_run_service_iam_policy_get"
+      ]
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "AUTHORIZATION_INVALID",
+        "AUTHORIZATION_STALE",
+        "CUSTODY_UNBOUND",
+        "IDENTITY_MISMATCH",
+        "INCOMPLETE_ANCESTRY",
+        "METHOD_NOT_ALLOWLISTED",
+        "NEXT_PAGE_TOKEN_PRESENT",
+        "NONCE_ALREADY_USED",
+        "NON_SUCCESS_RESPONSE",
+        "OVER_BYTE_CAP",
+        "OVER_REQUEST_CAP",
+        "PARTIAL_OR_DENIED",
+        "PROJECT_IDENTITY_MISMATCH",
+        "RECEIPT_SIGNATURE_INVALID",
+        "REQUEST_DIGEST_MISMATCH",
+        "REQUEST_SET_MISMATCH",
+        "RESPONSE_FIELD_UNEXPECTED",
+        "RESPONSE_FILTER_REJECTED",
+        "TIMESTAMP_ORDER_INVALID"
+      ]
+    },
+    "request_manifest_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_index",
+        "request_id",
+        "method_ref",
+        "identity_ref",
+        "local_configuration_digest",
+        "target_project_id",
+        "target_project_number",
+        "quota_project_id",
+        "endpoint",
+        "http_method",
+        "canonical_path_and_query",
+        "request_body_digest",
+        "response_field_mask",
+        "raw_evidence_class",
+        "canonical_request_digest"
+      ],
+      "properties": {
+        "request_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^req-[0-9]{3}$"
+        },
+        "method_ref": {
+          "$ref": "#/$defs/method_ref"
+        },
+        "identity_ref": {
+          "$ref": "#/$defs/identity_ref"
+        },
+        "local_configuration_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "target_project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "target_project_number": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[1-9][0-9]{5,29}$"
+        },
+        "quota_project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "endpoint": {
+          "type": "string",
+          "enum": [
+            "cloudasset.googleapis.com",
+            "cloudbilling.googleapis.com",
+            "cloudresourcemanager.googleapis.com",
+            "firebasedatabase.googleapis.com",
+            "firestore.googleapis.com",
+            "iam.googleapis.com",
+            "orgpolicy.googleapis.com",
+            "policytroubleshooter.googleapis.com",
+            "run.googleapis.com",
+            "serviceusage.googleapis.com"
+          ]
+        },
+        "http_method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "canonical_path_and_query": {
+          "type": "string",
+          "pattern": "^/[^\\r\\n ]+$"
+        },
+        "request_body_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "response_field_mask": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.]*$"
+          }
+        },
+        "raw_evidence_class": {
+          "type": "string",
+          "enum": [
+            "payload_safe",
+            "restricted_external_custody"
+          ]
+        },
+        "canonical_request_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "target_project_id": {
+                "enum": [
+                  "kevin-491315",
+                  "kevin-staging-491315"
+                ]
+              }
+            },
+            "required": [
+              "target_project_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "identity_ref": {
+                "const": "organization_operator_identity"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "identity_ref": {
+                "const": "isolated_bakeoff_operator_identity"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "phase_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "envelope_version",
+        "phase",
+        "source_sha",
+        "v2_json_digest",
+        "v3_contract_digest",
+        "coverage_matrix_digest",
+        "owner_public_key_digest",
+        "identity_configuration_digests",
+        "raw_evidence_custody_digest",
+        "envelope_nonce_seed",
+        "request_count",
+        "request_set_digest",
+        "requests",
+        "issued_at_ms",
+        "expires_at_ms",
+        "audit_and_quota_effects_acknowledged",
+        "owner_signature"
+      ],
+      "properties": {
+        "envelope_version": {
+          "const": 3
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "identity_binding",
+            "metadata_discovery",
+            "metadata_detail",
+            "access_control_discovery",
+            "access_control_detail"
+          ]
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "v2_json_digest": {
+          "const": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f"
+        },
+        "v3_contract_digest": {
+          "const": "0bea46e0994428de8c1dfc917563fc23b1263a4949d0e48d7962f91be31e59ad"
+        },
+        "coverage_matrix_digest": {
+          "const": "85d1b6073869eaac280d333868860353f7dc0c814c93be4f886cd05ae13753db"
+        },
+        "owner_public_key_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "identity_configuration_digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ],
+          "properties": {
+            "organization_operator_identity": {
+              "$ref": "#/$defs/sha256"
+            },
+            "isolated_bakeoff_operator_identity": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "raw_evidence_custody_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "envelope_nonce_seed": {
+          "$ref": "#/$defs/sha256"
+        },
+        "request_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 96
+        },
+        "request_set_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "requests": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 96,
+          "items": {
+            "$ref": "#/$defs/request_manifest_entry"
+          }
+        },
+        "issued_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "audit_and_quota_effects_acknowledged": {
+          "const": true
+        },
+        "owner_signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    },
+    "pass_predicates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_binding_valid",
+        "authorization_signature_valid",
+        "receipt_signature_valid",
+        "request_set_complete",
+        "request_receipts_authenticated",
+        "request_results_and_projections_bound",
+        "nonces_consumed_once",
+        "project_identity_mapping_valid",
+        "timestamps_ordered_and_fresh",
+        "response_filters_enforced",
+        "raw_response_gates_passed",
+        "no_unexpected_fields",
+        "no_free_text_or_raw_evidence"
+      ],
+      "properties": {
+        "contract_binding_valid": {
+          "type": "boolean"
+        },
+        "authorization_signature_valid": {
+          "type": "boolean"
+        },
+        "receipt_signature_valid": {
+          "type": "boolean"
+        },
+        "request_set_complete": {
+          "type": "boolean"
+        },
+        "request_receipts_authenticated": {
+          "type": "boolean"
+        },
+        "request_results_and_projections_bound": {
+          "type": "boolean"
+        },
+        "nonces_consumed_once": {
+          "type": "boolean"
+        },
+        "project_identity_mapping_valid": {
+          "type": "boolean"
+        },
+        "timestamps_ordered_and_fresh": {
+          "type": "boolean"
+        },
+        "response_filters_enforced": {
+          "type": "boolean"
+        },
+        "raw_response_gates_passed": {
+          "type": "boolean"
+        },
+        "no_unexpected_fields": {
+          "type": "boolean"
+        },
+        "no_free_text_or_raw_evidence": {
+          "type": "boolean"
+        }
+      }
+    },
+    "pass_predicates_all_true": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/pass_predicates"
+        },
+        {
+          "properties": {
+            "contract_binding_valid": {
+              "const": true
+            },
+            "authorization_signature_valid": {
+              "const": true
+            },
+            "receipt_signature_valid": {
+              "const": true
+            },
+            "request_set_complete": {
+              "const": true
+            },
+            "request_receipts_authenticated": {
+              "const": true
+            },
+            "request_results_and_projections_bound": {
+              "const": true
+            },
+            "nonces_consumed_once": {
+              "const": true
+            },
+            "project_identity_mapping_valid": {
+              "const": true
+            },
+            "timestamps_ordered_and_fresh": {
+              "const": true
+            },
+            "response_filters_enforced": {
+              "const": true
+            },
+            "raw_response_gates_passed": {
+              "const": true
+            },
+            "no_unexpected_fields": {
+              "const": true
+            },
+            "no_free_text_or_raw_evidence": {
+              "const": true
+            }
+          }
+        }
+      ]
+    },
+    "request_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_index",
+        "request_id",
+        "method_ref",
+        "identity_ref",
+        "target_project_id",
+        "target_project_number",
+        "canonical_request_digest",
+        "authorization_digest",
+        "derived_nonce",
+        "nonce_consumed_before_dispatch",
+        "response_field_mask_enforced",
+        "raw_response_gate_passed",
+        "status_code_class",
+        "response_projection_digest",
+        "private_custody_record_digest",
+        "completed_at_ms",
+        "error_codes",
+        "result",
+        "receipt_digest"
+      ],
+      "properties": {
+        "request_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^req-[0-9]{3}$"
+        },
+        "method_ref": {
+          "$ref": "#/$defs/method_ref"
+        },
+        "identity_ref": {
+          "$ref": "#/$defs/identity_ref"
+        },
+        "target_project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "target_project_number": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[1-9][0-9]{5,29}$"
+        },
+        "canonical_request_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authorization_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "derived_nonce": {
+          "$ref": "#/$defs/sha256"
+        },
+        "nonce_consumed_before_dispatch": {
+          "type": "boolean"
+        },
+        "response_field_mask_enforced": {
+          "type": "boolean"
+        },
+        "raw_response_gate_passed": {
+          "type": "boolean"
+        },
+        "status_code_class": {
+          "type": "string",
+          "enum": [
+            "2xx",
+            "4xx",
+            "5xx",
+            "transport_error"
+          ]
+        },
+        "response_projection_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "private_custody_record_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "completed_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "error_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/error_code"
+          }
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "incomplete"
+          ]
+        },
+        "receipt_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "target_project_id": {
+                "enum": [
+                  "kevin-491315",
+                  "kevin-staging-491315"
+                ]
+              }
+            },
+            "required": [
+              "target_project_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "identity_ref": {
+                "const": "organization_operator_identity"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "identity_ref": {
+                "const": "isolated_bakeoff_operator_identity"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passing_request_receipt": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/request_receipt"
+        },
+        {
+          "properties": {
+            "nonce_consumed_before_dispatch": {
+              "const": true
+            },
+            "response_field_mask_enforced": {
+              "const": true
+            },
+            "raw_response_gate_passed": {
+              "const": true
+            },
+            "status_code_class": {
+              "const": "2xx"
+            },
+            "result": {
+              "const": "pass"
+            },
+            "error_codes": {
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "visibility_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_ref",
+        "local_configuration_digest",
+        "project_id",
+        "project_number",
+        "ancestry_digest",
+        "visibility_result",
+        "evidence_digest",
+        "observed_at_ms",
+        "expires_at_ms"
+      ],
+      "properties": {
+        "identity_ref": {
+          "$ref": "#/$defs/identity_ref"
+        },
+        "local_configuration_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "project_number": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{5,29}$"
+        },
+        "ancestry_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "visibility_result": {
+          "type": "string",
+          "enum": [
+            "visible",
+            "not_visible",
+            "incomplete"
+          ]
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observed_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "payload_safe_phase_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_schema_version",
+        "source_sha",
+        "v2_json_digest",
+        "v3_contract_digest",
+        "coverage_matrix_digest",
+        "phase",
+        "phase_envelope_digest",
+        "authorization_digest",
+        "request_set_digest",
+        "request_count",
+        "request_receipts",
+        "visibility_claims",
+        "pass_predicates",
+        "error_codes",
+        "issued_at_ms",
+        "completed_at_ms",
+        "expires_at_ms",
+        "receipt_public_key_digest",
+        "receipt_signature",
+        "result"
+      ],
+      "properties": {
+        "receipt_schema_version": {
+          "const": 3
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "v2_json_digest": {
+          "const": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f"
+        },
+        "v3_contract_digest": {
+          "const": "0bea46e0994428de8c1dfc917563fc23b1263a4949d0e48d7962f91be31e59ad"
+        },
+        "coverage_matrix_digest": {
+          "const": "85d1b6073869eaac280d333868860353f7dc0c814c93be4f886cd05ae13753db"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "identity_binding",
+            "metadata_discovery",
+            "metadata_detail",
+            "access_control_discovery",
+            "access_control_detail"
+          ]
+        },
+        "phase_envelope_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authorization_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "request_set_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "request_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 96
+        },
+        "request_receipts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 96,
+          "items": {
+            "$ref": "#/$defs/request_receipt"
+          }
+        },
+        "visibility_claims": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/visibility_claim"
+          }
+        },
+        "pass_predicates": {
+          "$ref": "#/$defs/pass_predicates"
+        },
+        "error_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/error_code"
+          }
+        },
+        "issued_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "completed_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "receipt_public_key_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "receipt_signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "incomplete"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "pass"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "request_receipts": {
+                "items": {
+                  "$ref": "#/$defs/passing_request_receipt"
+                }
+              },
+              "pass_predicates": {
+                "$ref": "#/$defs/pass_predicates_all_true"
+              },
+              "error_codes": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

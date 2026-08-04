@@ -1,0 +1,135 @@
+{
+  "schema_version": 9,
+  "manifest_kind": "voice_bakeoff_v9_exact_predecessor_bundle",
+  "manifest_digest_sha256": "1c4293996dc10c1a23de7280d2cd7b22e167be041ef2c86eca3daaba76215805",
+  "entries": [
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.json",
+      "sha256": "5d4f7dd2d492fe3bf8f26a32ec137f4485d4601fddd81f8890c56927c86507f9"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.md",
+      "sha256": "d9b506878fbb6018efe3bfe108b69383222f2ebc62367cb01a41ae324420b53e"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.schema.json",
+      "sha256": "71231423063f60f856452f261e24fed5549c81ba08d73c401314a06235421cc2"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.json",
+      "sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.md",
+      "sha256": "b63eaaac7be760748d36765ebba5a04b5ef86b8e966d6199c37946889d7bfe4c"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.schema.json",
+      "sha256": "1c694b2879714a254e1b933131c5dcdf347f1cd5afbed660e03563417064d92d"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.json",
+      "sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.md",
+      "sha256": "1c95fb0d957e92ed5fae2103bf4a9756a58df4b4052be2e9cc3589457429073a"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.schema.json",
+      "sha256": "094b0ffdf3da572989630e516d1a708f545b46e5ca520ed48f1d9f4103375746"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.json",
+      "sha256": "883246c06309b575f5276be2974ab3b34ac9790bf3511c7ac8abacf0133f731d"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.md",
+      "sha256": "f3c9d4af70a874248e069416f348ea22d05e5cc88b917edb4e01d2c6fc5d0c75"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.schema.json",
+      "sha256": "4837d628aaead05bd16e3783cfd722f1741a7704a3980fd5ba2aaf20171f62ad"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.json",
+      "sha256": "9a273365dddcc8e839d04c63fd9794726a17b4a4197743e81fbc0d897a25da59"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.md",
+      "sha256": "1bd1d382648f03a8711995ba2cd2e68dd0cdabc538c8f721720521238f70d72c"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.schema.json",
+      "sha256": "3d083be600af252a6ea96cce0d58b5ed593f05425148b9c585e43bfa94bd4f85"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.json",
+      "sha256": "be8f7edc86705ac26d09184c05a846e724a389860bc9660fc43e191c55bdd8c7"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.md",
+      "sha256": "f218456cd14cdb329e913dffdc1a0bc81028649ca43f33045051c9b66db1b9e9"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.schema.json",
+      "sha256": "8857b4948859c85573d2f42f927861af8790de4690274c0c12777c12a0ad8abd"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.json",
+      "sha256": "1cdcb68d67d9285cc40c783483083f96e60bb3b9dd227fc16c2a0b42170b44ae"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.md",
+      "sha256": "418e0033944f3ec9a07c5a72023d55ccb6a6b1da6875ca9420511c9dc30ea288"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.schema.json",
+      "sha256": "edea6eac9471fe8ccb734f36904b7429e91482e45c629d90c48d30480801ee9f"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v8.json",
+      "sha256": "4153bf3764600198f583d627ad93e540ce0423cd25fab2c04be2e7b06245a859"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v8.md",
+      "sha256": "6238ff3f36074e3ffbe229345383c538cdb32260ea219304a73a5480305526dc"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v8.schema.json",
+      "sha256": "f70041f9ba8f3bb5405822f0a612de1d9eb12e7fd9dfb9a6b95c84c46a9728a1"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5.py",
+      "sha256": "1304b40feee5b5e3796ac020893e44962b099946226befb998708ff778f2ba13"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v2.py",
+      "sha256": "f6e5376ef9d0aaa87f54a1a1aa5b198e22fb0977e8a7fbb45ebf4536914dc415"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v3.py",
+      "sha256": "bc6693455e4a21b3ba2287e73213294c08470bd48f3ef561ab5e887083dcb254"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v4.py",
+      "sha256": "f037027d5ca31ac699fc9a551cf4f240e8d6805d9bb81765d28d3a216fd0d47f"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v5.py",
+      "sha256": "9eb8295411b225fc4e40d90aff2bb95ff6c4dea9319734b504332940897f32a3"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v6.py",
+      "sha256": "e4fa5f16da3fc14bb9480df3e945fccb22f9308c8079b33b22c13d3441e6ed2f"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v7.py",
+      "sha256": "f34f0756f8eb262c2075a8411dc734719bb52a6fd6834b670a48e961094cfac7"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v8.py",
+      "sha256": "56bd07ae06c5530c8be47fe9e758b61f23fe127f70b029aa7b3b3d77973ea562"
+    }
+  ]
+}

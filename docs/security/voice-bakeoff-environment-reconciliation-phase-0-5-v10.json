@@ -1,0 +1,204 @@
+{
+  "schema_version": 10,
+  "contract_kind": "voice_bakeoff_phase_0_5_fail_closed_acceptance",
+  "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+  "predecessor_exact_bundle": [
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.json",
+      "sha256": "737236646d066ecc50149d89af94fdca83ec28006c8fee44ca37323a858dc7e1"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.md",
+      "sha256": "7f718ac29e70bcb222a2ca847b1419ce0891f4956d21d446a27eeb273d021523"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.predecessors.json",
+      "sha256": "24ad05b112b5f26cb7b8918a1e6a23a3a49fa82efdb687630b920efe02db3dd5"
+    },
+    {
+      "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.schema.json",
+      "sha256": "a794dd4c78157a0287246b41410e6d05187eaf70627e443d512cff68d644a962"
+    },
+    {
+      "path": "scripts/materialize_voice_bakeoff_phase_one_payload_v9.py",
+      "sha256": "f9087cfe7dc905bb409f9ba887ddecaaad25164690d40975a03c8bac096124e1"
+    },
+    {
+      "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v9.py",
+      "sha256": "c5112823b600372ff30e817171d0b9d75958cc771d70ef2b41a51e2271eca99e"
+    }
+  ],
+  "predecessor_bundle_digest": "0e4021cf161066b642c78b76cfd52ab839f2b97ca3a5db5afc2c395a521fc776",
+  "panel_consensus": {
+    "staff": "blocked_real_materialization",
+    "security_privacy": "blocked_real_materialization",
+    "operator": "blocked_real_materialization",
+    "materialization_decision": "blocked",
+    "evidence_class": "advisory_non_authorizing"
+  },
+  "decision": {
+    "materialization": "blocked",
+    "v9_runner_invocation": "forbidden",
+    "connected_actions": "forbidden",
+    "product_evidence": "none",
+    "v10_scope": "source_only_acceptance_and_status_verification"
+  },
+  "allowed_actions": [
+    "inspect_public_contracts",
+    "run_offline_static_verifier",
+    "run_fixture_only_tests",
+    "obtain_exact_hash_advisory_review"
+  ],
+  "forbidden_actions": [
+    "invoke_v9_materializer",
+    "create_real_private_input",
+    "create_real_materialization_authorization",
+    "access_credentials",
+    "access_provider_or_pstn",
+    "access_staging_or_production",
+    "execute_task_4_8"
+  ],
+  "local_candidate_requirements": [
+    {
+      "id": "L01",
+      "requirement": "Future materializer anchors all ceremony child operations to one validated directory descriptor and rejects symlinks, hard links, wrong ownership, wrong modes, ancestor swaps, and unexpected initial entries.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L02",
+      "requirement": "Future materializer durably fsyncs the exclusive attempt record and its ceremony directory before any private-input read; any ambiguity consumes the attempt.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L03",
+      "requirement": "Future admission compares authorization and private-input expiry to trusted invocation time rather than a timestamp supplied by either record.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L04",
+      "requirement": "Future CLI emits distinct stable pre-admission, consumed-no-payload, residue-stop, and committed-success outcomes without private values.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L05",
+      "requirement": "Future implementation validates a closed attempt-event schema and every payload-to-private-input, authorization, time, request, and exact-bundle relationship before publication.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L06",
+      "requirement": "A payload is usable only when payload, matching successful audit, and durable terminal attempt event form one consistent committed envelope; every other state is quarantine.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L07",
+      "requirement": "Cross-process concurrency, second-call, deletion and restore, hard-kill at every write and sync boundary, startup-hook, residue, and cold isolated CLI tests pass.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "L08",
+      "requirement": "A payload-safe preflight and custody choreography validate exact inputs without inventing authority or exposing private values through argv, environment, output, traceback, clipboard, chat, or logs.",
+      "status": "not_satisfied",
+      "blocking": true
+    }
+  ],
+  "external_ceremony_requirements": [
+    {
+      "id": "E01",
+      "requirement": "Materialization authority provenance is authenticated against a pinned current non-revoked trust anchor and binds exact source, bundle, ceremony, custodian, private-input digest, attempt, and expiry.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "E02",
+      "requirement": "An authority-controlled append-only or WORM ledger provides deletion, copy, restore, restart, and cross-host resistant global one-use admission.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "E03",
+      "requirement": "An independently verified launcher binds the executable and interpreter provenance, uses isolated Python startup, a clean environment, disabled core and crash capture, and OS-enforced network and subprocess denial.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "E04",
+      "requirement": "A trusted host clock and protected custody medium, owner, ACL, backup, swap, residue, and retention policy are attested for the exact ceremony.",
+      "status": "not_satisfied",
+      "blocking": true
+    },
+    {
+      "id": "E05",
+      "requirement": "Staff, security/privacy, and operator accept the exact runnable successor and the materialization authority and custodian separately accept the exact one-use ceremony.",
+      "status": "not_satisfied",
+      "blocking": true
+    }
+  ],
+  "future_attempt_event_schema": {
+    "required_fields": [
+      "record_version",
+      "record_kind",
+      "event",
+      "state",
+      "attempt_id",
+      "authorization_id",
+      "source_sha",
+      "contract_digest",
+      "payload_digest",
+      "error_code",
+      "private_values_present",
+      "connected_action_occurred"
+    ],
+    "allowed_states": [
+      "pre_admission_rejected",
+      "consumed_no_payload",
+      "consumed_with_residue_stop",
+      "generated_one_payload"
+    ],
+    "private_values_present": false,
+    "connected_action_occurred": false
+  },
+  "operator_decision_table": [
+    {
+      "state": "pre_admission_rejected",
+      "attempt_consumed": false,
+      "payload_usable": false,
+      "retry": "only_after_new_exact_successor_and_authorization",
+      "operator_action": "stop_and_correct_preconditions"
+    },
+    {
+      "state": "consumed_no_payload",
+      "attempt_consumed": true,
+      "payload_usable": false,
+      "retry": "never_same_authorization",
+      "operator_action": "stop_and_quarantine_ceremony"
+    },
+    {
+      "state": "consumed_with_residue_stop",
+      "attempt_consumed": true,
+      "payload_usable": false,
+      "retry": "never_same_authorization",
+      "operator_action": "quarantine_residue_and_stop"
+    },
+    {
+      "state": "generated_one_payload",
+      "attempt_consumed": true,
+      "payload_usable": true,
+      "retry": "never_same_authorization",
+      "operator_action": "retain_committed_envelope_without_execution"
+    }
+  ],
+  "promotion_rule": {
+    "all_local_requirements": "independently_verified",
+    "all_external_requirements": "independently_attested",
+    "exact_successor_review": "staff_security_operator_acceptance",
+    "separate_one_use_authorization": "required",
+    "automatic_promotion": false
+  }
+}

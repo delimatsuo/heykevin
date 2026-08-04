@@ -1,0 +1,909 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.invalid/schemas/voice-bakeoff-environment-reconciliation-phase-0-5-v1.schema.json",
+  "title": "Hey Kevin voice bakeoff environment reconciliation Phase 0.5",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_kind",
+    "package_status",
+    "source_binding",
+    "authority",
+    "status_vocabulary",
+    "identity_aliases",
+    "environment_registry",
+    "operator_targeting_contract",
+    "read_manifest",
+    "transition_policy",
+    "historical_artifact_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "package_kind": {
+      "const": "voice_bakeoff_environment_reconciliation_phase_0_5"
+    },
+    "package_status": {
+      "const": "source_only_draft"
+    },
+    "source_binding": {
+      "$ref": "#/$defs/source_binding"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "status_vocabulary": {
+      "$ref": "#/$defs/status_vocabulary"
+    },
+    "identity_aliases": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/identity_alias"
+      }
+    },
+    "environment_registry": {
+      "$ref": "#/$defs/environment_registry"
+    },
+    "operator_targeting_contract": {
+      "$ref": "#/$defs/operator_targeting_contract"
+    },
+    "read_manifest": {
+      "$ref": "#/$defs/read_manifest"
+    },
+    "transition_policy": {
+      "$ref": "#/$defs/transition_policy"
+    },
+    "historical_artifact_policy": {
+      "$ref": "#/$defs/historical_artifact_policy"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "project_id": {
+      "type": "string",
+      "enum": [
+        "kevin-491315",
+        "kevin-staging-491315",
+        "hk-voice-bakeoff-0724-iso",
+        "hk-voice-bakeoff-preauth-iso"
+      ]
+    },
+    "source_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "worktree",
+        "branch",
+        "source_sha",
+        "tracked_tree_expected_clean",
+        "package_is_authorization"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/delimatsuo/heykevin"
+        },
+        "worktree": {
+          "const": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan"
+        },
+        "branch": {
+          "const": "codex/voice-architecture-bakeoff-plan"
+        },
+        "source_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "tracked_tree_expected_clean": {
+          "const": true
+        },
+        "package_is_authorization": {
+          "const": false
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorized_scope",
+        "connected_inventory_status",
+        "mutation_status",
+        "execution_status",
+        "task_4_8_status",
+        "owner_authorization_required_for_connected_inventory",
+        "advisory_review_is_owner_authorization"
+      ],
+      "properties": {
+        "authorized_scope": {
+          "const": "source_only_phase_0_5"
+        },
+        "connected_inventory_status": {
+          "const": "not_authorized"
+        },
+        "mutation_status": {
+          "const": "not_authorized"
+        },
+        "execution_status": {
+          "const": "not_authorized"
+        },
+        "task_4_8_status": {
+          "const": "sealed"
+        },
+        "owner_authorization_required_for_connected_inventory": {
+          "const": true
+        },
+        "advisory_review_is_owner_authorization": {
+          "const": false
+        }
+      }
+    },
+    "status_vocabulary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inventory",
+        "governance",
+        "resource_authority",
+        "review",
+        "connected_authority"
+      ],
+      "properties": {
+        "inventory": {
+          "const": [
+            "complete",
+            "incomplete",
+            "stale",
+            "not_visible"
+          ]
+        },
+        "governance": {
+          "const": [
+            "undecided",
+            "retain_frozen",
+            "move_approved",
+            "replace_approved"
+          ]
+        },
+        "resource_authority": {
+          "const": [
+            "frozen",
+            "candidate",
+            "authoritative",
+            "retiring",
+            "retired"
+          ]
+        },
+        "review": {
+          "const": [
+            "pending",
+            "advisory_pass",
+            "advisory_p1_open"
+          ]
+        },
+        "connected_authority": {
+          "const": [
+            "not_authorized",
+            "read_only_reconciliation_only",
+            "mutation_not_authorized",
+            "execution_not_authorized"
+          ]
+        }
+      }
+    },
+    "identity_alias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_ref",
+        "purpose",
+        "checked_in_account_identifier",
+        "checked_in_credential_material",
+        "local_configuration_ref"
+      ],
+      "properties": {
+        "identity_ref": {
+          "type": "string",
+          "enum": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ]
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checked_in_account_identifier": {
+          "type": "null"
+        },
+        "checked_in_credential_material": {
+          "const": false
+        },
+        "local_configuration_ref": {
+          "const": "required_but_not_bound"
+        }
+      }
+    },
+    "environment_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_status",
+        "inventory_status",
+        "governance_status",
+        "review_status",
+        "default_disposition",
+        "project_identity_rule",
+        "projects",
+        "resources",
+        "edges",
+        "invariants"
+      ],
+      "properties": {
+        "registry_status": {
+          "const": "source_derived_not_currently_observed"
+        },
+        "inventory_status": {
+          "const": "incomplete"
+        },
+        "governance_status": {
+          "const": "retain_frozen"
+        },
+        "review_status": {
+          "const": "advisory_pass"
+        },
+        "default_disposition": {
+          "const": "retain_frozen"
+        },
+        "project_identity_rule": {
+          "const": "project_id_plus_immutable_project_number_not_display_name_or_account_visibility"
+        },
+        "projects": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/project"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 8,
+          "items": {
+            "$ref": "#/$defs/resource"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "minItems": 8,
+          "items": {
+            "$ref": "#/$defs/edge"
+          }
+        },
+        "invariants": {
+          "type": "array",
+          "minItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "project_number",
+        "display_name_selector_allowed",
+        "identity_ref",
+        "source_declared_role",
+        "inventory_status",
+        "governance_status",
+        "resource_authority_status",
+        "connected_read_status",
+        "mutation_status",
+        "execution_status",
+        "observed_ancestry_digest",
+        "freshness_expires_at"
+      ],
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "project_number": {
+          "type": "null"
+        },
+        "display_name_selector_allowed": {
+          "const": false
+        },
+        "identity_ref": {
+          "type": "string",
+          "enum": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ]
+        },
+        "source_declared_role": {
+          "type": "string",
+          "enum": [
+            "production_data_and_shared_cloud_run_control_plane",
+            "staging_data_plane",
+            "bakeoff_execution_control_security_domain",
+            "bakeoff_preauth_security_domain"
+          ]
+        },
+        "inventory_status": {
+          "const": "incomplete"
+        },
+        "governance_status": {
+          "const": "retain_frozen"
+        },
+        "resource_authority_status": {
+          "const": "candidate"
+        },
+        "connected_read_status": {
+          "const": "not_authorized"
+        },
+        "mutation_status": {
+          "const": "mutation_not_authorized"
+        },
+        "execution_status": {
+          "const": "execution_not_authorized"
+        },
+        "observed_ancestry_digest": {
+          "type": "null"
+        },
+        "freshness_expires_at": {
+          "type": "null"
+        }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource_ref",
+        "project_id",
+        "resource_type",
+        "source_declared_name",
+        "environment_role",
+        "security_domain",
+        "inventory_status",
+        "resource_authority_status",
+        "connected_read_status",
+        "mutation_status",
+        "execution_status"
+      ],
+      "properties": {
+        "resource_ref": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "resource_type": {
+          "type": "string",
+          "enum": [
+            "gcp_project",
+            "cloud_run_service",
+            "firestore_database",
+            "firebase_rtdb_instance"
+          ]
+        },
+        "source_declared_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment_role": {
+          "type": "string",
+          "enum": [
+            "production",
+            "staging",
+            "bakeoff_control",
+            "bakeoff_preauth"
+          ]
+        },
+        "security_domain": {
+          "type": "string",
+          "enum": [
+            "production_data",
+            "production_runtime",
+            "staging_data",
+            "staging_runtime",
+            "bakeoff_execution_control",
+            "bakeoff_preauth"
+          ]
+        },
+        "inventory_status": {
+          "const": "incomplete"
+        },
+        "resource_authority_status": {
+          "const": "candidate"
+        },
+        "connected_read_status": {
+          "const": "not_authorized"
+        },
+        "mutation_status": {
+          "const": "mutation_not_authorized"
+        },
+        "execution_status": {
+          "const": "execution_not_authorized"
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_ref",
+        "relationship",
+        "to_ref",
+        "evidence_tier"
+      ],
+      "properties": {
+        "from_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relationship": {
+          "type": "string",
+          "enum": [
+            "hosted_by",
+            "source_declared_reads_from",
+            "must_remain_distinct_from",
+            "must_not_reach"
+          ]
+        },
+        "to_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_tier": {
+          "const": "source_derived_not_currently_observed"
+        }
+      }
+    },
+    "operator_targeting_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "banner_literal",
+        "required_banner_fields",
+        "bootstrap_identity_call",
+        "hard_fail_conditions",
+        "prohibited_target_sources",
+        "tabletop_scenarios"
+      ],
+      "properties": {
+        "banner_literal": {
+          "const": "CONNECTED EXECUTION SEALED — READ-ONLY RECONCILIATION NOT AUTHORIZED"
+        },
+        "required_banner_fields": {
+          "type": "array",
+          "minItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "bootstrap_identity_call": {
+          "$ref": "#/$defs/bootstrap_identity_call"
+        },
+        "hard_fail_conditions": {
+          "type": "array",
+          "minItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "prohibited_target_sources": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "tabletop_scenarios": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "bootstrap_identity_call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "method_ref",
+        "project_number_may_be_unbound_before_call",
+        "only_call_allowed_before_project_number_binding",
+        "next_calls_require_exact_number_and_ancestry_binding"
+      ],
+      "properties": {
+        "purpose": {
+          "const": "bind_immutable_project_number_for_one_exact_project_id"
+        },
+        "method_ref": {
+          "const": "resource_manager_project_get"
+        },
+        "project_number_may_be_unbound_before_call": {
+          "const": true
+        },
+        "only_call_allowed_before_project_number_binding": {
+          "const": true
+        },
+        "next_calls_require_exact_number_and_ancestry_binding": {
+          "const": true
+        }
+      }
+    },
+    "read_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_status",
+        "execution_supported",
+        "target_project_ids",
+        "project_creation_cap",
+        "request_rules",
+        "methods",
+        "payload_safe_receipt",
+        "raw_evidence_custody",
+        "completion_rule"
+      ],
+      "properties": {
+        "manifest_status": {
+          "const": "non_executable_source_only"
+        },
+        "execution_supported": {
+          "const": false
+        },
+        "target_project_ids": {
+          "const": [
+            "kevin-491315",
+            "kevin-staging-491315",
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "project_creation_cap": {
+          "const": 0
+        },
+        "request_rules": {
+          "$ref": "#/$defs/request_rules"
+        },
+        "methods": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/read_method"
+          }
+        },
+        "payload_safe_receipt": {
+          "$ref": "#/$defs/payload_safe_receipt"
+        },
+        "raw_evidence_custody": {
+          "$ref": "#/$defs/raw_evidence_custody"
+        },
+        "completion_rule": {
+          "const": "missing_denied_ambiguous_unpaginated_or_unresolved_visibility_is_incomplete_never_absent_or_safe"
+        }
+      }
+    },
+    "request_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "explicit_identity_alias_required",
+        "explicit_local_configuration_required",
+        "target_project_is_own_quota_project",
+        "ambient_project_forbidden",
+        "ambient_quota_forbidden",
+        "ambient_credentials_forbidden",
+        "application_default_credential_discovery_forbidden",
+        "service_account_impersonation_forbidden",
+        "credential_export_forbidden",
+        "access_token_output_forbidden",
+        "api_enablement_forbidden",
+        "fallback_discovery_forbidden",
+        "automatic_retry_forbidden",
+        "concurrency_forbidden",
+        "request_parameter_expansion_forbidden",
+        "raw_output_to_git_or_chat_forbidden"
+      ],
+      "properties": {
+        "explicit_identity_alias_required": {
+          "const": true
+        },
+        "explicit_local_configuration_required": {
+          "const": true
+        },
+        "target_project_is_own_quota_project": {
+          "const": true
+        },
+        "ambient_project_forbidden": {
+          "const": true
+        },
+        "ambient_quota_forbidden": {
+          "const": true
+        },
+        "ambient_credentials_forbidden": {
+          "const": true
+        },
+        "application_default_credential_discovery_forbidden": {
+          "const": true
+        },
+        "service_account_impersonation_forbidden": {
+          "const": true
+        },
+        "credential_export_forbidden": {
+          "const": true
+        },
+        "access_token_output_forbidden": {
+          "const": true
+        },
+        "api_enablement_forbidden": {
+          "const": true
+        },
+        "fallback_discovery_forbidden": {
+          "const": true
+        },
+        "automatic_retry_forbidden": {
+          "const": true
+        },
+        "concurrency_forbidden": {
+          "const": true
+        },
+        "request_parameter_expansion_forbidden": {
+          "const": true
+        },
+        "raw_output_to_git_or_chat_forbidden": {
+          "const": true
+        }
+      }
+    },
+    "read_method": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method_ref",
+        "api_method",
+        "http_method",
+        "resource_template",
+        "request_body",
+        "response_field_mask",
+        "pagination",
+        "raw_evidence_class",
+        "receipt_projection"
+      ],
+      "properties": {
+        "method_ref": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "api_method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "http_method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "resource_template": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_body": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "response_field_mask": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pagination": {
+          "type": "string",
+          "enum": [
+            "not_applicable",
+            "all_pages_required"
+          ]
+        },
+        "raw_evidence_class": {
+          "type": "string",
+          "enum": [
+            "payload_safe",
+            "restricted_external_custody"
+          ]
+        },
+        "receipt_projection": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "payload_safe_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_fields",
+        "forbidden_fields",
+        "result_values"
+      ],
+      "properties": {
+        "allowed_fields": {
+          "type": "array",
+          "minItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "forbidden_fields": {
+          "type": "array",
+          "minItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "result_values": {
+          "const": [
+            "pass",
+            "fail",
+            "incomplete"
+          ]
+        }
+      }
+    },
+    "raw_evidence_custody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_storage_allowed",
+        "chat_storage_allowed",
+        "external_private_custody_required",
+        "custody_mechanism_bound",
+        "connected_execution_precondition_satisfied"
+      ],
+      "properties": {
+        "repository_storage_allowed": {
+          "const": false
+        },
+        "chat_storage_allowed": {
+          "const": false
+        },
+        "external_private_custody_required": {
+          "const": true
+        },
+        "custody_mechanism_bound": {
+          "const": false
+        },
+        "connected_execution_precondition_satisfied": {
+          "const": false
+        }
+      }
+    },
+    "transition_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recommended_path",
+        "retain_path",
+        "move_or_replace_path",
+        "project_creation_cap",
+        "mixed_staging_control_plane"
+      ],
+      "properties": {
+        "recommended_path": {
+          "const": "inventory_then_registry_freeze_then_successor_packages"
+        },
+        "retain_path": {
+          "const": [
+            "separately_authorized_read_only_inventory",
+            "registry_freeze",
+            "versioned_successor_authorization_packages"
+          ]
+        },
+        "move_or_replace_path": {
+          "const": [
+            "separate_transition_authorization",
+            "transition",
+            "post_transition_inventory",
+            "registry_freeze",
+            "versioned_successor_authorization_packages"
+          ]
+        },
+        "project_creation_cap": {
+          "const": 0
+        },
+        "mixed_staging_control_plane": {
+          "const": "record_as_separate_environment_debt_do_not_fix_in_phase_0_5"
+        }
+      }
+    },
+    "historical_artifact_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existing_artifacts_are_historical",
+        "in_place_revision_allowed",
+        "future_corrections_require_versioned_successor",
+        "protected_artifacts"
+      ],
+      "properties": {
+        "existing_artifacts_are_historical": {
+          "const": true
+        },
+        "in_place_revision_allowed": {
+          "const": false
+        },
+        "future_corrections_require_versioned_successor": {
+          "const": true
+        },
+        "protected_artifacts": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/protected_artifact"
+          }
+        }
+      }
+    },
+    "protected_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

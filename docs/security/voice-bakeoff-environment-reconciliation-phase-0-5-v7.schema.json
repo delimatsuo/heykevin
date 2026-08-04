@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.invalid/schemas/voice-bakeoff-environment-reconciliation-phase-0-5-v7.schema.json",
+  "title": "Hey Kevin voice bakeoff environment reconciliation Phase 0.5 v7 validated phase-one materialization",
+  "const": {
+    "schema_version": 7,
+    "package_kind": "voice_bakeoff_environment_reconciliation_validated_phase_one_materialization_amendment",
+    "package_status": "source_only_exact_review_candidate",
+    "source_binding": {
+      "repository": "https://github.com/delimatsuo/heykevin",
+      "worktree": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan",
+      "branch": "codex/voice-architecture-bakeoff-plan",
+      "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+      "package_is_authorization": false
+    },
+    "provenance": {
+      "successor_of": {
+        "json_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.json",
+        "json_sha256": "be8f7edc86705ac26d09184c05a846e724a389860bc9660fc43e191c55bdd8c7",
+        "schema_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.schema.json",
+        "schema_sha256": "8857b4948859c85573d2f42f927861af8790de4690274c0c12777c12a0ad8abd",
+        "guide_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.md",
+        "guide_sha256": "f218456cd14cdb329e913dffdc1a0bc81028649ca43f33045051c9b66db1b9e9",
+        "test_path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v6.py",
+        "test_sha256": "e4fa5f16da3fc14bb9480df3e945fccb22f9308c8079b33b22c13d3441e6ed2f",
+        "review_outcome": "rejected_for_optional_post_construction_validation_preserved_as_source_only_evidence"
+      },
+      "v6_review_closure": [
+        "one_public_materialization_operation_performs_all_validation_before_return",
+        "invalid_uuid_digest_timestamp_type_order_freshness_or_lifetime_returns_no_payload",
+        "materialization_lifetime_is_at_most_fifteen_minutes"
+      ],
+      "scope_rule": {
+        "v7_supersedes": [
+          "v6.phase_one_generation_contract.generation_validator_action_on_any_mismatch",
+          "v6.transition_policy"
+        ],
+        "all_other_v6_scope_containment_remains_normative": true,
+        "v7_qualifies_only": "validated_source_only_materialization_of_one_unsigned_phase_one_signing_payload",
+        "dispatch_or_connected_capability_added": false
+      }
+    },
+    "authority": {
+      "authorized_scope": "source_only_validated_unsigned_phase_one_payload_materialization",
+      "source_only_payload_generation_status": "not_generated",
+      "owner_signature_status": "not_recorded",
+      "owner_authorization_status": "not_recorded",
+      "connected_inventory_status": "not_authorized",
+      "mutation_status": "not_authorized",
+      "execution_status": "not_authorized",
+      "task_4_8_status": "sealed",
+      "reviewed_contract_is_owner_authorization": false,
+      "generated_unsigned_payload_is_owner_authorization": false
+    },
+    "environment_recommendation": {
+      "action": "create_no_project_retain_all_four_exact_projects_frozen",
+      "exact_project_ids": [
+        "kevin-491315",
+        "kevin-staging-491315",
+        "hk-voice-bakeoff-0724-iso",
+        "hk-voice-bakeoff-preauth-iso"
+      ],
+      "screenshot_interpretation": "account_visibility_is_not_project_identity_or_duplication",
+      "mixed_staging_topology": "separate_environment_debt_no_phase_0_5_remediation",
+      "governance_status": "undecided"
+    },
+    "normative_contract_binding": {
+      "normative_contract_digest_sha256": "c2045082e5399eec1b18a817548258a6b4cf57532d4dceb59141e8ed2a85a4a2",
+      "digest_canonicalization": "RFC8785_JSON_Canonicalization_Scheme",
+      "digest_input": "the_complete_v7_package_without_normative_contract_digest_sha256",
+      "v2_json_sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f",
+      "v5_json_sha256": "9a273365dddcc8e839d04c63fd9794726a17b4a4197743e81fbc0d897a25da59",
+      "v6_json_sha256": "be8f7edc86705ac26d09184c05a846e724a389860bc9660fc43e191c55bdd8c7",
+      "v6_normative_contract_sha256": "8a1e561842dedfb871714a3caae1d652632c9f25503c90a3b868be8067468a62",
+      "phase_one_method_contract_sha256": "3244902ecbf20c155ee49836a10a074d28eb6386a4081d56e0963a6868a2b93f"
+    },
+    "validated_materialization_contract": {
+      "schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.schema.json#/$defs/phase_one_signing_payload_v7",
+      "single_public_operation": "materialize_validated_phase_one_payload",
+      "operation_result": "complete_validated_payload_or_error_without_payload",
+      "required_private_inputs": [
+        "owner_selected_inventory_session_uuidv4",
+        "owner_public_key_digest",
+        "organization_operator_identity_configuration_digest",
+        "isolated_bakeoff_operator_identity_configuration_digest",
+        "raw_evidence_custody_digest",
+        "one_use_nonce_seed",
+        "issued_at_ms",
+        "expires_at_ms"
+      ],
+      "required_trusted_context": [
+        "validation_time_ms"
+      ],
+      "validation_order_before_return": [
+        "require_exact_input_and_context_key_sets",
+        "reject_bool_and_require_exact_integer_timestamp_types",
+        "require_lowercase_sha256_digest_format",
+        "require_uuidv4_session_format",
+        "require_issued_at_ms_less_than_or_equal_to_validation_time_ms",
+        "require_validation_time_ms_strictly_less_than_expires_at_ms",
+        "require_expires_minus_issued_at_no_more_than_900000_ms",
+        "construct_candidate_in_private_ephemeral_memory",
+        "validate_closed_schema",
+        "validate_exact_ordered_four_request_relations_and_all_digests",
+        "return_payload_only_when_error_set_is_empty"
+      ],
+      "maximum_payload_lifetime_ms": 900000,
+      "invalid_input_action": "raise_error_return_no_payload_no_partial_persistence_no_fallback",
+      "forbidden_inputs": [
+        "credentials",
+        "access_tokens",
+        "service_account_keys",
+        "provider_secrets",
+        "raw_cloud_responses",
+        "project_numbers",
+        "ancestry",
+        "private_parameter_allowlist"
+      ]
+    },
+    "phase_one_payload_contract": {
+      "payload_kind": "unsigned_owner_signing_payload",
+      "payload_version": 7,
+      "phase": "project_id_binding",
+      "phase_ordinal": 1,
+      "predecessor": "GENESIS",
+      "exact_request_count": 4,
+      "exact_project_order": [
+        "kevin-491315",
+        "kevin-staging-491315",
+        "hk-voice-bakeoff-0724-iso",
+        "hk-voice-bakeoff-preauth-iso"
+      ],
+      "request_contract": "exact_v6_bodyless_phase_one_request_contract",
+      "owner_signature_field_present": false,
+      "owner_authorization_record_present": false,
+      "repository_storage_allowed_for_materialized_payload": false,
+      "chat_storage_allowed_for_materialized_payload": false
+    },
+    "dispatch_and_later_phase_blockers": {
+      "dispatch_eligibility": false,
+      "owner_signature_alone_would_authorize_dispatch": false,
+      "v5_current_phase_replay_finding": "unimplemented_blocks_every_dispatch",
+      "v5_dynamic_body_seed_and_encoding_findings": "unqualified_blocks_phases_two_through_six",
+      "v5_receipt_freshness_finding": "unimplemented_blocks_every_successor_phase",
+      "phase_two_through_six": "generation_and_dispatch_not_authorized",
+      "credentials_responses_receipts_and_network_clients": "not_present",
+      "any_missing_runtime_control_action": "connected_read_not_authorized"
+    },
+    "transition_policy": {
+      "v7_review_requirement": "exact_hash_staff_security_and_operator_review_with_no_unresolved_p1_for_validated_source_only_materialization",
+      "after_clean_v7_review": "may_call_the_validated_materializer_once_with_separately_supplied_private_inputs_and_trusted_validation_time",
+      "materialization_is_signature_authorization_or_connected_read": false,
+      "connected_read_status_after_materialization": "not_authorized",
+      "mutation_execution_and_task_4_8": "remain_sealed",
+      "incomplete_or_ambiguous_action": "stop_retain_frozen_create_no_project"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "phase_one_request_manifest_entry_v7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_index",
+        "request_id",
+        "method_ref",
+        "api_method",
+        "identity_ref",
+        "local_configuration_digest",
+        "target_project_id",
+        "target_project_number",
+        "quota_project_id",
+        "endpoint",
+        "http_method",
+        "canonical_path_and_query",
+        "canonical_request_body",
+        "request_body_digest",
+        "response_field_mask",
+        "pagination",
+        "raw_evidence_class",
+        "canonical_request_digest"
+      ],
+      "properties": {
+        "request_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^req-00[0-3]$"
+        },
+        "method_ref": {
+          "const": "project_identity_get"
+        },
+        "api_method": {
+          "const": "cloudresourcemanager.projects.get"
+        },
+        "identity_ref": {
+          "enum": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ]
+        },
+        "local_configuration_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target_project_id": {
+          "enum": [
+            "kevin-491315",
+            "kevin-staging-491315",
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "target_project_number": {
+          "const": null
+        },
+        "quota_project_id": {
+          "enum": [
+            "kevin-491315",
+            "kevin-staging-491315",
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "endpoint": {
+          "const": "cloudresourcemanager.googleapis.com"
+        },
+        "http_method": {
+          "const": "GET"
+        },
+        "canonical_path_and_query": {
+          "enum": [
+            "/v1/projects/kevin-491315",
+            "/v1/projects/kevin-staging-491315",
+            "/v1/projects/hk-voice-bakeoff-0724-iso",
+            "/v1/projects/hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "canonical_request_body": {
+          "const": null
+        },
+        "request_body_digest": {
+          "const": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+        },
+        "response_field_mask": {
+          "const": [
+            "projectId",
+            "projectNumber",
+            "lifecycleState",
+            "parent"
+          ]
+        },
+        "pagination": {
+          "const": "not_applicable"
+        },
+        "raw_evidence_class": {
+          "const": "restricted_external_custody"
+        },
+        "canonical_request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "target_project_id": {
+                "enum": [
+                  "kevin-491315",
+                  "kevin-staging-491315"
+                ]
+              }
+            },
+            "required": [
+              "target_project_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "identity_ref": {
+                "const": "organization_operator_identity"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "identity_ref": {
+                "const": "isolated_bakeoff_operator_identity"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "phase_one_signing_payload_v7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_version",
+        "payload_kind",
+        "inventory_session_id",
+        "phase",
+        "phase_ordinal",
+        "predecessor",
+        "source_sha",
+        "v2_json_digest",
+        "v5_json_digest",
+        "v6_json_digest",
+        "v7_normative_contract_digest",
+        "phase_one_method_contract_digest",
+        "owner_public_key_digest",
+        "identity_configuration_digests",
+        "raw_evidence_custody_digest",
+        "one_use_nonce_seed",
+        "request_count",
+        "request_set_digest",
+        "requests",
+        "issued_at_ms",
+        "expires_at_ms",
+        "audit_and_quota_effects_acknowledged"
+      ],
+      "properties": {
+        "payload_version": {
+          "const": 7
+        },
+        "payload_kind": {
+          "const": "unsigned_owner_signing_payload"
+        },
+        "inventory_session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "phase": {
+          "const": "project_id_binding"
+        },
+        "phase_ordinal": {
+          "const": 1
+        },
+        "predecessor": {
+          "const": "GENESIS"
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "v2_json_digest": {
+          "const": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f"
+        },
+        "v5_json_digest": {
+          "const": "9a273365dddcc8e839d04c63fd9794726a17b4a4197743e81fbc0d897a25da59"
+        },
+        "phase_one_method_contract_digest": {
+          "const": "3244902ecbf20c155ee49836a10a074d28eb6386a4081d56e0963a6868a2b93f"
+        },
+        "owner_public_key_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity_configuration_digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ],
+          "properties": {
+            "organization_operator_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "isolated_bakeoff_operator_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "raw_evidence_custody_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "one_use_nonce_seed": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "request_count": {
+          "const": 4
+        },
+        "request_set_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "requests": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/phase_one_request_manifest_entry_v7"
+          }
+        },
+        "issued_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "audit_and_quota_effects_acknowledged": {
+          "const": true
+        },
+        "v6_json_digest": {
+          "const": "be8f7edc86705ac26d09184c05a846e724a389860bc9660fc43e191c55bdd8c7"
+        },
+        "v7_normative_contract_digest": {
+          "const": "c2045082e5399eec1b18a817548258a6b4cf57532d4dceb59141e8ed2a85a4a2"
+        }
+      }
+    }
+  }
+}

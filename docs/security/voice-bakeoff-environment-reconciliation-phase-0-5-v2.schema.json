@@ -1,0 +1,1792 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.invalid/schemas/voice-bakeoff-environment-reconciliation-phase-0-5-v2.schema.json",
+  "title": "Hey Kevin voice bakeoff environment reconciliation Phase 0.5 v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_kind",
+    "package_status",
+    "source_binding",
+    "provenance",
+    "authority",
+    "status_model",
+    "identity_model",
+    "environment_registry",
+    "operator_targeting_contract",
+    "read_contract",
+    "receipt_contract",
+    "transition_policy",
+    "historical_artifact_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "package_kind": {
+      "const": "voice_bakeoff_environment_reconciliation_phase_0_5"
+    },
+    "package_status": {
+      "const": "source_only_exact_review_candidate"
+    },
+    "source_binding": {
+      "$ref": "#/$defs/source_binding"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "status_model": {
+      "$ref": "#/$defs/status_model"
+    },
+    "identity_model": {
+      "$ref": "#/$defs/identity_model"
+    },
+    "environment_registry": {
+      "$ref": "#/$defs/environment_registry"
+    },
+    "operator_targeting_contract": {
+      "$ref": "#/$defs/operator_targeting_contract"
+    },
+    "read_contract": {
+      "$ref": "#/$defs/read_contract"
+    },
+    "receipt_contract": {
+      "$ref": "#/$defs/receipt_contract"
+    },
+    "transition_policy": {
+      "$ref": "#/$defs/transition_policy"
+    },
+    "historical_artifact_policy": {
+      "$ref": "#/$defs/historical_artifact_policy"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "project_id": {
+      "type": "string",
+      "enum": [
+        "kevin-491315",
+        "kevin-staging-491315",
+        "hk-voice-bakeoff-0724-iso",
+        "hk-voice-bakeoff-preauth-iso"
+      ]
+    },
+    "source_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "worktree",
+        "branch",
+        "source_sha",
+        "package_is_authorization"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/delimatsuo/heykevin"
+        },
+        "worktree": {
+          "const": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan"
+        },
+        "branch": {
+          "const": "codex/voice-architecture-bakeoff-plan"
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "package_is_authorization": {
+          "const": false
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "successor_of",
+        "governing_artifacts"
+      ],
+      "properties": {
+        "successor_of": {
+          "const": {
+            "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.json",
+            "sha256": "5d4f7dd2d492fe3bf8f26a32ec137f4485d4601fddd81f8890c56927c86507f9",
+            "review_outcome": "rejected_for_connected_read_contract_preserved_as_freeze_evidence"
+          }
+        },
+        "governing_artifacts": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/governing_artifact"
+          }
+        }
+      }
+    },
+    "governing_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "relationship"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "relationship": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "authority": {
+      "const": {
+        "authorized_scope": "source_only_phase_0_5_successor",
+        "connected_inventory_status": "not_authorized",
+        "mutation_status": "not_authorized",
+        "execution_status": "not_authorized",
+        "task_4_8_status": "sealed",
+        "owner_authorization_required_for_each_connected_request": true,
+        "audit_and_quota_effect_acknowledgement_required_for_each_connected_request": true,
+        "advisory_review_is_owner_authorization": false
+      }
+    },
+    "status_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current",
+        "dominant_display_precedence",
+        "rules",
+        "allowed_transitions"
+      ],
+      "properties": {
+        "current": {
+          "const": {
+            "inventory": "incomplete",
+            "governance": "undecided",
+            "default_disposition": "retain_frozen",
+            "review": "pending_exact_artifact_review",
+            "connected_read": "not_authorized",
+            "mutation": "mutation_not_authorized",
+            "execution": "execution_not_authorized"
+          }
+        },
+        "dominant_display_precedence": {
+          "const": [
+            "execution_not_authorized",
+            "mutation_not_authorized",
+            "not_authorized",
+            "pending_exact_artifact_review",
+            "undecided",
+            "incomplete"
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "allowed_transitions": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "identity_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_aliases",
+        "designated_query_identity_by_project",
+        "observed_visibility_claims",
+        "visibility_claim_schema",
+        "rules"
+      ],
+      "properties": {
+        "identity_aliases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/identity_alias"
+          }
+        },
+        "designated_query_identity_by_project": {
+          "const": {
+            "kevin-491315": "organization_operator_identity",
+            "kevin-staging-491315": "organization_operator_identity",
+            "hk-voice-bakeoff-0724-iso": "isolated_bakeoff_operator_identity",
+            "hk-voice-bakeoff-preauth-iso": "isolated_bakeoff_operator_identity"
+          }
+        },
+        "observed_visibility_claims": {
+          "const": []
+        },
+        "visibility_claim_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required_fields",
+            "visibility_results"
+          ],
+          "properties": {
+            "required_fields": {
+              "const": [
+                "identity_ref",
+                "local_configuration_digest",
+                "project_id",
+                "project_number",
+                "ancestry_digest",
+                "observed_at_ms",
+                "expires_at_ms",
+                "visibility_result"
+              ]
+            },
+            "visibility_results": {
+              "const": [
+                "visible",
+                "not_visible",
+                "incomplete"
+              ]
+            }
+          }
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "identity_alias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_ref",
+        "checked_in_account_identifier",
+        "checked_in_credential_material",
+        "local_configuration_ref"
+      ],
+      "properties": {
+        "identity_ref": {
+          "type": "string",
+          "enum": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ]
+        },
+        "checked_in_account_identifier": {
+          "type": "null"
+        },
+        "checked_in_credential_material": {
+          "const": false
+        },
+        "local_configuration_ref": {
+          "const": "required_but_not_bound"
+        }
+      }
+    },
+    "environment_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_status",
+        "inventory_status",
+        "governance_status",
+        "default_disposition",
+        "review_status",
+        "project_identity_rule",
+        "projects",
+        "resources",
+        "edges",
+        "authority_cardinality",
+        "invariants"
+      ],
+      "properties": {
+        "registry_status": {
+          "const": "source_derived_not_currently_observed"
+        },
+        "inventory_status": {
+          "const": "incomplete"
+        },
+        "governance_status": {
+          "const": "undecided"
+        },
+        "default_disposition": {
+          "const": "retain_frozen"
+        },
+        "review_status": {
+          "const": "pending_exact_artifact_review"
+        },
+        "project_identity_rule": {
+          "const": "project_id_plus_immutable_project_number_not_display_name_or_account_visibility"
+        },
+        "projects": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/project"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/resource"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "minItems": 18,
+          "maxItems": 18,
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "authority_cardinality": {
+          "const": {
+            "key": "canonical_resource_role",
+            "maximum_authoritative_resources_per_key": 1,
+            "zero_authoritative_resources_allowed_while_inventory_incomplete": true
+          }
+        },
+        "invariants": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "project_number",
+        "source_declared_container_role",
+        "inventory_status",
+        "governance_status",
+        "default_disposition",
+        "connected_read_status"
+      ],
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "project_number": {
+          "type": "null"
+        },
+        "source_declared_container_role": {
+          "type": "string",
+          "enum": [
+            "mixed_production_and_staging_control_plane_container",
+            "staging_data_plane_container",
+            "bakeoff_execution_control_container",
+            "bakeoff_preauth_container"
+          ]
+        },
+        "inventory_status": {
+          "const": "incomplete"
+        },
+        "governance_status": {
+          "const": "undecided"
+        },
+        "default_disposition": {
+          "const": "retain_frozen"
+        },
+        "connected_read_status": {
+          "const": "not_authorized"
+        }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource_ref",
+        "project_id",
+        "resource_type",
+        "canonical_resource_role",
+        "environment_role",
+        "inventory_status",
+        "resource_authority_status"
+      ],
+      "properties": {
+        "resource_ref": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "resource_type": {
+          "type": "string",
+          "enum": [
+            "gcp_project_container",
+            "cloud_run_service",
+            "firestore_database",
+            "firebase_rtdb_instance"
+          ]
+        },
+        "source_declared_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canonical_resource_role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment_role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inventory_status": {
+          "const": "incomplete"
+        },
+        "resource_authority_status": {
+          "const": "candidate"
+        }
+      }
+    },
+    "operator_targeting_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "banner_literal",
+        "required_banner_fields",
+        "bootstrap_state_machine",
+        "status_examples",
+        "tabletop_cases"
+      ],
+      "properties": {
+        "banner_literal": {
+          "const": "CONNECTED EXECUTION SEALED — READ-ONLY RECONCILIATION NOT AUTHORIZED"
+        },
+        "required_banner_fields": {
+          "type": "array",
+          "minItems": 19,
+          "maxItems": 19,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "bootstrap_state_machine": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/bootstrap_state"
+          }
+        },
+        "status_examples": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/status_example"
+          }
+        },
+        "tabletop_cases": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/tabletop_case"
+          }
+        }
+      }
+    },
+    "bootstrap_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "bound_inputs",
+        "only_permitted_connected_method_ref",
+        "transition"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "sealed",
+            "project_identity_only",
+            "ancestry_only",
+            "bound_single_read"
+          ]
+        },
+        "bound_inputs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "only_permitted_connected_method_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transition": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "status_example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "example",
+        "project_number_display",
+        "ancestry_display",
+        "connected_read_status",
+        "dominant_banner"
+      ],
+      "properties": {
+        "example": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_number_display": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ancestry_display": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connected_read_status": {
+          "type": "string",
+          "enum": [
+            "not_authorized",
+            "read_only_reconciliation_only"
+          ]
+        },
+        "dominant_banner": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "tabletop_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_id",
+        "trigger",
+        "expected_inventory_status",
+        "expected_action",
+        "fallback_allowed",
+        "duplicate_project_recommendation_allowed"
+      ],
+      "properties": {
+        "scenario_id": {
+          "type": "string",
+          "enum": [
+            "wrong_google_account",
+            "wrong_local_configuration",
+            "wrong_project_id_or_number",
+            "same_project_visible_from_two_accounts",
+            "stale_project_number_ancestry_or_receipt",
+            "permission_denied_or_partial_visibility",
+            "missing_ancestry",
+            "ambient_quota_project",
+            "unexpected_response_field_or_over_cap",
+            "unbound_raw_evidence_custody"
+          ]
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_inventory_status": {
+          "const": "incomplete"
+        },
+        "expected_action": {
+          "type": "string",
+          "pattern": "^(abort|record_).+"
+        },
+        "fallback_allowed": {
+          "const": false
+        },
+        "duplicate_project_recommendation_allowed": {
+          "const": false
+        }
+      }
+    },
+    "read_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_status",
+        "connected_execution_supported",
+        "target_project_ids",
+        "exact_service_name_allowlist",
+        "exact_detailed_asset_type_allowlist",
+        "exact_source_declared_cloud_run_services",
+        "exact_source_declared_firestore_databases",
+        "parameter_binding_rules",
+        "caps",
+        "request_rules",
+        "methods",
+        "coverage_matrix",
+        "effective_access_matrix",
+        "raw_evidence_custody"
+      ],
+      "properties": {
+        "contract_status": {
+          "const": "non_executable_not_owner_signable"
+        },
+        "connected_execution_supported": {
+          "const": false
+        },
+        "target_project_ids": {
+          "const": [
+            "kevin-491315",
+            "kevin-staging-491315",
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "exact_service_name_allowlist": {
+          "const": [
+            "cloudasset.googleapis.com",
+            "cloudbilling.googleapis.com",
+            "cloudkms.googleapis.com",
+            "cloudresourcemanager.googleapis.com",
+            "firebasedatabase.googleapis.com",
+            "firestore.googleapis.com",
+            "iam.googleapis.com",
+            "orgpolicy.googleapis.com",
+            "policytroubleshooter.googleapis.com",
+            "run.googleapis.com",
+            "secretmanager.googleapis.com",
+            "serviceusage.googleapis.com"
+          ]
+        },
+        "exact_detailed_asset_type_allowlist": {
+          "const": [
+            "cloudkms.googleapis.com/CryptoKey",
+            "cloudkms.googleapis.com/KeyRing",
+            "firestore.googleapis.com/Database",
+            "iam.googleapis.com/ServiceAccount",
+            "logging.googleapis.com/LogSink",
+            "run.googleapis.com/Service",
+            "secretmanager.googleapis.com/Secret"
+          ]
+        },
+        "exact_source_declared_cloud_run_services": {
+          "const": [
+            "projects/kevin-491315/locations/us-central1/services/kevin-api",
+            "projects/kevin-491315/locations/us-central1/services/kevin-api-staging"
+          ]
+        },
+        "exact_source_declared_firestore_databases": {
+          "const": [
+            "projects/kevin-491315/databases/(default)",
+            "projects/kevin-staging-491315/databases/(default)",
+            "projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "projects/hk-voice-bakeoff-preauth-iso/databases/voice-bakeoff-preauth"
+          ]
+        },
+        "parameter_binding_rules": {
+          "const": {
+            "EXACT_TARGET_PROJECT_ID": "one exact member of target_project_ids",
+            "EXACT_TARGET_PROJECT_NUMBER": "fresh project_identity_get receipt bound to the same exact project ID",
+            "EXACT_ANCESTOR_FOLDER_NUMBER": "one exact folder returned by the bound complete ancestry receipt",
+            "EXACT_ANCESTOR_ORGANIZATION_NUMBER": "the exact organization returned by the bound complete ancestry receipt",
+            "EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT": "the exact target project number or one exact bound ancestor, URL-encoded where the API requires it",
+            "EACH_EXACT_ALLOWLISTED_SERVICE_NAME": "one exact member of exact_service_name_allowlist",
+            "EXACT_DETAILED_ASSET_TYPE_ALLOWLIST": "the complete ordered exact_detailed_asset_type_allowlist without widening",
+            "EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE": "one exact member of exact_source_declared_cloud_run_services",
+            "EXACT_DATABASE_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by firestore_database_list for the same target",
+            "EXACT_INSTANCE_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by firebase_rtdb_instance_list for the same target",
+            "EXACT_DENY_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by deny_policy_list for the same attachment point",
+            "EXACT_ENUMERATED_SERVICE_ACCOUNT": "one exact account returned by service_account_list for the same target",
+            "EXACT_MATCHED_PREDEFINED_ROLE_NAME": "one exact predefined role found in a bound allow-policy result",
+            "EXACT_MATCHED_ROLE_ID": "one exact custom role ID found in a bound allow-policy result and same project or organization scope",
+            "EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST": "one exact name returned by pab_policy_list for the bound organization",
+            "EACH_EXACT_ENUMERATED_CONSTRAINT": "one exact name returned by org_policy_constraint_list for the same target",
+            "EXACT_OWNER_BOUND_MEMBER_QUERY": "one of the exact future control principal, each owner-bound encompassing Resource Manager principal set, allUsers, or allAuthenticatedUsers",
+            "EXACT_OWNER_BOUND_EFFECTIVE_ACCESS_TUPLE": "one exact principal-resource-permission tuple from effective_access_matrix",
+            "unbound_ambiguous_mismatched_or_extra_parameter_action": "incomplete_and_abort_without_fallback"
+          }
+        },
+        "caps": {
+          "const": {
+            "target_projects": 4,
+            "connected_requests_per_owner_authorization": 1,
+            "ancestor_resources_per_project": 8,
+            "service_names_per_project": 12,
+            "service_accounts_per_project": 100,
+            "resource_types": 64,
+            "resources_per_project": 5000,
+            "policies_per_attachment_point": 500,
+            "roles_to_resolve": 500,
+            "pages_per_paginated_method_per_target": 10,
+            "page_size": 500,
+            "raw_response_bytes_per_request": 1048576,
+            "total_raw_response_bytes_per_inventory": 20971520,
+            "wall_clock_ms_per_request": 30000,
+            "total_wall_clock_ms": 900000,
+            "retries": 0,
+            "concurrency": 1,
+            "project_creation": 0,
+            "mutating_operations": 0,
+            "api_enablement_operations": 0,
+            "service_account_impersonations": 0,
+            "access_tokens_exported": 0,
+            "firestore_document_reads": 0,
+            "firebase_record_reads": 0,
+            "secret_payload_reads": 0,
+            "cloud_run_invocations": 0,
+            "provider_or_pstn_requests": 0
+          }
+        },
+        "request_rules": {
+          "const": {
+            "one_request_per_separately_consumed_owner_authorization": true,
+            "explicit_identity_and_local_configuration_digest_required": true,
+            "target_project_is_own_quota_project": true,
+            "audit_and_quota_effects_acknowledged_per_request": true,
+            "ambient_project_quota_identity_and_credentials_forbidden": true,
+            "application_default_credential_discovery_forbidden": true,
+            "service_account_impersonation_forbidden": true,
+            "credential_or_access_token_export_forbidden": true,
+            "api_enablement_forbidden": true,
+            "project_or_resource_discovery_outside_exact_scope_forbidden": true,
+            "fallback_retry_concurrency_and_request_expansion_forbidden": true,
+            "raw_output_to_git_or_chat_forbidden": true,
+            "mutation_workload_provider_pstn_staging_production_and_task_4_8_forbidden": true
+          }
+        },
+        "methods": {
+          "$ref": "#/$defs/exact_methods"
+        },
+        "coverage_matrix": {
+          "$ref": "#/$defs/coverage_matrix"
+        },
+        "effective_access_matrix": {
+          "$ref": "#/$defs/effective_access_matrix"
+        },
+        "raw_evidence_custody": {
+          "const": {
+            "repository_storage_allowed": false,
+            "chat_storage_allowed": false,
+            "external_private_custody_required": true,
+            "custody_mechanism_bound": false,
+            "connected_read_precondition_satisfied": false
+          }
+        }
+      }
+    },
+    "exact_methods": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_identity_get",
+        "project_provenance_get",
+        "project_ancestry_get",
+        "project_billing_get",
+        "service_state_get",
+        "asset_type_inventory_search",
+        "detailed_asset_inventory_search",
+        "asset_iam_policy_search",
+        "project_iam_policy_get",
+        "folder_iam_policy_get",
+        "organization_iam_policy_get",
+        "deny_policy_list",
+        "deny_policy_get",
+        "service_account_list",
+        "service_account_iam_policy_get",
+        "predefined_role_get",
+        "project_custom_role_get",
+        "organization_custom_role_get",
+        "pab_policy_list",
+        "pab_policy_get",
+        "pab_policy_binding_search",
+        "org_policy_constraint_list",
+        "org_policy_list",
+        "org_policy_effective_get",
+        "policy_troubleshooter",
+        "firestore_database_list",
+        "firestore_database_get",
+        "firebase_rtdb_instance_list",
+        "firebase_rtdb_instance_get",
+        "cloud_run_service_get",
+        "cloud_run_service_iam_policy_get"
+      ],
+      "properties": {
+        "project_identity_get": {
+          "const": {
+            "api_method": "cloudresourcemanager.projects.get",
+            "http_method": "GET",
+            "endpoint": "cloudresourcemanager.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}",
+            "request_body": null,
+            "response_field_mask": ["projectId", "projectNumber", "lifecycleState", "parent"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "project_provenance_get": {
+          "const": {
+            "api_method": "cloudresourcemanager.projects.get",
+            "http_method": "GET",
+            "endpoint": "cloudresourcemanager.googleapis.com",
+            "path": "/v3/projects/{EXACT_TARGET_PROJECT_NUMBER}",
+            "request_body": null,
+            "response_field_mask": ["createTime", "name", "parent", "projectId", "state"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "project_ancestry_get": {
+          "const": {
+            "api_method": "cloudresourcemanager.projects.getAncestry",
+            "http_method": "POST",
+            "endpoint": "cloudresourcemanager.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}:getAncestry",
+            "request_body": null,
+            "response_field_mask": ["ancestor.resourceId.id", "ancestor.resourceId.type"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "project_billing_get": {
+          "const": {
+            "api_method": "cloudbilling.projects.getBillingInfo",
+            "http_method": "GET",
+            "endpoint": "cloudbilling.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/billingInfo",
+            "request_body": null,
+            "response_field_mask": ["billingAccountName", "billingEnabled", "name", "projectId"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "service_state_get": {
+          "const": {
+            "api_method": "serviceusage.services.get",
+            "http_method": "GET",
+            "endpoint": "serviceusage.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}/services/{EACH_EXACT_ALLOWLISTED_SERVICE_NAME}",
+            "request_body": null,
+            "response_field_mask": ["config.name", "name", "state"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "payload_safe"
+          }
+        },
+        "asset_type_inventory_search": {
+          "const": {
+            "api_method": "cloudasset.assets.searchAllResources",
+            "http_method": "GET",
+            "endpoint": "cloudasset.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}:searchAllResources?pageSize=500&readMask=assetType",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "results.assetType"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "payload_safe"
+          }
+        },
+        "detailed_asset_inventory_search": {
+          "const": {
+            "api_method": "cloudasset.assets.searchAllResources",
+            "http_method": "GET",
+            "endpoint": "cloudasset.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}:searchAllResources?assetTypes={EXACT_DETAILED_ASSET_TYPE_ALLOWLIST}&pageSize=500&readMask=assetType,name,location,project",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "results.assetType", "results.location", "results.name", "results.project"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "asset_iam_policy_search": {
+          "const": {
+            "api_method": "cloudasset.assets.searchAllIamPolicies",
+            "http_method": "GET",
+            "endpoint": "cloudasset.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_NUMBER}:searchAllIamPolicies?assetTypes={EXACT_DETAILED_ASSET_TYPE_ALLOWLIST}&pageSize=500&query={EXACT_OWNER_BOUND_MEMBER_QUERY}",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "results.assetType", "results.policy", "results.resource"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "project_iam_policy_get": {
+          "$ref": "#/$defs/project_iam_policy_method"
+        },
+        "folder_iam_policy_get": {
+          "$ref": "#/$defs/folder_iam_policy_method"
+        },
+        "organization_iam_policy_get": {
+          "$ref": "#/$defs/organization_iam_policy_method"
+        },
+        "deny_policy_list": {
+          "const": {
+            "api_method": "iam.policies.list",
+            "http_method": "GET",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v2/policies?parent={EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT}&kind=denypolicies&pageSize=100",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "policies.kind", "policies.name", "policies.uid"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "deny_policy_get": {
+          "const": {
+            "api_method": "iam.policies.get",
+            "http_method": "GET",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v2/{EXACT_DENY_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+            "request_body": null,
+            "response_field_mask": ["etag", "kind", "name", "rules", "uid"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "service_account_list": {
+          "const": {
+            "api_method": "iam.projects.serviceAccounts.list",
+            "http_method": "GET",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/serviceAccounts?pageSize=100",
+            "request_body": null,
+            "response_field_mask": ["accounts.disabled", "accounts.email", "accounts.name", "accounts.oauth2ClientId", "accounts.uniqueId", "nextPageToken"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "service_account_iam_policy_get": {
+          "const": {
+            "api_method": "iam.projects.serviceAccounts.getIamPolicy",
+            "http_method": "POST",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/serviceAccounts/{EXACT_ENUMERATED_SERVICE_ACCOUNT}:getIamPolicy",
+            "request_body": {"options": {"requestedPolicyVersion": 3}},
+            "response_field_mask": ["bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "predefined_role_get": {
+          "$ref": "#/$defs/predefined_role_method"
+        },
+        "project_custom_role_get": {
+          "$ref": "#/$defs/project_custom_role_method"
+        },
+        "organization_custom_role_get": {
+          "$ref": "#/$defs/organization_custom_role_method"
+        },
+        "pab_policy_list": {
+          "const": {
+            "api_method": "iam.organizations.locations.principalAccessBoundaryPolicies.list",
+            "http_method": "GET",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v3/organizations/{EXACT_ANCESTOR_ORGANIZATION_NUMBER}/locations/global/principalAccessBoundaryPolicies?pageSize=500",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "principalAccessBoundaryPolicies.name", "principalAccessBoundaryPolicies.uid"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "pab_policy_get": {
+          "const": {
+            "api_method": "iam.organizations.locations.principalAccessBoundaryPolicies.get",
+            "http_method": "GET",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v3/{EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+            "request_body": null,
+            "response_field_mask": ["details", "etag", "name", "uid"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "pab_policy_binding_search": {
+          "const": {
+            "api_method": "iam.organizations.locations.principalAccessBoundaryPolicies.searchPolicyBindings",
+            "http_method": "GET",
+            "endpoint": "iam.googleapis.com",
+            "path": "/v3/{EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST}:searchPolicyBindings?pageSize=500",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "policyBindings.annotations", "policyBindings.displayName", "policyBindings.name", "policyBindings.policy", "policyBindings.principalSet", "policyBindings.target"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "org_policy_constraint_list": {
+          "const": {
+            "api_method": "orgpolicy.projects.constraints.list",
+            "http_method": "GET",
+            "endpoint": "orgpolicy.googleapis.com",
+            "path": "/v2/projects/{EXACT_TARGET_PROJECT_NUMBER}/constraints?pageSize=500",
+            "request_body": null,
+            "response_field_mask": ["constraints.name", "nextPageToken"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "org_policy_list": {
+          "const": {
+            "api_method": "orgpolicy.policies.list",
+            "http_method": "GET",
+            "endpoint": "orgpolicy.googleapis.com",
+            "path": "/v2/{EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT}/policies?pageSize=500",
+            "request_body": null,
+            "response_field_mask": ["nextPageToken", "policies.etag", "policies.name", "policies.spec", "policies.alternate"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "org_policy_effective_get": {
+          "const": {
+            "api_method": "orgpolicy.policies.getEffectivePolicy",
+            "http_method": "GET",
+            "endpoint": "orgpolicy.googleapis.com",
+            "path": "/v2/projects/{EXACT_TARGET_PROJECT_NUMBER}/policies/{EACH_EXACT_ENUMERATED_CONSTRAINT}:getEffectivePolicy",
+            "request_body": null,
+            "response_field_mask": ["dryRunSpec", "etag", "name", "spec"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "policy_troubleshooter": {
+          "const": {
+            "api_method": "policytroubleshooter.iam.troubleshoot",
+            "http_method": "POST",
+            "endpoint": "policytroubleshooter.googleapis.com",
+            "path": "/v3/iam:troubleshoot",
+            "request_body": {"accessTuple": "{EXACT_OWNER_BOUND_EFFECTIVE_ACCESS_TUPLE}"},
+            "response_field_mask": ["accessTuple", "allowPolicyExplanation", "denyPolicyExplanation", "overallAccessState"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "firestore_database_list": {
+          "const": {
+            "api_method": "firestore.projects.databases.list",
+            "http_method": "GET",
+            "endpoint": "firestore.googleapis.com",
+            "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/databases?pageSize=500",
+            "request_body": null,
+            "response_field_mask": ["databases.name", "nextPageToken", "unreachable"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "firestore_database_get": {
+          "const": {
+            "api_method": "firestore.projects.databases.get",
+            "http_method": "GET",
+            "endpoint": "firestore.googleapis.com",
+            "path": "/v1/{EXACT_DATABASE_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+            "request_body": null,
+            "response_field_mask": ["cmekConfig", "concurrencyMode", "createTime", "databaseEdition", "deleteProtectionState", "etag", "locationId", "name", "pointInTimeRecoveryEnablement", "sourceInfo", "type", "uid", "updateTime", "versionRetentionPeriod"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "firebase_rtdb_instance_list": {
+          "const": {
+            "api_method": "firebasedatabase.projects.locations.instances.list",
+            "http_method": "GET",
+            "endpoint": "firebasedatabase.googleapis.com",
+            "path": "/v1beta/projects/{EXACT_TARGET_PROJECT_NUMBER}/locations/-/instances?pageSize=500&showDeleted=true",
+            "request_body": null,
+            "response_field_mask": ["instances.name", "instances.project", "instances.state", "instances.type", "nextPageToken"],
+            "pagination": "all_pages_required",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "firebase_rtdb_instance_get": {
+          "const": {
+            "api_method": "firebasedatabase.projects.locations.instances.get",
+            "http_method": "GET",
+            "endpoint": "firebasedatabase.googleapis.com",
+            "path": "/v1beta/{EXACT_INSTANCE_NAME_RETURNED_BY_ALLOWLISTED_LIST}",
+            "request_body": null,
+            "response_field_mask": ["name", "project", "state", "type"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "cloud_run_service_get": {
+          "const": {
+            "api_method": "run.projects.locations.services.get",
+            "http_method": "GET",
+            "endpoint": "run.googleapis.com",
+            "path": "/v2/{EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE}",
+            "request_body": null,
+            "response_field_mask": ["createTime", "etag", "generation", "name", "observedGeneration", "uid", "updateTime"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        },
+        "cloud_run_service_iam_policy_get": {
+          "const": {
+            "api_method": "run.projects.locations.services.getIamPolicy",
+            "http_method": "GET",
+            "endpoint": "run.googleapis.com",
+            "path": "/v2/{EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE}:getIamPolicy?options.requestedPolicyVersion=3",
+            "request_body": null,
+            "response_field_mask": ["bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+            "pagination": "not_applicable",
+            "raw_evidence_class": "restricted_external_custody"
+          }
+        }
+      }
+    },
+    "project_iam_policy_method": {
+      "const": {
+        "api_method": "cloudresourcemanager.projects.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["auditConfigs", "bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "folder_iam_policy_method": {
+      "const": {
+        "api_method": "cloudresourcemanager.folders.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v2/folders/{EXACT_ANCESTOR_FOLDER_NUMBER}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["auditConfigs", "bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "organization_iam_policy_method": {
+      "const": {
+        "api_method": "cloudresourcemanager.organizations.getIamPolicy",
+        "http_method": "POST",
+        "endpoint": "cloudresourcemanager.googleapis.com",
+        "path": "/v1/organizations/{EXACT_ANCESTOR_ORGANIZATION_NUMBER}:getIamPolicy",
+        "request_body": {"options": {"requestedPolicyVersion": 3}},
+        "response_field_mask": ["auditConfigs", "bindings.condition", "bindings.members", "bindings.role", "etag", "version"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "predefined_role_method": {
+      "const": {
+        "api_method": "iam.roles.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/{EXACT_MATCHED_PREDEFINED_ROLE_NAME}",
+        "request_body": null,
+        "response_field_mask": ["deleted", "includedPermissions", "name", "stage"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "project_custom_role_method": {
+      "const": {
+        "api_method": "iam.projects.roles.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/projects/{EXACT_TARGET_PROJECT_ID}/roles/{EXACT_MATCHED_ROLE_ID}",
+        "request_body": null,
+        "response_field_mask": ["deleted", "includedPermissions", "name", "stage"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "organization_custom_role_method": {
+      "const": {
+        "api_method": "iam.organizations.roles.get",
+        "http_method": "GET",
+        "endpoint": "iam.googleapis.com",
+        "path": "/v1/organizations/{EXACT_ANCESTOR_ORGANIZATION_NUMBER}/roles/{EXACT_MATCHED_ROLE_ID}",
+        "request_body": null,
+        "response_field_mask": ["deleted", "includedPermissions", "name", "stage"],
+        "pagination": "not_applicable",
+        "raw_evidence_class": "restricted_external_custody"
+      }
+    },
+    "coverage_matrix": {
+      "const": [
+        ["project_identity_lifecycle_and_immediate_parent", ["project_identity_get", "project_provenance_get"], "required_complete_all_four"],
+        ["complete_ancestry", ["project_ancestry_get"], "required_complete_all_four"],
+        ["billing_association", ["project_billing_get"], "required_complete_all_four_raw_id_digest_only"],
+        ["required_api_state", ["service_state_get"], "required_all_allowlisted_names_observed_no_enablement"],
+        ["all_resource_type_inventory", ["asset_type_inventory_search"], "required_all_pages_within_cap"],
+        ["detailed_known_resource_metadata", ["detailed_asset_inventory_search", "firestore_database_list", "firestore_database_get", "cloud_run_service_get"], "required_all_pages_and_all_list_items_fetched"],
+        ["kms_keyring_and_cryptokey_metadata", ["detailed_asset_inventory_search"], "required_count_and_digest_no_raw_names"],
+        ["rtdb_instance_metadata", ["firebase_rtdb_instance_list", "firebase_rtdb_instance_get"], "required_all_pages_and_all_list_items_fetched_no_record_reads"],
+        ["secret_metadata_without_payload", ["detailed_asset_inventory_search"], "required_count_and_digest_no_secret_payload"],
+        ["audit_sink_metadata", ["detailed_asset_inventory_search"], "required_count_and_digest_no_log_entries"],
+        ["project_and_ancestor_allow_iam", ["project_iam_policy_get", "folder_iam_policy_get", "organization_iam_policy_get"], "required_version_3_complete_or_not_applicable_from_complete_ancestry"],
+        ["resource_allow_iam", ["asset_iam_policy_search", "service_account_iam_policy_get", "cloud_run_service_iam_policy_get"], "required_exact_member_queries_all_pages"],
+        ["deny_iam", ["deny_policy_list", "deny_policy_get"], "required_every_attachment_point_every_list_item_fetched"],
+        ["service_account_inventory_and_impersonation_policy", ["service_account_list", "service_account_iam_policy_get"], "required_every_account_within_cap"],
+        ["role_permission_resolution", ["predefined_role_get", "project_custom_role_get", "organization_custom_role_get"], "required_every_matched_role"],
+        ["principal_access_boundary_policy_and_bindings", ["pab_policy_list", "pab_policy_get", "pab_policy_binding_search"], "required_complete_or_not_applicable_from_complete_no_org_ancestry"],
+        ["organization_policy_inheritance", ["org_policy_constraint_list", "org_policy_list", "org_policy_effective_get"], "required_every_constraint_effective_policy"],
+        ["supplementary_effective_access", ["policy_troubleshooter"], "required_complete_or_incomplete_if_absent_principal_unsupported"],
+        ["owner_identity_recovery_and_account_custody", [], "required_separately_custodied_owner_attestation"],
+        ["raw_evidence_private_custody", [], "required_bound_digest_before_each_restricted_read"]
+      ]
+    },
+    "effective_access_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "future_principal",
+        "static_resources",
+        "dynamic_service_account_permissions",
+        "unknown_unavailable_ambiguous_or_unsupported_result"
+      ],
+      "properties": {
+        "future_principal": {
+          "const": "voice-bakeoff-control-adapter@hk-voice-bakeoff-0724-iso.iam.gserviceaccount.com"
+        },
+        "static_resources": {
+          "const": [
+            ["//firestore.googleapis.com/projects/kevin-491315/databases/(default)", ["datastore.databases.get", "datastore.entities.create", "datastore.entities.delete", "datastore.entities.get", "datastore.entities.list", "datastore.entities.update"], "NOT_GRANTED"],
+            ["//firestore.googleapis.com/projects/kevin-staging-491315/databases/(default)", ["datastore.databases.get", "datastore.entities.create", "datastore.entities.delete", "datastore.entities.get", "datastore.entities.list", "datastore.entities.update"], "NOT_GRANTED"],
+            ["//run.googleapis.com/projects/kevin-491315/locations/us-central1/services/kevin-api", ["run.services.get", "run.services.update"], "NOT_GRANTED"],
+            ["//run.googleapis.com/projects/kevin-491315/locations/us-central1/services/kevin-api-staging", ["run.services.get", "run.services.update"], "NOT_GRANTED"]
+          ]
+        },
+        "dynamic_service_account_permissions": {
+          "const": [
+            "iam.serviceAccounts.actAs",
+            "iam.serviceAccounts.getAccessToken",
+            "iam.serviceAccounts.implicitDelegation",
+            "iam.serviceAccounts.signBlob",
+            "iam.serviceAccounts.signJwt"
+          ]
+        },
+        "unknown_unavailable_ambiguous_or_unsupported_result": {
+          "const": "incomplete"
+        }
+      }
+    },
+    "receipt_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_ref",
+        "allowed_results",
+        "pass_requires",
+        "pass_does_not_authorize_mutation_execution_bootstrap_runtime_or_task_4_8"
+      ],
+      "properties": {
+        "schema_ref": {
+          "const": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.schema.json#/$defs/payload_safe_receipt"
+        },
+        "allowed_results": {
+          "const": [
+            "pass",
+            "fail",
+            "incomplete"
+          ]
+        },
+        "pass_requires": {
+          "type": "array",
+          "minItems": 15,
+          "maxItems": 15,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pass_does_not_authorize_mutation_execution_bootstrap_runtime_or_task_4_8": {
+          "const": true
+        }
+      }
+    },
+    "payload_safe_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_schema_version",
+        "source_sha",
+        "contract_digest",
+        "owner_identity_recovery_attestation_digest",
+        "coverage_matrix_digest",
+        "raw_evidence_custody_digest",
+        "request_receipt_digests",
+        "target_results",
+        "pass_predicates",
+        "completeness_errors",
+        "completed_at_ms",
+        "expires_at_ms",
+        "result"
+      ],
+      "properties": {
+        "receipt_schema_version": {
+          "const": 2
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "contract_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "owner_identity_recovery_attestation_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "coverage_matrix_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_evidence_custody_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "request_receipt_digests": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "target_results": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "allOf": [
+            {
+              "contains": {
+                "properties": {
+                  "project_id": {
+                    "const": "kevin-491315"
+                  }
+                },
+                "required": [
+                  "project_id"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "project_id": {
+                    "const": "kevin-staging-491315"
+                  }
+                },
+                "required": [
+                  "project_id"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "project_id": {
+                    "const": "hk-voice-bakeoff-0724-iso"
+                  }
+                },
+                "required": [
+                  "project_id"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "project_id": {
+                    "const": "hk-voice-bakeoff-preauth-iso"
+                  }
+                },
+                "required": [
+                  "project_id"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/target_receipt"
+          }
+        },
+        "pass_predicates": {
+          "$ref": "#/$defs/pass_predicates"
+        },
+        "completeness_errors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "completed_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "incomplete"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "pass"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "pass_predicates": {
+                "$ref": "#/$defs/pass_predicates_all_true"
+              },
+              "completeness_errors": {
+                "maxItems": 0
+              },
+              "target_results": {
+                "items": {
+                  "$ref": "#/$defs/complete_target_receipt"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "target_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "project_number",
+        "identity_ref",
+        "local_configuration_digest",
+        "ancestry_digest",
+        "billing_association_digest",
+        "service_state_digest",
+        "resource_inventory_digest",
+        "iam_inventory_digest",
+        "org_policy_digest",
+        "pab_inventory_digest",
+        "coverage_status",
+        "all_pages_exhausted",
+        "all_list_items_fetched",
+        "freshness_expires_at_ms",
+        "completeness_errors"
+      ],
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/project_id"
+        },
+        "project_number": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{5,29}$"
+        },
+        "identity_ref": {
+          "type": "string",
+          "enum": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ]
+        },
+        "local_configuration_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ancestry_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "billing_association_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "service_state_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "resource_inventory_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "iam_inventory_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "org_policy_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "pab_inventory_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "coverage_status": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "incomplete"
+          ]
+        },
+        "all_pages_exhausted": {
+          "type": "boolean"
+        },
+        "all_list_items_fetched": {
+          "type": "boolean"
+        },
+        "freshness_expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "completeness_errors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "complete_target_receipt": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/target_receipt"
+        },
+        {
+          "properties": {
+            "coverage_status": {
+              "const": "complete"
+            },
+            "all_pages_exhausted": {
+              "const": true
+            },
+            "all_list_items_fetched": {
+              "const": true
+            },
+            "completeness_errors": {
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "pass_predicates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exactly_four_targets",
+        "project_identity_and_ancestry_complete",
+        "service_and_resource_coverage_complete",
+        "iam_and_role_coverage_complete",
+        "org_policy_and_pab_coverage_complete_or_proven_not_applicable",
+        "private_custody_complete",
+        "owner_identity_recovery_attestation_present",
+        "single_request_authorizations_consumed_once",
+        "within_all_caps",
+        "fresh"
+      ],
+      "properties": {
+        "exactly_four_targets": {
+          "type": "boolean"
+        },
+        "project_identity_and_ancestry_complete": {
+          "type": "boolean"
+        },
+        "service_and_resource_coverage_complete": {
+          "type": "boolean"
+        },
+        "iam_and_role_coverage_complete": {
+          "type": "boolean"
+        },
+        "org_policy_and_pab_coverage_complete_or_proven_not_applicable": {
+          "type": "boolean"
+        },
+        "private_custody_complete": {
+          "type": "boolean"
+        },
+        "owner_identity_recovery_attestation_present": {
+          "type": "boolean"
+        },
+        "single_request_authorizations_consumed_once": {
+          "type": "boolean"
+        },
+        "within_all_caps": {
+          "type": "boolean"
+        },
+        "fresh": {
+          "type": "boolean"
+        }
+      }
+    },
+    "pass_predicates_all_true": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exactly_four_targets",
+        "project_identity_and_ancestry_complete",
+        "service_and_resource_coverage_complete",
+        "iam_and_role_coverage_complete",
+        "org_policy_and_pab_coverage_complete_or_proven_not_applicable",
+        "private_custody_complete",
+        "owner_identity_recovery_attestation_present",
+        "single_request_authorizations_consumed_once",
+        "within_all_caps",
+        "fresh"
+      ],
+      "properties": {
+        "exactly_four_targets": {
+          "const": true
+        },
+        "project_identity_and_ancestry_complete": {
+          "const": true
+        },
+        "service_and_resource_coverage_complete": {
+          "const": true
+        },
+        "iam_and_role_coverage_complete": {
+          "const": true
+        },
+        "org_policy_and_pab_coverage_complete_or_proven_not_applicable": {
+          "const": true
+        },
+        "private_custody_complete": {
+          "const": true
+        },
+        "owner_identity_recovery_attestation_present": {
+          "const": true
+        },
+        "single_request_authorizations_consumed_once": {
+          "const": true
+        },
+        "within_all_caps": {
+          "const": true
+        },
+        "fresh": {
+          "const": true
+        }
+      }
+    },
+    "transition_policy": {
+      "const": {
+        "recommended_path": "exact_v2_review_then_separate_owner_authorized_single_reads_then_registry_freeze_then_versioned_successor_packages",
+        "retain_path": [
+          "separately_authorized_single_read_inventory",
+          "registry_freeze",
+          "versioned_successor_bootstrap_and_runtime_packages"
+        ],
+        "move_or_replace_path": [
+          "separate_transition_plan_review_and_owner_authorization",
+          "transition",
+          "post_transition_single_read_inventory",
+          "registry_freeze",
+          "versioned_successor_bootstrap_and_runtime_packages"
+        ],
+        "project_creation_cap": 0,
+        "mixed_staging_control_plane": "separate_environment_debt_no_phase_0_5_remediation"
+      }
+    },
+    "historical_artifact_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "in_place_revision_allowed",
+        "future_corrections_require_versioned_successor",
+        "protected_artifacts"
+      ],
+      "properties": {
+        "in_place_revision_allowed": {
+          "const": false
+        },
+        "future_corrections_require_versioned_successor": {
+          "const": true
+        },
+        "protected_artifacts": {
+          "type": "array",
+          "minItems": 16,
+          "maxItems": 16,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "prefixItems": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/sha256"
+              }
+            ],
+            "items": false
+          }
+        }
+      }
+    }
+  }
+}

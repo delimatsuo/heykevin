@@ -1,0 +1,245 @@
+{
+  "schema_version": 8,
+  "package_kind": "voice_bakeoff_environment_reconciliation_safe_integer_materialization_amendment",
+  "package_status": "source_only_exact_review_candidate",
+  "source_binding": {
+    "repository": "https://github.com/delimatsuo/heykevin",
+    "worktree": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan",
+    "branch": "codex/voice-architecture-bakeoff-plan",
+    "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+    "source_sha_role": "tracked_runtime_baseline_only_not_untracked_review_bundle_identity",
+    "package_is_authorization": false
+  },
+  "review_bundle_binding": {
+    "review_bundle_state": "untracked_source_only_exact_hash_set",
+    "v8_quartet_identity": "externally_bound_by_exact_hash_review",
+    "predecessor_manifest_version": 1,
+    "predecessor_manifest_digest_sha256": "0eb91f2be8ed804400c1c267e7f244e33de244589c5a26a27261b5feb8065326",
+    "predecessor_manifest": [
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.json",
+        "sha256": "5d4f7dd2d492fe3bf8f26a32ec137f4485d4601fddd81f8890c56927c86507f9"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.md",
+        "sha256": "d9b506878fbb6018efe3bfe108b69383222f2ebc62367cb01a41ae324420b53e"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v1.schema.json",
+        "sha256": "71231423063f60f856452f261e24fed5549c81ba08d73c401314a06235421cc2"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.json",
+        "sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.md",
+        "sha256": "b63eaaac7be760748d36765ebba5a04b5ef86b8e966d6199c37946889d7bfe4c"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v2.schema.json",
+        "sha256": "1c694b2879714a254e1b933131c5dcdf347f1cd5afbed660e03563417064d92d"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.json",
+        "sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.md",
+        "sha256": "1c95fb0d957e92ed5fae2103bf4a9756a58df4b4052be2e9cc3589457429073a"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.schema.json",
+        "sha256": "094b0ffdf3da572989630e516d1a708f545b46e5ca520ed48f1d9f4103375746"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.json",
+        "sha256": "883246c06309b575f5276be2974ab3b34ac9790bf3511c7ac8abacf0133f731d"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.md",
+        "sha256": "f3c9d4af70a874248e069416f348ea22d05e5cc88b917edb4e01d2c6fc5d0c75"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.schema.json",
+        "sha256": "4837d628aaead05bd16e3783cfd722f1741a7704a3980fd5ba2aaf20171f62ad"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.json",
+        "sha256": "9a273365dddcc8e839d04c63fd9794726a17b4a4197743e81fbc0d897a25da59"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.md",
+        "sha256": "1bd1d382648f03a8711995ba2cd2e68dd0cdabc538c8f721720521238f70d72c"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.schema.json",
+        "sha256": "3d083be600af252a6ea96cce0d58b5ed593f05425148b9c585e43bfa94bd4f85"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.json",
+        "sha256": "be8f7edc86705ac26d09184c05a846e724a389860bc9660fc43e191c55bdd8c7"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.md",
+        "sha256": "f218456cd14cdb329e913dffdc1a0bc81028649ca43f33045051c9b66db1b9e9"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v6.schema.json",
+        "sha256": "8857b4948859c85573d2f42f927861af8790de4690274c0c12777c12a0ad8abd"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.json",
+        "sha256": "1cdcb68d67d9285cc40c783483083f96e60bb3b9dd227fc16c2a0b42170b44ae"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.md",
+        "sha256": "418e0033944f3ec9a07c5a72023d55ccb6a6b1da6875ca9420511c9dc30ea288"
+      },
+      {
+        "path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.schema.json",
+        "sha256": "edea6eac9471fe8ccb734f36904b7429e91482e45c629d90c48d30480801ee9f"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5.py",
+        "sha256": "1304b40feee5b5e3796ac020893e44962b099946226befb998708ff778f2ba13"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v2.py",
+        "sha256": "f6e5376ef9d0aaa87f54a1a1aa5b198e22fb0977e8a7fbb45ebf4536914dc415"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v3.py",
+        "sha256": "bc6693455e4a21b3ba2287e73213294c08470bd48f3ef561ab5e887083dcb254"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v4.py",
+        "sha256": "f037027d5ca31ac699fc9a551cf4f240e8d6805d9bb81765d28d3a216fd0d47f"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v5.py",
+        "sha256": "9eb8295411b225fc4e40d90aff2bb95ff6c4dea9319734b504332940897f32a3"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v6.py",
+        "sha256": "e4fa5f16da3fc14bb9480df3e945fccb22f9308c8079b33b22c13d3441e6ed2f"
+      },
+      {
+        "path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v7.py",
+        "sha256": "f34f0756f8eb262c2075a8411dc734719bb52a6fd6834b670a48e961094cfac7"
+      }
+    ],
+    "verification_timing": "inside_public_operation_before_private_input_validation_or_payload_construction",
+    "mismatch_action": "raise_error_return_no_payload_no_partial_persistence_no_fallback"
+  },
+  "provenance": {
+    "successor_of": {
+      "json_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.json",
+      "json_sha256": "1cdcb68d67d9285cc40c783483083f96e60bb3b9dd227fc16c2a0b42170b44ae",
+      "schema_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.schema.json",
+      "schema_sha256": "edea6eac9471fe8ccb734f36904b7429e91482e45c629d90c48d30480801ee9f",
+      "guide_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v7.md",
+      "guide_sha256": "418e0033944f3ec9a07c5a72023d55ccb6a6b1da6875ca9420511c9dc30ea288",
+      "test_path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v7.py",
+      "test_sha256": "f34f0756f8eb262c2075a8411dc734719bb52a6fd6834b670a48e961094cfac7",
+      "review_outcome": "rejected_for_cross_language_unbounded_integer_canonicalization_preserved_as_source_only_evidence"
+    },
+    "v7_security_closure": {
+      "finding": "RFC8785_and_I_JSON_require_portable_exact_timestamp_integers",
+      "minimum_timestamp_ms": 1,
+      "maximum_timestamp_ms": 9007199254740991,
+      "maximum_is_two_to_the_fifty_three_minus_one": true,
+      "applies_to": [
+        "issued_at_ms",
+        "validation_time_ms",
+        "expires_at_ms"
+      ],
+      "v8_supersedes": [
+        "v7.validated_materialization_contract_timestamp_range"
+      ],
+      "all_other_v7_scope_and_validation_remains_normative": true
+    }
+  },
+  "authority": {
+    "authorized_scope": "source_only_safe_integer_validated_unsigned_phase_one_payload_materialization",
+    "source_only_payload_generation_status": "not_generated",
+    "owner_signature_status": "not_recorded",
+    "owner_authorization_status": "not_recorded",
+    "connected_inventory_status": "not_authorized",
+    "mutation_status": "not_authorized",
+    "execution_status": "not_authorized",
+    "task_4_8_status": "sealed",
+    "reviewed_contract_is_owner_authorization": false,
+    "generated_unsigned_payload_is_owner_authorization": false
+  },
+  "environment_recommendation": {
+    "action": "create_no_project_retain_all_four_exact_projects_frozen",
+    "exact_project_ids": [
+      "kevin-491315",
+      "kevin-staging-491315",
+      "hk-voice-bakeoff-0724-iso",
+      "hk-voice-bakeoff-preauth-iso"
+    ],
+    "screenshot_interpretation": "account_visibility_is_not_project_identity_or_duplication",
+    "mixed_staging_topology": "separate_environment_debt_no_phase_0_5_remediation"
+  },
+  "normative_contract_binding": {
+    "normative_contract_digest_sha256": "27ef8d43989e6f7db7264588f43cccb040a90fdb7bbbee6eccd778b3bf536175",
+    "digest_canonicalization": "RFC8785_JSON_Canonicalization_Scheme",
+    "digest_input": "the_complete_v8_package_without_normative_contract_digest_sha256",
+    "v2_json_sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f",
+    "v5_json_sha256": "9a273365dddcc8e839d04c63fd9794726a17b4a4197743e81fbc0d897a25da59",
+    "v6_json_sha256": "be8f7edc86705ac26d09184c05a846e724a389860bc9660fc43e191c55bdd8c7",
+    "v7_json_sha256": "1cdcb68d67d9285cc40c783483083f96e60bb3b9dd227fc16c2a0b42170b44ae",
+    "v7_normative_contract_sha256": "c2045082e5399eec1b18a817548258a6b4cf57532d4dceb59141e8ed2a85a4a2",
+    "phase_one_method_contract_sha256": "3244902ecbf20c155ee49836a10a074d28eb6386a4081d56e0963a6868a2b93f"
+  },
+  "validated_materialization_contract": {
+    "single_public_operation": "materialize_validated_phase_one_payload_v8",
+    "result": "complete_validated_unsigned_payload_or_error_without_payload",
+    "timestamp_type": "exact_integer_not_bool",
+    "timestamp_minimum_ms": 1,
+    "timestamp_maximum_ms": 9007199254740991,
+    "timestamp_relation": "issued_at_ms_less_than_or_equal_to_validation_time_ms_strictly_less_than_expires_at_ms",
+    "maximum_payload_lifetime_ms": 900000,
+    "schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v8.schema.json#/$defs/phase_one_signing_payload_v8",
+    "candidate_must_bind": [
+      "exact_v2_json",
+      "exact_v5_json",
+      "exact_v6_json",
+      "exact_v7_json",
+      "exact_v1_through_v7_predecessor_manifest",
+      "exact_v8_normative_contract",
+      "exact_phase_one_method_contract"
+    ],
+    "all_v7_pre_return_validations_remain_required": true,
+    "predecessor_integrity_check_is_part_of_public_operation": true,
+    "invalid_input_action": "raise_error_return_no_payload_no_partial_persistence_no_fallback"
+  },
+  "payload_scope": {
+    "payload_version": 8,
+    "payload_kind": "unsigned_owner_signing_payload",
+    "phase": "project_id_binding",
+    "exact_request_count": 4,
+    "owner_signature_field_present": false,
+    "owner_authorization_record_present": false,
+    "repository_or_chat_storage_allowed": false,
+    "credentials_network_responses_receipts_or_later_phase_capability": false
+  },
+  "dispatch_and_later_phase_blockers": {
+    "dispatch_eligibility": false,
+    "owner_signature_alone_would_authorize_dispatch": false,
+    "atomic_current_phase_once_ledger": "unimplemented_blocks_every_dispatch",
+    "dynamic_bodies_seed_encoding_and_receipt_freshness": "unqualified_blocks_later_phases",
+    "phase_two_through_six": "generation_and_dispatch_not_authorized",
+    "task_4_8": "sealed"
+  },
+  "transition_policy": {
+    "v8_review_requirement": "exact_hash_staff_security_and_operator_review_with_no_unresolved_p1",
+    "after_clean_v8_review": "may_call_the_v8_validated_materializer_once_with_separately_supplied_private_inputs_and_trusted_validation_time",
+    "materialization_is_signature_authorization_or_connected_read": false,
+    "connected_read_status_after_materialization": "not_authorized",
+    "mutation_execution_and_task_4_8": "remain_sealed",
+    "incomplete_or_ambiguous_action": "stop_retain_frozen_create_no_project"
+  }
+}

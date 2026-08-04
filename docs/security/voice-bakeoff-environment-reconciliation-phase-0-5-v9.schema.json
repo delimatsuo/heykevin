@@ -1,0 +1,506 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.invalid/schemas/voice-bakeoff-environment-reconciliation-phase-0-5-v9.schema.json",
+  "title": "Hey Kevin voice bakeoff Phase 0.5 v9 one-attempt offline materialization",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "uuid4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "safe_timestamp": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "review_bundle_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "enum": [
+            "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.json",
+            "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.schema.json",
+            "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.md",
+            "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.predecessors.json",
+            "scripts/materialize_voice_bakeoff_phase_one_payload_v9.py",
+            "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v9.py"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "review_acceptances": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "staff",
+        "security_privacy",
+        "operator",
+        "advisory_only",
+        "unresolved_p1_count"
+      ],
+      "properties": {
+        "staff": {
+          "const": "accepted_exact_hashes"
+        },
+        "security_privacy": {
+          "const": "accepted_exact_hashes"
+        },
+        "operator": {
+          "const": "accepted_exact_hashes"
+        },
+        "advisory_only": {
+          "const": true
+        },
+        "unresolved_p1_count": {
+          "const": 0
+        }
+      }
+    },
+    "materialization_authorization_v9": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_version",
+        "record_kind",
+        "decision",
+        "authorization_id",
+        "attempt_id",
+        "source_sha",
+        "v9_normative_contract_digest",
+        "predecessor_manifest_digest",
+        "review_bundle",
+        "review_bundle_digest",
+        "review_acceptances",
+        "materialization_authority_identity_digest",
+        "custodian_identity_digest",
+        "ceremony_root_digest",
+        "private_input_sha256",
+        "issued_at_ms",
+        "validation_time_ms",
+        "expires_at_ms",
+        "failure_consumes_attempt",
+        "connected_action_authorized",
+        "authorization_digest"
+      ],
+      "properties": {
+        "record_version": {
+          "const": 1
+        },
+        "record_kind": {
+          "const": "voice_bakeoff_v9_materialization_authorization"
+        },
+        "decision": {
+          "const": "authorize_one_offline_unsigned_payload_materialization"
+        },
+        "authorization_id": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "v9_normative_contract_digest": {
+          "const": "c602a313d0dbb8ee0528aa4a90587f876817d6a7d93fe35a711ad363805325a5"
+        },
+        "predecessor_manifest_digest": {
+          "const": "1c4293996dc10c1a23de7280d2cd7b22e167be041ef2c86eca3daaba76215805"
+        },
+        "review_bundle": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/review_bundle_entry"
+          }
+        },
+        "review_bundle_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "review_acceptances": {
+          "$ref": "#/$defs/review_acceptances"
+        },
+        "materialization_authority_identity_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "custodian_identity_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ceremony_root_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "private_input_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "validation_time_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "failure_consumes_attempt": {
+          "const": true
+        },
+        "connected_action_authorized": {
+          "const": false
+        },
+        "authorization_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "private_input_v9": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner_selected_inventory_session_uuidv4",
+        "owner_public_key_digest",
+        "organization_operator_identity_configuration_digest",
+        "isolated_bakeoff_operator_identity_configuration_digest",
+        "raw_evidence_custody_digest",
+        "one_use_nonce_seed",
+        "issued_at_ms",
+        "expires_at_ms",
+        "audit_and_quota_effects_acknowledged"
+      ],
+      "properties": {
+        "owner_selected_inventory_session_uuidv4": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "owner_public_key_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "organization_operator_identity_configuration_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "isolated_bakeoff_operator_identity_configuration_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_evidence_custody_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "one_use_nonce_seed": {
+          "$ref": "#/$defs/sha256"
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "audit_and_quota_effects_acknowledged": {
+          "const": true
+        }
+      }
+    },
+    "phase_one_request_v9": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_index",
+        "request_id",
+        "method_ref",
+        "api_method",
+        "identity_ref",
+        "local_configuration_digest",
+        "target_project_id",
+        "target_project_number",
+        "quota_project_id",
+        "endpoint",
+        "http_method",
+        "canonical_path_and_query",
+        "canonical_request_body",
+        "request_body_digest",
+        "response_field_mask",
+        "pagination",
+        "raw_evidence_class",
+        "canonical_request_digest"
+      ],
+      "properties": {
+        "request_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^req-00[0-3]$"
+        },
+        "method_ref": {
+          "const": "project_identity_get"
+        },
+        "api_method": {
+          "const": "cloudresourcemanager.projects.get"
+        },
+        "identity_ref": {
+          "enum": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ]
+        },
+        "local_configuration_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "target_project_id": {
+          "enum": [
+            "kevin-491315",
+            "kevin-staging-491315",
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "target_project_number": {
+          "const": null
+        },
+        "quota_project_id": {
+          "enum": [
+            "kevin-491315",
+            "kevin-staging-491315",
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "endpoint": {
+          "const": "cloudresourcemanager.googleapis.com"
+        },
+        "http_method": {
+          "const": "GET"
+        },
+        "canonical_path_and_query": {
+          "enum": [
+            "/v1/projects/kevin-491315",
+            "/v1/projects/kevin-staging-491315",
+            "/v1/projects/hk-voice-bakeoff-0724-iso",
+            "/v1/projects/hk-voice-bakeoff-preauth-iso"
+          ]
+        },
+        "canonical_request_body": {
+          "const": null
+        },
+        "request_body_digest": {
+          "const": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+        },
+        "response_field_mask": {
+          "const": [
+            "projectId",
+            "projectNumber",
+            "lifecycleState",
+            "parent"
+          ]
+        },
+        "pagination": {
+          "const": "not_applicable"
+        },
+        "raw_evidence_class": {
+          "const": "restricted_external_custody"
+        },
+        "canonical_request_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "phase_one_signing_payload_v9": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_version",
+        "payload_kind",
+        "inventory_session_id",
+        "phase",
+        "phase_ordinal",
+        "predecessor",
+        "source_sha",
+        "v8_json_digest",
+        "v9_normative_contract_digest",
+        "predecessor_bundle_manifest_digest",
+        "v9_review_bundle_digest",
+        "materialization_authorization_digest",
+        "materialization_attempt_id",
+        "phase_one_method_contract_digest",
+        "owner_public_key_digest",
+        "identity_configuration_digests",
+        "raw_evidence_custody_digest",
+        "one_use_nonce_seed",
+        "request_count",
+        "request_set_digest",
+        "requests",
+        "issued_at_ms",
+        "expires_at_ms",
+        "audit_and_quota_effects_acknowledged"
+      ],
+      "properties": {
+        "payload_version": {
+          "const": 9
+        },
+        "payload_kind": {
+          "const": "unsigned_owner_signing_payload"
+        },
+        "inventory_session_id": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "phase": {
+          "const": "project_id_binding"
+        },
+        "phase_ordinal": {
+          "const": 1
+        },
+        "predecessor": {
+          "const": "GENESIS"
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "v8_json_digest": {
+          "const": "4153bf3764600198f583d627ad93e540ce0423cd25fab2c04be2e7b06245a859"
+        },
+        "v9_normative_contract_digest": {
+          "const": "c602a313d0dbb8ee0528aa4a90587f876817d6a7d93fe35a711ad363805325a5"
+        },
+        "predecessor_bundle_manifest_digest": {
+          "const": "1c4293996dc10c1a23de7280d2cd7b22e167be041ef2c86eca3daaba76215805"
+        },
+        "v9_review_bundle_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "materialization_authorization_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "materialization_attempt_id": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "phase_one_method_contract_digest": {
+          "const": "3244902ecbf20c155ee49836a10a074d28eb6386a4081d56e0963a6868a2b93f"
+        },
+        "owner_public_key_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "identity_configuration_digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "organization_operator_identity",
+            "isolated_bakeoff_operator_identity"
+          ],
+          "properties": {
+            "organization_operator_identity": {
+              "$ref": "#/$defs/sha256"
+            },
+            "isolated_bakeoff_operator_identity": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "raw_evidence_custody_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "one_use_nonce_seed": {
+          "$ref": "#/$defs/sha256"
+        },
+        "request_count": {
+          "const": 4
+        },
+        "request_set_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "requests": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/phase_one_request_v9"
+          }
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/safe_timestamp"
+        },
+        "audit_and_quota_effects_acknowledged": {
+          "const": true
+        }
+      }
+    },
+    "payload_safe_audit_v9": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_version",
+        "record_kind",
+        "status",
+        "attempt_id",
+        "authorization_id",
+        "source_sha",
+        "v9_normative_contract_digest",
+        "payload_digest",
+        "error_code",
+        "private_values_present",
+        "connected_action_occurred"
+      ],
+      "properties": {
+        "record_version": {
+          "const": 1
+        },
+        "record_kind": {
+          "const": "voice_bakeoff_v9_payload_safe_materialization_audit"
+        },
+        "status": {
+          "enum": [
+            "generated_one_payload",
+            "consumed_no_payload",
+            "consumed_with_residue_stop"
+          ]
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "authorization_id": {
+          "$ref": "#/$defs/uuid4"
+        },
+        "source_sha": {
+          "const": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533"
+        },
+        "v9_normative_contract_digest": {
+          "const": "c602a313d0dbb8ee0528aa4a90587f876817d6a7d93fe35a711ad363805325a5"
+        },
+        "payload_digest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9_]{1,64}$"
+        },
+        "private_values_present": {
+          "const": false
+        },
+        "connected_action_occurred": {
+          "const": false
+        }
+      }
+    }
+  }
+}

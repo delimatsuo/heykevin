@@ -1,0 +1,516 @@
+{
+  "schema_version": 1,
+  "package_kind": "voice_bakeoff_bootstrap_runtime_authorization_review",
+  "package_status": "review_candidate_not_authority",
+  "execution_supported": false,
+  "authorization_model": "sole_owner",
+  "source_binding": {
+    "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+    "branch": "codex/voice-architecture-bakeoff-plan",
+    "tracked_source_clean_at_observation": true,
+    "untracked_handoff_material_excluded": true,
+    "source_bundle_digest": "1b78bf4de59633470a5ac683f4cfc80db1114f9a8d99f48e1b750dbafa9ff461",
+    "source_artifact_digests": {
+      "app/services/voice_bakeoff_control_admission_projection.py": "c3cf64c8228802d1ae595755545f05f7a99348c4b11f8e29b5c2501246ab695c",
+      "app/services/voice_bakeoff_control_store_assembly.py": "66c6a080f0243eaffe54fe7e425d54289436e893746bcbfcebfbd29e24b56206",
+      "app/services/voice_bakeoff_execution_firewall_contracts.py": "951a09012f2c60651f2103c062b87fca5aff4801e426e8ce9ffbb59b164cef28",
+      "app/services/voice_bakeoff_firestore_transaction_port.py": "cf1f4f67b7d5312db9daf41f5bcbc7e086b9c2e3fe836458a613d9b08b615811",
+      "app/services/voice_bakeoff_gate_report.py": "713ea6d34bb0adfb21b9d9e18ee56f4d492acc13b8ac849573b3858ad19e6bec",
+      "app/services/voice_bakeoff_google_firestore_runner.py": "82372415a35554d1371a43e3335201d21895473ded36632087ab2c36fada9777",
+      "app/services/voice_bakeoff_security_contracts.py": "77948e3a357699ee1738379380e2cc0f76612ce3aea75f455dffdd1e17ab5b74",
+      "app/services/voice_bakeoff_transactional_control_seam.py": "e403a7ef05db3179ca2d9556fa2ef26f5dac28ffa1a48151932acbb06cb5e3cb",
+      "docs/security/voice-bakeoff-durable-control-adapter-spec.md": "b79cd343aecb0f0654b284b764148516079aa5db56c06f0493b597495110aad0",
+      "docs/security/voice-bakeoff-sealed-composition-and-iam-packet.md": "67bf2095288221658cf0ac6226094da5daf7201600764a38ad347dca05de36d9",
+      "docs/superpowers/plans/2026-07-22-voice-architecture-bakeoff-and-lifecycle-control.md": "74aed6bec9f03e0ba16660ff116d20c4bdde598635b538b03a75b9e9c14cd68b",
+      "docs/voice-architecture-bakeoff-qualification.md": "23e1d7baf5d3fe636a45f60163638b2a6d542ec37c8b802d63f0ffba4747bf73"
+    }
+  },
+  "read_only_inventory": {
+    "path": "docs/security/voice-bakeoff-bootstrap-readonly-inventory-2026-07-28.json",
+    "canonical_digest": "71df00daca8e59998ec0ce91034cdf2c0c800aa6a92731c8dff8d8c693b31e44",
+    "status": "current_for_review_only",
+    "expires_before_mutation": true,
+    "revalidation_state_path": "docs/security/voice-bakeoff-bootstrap-revalidation-state-2026-07-28.json",
+    "revalidation_state_digest": "d7d81c1c26057493038f5a67ba4f9310ec80a3a8da3806d16455e06403704ad2"
+  },
+  "bootstrap": {
+    "status": "blocked_not_owner_signable",
+    "action_class": "isolated_control_plane_bootstrap",
+    "one_use": true,
+    "execution_supported": false,
+    "bootstrap_payload_digest": "3323f05b3384f02ac87f111935304a6e0224720e1beab46fc91841a69b8caefb",
+    "materialization_policy": {
+      "status": "specified_verifier_and_durable_consumer_not_implemented",
+      "custody": "external_immutable_store_required",
+      "owner_signature": "detached_ed25519_required",
+      "nonce": "externally_generated_and_atomically_consumed",
+      "issued_at_ms": "materialize_after_review",
+      "expires_at_ms": "at_most_1800000_after_issue",
+      "no_break_glass": true,
+      "chat_approval_alone_is_not_a_signature": true,
+      "canonical_encoding": "utf8_json_sort_keys_compact_ensure_ascii",
+      "signature_domain_ascii": "hey-kevin/voice-bakeoff/bootstrap-authorization/v1",
+      "signature_domain_separator_hex": "00",
+      "envelope_self_digest_algorithm": "sha256",
+      "signature_message_fields": [
+        "approval_id_digest",
+        "bootstrap_payload_digest",
+        "cross_environment_negative_grant_attestation_digest",
+        "expires_at_ms",
+        "issued_at_ms",
+        "no_break_glass",
+        "nonce_digest",
+        "source_sha",
+        "technical_review_digest",
+        "trust_snapshot_digest"
+      ],
+      "envelope_self_digest_excludes": [
+        "detached_signature",
+        "envelope_self_digest"
+      ],
+      "approval_id_domain_ascii": "hey-kevin/voice-bakeoff/bootstrap-approval-id/v1",
+      "nonce_digest_domain_ascii": "hey-kevin/voice-bakeoff/bootstrap-nonce/v1",
+      "atomic_consumption_contract": "durable_create_once_approval_and_nonce_before_first_mutation",
+      "fail_closed_if_consumer_unavailable_or_result_unknown": true,
+      "cross_environment_negative_grant_attestation": {
+        "status": "required_not_collected_current_scope_forbids_query",
+        "digest": null,
+        "separate_owner_authorization_required": true,
+        "principal": "serviceAccount:voice-bakeoff-control-adapter@hk-voice-bakeoff-0724-iso.iam.gserviceaccount.com",
+        "required_scope": [
+          "complete_current_production_project_denylist",
+          "complete_current_staging_project_denylist",
+          "project_level_allow_and_deny_policies",
+          "project_level_service_account_impersonation_grants"
+        ],
+        "required_result": "no_production_or_staging_grant_or_exception_references_the_exact_future_principal",
+        "freshness": "source_payload_and_denylist_digest_bound_immediately_before_owner_materialization"
+      }
+    },
+    "payload": {
+      "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+      "source_bundle_digest": "1b78bf4de59633470a5ac683f4cfc80db1114f9a8d99f48e1b750dbafa9ff461",
+      "inventory_digest": "71df00daca8e59998ec0ce91034cdf2c0c800aa6a92731c8dff8d8c693b31e44",
+      "revalidation_state_digest": "d7d81c1c26057493038f5a67ba4f9310ec80a3a8da3806d16455e06403704ad2",
+      "environment": "bakeoff_nonproduction",
+      "read_only_allowed_projects": [
+        "hk-voice-bakeoff-0724-iso",
+        "hk-voice-bakeoff-preauth-iso"
+      ],
+      "mutation_allowed_projects": [
+        "hk-voice-bakeoff-0724-iso"
+      ],
+      "allowed_region": "us-central1",
+      "allowed_databases": {
+        "hk-voice-bakeoff-0724-iso": "voice-bakeoff-control",
+        "hk-voice-bakeoff-preauth-iso": "voice-bakeoff-preauth"
+      },
+      "default_project_or_database_forbidden": true,
+      "explicit_quota_project_required": true,
+      "control_quota_project": "hk-voice-bakeoff-0724-iso",
+      "preauth_quota_project": "hk-voice-bakeoff-preauth-iso",
+      "ambient_or_configured_quota_project_forbidden": true,
+      "api_enablement_fault_contract": {
+        "enable_one_service_per_operation": true,
+        "record_service_usage_readback_after_each_operation": true,
+        "on_partial_or_unknown_result": "read_exact_three_service_states_disable_only_observed_enabled_subset_then_abort",
+        "retry_unknown_mutation": false,
+        "allowed_transient_services": [
+          "cloudresourcemanager.googleapis.com",
+          "iam.googleapis.com",
+          "policytroubleshooter.googleapis.com"
+        ]
+      },
+      "allowed_control_plane_endpoints": [
+        "cloudbilling.googleapis.com",
+        "cloudkms.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "firestore.googleapis.com",
+        "iam.googleapis.com",
+        "policytroubleshooter.googleapis.com",
+        "serviceusage.googleapis.com"
+      ],
+      "effective_access_matrix": {
+        "principal": "serviceAccount:voice-bakeoff-control-adapter@hk-voice-bakeoff-0724-iso.iam.gserviceaccount.com",
+        "policy_troubleshooter_queries": [
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "permission": "datastore.databases.get",
+            "expected": "GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "permission": "datastore.entities.create",
+            "expected": "GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "permission": "datastore.entities.get",
+            "expected": "GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "permission": "datastore.entities.update",
+            "expected": "GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "permission": "datastore.entities.delete",
+            "expected": "NOT_GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control",
+            "permission": "datastore.entities.list",
+            "expected": "NOT_GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-preauth-iso/databases/voice-bakeoff-preauth",
+            "permission": "datastore.databases.get",
+            "expected": "NOT_GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-preauth-iso/databases/voice-bakeoff-preauth",
+            "permission": "datastore.entities.create",
+            "expected": "NOT_GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-preauth-iso/databases/voice-bakeoff-preauth",
+            "permission": "datastore.entities.get",
+            "expected": "NOT_GRANTED"
+          },
+          {
+            "resource": "//firestore.googleapis.com/projects/hk-voice-bakeoff-preauth-iso/databases/voice-bakeoff-preauth",
+            "permission": "datastore.entities.update",
+            "expected": "NOT_GRANTED"
+          }
+        ],
+        "project_and_resource_policy_negative_permissions": [
+          "iam.serviceAccounts.actAs",
+          "iam.serviceAccounts.getAccessToken",
+          "iam.serviceAccounts.signBlob",
+          "iam.serviceAccounts.signJwt",
+          "run.services.create",
+          "run.services.update",
+          "secretmanager.secrets.get",
+          "secretmanager.versions.access",
+          "serviceusage.services.enable"
+        ],
+        "unknown_unavailable_or_ambiguous_result": "abort_and_rollback"
+      },
+      "mutation_plan": [
+        {
+          "step": 1,
+          "operation": "reverify_pre_enable_core_state",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "mutation": false,
+          "required_result": "reachable_core_baseline_fields_match_with_explicit_control_quota_or_bootstrap_aborts"
+        },
+        {
+          "step": 2,
+          "operation": "reverify_pre_enable_core_state",
+          "project": "hk-voice-bakeoff-preauth-iso",
+          "mutation": false,
+          "required_result": "reachable_core_baseline_fields_match_with_explicit_preauth_quota_or_bootstrap_aborts"
+        },
+        {
+          "step": 3,
+          "operation": "enable_required_control_plane_apis",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "mutation": true,
+          "mutation_units": 3,
+          "services": [
+            "cloudresourcemanager.googleapis.com",
+            "iam.googleapis.com",
+            "policytroubleshooter.googleapis.com"
+          ],
+          "required_result": "exact_services_enabled_with_explicit_control_quota_project_as_only_exception_before_full_revalidation"
+        },
+        {
+          "step": 4,
+          "operation": "full_identity_policy_and_role_revalidation",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "read_targets": [
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ],
+          "quota_project": "hk-voice-bakeoff-0724-iso",
+          "mutation": false,
+          "required_result": "full_baseline_exact_except_three_enabled_control_apis_with_zero_new_identity_binding_role_or_preauth_delta_otherwise_disable_only_those_apis_and_abort"
+        },
+        {
+          "step": 5,
+          "operation": "list_testable_permissions",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "mutation": false,
+          "required_result": "all_proposed_control_permissions_supported"
+        },
+        {
+          "step": 6,
+          "operation": "create_service_account",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "resource": "voice-bakeoff-control-adapter",
+          "mutation": true,
+          "mutation_units": 1,
+          "required_result": "identity_created_without_user_managed_key"
+        },
+        {
+          "step": 7,
+          "operation": "create_project_custom_role",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "resource": "voiceBakeoffControlTransaction",
+          "mutation": true,
+          "mutation_units": 1,
+          "permissions": [
+            "datastore.databases.get",
+            "datastore.entities.create",
+            "datastore.entities.get",
+            "datastore.entities.update"
+          ],
+          "required_result": "exact_permission_set_only"
+        },
+        {
+          "step": 8,
+          "operation": "add_conditional_iam_binding",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "resource": "voice-bakeoff-control-adapter",
+          "role": "voiceBakeoffControlTransaction",
+          "mutation": true,
+          "mutation_units": 1,
+          "condition": "resource.type == \"firestore.googleapis.com/Database\" && resource.name == \"projects/hk-voice-bakeoff-0724-iso/databases/voice-bakeoff-control\"",
+          "required_result": "exact_database_condition_only"
+        },
+        {
+          "step": 9,
+          "operation": "policy_readback_and_policy_troubleshooter",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "mutation": false,
+          "required_result": "expected_control_grants_and_all_named_negative_grants_verified"
+        },
+        {
+          "step": 10,
+          "operation": "remove_exact_conditional_iam_binding",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "resource": "voice-bakeoff-control-adapter",
+          "role": "voiceBakeoffControlTransaction",
+          "mutation": true,
+          "mutation_units": 1,
+          "required_result": "exact_binding_absent"
+        },
+        {
+          "step": 11,
+          "operation": "disable_service_account",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "resource": "voice-bakeoff-control-adapter",
+          "mutation": true,
+          "mutation_units": 1,
+          "required_result": "identity_disabled"
+        },
+        {
+          "step": 12,
+          "operation": "disable_project_custom_role",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "resource": "voiceBakeoffControlTransaction",
+          "mutation": true,
+          "mutation_units": 1,
+          "required_result": "custom_role_disabled"
+        },
+        {
+          "step": 13,
+          "operation": "pre_api_disable_iam_role_and_identity_readback",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "read_targets": [
+            "hk-voice-bakeoff-0724-iso",
+            "hk-voice-bakeoff-preauth-iso"
+          ],
+          "quota_project": "hk-voice-bakeoff-0724-iso",
+          "mutation": false,
+          "required_result": "control_policy_at_baseline_only_exact_disabled_adapter_and_exact_disabled_role_present_no_unexpected_service_identity_resource_policy_or_impersonation_binding_preauth_at_exact_baseline"
+        },
+        {
+          "step": 14,
+          "operation": "disable_bootstrap_control_plane_apis",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "mutation": true,
+          "mutation_units": 3,
+          "services": [
+            "cloudresourcemanager.googleapis.com",
+            "iam.googleapis.com",
+            "policytroubleshooter.googleapis.com"
+          ],
+          "required_result": "exact_services_restored_to_disabled_baseline"
+        },
+        {
+          "step": 15,
+          "operation": "post_api_disable_service_usage_readback",
+          "project": "hk-voice-bakeoff-0724-iso",
+          "mutation": false,
+          "required_result": "exact_three_bootstrap_services_disabled_using_explicit_control_quota"
+        }
+      ],
+      "preauth_mutation_plan": [],
+      "preauth_bootstrap_status": "blocked_pending_reviewed_preauth_adapter_and_least_privilege_role",
+      "runtime_or_document_operations": [],
+      "forbidden_actions": [
+        "create_or_invoke_workload",
+        "create_user_managed_key",
+        "create_or_resolve_provider_credential",
+        "create_or_resolve_pstn_credential",
+        "read_or_write_firestore_documents",
+        "query_production_or_staging",
+        "modify_production_or_staging",
+        "enable_cloud_run_compute_container_functions_or_build",
+        "enable_secret_manager_iam_credentials_or_sts",
+        "create_preauth_identity_role_or_binding",
+        "create_retention_lock",
+        "contact_provider_or_pstn",
+        "mount_runtime_or_route",
+        "execute_task_4_8"
+      ],
+      "caps": {
+        "forward_mutating_operations": 12,
+        "rollback_mutating_operations": 6,
+        "total_mutating_operations": 18,
+        "service_apis_enabled": 3,
+        "service_apis_left_enabled": 0,
+        "projects": 2,
+        "runtime_identities_created": 1,
+        "custom_roles_created": 1,
+        "iam_bindings_created": 1,
+        "preauth_mutations": 0,
+        "runtime_identities_left_enabled": 0,
+        "iam_bindings_left_present": 0,
+        "custom_roles_left_enabled": 0,
+        "user_managed_keys": 0,
+        "firestore_document_reads": 0,
+        "firestore_document_writes": 0,
+        "provider_or_pstn_requests": 0,
+        "workload_invocations": 0,
+        "concurrency": 1,
+        "retries": 0,
+        "wall_clock_ms": 1200000,
+        "cost_minor_units": 0
+      },
+      "rollback": {
+        "trigger_on_any_unknown_or_mismatch": true,
+        "ordered_steps": [
+          {
+            "operation": "remove_exact_conditional_binding_if_created",
+            "mutation_units": 1
+          },
+          {
+            "operation": "read_back_binding_absence",
+            "mutation_units": 0
+          },
+          {
+            "operation": "disable_exact_runtime_identity_if_created",
+            "mutation_units": 1
+          },
+          {
+            "operation": "read_back_identity_disabled",
+            "mutation_units": 0
+          },
+          {
+            "operation": "disable_exact_custom_role_if_created",
+            "mutation_units": 1
+          },
+          {
+            "operation": "read_back_custom_role_disabled",
+            "mutation_units": 0
+          },
+          {
+            "operation": "disable_exact_bootstrap_control_plane_apis_if_enabled",
+            "mutation_units": 3
+          },
+          {
+            "operation": "read_back_bootstrap_control_plane_apis_disabled",
+            "mutation_units": 0
+          },
+          {
+            "operation": "record_payload_safe_residue_receipt",
+            "mutation_units": 0
+          }
+        ],
+        "delete_resources": false,
+        "retention_lock": false
+      }
+    },
+    "preconditions": [
+      "source_sha_and_source_bundle_digest_match",
+      "staged_revalidation_contract_digest_matches_without_drift",
+      "independent_review_bound_to_bootstrap_payload_with_zero_unresolved_p1",
+      "owner_signature_bound_to_payload_and_review",
+      "separately_authorized_fresh_digest_bound_production_and_staging_negative_grant_attestation",
+      "canonical_materialized_envelope_schema_and_domain_separated_verifier_implemented_and_reviewed",
+      "external_nonce_store_available_and_nonce_unused",
+      "atomic_durable_approval_and_nonce_consumer_implemented_and_reviewed",
+      "external_immutable_custody_available",
+      "keyless_owner_bootstrap_path_documented",
+      "bootstrap_executor_exact_action_allowlist_and_dry_run_reviewed",
+      "explicit_isolated_quota_project_bound_for_every_command",
+      "all_testable_permissions_supported",
+      "organization_and_folder_inheritance_reviewed_without_cross_project_risk",
+      "rollback_operator_and_residue_sink_ready"
+    ],
+    "technical_review": {
+      "status": "pending",
+      "advisory_only": true,
+      "review_digest": null,
+      "reviewed_payload_digest": null,
+      "unresolved_p1_count": null,
+      "provenance_ref": null
+    },
+    "owner_authorization": {
+      "status": "not_materializable",
+      "identity_ref": null,
+      "key_id": null,
+      "trust_snapshot_ref": null,
+      "nonce_ref": null,
+      "issued_at_ms": null,
+      "expires_at_ms": null,
+      "detached_signature_ref": null,
+      "signature_digest": null
+    }
+  },
+  "runtime": {
+    "status": "blocked_until_post_bootstrap_evidence_and_separate_review",
+    "evidence_tier": "bounded_connected_probe",
+    "one_use_per_arm": true,
+    "arm": null,
+    "execution_supported": false,
+    "provider_or_pstn_supported": false,
+    "required_before_materialization": [
+      "bootstrap_receipt_with_disabled_control_identity",
+      "reviewed_preauth_adapter_source_and_transaction_runner",
+      "separate_preauth_identity_role_binding_and_negative_cross_access_proof",
+      "durable_trust_generation_and_revocation_store",
+      "credential_broker_with_no_production_reachability",
+      "complete_current_production_denylist",
+      "provider_account_region_privacy_retention_and_deletion_attestations",
+      "immutable_approval_and_evidence_custody",
+      "residue_sink_and_deletion_receipt_procedure",
+      "exact_arm_manifest_configuration_and_dependency_digests",
+      "independent_runtime_review_with_zero_unresolved_p1",
+      "fresh_owner_signature_nonce_and_expiry"
+    ],
+    "blocking_gate_status": {
+      "sealed_owner_authorization": "not_recorded",
+      "independent_technical_review": "bootstrap_review_pending_runtime_review_not_started",
+      "physically_separate_preauth_store": "project_and_database_observed_adapter_not_implemented",
+      "identity_and_credential_broker": "not_implemented",
+      "durable_trust_and_revocation_store": "not_implemented",
+      "provider_privacy_and_region_attestations": "not_recorded",
+      "complete_production_denylist": "not_recorded",
+      "immutable_custody_and_residue_routing": "not_implemented",
+      "one_use_runtime_envelope": "not_materialized"
+    },
+    "owner_authorization": null,
+    "technical_review": null
+  },
+  "package_review": {
+    "status": "pending",
+    "advisory_only": true,
+    "review_digest": null,
+    "unresolved_p1_count": null,
+    "reviewed_artifact_digests": null
+  }
+}

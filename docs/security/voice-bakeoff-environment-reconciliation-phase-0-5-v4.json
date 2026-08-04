@@ -1,0 +1,593 @@
+{
+  "schema_version": 4,
+  "package_kind": "voice_bakeoff_environment_reconciliation_phase_0_5_amendment",
+  "package_status": "source_only_exact_review_candidate",
+  "source_binding": {
+    "repository": "https://github.com/delimatsuo/heykevin",
+    "worktree": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan",
+    "branch": "codex/voice-architecture-bakeoff-plan",
+    "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+    "package_is_authorization": false
+  },
+  "provenance": {
+    "successor_of": {
+      "json_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.json",
+      "json_sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d",
+      "schema_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.schema.json",
+      "schema_sha256": "094b0ffdf3da572989630e516d1a708f545b46e5ca520ed48f1d9f4103375746",
+      "guide_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v3.md",
+      "guide_sha256": "1c95fb0d957e92ed5fae2103bf4a9756a58df4b4052be2e9cc3589457429073a",
+      "test_path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v3.py",
+      "test_sha256": "bc6693455e4a21b3ba2287e73213294c08470bd48f3ef561ab5e887083dcb254",
+      "review_outcome": "rejected_for_owner_signable_envelope_generation_preserved_as_source_only_evidence"
+    },
+    "composite_predecessor_digests": {
+      "v2_json_sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f",
+      "v3_json_sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d",
+      "v3_effective_access_contract_sha256": "85d1b6073869eaac280d333868860353f7dc0c814c93be4f886cd05ae13753db"
+    },
+    "v3_p1_closures": [
+      "project_id_binding_is_separate_from_number_bound_provenance_ancestry_and_billing",
+      "one_exact_composite_method_table_is_derived_and_validated_for_all_v2_and_v3_methods",
+      "the_v4_root_schema_const_pins_the_complete_v4_package",
+      "access_detail_capacity_exceeds_the_static_eighty_eight_tuple_minimum",
+      "inventory_session_phase_ordinal_predecessor_receipt_cumulative_count_and_phase_once_ledger_are_bound",
+      "pab_binding_search_moves_after_pab_policy_name_discovery",
+      "v4_explicitly_supersedes_status_model_and_uses_one_canonical_status_vocabulary"
+    ],
+    "composite_rule": {
+      "v2_environment_graph_and_v3_response_safety_access_and_receipt_contracts_remain_normative": true,
+      "v4_supersedes": [
+        "v2.status_model",
+        "v3.provenance.composite_rule",
+        "v3.bounded_inventory_envelope_contract",
+        "v3.operator_targeting_contract",
+        "v3.transition_policy"
+      ],
+      "v4_extends": [
+        "v3.receipt_contract",
+        "v3.request_safety_amendments",
+        "v3.effective_access_contract"
+      ],
+      "conflict_precedence": "v4_then_v3_then_v2",
+      "composite_is_authorization": false
+    }
+  },
+  "authority": {
+    "authorized_scope": "source_only_phase_0_5_v4_amendment",
+    "connected_inventory_status": "not_authorized",
+    "mutation_status": "not_authorized",
+    "execution_status": "not_authorized",
+    "task_4_8_status": "sealed",
+    "owner_signable_package_status": "not_generated",
+    "advisory_review_is_owner_authorization": false,
+    "reviewed_contract_is_owner_authorization": false
+  },
+  "normative_contract_binding": {
+    "normative_contract_digest_sha256": "35f34b432ed7e255fe0847cdcff9ba5579becd931ae490d1e63bd57cc5968602",
+    "digest_canonicalization": "RFC8785_JSON_Canonicalization_Scheme",
+    "digest_input": "the_complete_v4_package_without_normative_contract_digest_sha256",
+    "v2_json_sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f",
+    "v3_json_sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d",
+    "composite_method_table_sha256": "4603e4b83775cc87a8d076da1398c3113a02b758b6a244fe50ed28edc8f64967",
+    "v3_effective_access_contract_sha256": "85d1b6073869eaac280d333868860353f7dc0c814c93be4f886cd05ae13753db",
+    "future_envelope_must_bind_all_five_digests": true
+  },
+  "status_model": {
+    "current": {
+      "inventory_status": "incomplete",
+      "governance_status": "undecided",
+      "review_status": "pending_exact_artifact_review",
+      "connected_read_status": "not_authorized",
+      "mutation_status": "mutation_not_authorized",
+      "execution_status": "execution_not_authorized",
+      "dominant_status": "execution_not_authorized"
+    },
+    "vocabulary": {
+      "inventory_status": [
+        "incomplete",
+        "complete"
+      ],
+      "governance_status": [
+        "undecided",
+        "retain_frozen",
+        "move_approved",
+        "replace_approved"
+      ],
+      "review_status": [
+        "pending_exact_artifact_review",
+        "externally_bound_advisory_pass"
+      ],
+      "connected_read_status": [
+        "not_authorized",
+        "owner_signed_phase_only"
+      ],
+      "mutation_status": [
+        "mutation_not_authorized"
+      ],
+      "execution_status": [
+        "execution_not_authorized"
+      ]
+    },
+    "dominant_display_precedence": [
+      "execution_not_authorized",
+      "mutation_not_authorized",
+      "not_authorized",
+      "owner_signed_phase_only",
+      "pending_exact_artifact_review",
+      "externally_bound_advisory_pass",
+      "undecided",
+      "incomplete",
+      "complete"
+    ],
+    "rules": [
+      "Every operator fixture uses only this vocabulary.",
+      "dominant_status is the first value present in dominant_display_precedence.",
+      "execution_not_authorized remains dominant during every read-only phase.",
+      "A phase receipt may change inventory evidence only.",
+      "Governance remains undecided unless a separate owner decision changes it.",
+      "The default disposition while incomplete or undecided is retain_frozen."
+    ]
+  },
+  "method_validation_contract": {
+    "derivation": [
+      "load the exact V2 read_contract.methods bound by v2_json_sha256",
+      "remove each method named by V3 method_overrides.replaces_v2_method_ref",
+      "insert every exact V3 method_overrides entry under its V3 method ref",
+      "insert every exact V3 method_additions entry under its V3 method ref",
+      "RFC8785-canonicalize the resulting key-sorted object and verify composite_method_table_sha256"
+    ],
+    "exact_method_count": 32,
+    "composite_method_table_sha256": "4603e4b83775cc87a8d076da1398c3113a02b758b6a244fe50ed28edc8f64967",
+    "manifest_match_fields": [
+      "api_method",
+      "endpoint",
+      "http_method",
+      "fully_resolved_path_and_query",
+      "request_body_digest",
+      "response_field_mask",
+      "pagination",
+      "raw_evidence_class"
+    ],
+    "field_mapping": {
+      "v2_response_field_mask": "response_field_mask",
+      "v3_response_field_mask": "exact_response_field_mask",
+      "v2_and_v3_path": "path",
+      "v2_and_v3_request_body": "request_body"
+    },
+    "pagination_mapping": {
+      "not_applicable": "not_applicable",
+      "all_pages_required": "single_page_or_incomplete",
+      "single_page_or_incomplete": "single_page_or_incomplete",
+      "reason": "v4_forbids_followup_page_requests_and_marks_next_page_token_incomplete"
+    },
+    "v3_security_fields_that_remain_mandatory": [
+      "forbidden_response_paths",
+      "scope_rule_when_present"
+    ],
+    "placeholder_resolution_rule": "every_placeholder_must_resolve_from_the_exact_project_binding_or_the_authenticated_predecessor_parameter_allowlist_bound_by_digest",
+    "unknown_method_action": "incomplete_abort_before_dispatch",
+    "any_field_mismatch_action": "incomplete_abort_before_dispatch",
+    "validation_skip_allowed": false
+  },
+  "phase_contract": {
+    "phase_count": 6,
+    "phases": [
+      {
+        "phase": "project_id_binding",
+        "ordinal": 1,
+        "minimum_requests": 4,
+        "maximum_requests": 4,
+        "allowed_method_refs": [
+          "project_identity_get"
+        ],
+        "manifest_derivation": "one_exact_project_identity_get_for_each_of_the_four_source_bound_project_ids",
+        "predecessor": "GENESIS",
+        "postcondition": "four_exact_project_numbers_and_immediate_parent_digests_bound_or_inventory_incomplete"
+      },
+      {
+        "phase": "project_number_binding",
+        "ordinal": 2,
+        "minimum_requests": 12,
+        "maximum_requests": 12,
+        "allowed_method_refs": [
+          "project_provenance_get",
+          "project_ancestry_get",
+          "project_billing_get"
+        ],
+        "manifest_derivation": "three_exact_number_bound_requests_for_each_project_from_the_project_id_binding_receipt",
+        "predecessor": "project_id_binding",
+        "postcondition": "four_complete_ancestries_provenance_and_billing_digests_bound_or_inventory_incomplete"
+      },
+      {
+        "phase": "metadata_discovery",
+        "ordinal": 3,
+        "minimum_requests": 64,
+        "maximum_requests": 96,
+        "allowed_method_refs": [
+          "service_state_get",
+          "asset_type_inventory_search",
+          "detailed_asset_inventory_search",
+          "ancestor_log_sink_asset_search",
+          "firestore_database_list",
+          "firebase_rtdb_instance_list_v3"
+        ],
+        "manifest_derivation": "required_service_and_project_searches_plus_every_unique_bound_ancestry_scope_within_cap",
+        "predecessor": "project_number_binding",
+        "postcondition": "bounded_metadata_names_and_types_discovered_or_inventory_incomplete"
+      },
+      {
+        "phase": "metadata_detail",
+        "ordinal": 4,
+        "minimum_requests": 2,
+        "maximum_requests": 32,
+        "allowed_method_refs": [
+          "firestore_database_get",
+          "firebase_rtdb_instance_get_v3",
+          "cloud_run_service_get_v3"
+        ],
+        "manifest_derivation": "every_allowlisted_database_or_instance_name_from_metadata_discovery_plus_two_source_declared_cloud_run_services",
+        "predecessor": "metadata_discovery",
+        "postcondition": "bounded_metadata_detail_complete_or_inventory_incomplete"
+      },
+      {
+        "phase": "access_control_discovery",
+        "ordinal": 5,
+        "minimum_requests": 4,
+        "maximum_requests": 64,
+        "allowed_method_refs": [
+          "asset_iam_policy_search",
+          "project_iam_policy_get",
+          "folder_iam_policy_get",
+          "organization_iam_policy_get",
+          "deny_policy_list",
+          "service_account_list",
+          "pab_policy_list",
+          "org_policy_constraint_list",
+          "org_policy_list",
+          "cloud_run_service_iam_policy_get"
+        ],
+        "manifest_derivation": "exact_project_ancestor_resource_and_owner_bound_member_queries_known_before_dispatch",
+        "predecessor": "metadata_detail",
+        "postcondition": "bounded_policy_account_role_constraint_and_pab_names_discovered_or_inventory_incomplete"
+      },
+      {
+        "phase": "access_control_detail",
+        "ordinal": 6,
+        "minimum_requests": 88,
+        "maximum_requests": 384,
+        "allowed_method_refs": [
+          "deny_policy_get",
+          "service_account_iam_policy_get",
+          "predefined_role_get",
+          "project_custom_role_get",
+          "organization_custom_role_get",
+          "pab_policy_get",
+          "pab_policy_binding_search",
+          "org_policy_effective_get",
+          "policy_troubleshooter"
+        ],
+        "manifest_derivation": "every_allowlisted_name_from_access_discovery_plus_every_exact_static_and_dynamic_effective_access_tuple_within_cap",
+        "predecessor": "access_control_discovery",
+        "postcondition": "bounded_access_inventory_complete_or_inventory_incomplete"
+      }
+    ],
+    "caps": {
+      "owner_signed_phase_envelopes": 6,
+      "total_connected_requests": 592,
+      "pages_per_list_or_search": 1,
+      "next_page_token_action": "incomplete_abort_without_followup_request",
+      "raw_response_bytes_per_request": 262144,
+      "total_raw_response_bytes": 16777216,
+      "wall_clock_ms_per_request": 15000,
+      "total_wall_clock_ms": 900000,
+      "retries": 0,
+      "concurrency": 1,
+      "mutating_operations": 0,
+      "project_creation": 0,
+      "api_enablement_operations": 0,
+      "credential_or_token_operations": 0,
+      "service_account_impersonations": 0,
+      "workload_operations": 0,
+      "provider_or_pstn_requests": 0,
+      "firestore_document_reads": 0,
+      "firebase_record_reads": 0,
+      "secret_payload_reads": 0,
+      "log_entry_reads": 0,
+      "cloud_run_invocations": 0
+    },
+    "completion_resource_caps": {
+      "target_projects": 4,
+      "unique_project_and_ancestor_scopes": 8,
+      "unique_organizations": 2,
+      "owner_bound_member_queries_per_project": 4,
+      "firestore_databases": 8,
+      "rtdb_instances": 8,
+      "service_accounts": 8,
+      "deny_policies": 16,
+      "roles": 32,
+      "pab_policies": 8,
+      "org_policy_effective_target_constraint_pairs": 16,
+      "secrets": 16,
+      "kms_crypto_keys": 16,
+      "cap_exceeded_action": "inventory_incomplete_no_followup_request_no_fallback"
+    },
+    "phase_manifest_coverage_rules": {
+      "project_id_binding": "exactly_four_project_identity_get_requests_one_per_exact_project_id",
+      "project_number_binding": "exactly_three_requests_per_project_using_each_number_from_the_authenticated_predecessor",
+      "metadata_discovery": "all_forty_eight_service_checks_all_project_searches_and_every_bound_unique_ancestry_scope_within_cap",
+      "metadata_detail": "every_allowlisted_discovered_database_and_instance_plus_both_source_declared_cloud_run_services",
+      "access_control_discovery": "every_required_project_ancestor_resource_and_owner_bound_member_query_within_cap",
+      "access_control_detail": "all_eighty_eight_static_tuples_and_every_allowlisted_discovered_policy_role_account_pab_constraint_secret_kms_and_dynamic_tuple_within_caps",
+      "omission_duplicate_or_extra_action": "inventory_incomplete_abort_before_dispatch"
+    },
+    "static_effective_access_request_floor": {
+      "data_tuples": 48,
+      "cloud_run_tuples": 16,
+      "project_level_tuples": 24,
+      "total": 88
+    },
+    "access_discovery_worst_case_budget": {
+      "asset_iam_member_searches": 16,
+      "project_iam_policy_gets": 4,
+      "ancestor_iam_policy_gets": 4,
+      "deny_policy_lists": 8,
+      "service_account_lists": 4,
+      "pab_policy_lists": 2,
+      "org_constraint_lists": 4,
+      "org_policy_lists": 8,
+      "cloud_run_iam_policy_gets": 2,
+      "total": 52,
+      "phase_maximum": 64
+    },
+    "access_detail_worst_case_budget": {
+      "static_effective_access": 88,
+      "secret_dynamic_tuples": 32,
+      "kms_dynamic_tuples": 32,
+      "service_account_dynamic_tuples": 80,
+      "service_account_policy_gets": 8,
+      "deny_policy_gets": 16,
+      "role_gets": 32,
+      "pab_policy_gets": 8,
+      "pab_binding_searches": 8,
+      "org_effective_policy_gets": 16,
+      "total": 320,
+      "phase_maximum": 384
+    },
+    "all_six_passing_receipts_required_for_complete_inventory": true
+  },
+  "inventory_session_contract": {
+    "session_id_format": "UUIDv4_lowercase",
+    "session_contract_digest": "normative_contract_digest_sha256",
+    "phase_envelope_required_fields": [
+      "envelope_version",
+      "inventory_session_id",
+      "phase",
+      "phase_ordinal",
+      "predecessor_phase_receipt_digest",
+      "predecessor_parameter_allowlist_digest",
+      "cumulative_prior_request_count",
+      "cumulative_request_count",
+      "source_sha",
+      "v2_json_digest",
+      "v3_json_digest",
+      "v4_normative_contract_digest",
+      "composite_method_table_digest",
+      "effective_access_contract_digest",
+      "owner_public_key_digest",
+      "identity_configuration_digests",
+      "raw_evidence_custody_digest",
+      "envelope_nonce_seed",
+      "request_count",
+      "request_set_digest",
+      "requests",
+      "issued_at_ms",
+      "expires_at_ms",
+      "audit_and_quota_effects_acknowledged",
+      "owner_signature"
+    ],
+    "request_manifest_entry_required_fields": [
+      "request_index",
+      "request_id",
+      "method_ref",
+      "api_method",
+      "identity_ref",
+      "local_configuration_digest",
+      "target_project_id",
+      "target_project_number",
+      "quota_project_id",
+      "endpoint",
+      "http_method",
+      "canonical_path_and_query",
+      "request_body_digest",
+      "response_field_mask",
+      "pagination",
+      "raw_evidence_class",
+      "canonical_request_digest"
+    ],
+    "sequence_rules": [
+      "phase ordinal one binds predecessor_phase_receipt_digest to GENESIS and cumulative_prior_request_count to zero.",
+      "phase ordinal one binds predecessor_parameter_allowlist_digest to GENESIS; every later phase binds the exact payload-safe allowlist digest derived by its authenticated predecessor.",
+      "Every later phase binds the immediately preceding authenticated phase receipt digest.",
+      "phase_ordinal and phase exactly match the six-entry phase contract.",
+      "cumulative_request_count equals cumulative_prior_request_count plus request_count and never exceeds 592.",
+      "The session ledger accepts at most one owner-signed envelope and one phase receipt per inventory_session_id plus phase_ordinal.",
+      "The phase-once ledger entry is consumed before the first request and survives denied partial malformed or failed responses.",
+      "Every request nonce is derived from inventory_session_id phase_ordinal envelope_nonce_seed request index and canonical request digest.",
+      "A phase cannot start until the predecessor receipt passes semantic signature freshness completeness and phase-once checks.",
+      "Any mismatch stale value skipped ordinal duplicate phase or unavailable predecessor yields incomplete before dispatch."
+    ],
+    "phase_once_ledger_key": "sha256(inventory_session_id || uint32_be(phase_ordinal))",
+    "request_nonce_rule": "sha256(domain_separator || inventory_session_id || uint32_be(phase_ordinal) || envelope_nonce_seed || uint32_be(request_index) || canonical_request_digest)",
+    "domain_separator": "hey-kevin/voice-bakeoff/environment-inventory/v4",
+    "signature_algorithm": "Ed25519",
+    "canonicalization": "RFC8785_JSON_Canonicalization_Scheme",
+    "ledger_storage": "separately_reviewed_private_local_custody_not_git_not_chat"
+  },
+  "operator_targeting_contract": {
+    "required_banner_fields": [
+      "operation_class",
+      "source_sha",
+      "contract_digest",
+      "inventory_session_id",
+      "phase_ordinal",
+      "phase_envelope_digest",
+      "predecessor_phase_receipt_digest",
+      "cumulative_request_count",
+      "local_configuration_digest",
+      "identity_ref",
+      "target_project_id",
+      "expected_project_number",
+      "expected_ancestry_digest",
+      "quota_project_id",
+      "api_method",
+      "response_field_mask",
+      "raw_evidence_class",
+      "inventory_status",
+      "governance_status",
+      "review_status",
+      "connected_read_status",
+      "mutation_status",
+      "execution_status",
+      "dominant_status",
+      "freshness_expires_at"
+    ],
+    "status_examples": [
+      {
+        "example": "sealed_source_only",
+        "fields": {
+          "operation_class": "source_only_review",
+          "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+          "contract_digest": "UNBOUND",
+          "inventory_session_id": "UNBOUND",
+          "phase_ordinal": "UNBOUND",
+          "phase_envelope_digest": "UNBOUND",
+          "predecessor_phase_receipt_digest": "UNBOUND",
+          "cumulative_request_count": 0,
+          "local_configuration_digest": "UNBOUND",
+          "identity_ref": "UNBOUND",
+          "target_project_id": "hk-voice-bakeoff-0724-iso",
+          "expected_project_number": "UNBOUND",
+          "expected_ancestry_digest": "UNBOUND",
+          "quota_project_id": "UNBOUND",
+          "api_method": "NONE",
+          "response_field_mask": "NONE",
+          "raw_evidence_class": "NONE",
+          "inventory_status": "incomplete",
+          "governance_status": "undecided",
+          "review_status": "pending_exact_artifact_review",
+          "connected_read_status": "not_authorized",
+          "mutation_status": "mutation_not_authorized",
+          "execution_status": "execution_not_authorized",
+          "dominant_status": "execution_not_authorized",
+          "freshness_expires_at": "UNBOUND"
+        },
+        "dominant_banner": "CONNECTED EXECUTION SEALED — READ-ONLY RECONCILIATION NOT AUTHORIZED"
+      },
+      {
+        "example": "future_project_id_binding",
+        "fields": {
+          "operation_class": "read_only_environment_reconciliation",
+          "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+          "contract_digest": "EXACT_REVIEWED_DIGEST",
+          "inventory_session_id": "EXACT_OWNER_BOUND_UUID",
+          "phase_ordinal": 1,
+          "phase_envelope_digest": "EXACT_OWNER_SIGNED_DIGEST",
+          "predecessor_phase_receipt_digest": "GENESIS",
+          "cumulative_request_count": 4,
+          "local_configuration_digest": "EXACT_PRIVATE_DIGEST",
+          "identity_ref": "EXACT_PROJECT_SPECIFIC_IDENTITY",
+          "target_project_id": "EXACT_ALLOWLISTED_PROJECT_ID",
+          "expected_project_number": "UNBOUND_PROJECT_GET_ONLY",
+          "expected_ancestry_digest": "UNBOUND",
+          "quota_project_id": "SAME_AS_TARGET_PROJECT_ID",
+          "api_method": "cloudresourcemanager.projects.get",
+          "response_field_mask": "projectId,projectNumber,lifecycleState,parent",
+          "raw_evidence_class": "restricted_external_custody",
+          "inventory_status": "incomplete",
+          "governance_status": "undecided",
+          "review_status": "externally_bound_advisory_pass",
+          "connected_read_status": "owner_signed_phase_only",
+          "mutation_status": "mutation_not_authorized",
+          "execution_status": "execution_not_authorized",
+          "dominant_status": "execution_not_authorized",
+          "freshness_expires_at": "EXACT_ENVELOPE_EXPIRY"
+        },
+        "dominant_banner": "PROJECT ID BINDING — FOUR READS ONLY — EXECUTION SEALED"
+      },
+      {
+        "example": "future_bound_detail_phase",
+        "fields": {
+          "operation_class": "read_only_environment_reconciliation",
+          "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+          "contract_digest": "EXACT_REVIEWED_DIGEST",
+          "inventory_session_id": "EXACT_OWNER_BOUND_UUID",
+          "phase_ordinal": "EXACT_ORDINAL_2_THROUGH_6",
+          "phase_envelope_digest": "EXACT_OWNER_SIGNED_DIGEST",
+          "predecessor_phase_receipt_digest": "EXACT_PASSING_RECEIPT_DIGEST",
+          "cumulative_request_count": "EXACT_COUNT_NOT_OVER_592",
+          "local_configuration_digest": "EXACT_PRIVATE_DIGEST",
+          "identity_ref": "EXACT_PROJECT_SPECIFIC_IDENTITY",
+          "target_project_id": "EXACT_ALLOWLISTED_PROJECT_ID",
+          "expected_project_number": "EXACT_BOUND_NUMBER",
+          "expected_ancestry_digest": "EXACT_BOUND_DIGEST",
+          "quota_project_id": "SAME_AS_TARGET_PROJECT_ID",
+          "api_method": "EXACT_COMPOSITE_METHOD",
+          "response_field_mask": "EXACT_COMPOSITE_METHOD_FILTER",
+          "raw_evidence_class": "EXACT_REVIEWED_CLASS",
+          "inventory_status": "incomplete",
+          "governance_status": "undecided",
+          "review_status": "externally_bound_advisory_pass",
+          "connected_read_status": "owner_signed_phase_only",
+          "mutation_status": "mutation_not_authorized",
+          "execution_status": "execution_not_authorized",
+          "dominant_status": "execution_not_authorized",
+          "freshness_expires_at": "EXACT_ENVELOPE_EXPIRY"
+        },
+        "dominant_banner": "BOUNDED INVENTORY PHASE — EXACT MANIFEST ONLY — EXECUTION SEALED"
+      },
+      {
+        "example": "blocked_incomplete",
+        "fields": {
+          "operation_class": "blocked",
+          "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+          "contract_digest": "MISMATCH_OR_STALE",
+          "inventory_session_id": "EXACT_OR_UNBOUND",
+          "phase_ordinal": "MISMATCH_OR_SKIPPED",
+          "phase_envelope_digest": "CONSUMED_OR_INVALID",
+          "predecessor_phase_receipt_digest": "MISSING_MISMATCH_OR_FAILED",
+          "cumulative_request_count": "MISMATCH_OR_OVER_592",
+          "local_configuration_digest": "MISMATCH_OR_UNBOUND",
+          "identity_ref": "MISMATCH_OR_UNBOUND",
+          "target_project_id": "EXACT_OR_UNBOUND",
+          "expected_project_number": "MISMATCH_OR_UNBOUND",
+          "expected_ancestry_digest": "INCOMPLETE",
+          "quota_project_id": "MISMATCH_OR_UNBOUND",
+          "api_method": "BLOCKED",
+          "response_field_mask": "BLOCKED",
+          "raw_evidence_class": "NONE",
+          "inventory_status": "incomplete",
+          "governance_status": "undecided",
+          "review_status": "pending_exact_artifact_review",
+          "connected_read_status": "not_authorized",
+          "mutation_status": "mutation_not_authorized",
+          "execution_status": "execution_not_authorized",
+          "dominant_status": "execution_not_authorized",
+          "freshness_expires_at": "EXPIRED_OR_UNBOUND"
+        },
+        "dominant_banner": "INCOMPLETE — NO FALLBACK — EXECUTION SEALED"
+      }
+    ],
+    "display_rule": "every_example_and_future_operator_surface_renders_all_fields_and_computes_dominant_status_from_v4_precedence_before_any_request"
+  },
+  "transition_policy": {
+    "environment_recommendation": "create_no_project_retain_all_four_exact_projects_frozen",
+    "governance_status": "undecided",
+    "mixed_staging_control_plane": "separate_environment_debt_no_phase_0_5_remediation",
+    "v4_review_requirement": "exact_hash_staff_security_and_operator_review_with_no_unresolved_p1",
+    "after_v4_review": "generate_but_do_not_execute_one_source_only_owner_signable_project_id_binding_envelope",
+    "connected_read_requirement": "separate_owner_signature_over_that_exact_reviewed_phase_envelope",
+    "incomplete_action": "stop_retain_frozen_no_duplicate_no_fallback",
+    "mutation_execution_and_task_4_8": "remain_sealed_regardless_of_inventory_result"
+  }
+}

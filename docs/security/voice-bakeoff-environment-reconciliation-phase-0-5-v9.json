@@ -1,0 +1,177 @@
+{
+  "schema_version": 9,
+  "package_kind": "voice_bakeoff_environment_reconciliation_one_attempt_custody_runner",
+  "package_status": "source_only_exact_review_candidate",
+  "source_binding": {
+    "repository": "https://github.com/delimatsuo/heykevin",
+    "worktree": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan",
+    "branch": "codex/voice-architecture-bakeoff-plan",
+    "tracked_runtime_baseline_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+    "tracked_runtime_baseline_is_v9_review_identity": false,
+    "v9_review_identity": "externally_bound_exact_hash_sextet",
+    "package_is_authorization": false
+  },
+  "provenance": {
+    "successor_of": {
+      "version": 8,
+      "json_sha256": "4153bf3764600198f583d627ad93e540ce0423cd25fab2c04be2e7b06245a859",
+      "schema_sha256": "f70041f9ba8f3bb5405822f0a612de1d9eb12e7fd9dfb9a6b95c84c46a9728a1",
+      "guide_sha256": "6238ff3f36074e3ffbe229345383c538cdb32260ea219304a73a5480305526dc",
+      "test_sha256": "56bd07ae06c5530c8be47fe9e758b61f23fe127f70b029aa7b3b3d77973ea562",
+      "panel_decision": "block_v8_materialization_retain_as_non_authorizing_evidence",
+      "unresolved_v8_p1": [
+        "executable_predecessor_imports_before_integrity_verification",
+        "one_attempt_concurrency_crash_retry_and_custody_unenforced"
+      ]
+    },
+    "v9_closure_scope": [
+      "standalone_stdlib_only_runner_with_no_project_module_imports",
+      "external_exact_hash_review_bundle_verified_before_private_input",
+      "read_only_regular_non_symlink_snapshot_verified_twice",
+      "atomic_attempt_consumption_before_private_input",
+      "second_and_concurrent_invocation_rejection",
+      "no_replace_0600_output_and_payload_safe_audit",
+      "failure_or_crash_is_terminal_without_retry",
+      "review_acceptance_materialization_authority_owner_authorization_and_connected_authority_are_distinct"
+    ]
+  },
+  "normative_contract_binding": {
+    "normative_contract_digest_sha256": "c602a313d0dbb8ee0528aa4a90587f876817d6a7d93fe35a711ad363805325a5",
+    "digest_canonicalization": "RFC8785_JSON_Canonicalization_Scheme_for_ASCII_keys_safe_integers_booleans_null_arrays_and_objects",
+    "digest_input": "complete_v9_package_without_normative_contract_digest_sha256",
+    "predecessor_manifest_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.predecessors.json",
+    "predecessor_manifest_file_sha256": "24ad05b112b5f26cb7b8918a1e6a23a3a49fa82efdb687630b920efe02db3dd5",
+    "predecessor_manifest_digest_sha256": "1c4293996dc10c1a23de7280d2cd7b22e167be041ef2c86eca3daaba76215805",
+    "phase_one_method_contract_sha256": "3244902ecbf20c155ee49836a10a074d28eb6386a4081d56e0963a6868a2b93f"
+  },
+  "authority_model": {
+    "staff_security_operator_review_acceptance": "advisory_not_authority",
+    "materialization_authority": "separate_exact_bundle_hash_expiry_attempt_custodian_and_private_input_binding_required",
+    "operator": "executes_only_the_authorized_offline_ceremony",
+    "owner_authorization": "not_present_and_not_created_by_v9",
+    "connected_read_authority": "not_present",
+    "provider_or_pstn_authority": "not_present",
+    "task_4_8_authority": "not_present"
+  },
+  "runner_contract": {
+    "path": "scripts/materialize_voice_bakeoff_phase_one_payload_v9.py",
+    "runtime_dependencies": "python_3_12_standard_library_only",
+    "project_module_imports": false,
+    "network_or_subprocess_capability": false,
+    "operator_argument": "absolute_private_ceremony_directory_path_only",
+    "stdout_stderr_or_traceback_output": false,
+    "fixed_private_input_files": [
+      "materialization-authorization.json",
+      "private-input.json"
+    ],
+    "fixed_created_files": [
+      "attempt-record.jsonl",
+      "unsigned-payload.json",
+      "payload-safe-audit.json"
+    ],
+    "snapshot_verification": [
+      "validate_exact_v9_review_sextet_from_materialization_authorization",
+      "validate_v9_predecessor_manifest_file_and_all_32_entries",
+      "reject_absolute_parent_traversing_duplicate_missing_non_regular_symlink_or_writable_source_artifacts",
+      "verify_snapshot_before_authorization_acceptance",
+      "verify_snapshot_again_after_attempt_consumption_before_private_input_read",
+      "use_no_predecessor_import_or_execution"
+    ]
+  },
+  "one_attempt_state_machine": {
+    "initial_state": "not_attempted",
+    "admission": "atomic_0600_o_creat_o_excl_attempt_record_before_private_input_read",
+    "admitted_terminal_default": "consumed_no_payload",
+    "success_state": "generated_one_payload",
+    "failure_state": "consumed_no_payload",
+    "output_or_temp_residue_state": "consumed_with_residue_stop",
+    "second_or_concurrent_invocation": "reject_before_private_input_read",
+    "retry_after_any_consumed_state": "forbidden_requires_new_successor_and_fresh_exact_hash_review",
+    "crash_after_admission": "consumed_terminal_no_retry",
+    "attempt_record_contents": "payload_safe_json_lines_only"
+  },
+  "custody_contract": {
+    "ceremony_directory_mode": "0700_no_symlink",
+    "input_file_mode": "0600_regular_no_symlink",
+    "created_file_mode": "0600_regular_no_symlink",
+    "private_values_in_argv_env_stdout_stderr_traceback_audit_or_attempt_record": false,
+    "payload_publish": "fsynced_0600_exclusive_temp_then_atomic_no_replace_link",
+    "audit_publish": "fsynced_0600_exclusive_temp_then_atomic_no_replace_link",
+    "payload_safe_audit_fields": [
+      "status",
+      "attempt_id",
+      "authorization_id",
+      "source_sha",
+      "v9_normative_contract_digest",
+      "payload_digest_or_null",
+      "stable_error_code_or_null",
+      "private_values_present_false",
+      "connected_action_occurred_false"
+    ],
+    "failure_cleanup": "best_effort_remove_unpublished_temp_then_stop",
+    "crash_or_residue": "quarantine_ceremony_directory_do_not_use_payload_do_not_retry"
+  },
+  "materialization_authorization_contract": {
+    "schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.schema.json#/$defs/materialization_authorization_v9",
+    "required_before_attempt_consumption": true,
+    "self_digest_required": true,
+    "exact_v9_review_sextet_required": true,
+    "staff_security_operator_acceptance_with_zero_unresolved_p1_required": true,
+    "materialization_authority_and_custodian_digests_required": true,
+    "ceremony_root_and_exact_private_input_file_digests_required": true,
+    "safe_integer_freshness_and_maximum_lifetime_ms": 900000,
+    "failure_consumes_attempt": true,
+    "connected_action_authorized": false,
+    "cryptographic_authority_proof": "external_custody_responsibility_not_implemented_by_stdlib_runner"
+  },
+  "payload_contract": {
+    "schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v9.schema.json#/$defs/phase_one_signing_payload_v9",
+    "payload_kind": "unsigned_owner_signing_payload",
+    "payload_version": 9,
+    "exact_request_count": 4,
+    "exact_project_order": [
+      "kevin-491315",
+      "kevin-staging-491315",
+      "hk-voice-bakeoff-0724-iso",
+      "hk-voice-bakeoff-preauth-iso"
+    ],
+    "binds_review_bundle_materialization_authorization_and_attempt": true,
+    "owner_signature_or_authorization_field_present": false,
+    "repository_chat_log_or_stdout_storage_allowed": false
+  },
+  "product_evidence": {
+    "status": "none",
+    "does_not_prove": [
+      "real_calls_or_callers",
+      "native_audio_quality",
+      "latency",
+      "turn_taking_or_interruption",
+      "multilingual_behavior",
+      "accessibility",
+      "user_testing",
+      "user_or_owner_approval",
+      "provider_capability",
+      "task_4_8_eligibility"
+    ],
+    "goal_alignment": "offline_authorization_custody_preparation_only_not_a_substitute_for_native_audio_qualification"
+  },
+  "sealed_status": {
+    "source_only_payload_generation_status": "not_generated",
+    "owner_signature_status": "not_recorded",
+    "owner_authorization_status": "not_recorded",
+    "connected_inventory_status": "not_authorized",
+    "credential_resolution_status": "not_authorized",
+    "mutation_status": "not_authorized",
+    "execution_status": "not_authorized",
+    "provider_pstn_status": "sealed",
+    "staging_production_status": "sealed",
+    "task_4_8_status": "sealed"
+  },
+  "transition_policy": {
+    "current_v9_status": "materialization_blocked_pending_exact_hash_staff_security_operator_review_and_separate_materialization_authority",
+    "after_clean_review_and_authority": "one_offline_materialization_attempt_may_run_in_restricted_private_custody",
+    "terminal_stop_after_success": "validate_hash_and_custody_output_then_no_signature_connected_read_credentials_dispatch_provider_pstn_staging_production_or_task_4_8_action",
+    "terminal_stop_after_failure_or_crash": "quarantine_residue_no_retry_and_require_new_successor_with_fresh_exact_hash_review",
+    "incomplete_ambiguous_or_drift_action": "stop_create_no_project_preserve_all_seals"
+  }
+}

@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "status": "read_only_observation",
+  "environment": "bakeoff_nonproduction",
+  "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+  "observation_window": {
+    "started_at": "2026-07-28T14:07:23Z",
+    "completed_at": "2026-07-28T14:10:21Z"
+  },
+  "operator_identity_ref": "ref_current_gcloud_actor_private_20260728",
+  "operator_identity_count": 1,
+  "gcloud_context": {
+    "configured_quota_project_status": "unapproved_or_out_of_scope",
+    "implicit_quota_context_for_initial_read_only_queries": true,
+    "explicit_isolated_quota_required_for_future_commands": true,
+    "explicit_isolated_quota_checks": {
+      "control_service_usage_api": "usable",
+      "preauth_service_usage_api": "usable",
+      "control_cloud_resource_manager_api": "blocked_api_disabled",
+      "preauth_cloud_resource_manager_api": "blocked_api_disabled",
+      "control_iam_api": "blocked_api_disabled",
+      "preauth_iam_api": "blocked_api_disabled",
+      "control_policy_troubleshooter_api": "blocked_api_disabled",
+      "preauth_policy_troubleshooter_api": "blocked_api_disabled"
+    }
+  },
+  "projects": [
+    {
+      "project_id": "hk-voice-bakeoff-0724-iso",
+      "domain": "execution_control",
+      "lifecycle_state": "ACTIVE",
+      "billing_enabled": true,
+      "database": {
+        "database_id": "voice-bakeoff-control",
+        "database_count": 1,
+        "location_id": "us-central1",
+        "type": "FIRESTORE_NATIVE",
+        "concurrency_mode": "PESSIMISTIC",
+        "app_engine_integration_mode": "DISABLED",
+        "point_in_time_recovery": "POINT_IN_TIME_RECOVERY_DISABLED",
+        "delete_protection": "DELETE_PROTECTION_DISABLED",
+        "version_retention_period": "3600s",
+        "free_tier": true,
+        "inventory_digest": "4679a7376395a8321cdd9ef047cc1c19ec03d3923f52259e61c791485bf27014",
+        "documents_read": false,
+        "documents_written": false
+      },
+      "iam": {
+        "service_account_count": 1,
+        "enabled_service_account_count": 1,
+        "app_engine_default_service_account_count": 0,
+        "compute_default_service_account_count": 0,
+        "other_service_account_count": 1,
+        "expected_runtime_identity": "voice-bakeoff-control-adapter",
+        "expected_runtime_identity_present": false,
+        "expected_runtime_identity_binding_count": 0,
+        "total_user_managed_key_count": 0,
+        "binding_count": 3,
+        "conditioned_binding_count": 0,
+        "project_custom_role_count": 0,
+        "policy_digest": "e86154e9c77313b6536d8c67dcb8b5788963a5a86e96a954951a8f2951b896c6",
+        "custom_role_inventory_digest": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "binding_shapes": [
+          {
+            "role": "roles/firebaserules.system",
+            "condition_present": false,
+            "member_kind": "serviceAccount",
+            "member_count": 1
+          },
+          {
+            "role": "roles/firestore.serviceAgent",
+            "condition_present": false,
+            "member_kind": "serviceAccount",
+            "member_count": 1
+          },
+          {
+            "role": "roles/owner",
+            "condition_present": false,
+            "member_kind": "user",
+            "member_count": 1
+          }
+        ]
+      },
+      "enabled_services": {
+        "count": 26,
+        "inventory_digest": "750f0b48e162ddfda7f5aa58fca5d01d85a73ae7c981dd679db83439993ffeb1",
+        "appengine": false,
+        "cloudbuild": false,
+        "cloudfunctions": false,
+        "cloudresourcemanager": false,
+        "compute": false,
+        "container": false,
+        "iam": false,
+        "iamcredentials": false,
+        "kms": true,
+        "policytroubleshooter": false,
+        "pubsub": false,
+        "run": false,
+        "secretmanager": false,
+        "serviceusage": true,
+        "sts": false
+      },
+      "kms": {
+        "inventory_status": "observed_not_authoritative_for_custody",
+        "location_id": "us-central1",
+        "keyring_count": 1,
+        "crypto_key_count": 1,
+        "primary_enabled_crypto_key_count": 1,
+        "purpose": "ENCRYPT_DECRYPT",
+        "algorithm": "GOOGLE_SYMMETRIC_ENCRYPTION",
+        "protection_level": "SOFTWARE",
+        "rotation_period": "7776000s",
+        "next_rotation_time_present": true,
+        "key_policy_binding_count": 0,
+        "key_policy_conditioned_binding_count": 0,
+        "keyring_inventory_digest": "124e2119e685483fbed3b1d2dfbaf32a95f3b8d5215db704ec55a62537f4055f",
+        "key_policy_inventory_digest": "11765609ed9f8e8dd460c679a598d5ed4bd45ac844d2061442c06070e191cb35",
+        "suitable_for_owner_signing": false,
+        "suitable_for_immutable_custody": false
+      }
+    },
+    {
+      "project_id": "hk-voice-bakeoff-preauth-iso",
+      "domain": "preauth",
+      "lifecycle_state": "ACTIVE",
+      "billing_enabled": true,
+      "database": {
+        "database_id": "voice-bakeoff-preauth",
+        "database_count": 1,
+        "location_id": "us-central1",
+        "type": "FIRESTORE_NATIVE",
+        "concurrency_mode": "PESSIMISTIC",
+        "app_engine_integration_mode": "DISABLED",
+        "point_in_time_recovery": "POINT_IN_TIME_RECOVERY_DISABLED",
+        "delete_protection": "DELETE_PROTECTION_DISABLED",
+        "version_retention_period": "3600s",
+        "free_tier": true,
+        "inventory_digest": "52d32533ea6d56378e7931cad36cab4d307b69c3bc7e7bfc2fce9f3a2867dc6d",
+        "documents_read": false,
+        "documents_written": false
+      },
+      "iam": {
+        "service_account_count": 0,
+        "enabled_service_account_count": 0,
+        "app_engine_default_service_account_count": 0,
+        "compute_default_service_account_count": 0,
+        "other_service_account_count": 0,
+        "expected_runtime_identity": "voice-bakeoff-preauth-adapter",
+        "expected_runtime_identity_present": false,
+        "expected_runtime_identity_binding_count": 0,
+        "total_user_managed_key_count": 0,
+        "binding_count": 3,
+        "conditioned_binding_count": 0,
+        "project_custom_role_count": 0,
+        "policy_digest": "7303764d90145e5de842489c30c21aa890bcdff78497ee7cbd3bffd87f121c75",
+        "custom_role_inventory_digest": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "binding_shapes": [
+          {
+            "role": "roles/firebaserules.system",
+            "condition_present": false,
+            "member_kind": "serviceAccount",
+            "member_count": 1
+          },
+          {
+            "role": "roles/firestore.serviceAgent",
+            "condition_present": false,
+            "member_kind": "serviceAccount",
+            "member_count": 1
+          },
+          {
+            "role": "roles/owner",
+            "condition_present": false,
+            "member_kind": "user",
+            "member_count": 1
+          }
+        ]
+      },
+      "enabled_services": {
+        "count": 24,
+        "inventory_digest": "b861cafd35e889fe165d8156fbab5347b9ca85085d1a26eb6a1194c0f54c1692",
+        "appengine": false,
+        "cloudbuild": false,
+        "cloudfunctions": false,
+        "cloudresourcemanager": false,
+        "compute": false,
+        "container": false,
+        "iam": false,
+        "iamcredentials": false,
+        "kms": false,
+        "policytroubleshooter": false,
+        "pubsub": false,
+        "run": false,
+        "secretmanager": false,
+        "serviceusage": true,
+        "sts": false
+      },
+      "kms": {
+        "inventory_status": "api_disabled",
+        "suitable_for_owner_signing": false,
+        "suitable_for_immutable_custody": false
+      }
+    }
+  ],
+  "verified_absences": [
+    "expected_runtime_identities",
+    "expected_runtime_identity_bindings",
+    "conditioned_project_bindings",
+    "project_custom_roles",
+    "user_managed_service_account_keys",
+    "cloud_run_api",
+    "compute_api",
+    "container_api",
+    "cloud_functions_api",
+    "cloud_build_api",
+    "cloud_resource_manager_api",
+    "iam_api",
+    "policy_troubleshooter_api",
+    "secret_manager_api",
+    "security_token_service_api",
+    "iam_credentials_api"
+  ],
+  "unverified_or_out_of_scope": [
+    "firestore_document_inventory",
+    "organization_or_folder_inherited_allow_and_deny_policies",
+    "production_or_staging_policy_state",
+    "policy_troubleshooter_effective_access",
+    "synthetic_runtime_identity_access",
+    "provider_or_pstn_accounts",
+    "provider_privacy_region_retention_and_deletion",
+    "credential_broker",
+    "durable_trust_and_revocation_store",
+    "immutable_authorization_custody",
+    "residue_sink_and_deletion_receipts"
+  ],
+  "effects": {
+    "iam_mutations": 0,
+    "resource_mutations": 0,
+    "database_document_reads": 0,
+    "database_document_writes": 0,
+    "credentials_created_or_resolved": 0,
+    "workloads_created_or_invoked": 0,
+    "provider_or_pstn_requests": 0,
+    "production_or_staging_queries": 0
+  }
+}

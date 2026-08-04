@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heykevin.invalid/schemas/voice-bakeoff-phase-0-5-v10.schema.json",
+  "title": "Hey Kevin voice bakeoff V10 fail-closed acceptance contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_kind",
+    "source_sha",
+    "predecessor_exact_bundle",
+    "predecessor_bundle_digest",
+    "panel_consensus",
+    "decision",
+    "allowed_actions",
+    "forbidden_actions",
+    "local_candidate_requirements",
+    "external_ceremony_requirements",
+    "future_attempt_event_schema",
+    "operator_decision_table",
+    "promotion_rule"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 10
+    },
+    "contract_kind": {
+      "const": "voice_bakeoff_phase_0_5_fail_closed_acceptance"
+    },
+    "source_sha": {
+      "$ref": "#/$defs/sha256"
+    },
+    "predecessor_exact_bundle": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "$ref": "#/$defs/fileDigest"
+      }
+    },
+    "predecessor_bundle_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "panel_consensus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "staff",
+        "security_privacy",
+        "operator",
+        "materialization_decision",
+        "evidence_class"
+      ],
+      "properties": {
+        "staff": {
+          "const": "blocked_real_materialization"
+        },
+        "security_privacy": {
+          "const": "blocked_real_materialization"
+        },
+        "operator": {
+          "const": "blocked_real_materialization"
+        },
+        "materialization_decision": {
+          "const": "blocked"
+        },
+        "evidence_class": {
+          "const": "advisory_non_authorizing"
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "materialization",
+        "v9_runner_invocation",
+        "connected_actions",
+        "product_evidence",
+        "v10_scope"
+      ],
+      "properties": {
+        "materialization": {
+          "const": "blocked"
+        },
+        "v9_runner_invocation": {
+          "const": "forbidden"
+        },
+        "connected_actions": {
+          "const": "forbidden"
+        },
+        "product_evidence": {
+          "const": "none"
+        },
+        "v10_scope": {
+          "const": "source_only_acceptance_and_status_verification"
+        }
+      }
+    },
+    "allowed_actions": {
+      "const": [
+        "inspect_public_contracts",
+        "run_offline_static_verifier",
+        "run_fixture_only_tests",
+        "obtain_exact_hash_advisory_review"
+      ]
+    },
+    "forbidden_actions": {
+      "const": [
+        "invoke_v9_materializer",
+        "create_real_private_input",
+        "create_real_materialization_authorization",
+        "access_credentials",
+        "access_provider_or_pstn",
+        "access_staging_or_production",
+        "execute_task_4_8"
+      ]
+    },
+    "local_candidate_requirements": {
+      "$ref": "#/$defs/requirements"
+    },
+    "external_ceremony_requirements": {
+      "$ref": "#/$defs/requirements"
+    },
+    "future_attempt_event_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_fields",
+        "allowed_states",
+        "private_values_present",
+        "connected_action_occurred"
+      ],
+      "properties": {
+        "required_fields": {
+          "const": [
+            "record_version",
+            "record_kind",
+            "event",
+            "state",
+            "attempt_id",
+            "authorization_id",
+            "source_sha",
+            "contract_digest",
+            "payload_digest",
+            "error_code",
+            "private_values_present",
+            "connected_action_occurred"
+          ]
+        },
+        "allowed_states": {
+          "const": [
+            "pre_admission_rejected",
+            "consumed_no_payload",
+            "consumed_with_residue_stop",
+            "generated_one_payload"
+          ]
+        },
+        "private_values_present": {
+          "const": false
+        },
+        "connected_action_occurred": {
+          "const": false
+        }
+      }
+    },
+    "operator_decision_table": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "attempt_consumed",
+          "payload_usable",
+          "retry",
+          "operator_action"
+        ],
+        "properties": {
+          "state": {
+            "enum": [
+              "pre_admission_rejected",
+              "consumed_no_payload",
+              "consumed_with_residue_stop",
+              "generated_one_payload"
+            ]
+          },
+          "attempt_consumed": {
+            "type": "boolean"
+          },
+          "payload_usable": {
+            "type": "boolean"
+          },
+          "retry": {
+            "enum": [
+              "never_same_authorization",
+              "only_after_new_exact_successor_and_authorization"
+            ]
+          },
+          "operator_action": {
+            "enum": [
+              "stop_and_correct_preconditions",
+              "stop_and_quarantine_ceremony",
+              "quarantine_residue_and_stop",
+              "retain_committed_envelope_without_execution"
+            ]
+          }
+        }
+      }
+    },
+    "promotion_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_local_requirements",
+        "all_external_requirements",
+        "exact_successor_review",
+        "separate_one_use_authorization",
+        "automatic_promotion"
+      ],
+      "properties": {
+        "all_local_requirements": {
+          "const": "independently_verified"
+        },
+        "all_external_requirements": {
+          "const": "independently_attested"
+        },
+        "exact_successor_review": {
+          "const": "staff_security_operator_acceptance"
+        },
+        "separate_one_use_authorization": {
+          "const": "required"
+        },
+        "automatic_promotion": {
+          "const": false
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fileDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(docs|scripts|tests)/"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "requirement",
+          "status",
+          "blocking"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[LE][0-9]{2}$"
+          },
+          "requirement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "const": "not_satisfied"
+          },
+          "blocking": {
+            "const": true
+          }
+        }
+      }
+    }
+  }
+}

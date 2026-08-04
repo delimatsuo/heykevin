@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "environment": "bakeoff_nonproduction",
+  "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+  "comparison_contract": "staged_exact_canonical_equality_with_only_the_named_api_enablement_delta",
+  "explicit_quota_project_required": true,
+  "ambient_or_configured_quota_project_forbidden": true,
+  "staged_revalidation_contract": {
+    "pre_enable_core_revalidation": "reverify_service_usage_firestore_billing_and_kms_fields_reachable_with_explicit_isolated_quota",
+    "only_pre_full_revalidation_mutation": "enable_cloudresourcemanager_iam_and_policytroubleshooter_in_control_project",
+    "post_enable_quota_project": "hk-voice-bakeoff-0724-iso",
+    "post_enable_read_targets": [
+      "hk-voice-bakeoff-0724-iso",
+      "hk-voice-bakeoff-preauth-iso"
+    ],
+    "post_enable_required_state": "all_baseline_fields_exact_except_three_named_control_project_apis_enabled",
+    "post_enable_forbidden_deltas": [
+      "new_service_account_or_service_identity",
+      "new_project_or_resource_policy_binding",
+      "new_impersonation_grant",
+      "new_custom_role",
+      "any_preauth_project_delta"
+    ],
+    "mismatch_action": "disable_only_the_three_newly_enabled_control_project_apis_then_abort_and_record_residue"
+  },
+  "projects": [
+    {
+      "project_id": "hk-voice-bakeoff-0724-iso",
+      "domain": "execution_control",
+      "lifecycle_state": "ACTIVE",
+      "billing_enabled": true,
+      "database": {
+        "database_id": "voice-bakeoff-control",
+        "database_count": 1,
+        "location_id": "us-central1",
+        "type": "FIRESTORE_NATIVE",
+        "concurrency_mode": "PESSIMISTIC",
+        "app_engine_integration_mode": "DISABLED",
+        "point_in_time_recovery": "POINT_IN_TIME_RECOVERY_DISABLED",
+        "delete_protection": "DELETE_PROTECTION_DISABLED",
+        "version_retention_period": "3600s",
+        "free_tier": true,
+        "inventory_digest": "4679a7376395a8321cdd9ef047cc1c19ec03d3923f52259e61c791485bf27014"
+      },
+      "iam": {
+        "service_account_count": 1,
+        "enabled_service_account_count": 1,
+        "expected_runtime_identity_present": false,
+        "expected_runtime_identity_binding_count": 0,
+        "total_user_managed_key_count": 0,
+        "binding_count": 3,
+        "conditioned_binding_count": 0,
+        "project_custom_role_count": 0,
+        "policy_digest": "e86154e9c77313b6536d8c67dcb8b5788963a5a86e96a954951a8f2951b896c6",
+        "custom_role_inventory_digest": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      "enabled_services": {
+        "inventory_digest": "750f0b48e162ddfda7f5aa58fca5d01d85a73ae7c981dd679db83439993ffeb1",
+        "cloudresourcemanager": false,
+        "iam": false,
+        "policytroubleshooter": false,
+        "serviceusage": true,
+        "appengine": false,
+        "cloudbuild": false,
+        "cloudfunctions": false,
+        "compute": false,
+        "container": false,
+        "iamcredentials": false,
+        "run": false,
+        "secretmanager": false,
+        "sts": false
+      },
+      "kms": {
+        "api_enabled": true,
+        "keyring_count": 1,
+        "crypto_key_count": 1,
+        "primary_enabled_crypto_key_count": 1,
+        "purpose": "ENCRYPT_DECRYPT",
+        "algorithm": "GOOGLE_SYMMETRIC_ENCRYPTION",
+        "protection_level": "SOFTWARE",
+        "keyring_inventory_digest": "124e2119e685483fbed3b1d2dfbaf32a95f3b8d5215db704ec55a62537f4055f",
+        "key_policy_inventory_digest": "11765609ed9f8e8dd460c679a598d5ed4bd45ac844d2061442c06070e191cb35",
+        "suitable_for_owner_signing": false,
+        "suitable_for_immutable_custody": false
+      }
+    },
+    {
+      "project_id": "hk-voice-bakeoff-preauth-iso",
+      "domain": "preauth",
+      "lifecycle_state": "ACTIVE",
+      "billing_enabled": true,
+      "database": {
+        "database_id": "voice-bakeoff-preauth",
+        "database_count": 1,
+        "location_id": "us-central1",
+        "type": "FIRESTORE_NATIVE",
+        "concurrency_mode": "PESSIMISTIC",
+        "app_engine_integration_mode": "DISABLED",
+        "point_in_time_recovery": "POINT_IN_TIME_RECOVERY_DISABLED",
+        "delete_protection": "DELETE_PROTECTION_DISABLED",
+        "version_retention_period": "3600s",
+        "free_tier": true,
+        "inventory_digest": "52d32533ea6d56378e7931cad36cab4d307b69c3bc7e7bfc2fce9f3a2867dc6d"
+      },
+      "iam": {
+        "service_account_count": 0,
+        "enabled_service_account_count": 0,
+        "expected_runtime_identity_present": false,
+        "expected_runtime_identity_binding_count": 0,
+        "total_user_managed_key_count": 0,
+        "binding_count": 3,
+        "conditioned_binding_count": 0,
+        "project_custom_role_count": 0,
+        "policy_digest": "7303764d90145e5de842489c30c21aa890bcdff78497ee7cbd3bffd87f121c75",
+        "custom_role_inventory_digest": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      "enabled_services": {
+        "inventory_digest": "b861cafd35e889fe165d8156fbab5347b9ca85085d1a26eb6a1194c0f54c1692",
+        "cloudresourcemanager": false,
+        "iam": false,
+        "policytroubleshooter": false,
+        "serviceusage": true,
+        "appengine": false,
+        "cloudbuild": false,
+        "cloudfunctions": false,
+        "compute": false,
+        "container": false,
+        "iamcredentials": false,
+        "run": false,
+        "secretmanager": false,
+        "sts": false
+      },
+      "kms": {
+        "api_enabled": false,
+        "suitable_for_owner_signing": false,
+        "suitable_for_immutable_custody": false
+      }
+    }
+  ],
+  "required_terminal_state": {
+    "control_iam_readback_before_api_disable": {
+      "service_account_count": 2,
+      "enabled_service_account_count": 1,
+      "baseline_service_account_count": 1,
+      "baseline_enabled_service_account_count": 1,
+      "exact_new_service_account": "voice-bakeoff-control-adapter@hk-voice-bakeoff-0724-iso.iam.gserviceaccount.com",
+      "exact_new_service_account_disabled": true,
+      "exact_new_service_account_user_managed_key_count": 0,
+      "unexpected_new_service_account_or_service_identity_count": 0,
+      "project_policy_digest": "e86154e9c77313b6536d8c67dcb8b5788963a5a86e96a954951a8f2951b896c6",
+      "project_binding_count": 3,
+      "project_conditioned_binding_count": 0,
+      "new_project_or_resource_policy_binding_count": 0,
+      "new_service_agent_binding_count": 0,
+      "adapter_service_account_policy_binding_count": 0,
+      "adapter_service_account_impersonation_binding_count": 0,
+      "project_custom_role_count": 1,
+      "exact_new_custom_role": "projects/hk-voice-bakeoff-0724-iso/roles/voiceBakeoffControlTransaction",
+      "exact_new_custom_role_stage": "DISABLED",
+      "exact_new_custom_role_permissions": [
+        "datastore.databases.get",
+        "datastore.entities.create",
+        "datastore.entities.get",
+        "datastore.entities.update"
+      ],
+      "unexpected_new_custom_role_count": 0
+    },
+    "preauth_iam_exact_baseline": {
+      "service_account_count": 0,
+      "enabled_service_account_count": 0,
+      "expected_runtime_identity_present": false,
+      "expected_runtime_identity_binding_count": 0,
+      "total_user_managed_key_count": 0,
+      "binding_count": 3,
+      "conditioned_binding_count": 0,
+      "project_custom_role_count": 0,
+      "policy_digest": "7303764d90145e5de842489c30c21aa890bcdff78497ee7cbd3bffd87f121c75",
+      "custom_role_inventory_digest": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    "bootstrap_control_plane_apis_restored_to_disabled": [
+      "cloudresourcemanager.googleapis.com",
+      "iam.googleapis.com",
+      "policytroubleshooter.googleapis.com"
+    ],
+    "service_usage_readback_after_api_disable": "exact_three_services_disabled_with_explicit_control_project_quota"
+  }
+}

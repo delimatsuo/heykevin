@@ -1,0 +1,251 @@
+{
+  "schema_version": 5,
+  "package_kind": "voice_bakeoff_environment_reconciliation_phase_0_5_continuity_amendment",
+  "package_status": "source_only_exact_review_candidate",
+  "source_binding": {
+    "repository": "https://github.com/delimatsuo/heykevin",
+    "worktree": "/Volumes/Extreme Pro/myprojects/Kevin/.worktrees/voice-architecture-bakeoff-plan",
+    "branch": "codex/voice-architecture-bakeoff-plan",
+    "source_sha": "2ed8ea7d1d7f338e84ddf08d5a50a714835e1533",
+    "package_is_authorization": false
+  },
+  "provenance": {
+    "successor_of": {
+      "json_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.json",
+      "json_sha256": "883246c06309b575f5276be2974ab3b34ac9790bf3511c7ac8abacf0133f731d",
+      "schema_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.schema.json",
+      "schema_sha256": "4837d628aaead05bd16e3783cfd722f1741a7704a3980fd5ba2aaf20171f62ad",
+      "guide_path": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v4.md",
+      "guide_sha256": "f3c9d4af70a874248e069416f348ea22d05e5cc88b917edb4e01d2c6fc5d0c75",
+      "test_path": "tests/unit/test_voice_bakeoff_environment_reconciliation_phase_0_5_v4.py",
+      "test_sha256": "f037027d5ca31ac699fc9a551cf4f240e8d6805d9bb81765d28d3a216fd0d47f",
+      "review_outcome": "rejected_for_owner_signable_envelope_generation_preserved_as_source_only_evidence"
+    },
+    "composite_predecessor_digests": {
+      "v2_json_sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f",
+      "v3_json_sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d",
+      "v4_json_sha256": "883246c06309b575f5276be2974ab3b34ac9790bf3511c7ac8abacf0133f731d",
+      "v4_normative_contract_sha256": "35f34b432ed7e255fe0847cdcff9ba5579becd931ae490d1e63bd57cc5968602",
+      "composite_method_table_sha256": "4603e4b83775cc87a8d076da1398c3113a02b758b6a244fe50ed28edc8f64967",
+      "effective_access_contract_sha256": "85d1b6073869eaac280d333868860353f7dc0c814c93be4f886cd05ae13753db"
+    },
+    "v4_p1_and_p2_closures": [
+      "the_verifier_receives_and_authenticates_the_exact_predecessor_receipt",
+      "the_verifier_recomputes_the_private_parameter_allowlist_digest_and_requires_exact_equality",
+      "the_predecessor_receipt_session_ordinal_pass_freshness_cumulative_count_and_allowlist_digest_must_match",
+      "every_final_path_is_placeholder_free_and_every_resolved_value_is_an_exact_allowlist_member",
+      "the_actual_ordered_manifest_must_equal_the_independently_derived_expected_manifest",
+      "request_index_equals_position_request_id_derives_from_position_and_ids_digests_are_unique"
+    ],
+    "composite_rule": {
+      "v2_v3_and_v4_remain_normative_except_where_v5_supersedes": true,
+      "v5_supersedes": [
+        "v4.inventory_session_contract.sequence_rules",
+        "v4.inventory_session_contract.request_manifest_relational_validation",
+        "v4.phase_contract.phase_manifest_coverage_rules",
+        "v4.transition_policy"
+      ],
+      "v5_extends": [
+        "v4.method_validation_contract",
+        "v4.inventory_session_contract",
+        "v4.phase_contract"
+      ],
+      "conflict_precedence": "v5_then_v4_then_v3_then_v2",
+      "composite_is_authorization": false
+    }
+  },
+  "authority": {
+    "authorized_scope": "source_only_phase_0_5_v5_continuity_amendment",
+    "connected_inventory_status": "not_authorized",
+    "mutation_status": "not_authorized",
+    "execution_status": "not_authorized",
+    "task_4_8_status": "sealed",
+    "owner_signable_package_status": "not_generated",
+    "advisory_review_is_owner_authorization": false,
+    "reviewed_contract_is_owner_authorization": false
+  },
+  "normative_contract_binding": {
+    "normative_contract_digest_sha256": "1f737311fda045e06544a7fa94fe51e179f38133f5d4f5d545d3eae15ed55c33",
+    "digest_canonicalization": "RFC8785_JSON_Canonicalization_Scheme",
+    "digest_input": "the_complete_v5_package_without_normative_contract_digest_sha256",
+    "v2_json_sha256": "508b06d75f6f585c513183199074125bc6fc3fdb9987dec8a7deb26e5bc1027f",
+    "v3_json_sha256": "a4ab352779fc6eb72c098622c7c462d5a7767358ed9663c31e53b52108b83b3d",
+    "v4_json_sha256": "883246c06309b575f5276be2974ab3b34ac9790bf3511c7ac8abacf0133f731d",
+    "v5_normative_contract_sha256": "self",
+    "composite_method_table_sha256": "4603e4b83775cc87a8d076da1398c3113a02b758b6a244fe50ed28edc8f64967",
+    "effective_access_contract_sha256": "85d1b6073869eaac280d333868860353f7dc0c814c93be4f886cd05ae13753db",
+    "future_envelope_must_bind_five_predecessor_and_composite_digests_plus_v5_normative_digest": true
+  },
+  "private_parameter_allowlist_contract": {
+    "artifact_class": "restricted_private_custody_not_payload_safe",
+    "repository_storage_allowed": false,
+    "chat_storage_allowed": false,
+    "schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.schema.json#/$defs/private_parameter_allowlist_v5",
+    "canonicalization": "RFC8785_JSON_Canonicalization_Scheme",
+    "digest_algorithm": "sha256(canonical_private_parameter_allowlist)",
+    "required_top_level_fields": [
+      "allowlist_version",
+      "inventory_session_id",
+      "producing_phase",
+      "producing_phase_ordinal",
+      "source_sha",
+      "v5_normative_contract_digest",
+      "project_bindings",
+      "parameters_by_placeholder"
+    ],
+    "exact_placeholder_keys": [
+      "EXACT_TARGET_PROJECT_ID",
+      "EXACT_TARGET_PROJECT_NUMBER",
+      "EXACT_ANCESTOR_FOLDER_NUMBER",
+      "EXACT_ANCESTOR_ORGANIZATION_NUMBER",
+      "EXACT_PROJECT_OR_ANCESTOR_ATTACHMENT_POINT",
+      "EACH_EXACT_ALLOWLISTED_SERVICE_NAME",
+      "EXACT_DETAILED_ASSET_TYPE_ALLOWLIST",
+      "EACH_EXACT_SOURCE_DECLARED_CLOUD_RUN_SERVICE",
+      "EXACT_DATABASE_NAME_RETURNED_BY_ALLOWLISTED_LIST",
+      "EXACT_INSTANCE_NAME_RETURNED_BY_ALLOWLISTED_LIST",
+      "EXACT_DENY_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST",
+      "EXACT_ENUMERATED_SERVICE_ACCOUNT",
+      "EXACT_MATCHED_PREDEFINED_ROLE_NAME",
+      "EXACT_MATCHED_ROLE_ID",
+      "EXACT_PAB_POLICY_NAME_RETURNED_BY_ALLOWLISTED_LIST",
+      "EACH_EXACT_ENUMERATED_CONSTRAINT",
+      "EXACT_OWNER_BOUND_MEMBER_QUERY",
+      "EXACT_OWNER_BOUND_EFFECTIVE_ACCESS_TUPLE",
+      "EACH_EXACT_BOUND_PROJECT_FOLDER_OR_ORGANIZATION_SCOPE"
+    ],
+    "project_binding_fields": [
+      "project_id",
+      "project_number",
+      "query_identity_ref",
+      "local_configuration_digest",
+      "immediate_parent_digest",
+      "ancestry_digest"
+    ],
+    "parameter_entry_fields": [
+      "project_id",
+      "value"
+    ],
+    "effective_access_tuple_fields": [
+      "project_id",
+      "identity_ref",
+      "principal",
+      "fullResourceName",
+      "permission"
+    ],
+    "rules": [
+      "The private artifact contains exact raw values needed to resolve method placeholders; only its digest may enter a checked-in receipt.",
+      "Phase 1 output contains exactly four project bindings and the source-static allowlists.",
+      "Every later output monotonically carries forward prior values and adds only values authenticated by that phase's request receipts.",
+      "Every ordinary placeholder entry is an exact project_id and value pair and resolution requires both fields to match the request target.",
+      "Every effective access tuple binds project_id identity_ref principal fullResourceName and permission.",
+      "Unknown extra keys duplicate canonical entries duplicate project bindings type mismatches or values over V4 resource caps make the artifact invalid.",
+      "The verifier rejects an allowlist unless its digest equals both the authenticated predecessor receipt derived_parameter_allowlist_digest and the current envelope predecessor_parameter_allowlist_digest."
+    ]
+  },
+  "predecessor_receipt_verification_contract": {
+    "phase_one_predecessor": "GENESIS",
+    "later_phase_required_inputs": [
+      "current_phase_envelope",
+      "authenticated_predecessor_phase_receipt",
+      "trusted_predecessor_receipt_public_key",
+      "private_predecessor_parameter_allowlist",
+      "verification_time_ms",
+      "phase_once_ledger_snapshot"
+    ],
+    "required_checks_before_dispatch": [
+      "predecessor_receipt_signature_is_valid_under_the_bound_trusted_key",
+      "sha256(canonical_signed_predecessor_receipt)_equals_current_envelope_predecessor_phase_receipt_digest",
+      "predecessor_receipt_result_is_pass_with_zero_error_codes",
+      "predecessor_receipt_inventory_session_id_equals_current_inventory_session_id",
+      "predecessor_receipt_phase_ordinal_plus_one_equals_current_phase_ordinal",
+      "predecessor_receipt_phase_matches_the_v4_phase_table",
+      "predecessor_receipt_source_and_all_contract_digests_equal_the_current_envelope",
+      "predecessor_receipt_completed_at_ms_is_not_before_issued_at_ms",
+      "verification_time_ms_is_before_predecessor_receipt_expires_at_ms",
+      "predecessor_receipt_cumulative_request_count_equals_current_cumulative_prior_request_count",
+      "private_allowlist_session_phase_ordinal_source_and_contract_bindings_match_the_predecessor_receipt",
+      "sha256(canonical_private_allowlist)_equals_predecessor_receipt_derived_parameter_allowlist_digest",
+      "sha256(canonical_private_allowlist)_equals_current_envelope_predecessor_parameter_allowlist_digest",
+      "the_predecessor_phase_once_ledger_entry_is_present_consumed_and_unique"
+    ],
+    "any_failed_check_action": "inventory_incomplete_abort_before_dispatch_no_fallback"
+  },
+  "manifest_relational_verification_contract": {
+    "required_checks_before_owner_signature_and_again_before_dispatch": [
+      "request_count_equals_manifest_length_and_phase_specific_exact_or_bounded_count",
+      "request_index_equals_zero_based_manifest_position_for_every_entry",
+      "request_id_equals_req_dash_plus_three_digit_zero_padded_position",
+      "request_id_values_are_unique",
+      "canonical_request_digest_values_are_unique",
+      "request_set_digest_equals_sha256_of_the_ordered_canonical_manifest",
+      "actual_ordered_manifest_equals_the_independently_derived_expected_ordered_manifest",
+      "every_method_ref_matches_the_exact_composite_method_table",
+      "every_placeholder_is_replaced_by_a_value_from_the_authenticated_private_predecessor_allowlist_or_the_exact_phase_one_source_binding",
+      "no_left_brace_or_right_brace_remains_in_canonical_path_and_query",
+      "target_project_id_project_number_identity_configuration_and_quota_project_match_the_exact_project_binding",
+      "the_manifest_exactly_satisfies_the_phase_coverage_algorithm"
+    ],
+    "request_id_format": "req-%03d",
+    "unresolved_placeholder_pattern": "\\{[A-Z][A-Z0-9_]*\\}",
+    "any_failed_check_action": "inventory_incomplete_abort_before_owner_signature_or_dispatch_no_fallback"
+  },
+  "phase_coverage_algorithms": {
+    "project_id_binding": {
+      "predecessor_allowlist": "GENESIS",
+      "expected_multiset": "one project_identity_get for each of the four exact source project IDs",
+      "expected_count": 4
+    },
+    "project_number_binding": {
+      "predecessor_allowlist": "authenticated_project_id_binding_output",
+      "expected_multiset": "for each exact predecessor project binding one project_provenance_get one project_ancestry_get and one project_billing_get using its non_null_number",
+      "expected_count": 12
+    },
+    "metadata_discovery": {
+      "predecessor_allowlist": "authenticated_project_number_binding_output",
+      "expected_multiset": "all forty_eight service checks every required project search and every unique bound ancestry scope within cap",
+      "count_rule": "derived_exact_count_between_64_and_96"
+    },
+    "metadata_detail": {
+      "predecessor_allowlist": "authenticated_metadata_discovery_output",
+      "expected_multiset": "every allowlisted discovered Firestore database and RTDB instance plus both source-declared Cloud Run services",
+      "count_rule": "derived_exact_count_between_2_and_32"
+    },
+    "access_control_discovery": {
+      "predecessor_allowlist": "authenticated_metadata_detail_output",
+      "expected_multiset": "every required project ancestor resource and owner-bound-member discovery query within cap",
+      "count_rule": "derived_exact_count_between_4_and_64"
+    },
+    "access_control_detail": {
+      "predecessor_allowlist": "authenticated_access_control_discovery_output",
+      "expected_multiset": "all eighty_eight static tuples and every allowlisted discovered policy role account PAB constraint secret KMS and dynamic tuple within caps",
+      "count_rule": "derived_exact_count_between_88_and_384"
+    },
+    "actual_manifest_equality": "byte_for_byte_equality_after_RFC8785_canonicalization_of_each_ordered_entry",
+    "omission_duplicate_extra_reorder_or_cap_failure": "inventory_incomplete"
+  },
+  "v5_envelope_and_receipt_binding": {
+    "phase_envelope_schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.schema.json#/$defs/phase_envelope_v5",
+    "phase_receipt_schema_ref": "docs/security/voice-bakeoff-environment-reconciliation-phase-0-5-v5.schema.json#/$defs/phase_receipt_v5",
+    "v5_envelope_replaces_v4_digest_field": "v5_normative_contract_digest",
+    "v5_envelope_adds": [
+      "v4_json_digest"
+    ],
+    "v5_receipt_adds": [
+      "v4_json_digest",
+      "derived_parameter_allowlist_digest"
+    ],
+    "v5_receipt_signature_domain": "hey-kevin/voice-bakeoff/environment-inventory/v5/receipt",
+    "v5_envelope_signature_domain": "hey-kevin/voice-bakeoff/environment-inventory/v5/envelope"
+  },
+  "transition_policy": {
+    "environment_recommendation": "create_no_project_retain_all_four_exact_projects_frozen",
+    "governance_status": "undecided",
+    "mixed_staging_control_plane": "separate_environment_debt_no_phase_0_5_remediation",
+    "v5_review_requirement": "exact_hash_staff_security_and_operator_review_with_no_unresolved_p1",
+    "after_v5_review": "generate_but_do_not_execute_one_source_only_owner_signable_project_id_binding_envelope",
+    "connected_read_requirement": "separate_owner_signature_over_that_exact_reviewed_phase_envelope",
+    "incomplete_action": "stop_retain_frozen_no_duplicate_no_fallback",
+    "mutation_execution_and_task_4_8": "remain_sealed_regardless_of_inventory_result"
+  }
+}

@@ -26,5 +26,8 @@ scripts/appstore-screenshots/
 scripts/cpp_ids.json
 scripts/create_custom_product_pages.py
 scripts/update_promo_text.py
-scripts/capture_app_store_screenshots.sh
+# Generated screenshot output only. The capture script itself IS tracked: it and
+# ios/Kevin/Debug/AppStoreScreenshotFixtures.swift are what regenerate these
+# PNGs, and the script previously existed in exactly one throwaway worktree with
+# no copy in git — ignoring it there would have destroyed the only copy.
 marketing/app-store/screenshots/

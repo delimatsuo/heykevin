@@ -32,7 +32,7 @@ from typing import Mapping
 # legitimate source for and therefore does not attempt to enumerate here.
 # Do not add fabricated entries to "cover" those providers.
 #
-# Comprehensive, per-provider production-identity denylisting is a
+# Comprehensive, per-provider production-identity/destination denylisting is a
 # separate mechanism (DeclaredProductionDenylist / ExecutionFirewallResolver
 # in voice_bakeoff_execution_firewall_contracts.py), deliberately not wired
 # in yet — this denylist is, for now, the sole production guard the runner

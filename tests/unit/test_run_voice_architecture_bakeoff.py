@@ -550,7 +550,7 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "09efca12dd862c32f7ac8d527d7c7fd0e53d6164f5977a332ec74dd92a211445"
     ),
     "app.services.voice_bakeoff_credential_broker": (
-        "cf6df51adc68cba36f49e117290d2eacb04f125a1a83ce9b12edb4ff082d772c"
+        "d2a25c0d9d7f57e96f0a80ca72d42c1ef00a129583bd0cd126bc5a97ba70d1ed"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
         "70ea255ad960f11470a25c7f941ecc13abb492e0e4e9533fcd5c823c85e8f231"

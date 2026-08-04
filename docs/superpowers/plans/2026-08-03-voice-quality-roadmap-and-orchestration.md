@@ -100,7 +100,7 @@ Dependencies are strictly ordered except where noted. Each phase states objectiv
 ### Phase 0 — Ground truth, hygiene, and deferred fixes *(fully specified in §6; executable immediately)*
 
 - **Objective:** local/remote sync; a committed, evidence-cited offline-gate status report; accurate docs (two files currently claim the app is pre-launch, which misled this very session); the cheap high-value polish fixes from PR #134's independent review.
-- **Entry:** none. **Loops:** L1 per task, L2 once for the combined branch. **Exit:** all §6 tasks merged; gate report shows every master-plan offline gate green with cited evidence, or failures spawned as L1 fix tasks and closed. **Owner:** G1. **Scale:** ~12–18 dispatches.
+- **Entry:** none. **Loops:** L1 per task, L2 once for the combined branch. **Exit:** all §6 tasks merged; every master-plan offline gate in the report is green with cited evidence, spawned as an L1 fix task and closed, or explicitly recorded as a gap and owner-accepted with reason at the G1 merge gate. **Owner:** G1. **Scale:** ~12–18 dispatches.
 
 ### Phase 1 — Scope decision and caller-UX contract revision
 

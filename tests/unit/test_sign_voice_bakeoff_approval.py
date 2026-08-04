@@ -79,6 +79,46 @@ def test_signature_interoperates_with_the_real_approval_verifier(tmp_path):
     assert not _verify_ed25519(public_key_bytes, other_domain, payload, signature)
 
 
+def test_domain_name_approval_cli_signs_under_the_real_approval_domain(tmp_path, capsys):
+    """Pin the CLI's --domain-name approval path to the real verifier.
+
+    main() maps the symbolic name "approval" to the public APPROVAL_DOMAIN
+    alias (see _DOMAIN_NAME_TO_BYTES in sign_voice_bakeoff_approval.py).
+    This test drives the CLI end to end through that path — a fresh tmp
+    key, --create-key, --domain-name approval — then verifies the
+    resulting signature the exact way
+    test_signature_interoperates_with_the_real_approval_verifier above
+    verifies its own: via _verify_ed25519, against the private
+    _APPROVAL_DOMAIN constant OfflineApprovalVerifier.verify() actually
+    hardcodes, using the same canonicalization sign_payload() uses. It
+    would fail if _DOMAIN_NAME_TO_BYTES["approval"] were ever mapped to
+    bytes other than _APPROVAL_DOMAIN.
+    """
+    key_path = tmp_path / "owner_key.pem"
+    payload_path = tmp_path / "payload.json"
+    payload = {"approval_id": "abc123", "arm": "A"}
+    payload_path.write_text(json.dumps(payload))
+
+    rc = main(
+        [
+            "--key", str(key_path),
+            "--payload", str(payload_path),
+            "--domain-name", "approval",
+            "--create-key",
+        ]
+    )
+
+    assert rc == 0
+    signature = bytes.fromhex(capsys.readouterr().out.strip())
+
+    # Mirrors how the other tests in this file obtain the public half —
+    # load_owner_key() against the same --key path main() just wrote to.
+    private_key = load_owner_key(key_path, create=False)
+    public_key_bytes = private_key.public_key().public_bytes_raw()
+
+    assert _verify_ed25519(public_key_bytes, _APPROVAL_DOMAIN, payload, signature)
+
+
 def test_refuses_to_load_key_whose_permissions_were_loosened(tmp_path):
     key_path = tmp_path / "owner_key.pem"
     load_owner_key(key_path, create=True)

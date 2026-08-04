@@ -10,6 +10,7 @@ Usage:
         --key ~/.config/hey-kevin/bakeoff_owner_key.pem \\
         --payload /path/to/approval_payload.json \\
         --domain-name approval
+    # First run only (no key file yet): add --create-key to mint it
 """
 
 from __future__ import annotations

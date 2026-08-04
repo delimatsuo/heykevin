@@ -2,9 +2,13 @@ import SwiftUI
 
 struct CallHistoryView: View {
     @EnvironmentObject var appState: AppState
-    @State private var calls: [CallRecord] = []
+    @State private var calls: [CallRecord]
     @State private var isLoading = false
     @State private var errorMessage = ""
+
+    init() {
+        _calls = State(initialValue: AppStoreScreenshotFixtures.seededCalls)
+    }
 
     var body: some View {
         NavigationStack {
@@ -26,6 +30,7 @@ struct CallHistoryView: View {
                         }
                     }
                     .onChange(of: appState.ringThroughContacts) { _, newValue in
+                        guard !AppStoreScreenshotFixtures.isEnabled else { return }
                         Task {
                             guard !appState.contractorId.isEmpty else { return }
                             _ = try? await APIClient.shared.patchContractor(
@@ -81,12 +86,19 @@ struct CallHistoryView: View {
                     }
                 }
             }
-            .refreshable { await loadCalls() }
-            .task { await loadCalls() }
+            .refreshable {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                await loadCalls()
+            }
+            .task {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                await loadCalls()
+            }
         }
     }
 
     private func loadCalls() async {
+        guard !AppStoreScreenshotFixtures.isEnabled else { return }
         isLoading = true
         errorMessage = ""
         do {
@@ -244,7 +256,9 @@ struct CallDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             appState.markCallAsRead(call.id)
-            Task { await APIClient.shared.markCallsRead([call.id]) }
+            if !AppStoreScreenshotFixtures.isEnabled {
+                Task { await APIClient.shared.markCallsRead([call.id]) }
+            }
         }
     }
 

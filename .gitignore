@@ -26,3 +26,5 @@ scripts/appstore-screenshots/
 scripts/cpp_ids.json
 scripts/create_custom_product_pages.py
 scripts/update_promo_text.py
+scripts/capture_app_store_screenshots.sh
+marketing/app-store/screenshots/

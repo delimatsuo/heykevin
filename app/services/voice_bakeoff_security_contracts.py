@@ -18,6 +18,10 @@ import cryptography.hazmat.primitives.asymmetric.ed25519
 
 
 _APPROVAL_DOMAIN = b"hey-kevin/voice-bakeoff/approval/v1\x00"
+# Public alias: external signing tooling (scripts/sign_voice_bakeoff_approval.py)
+# must sign under the exact domain bytes the verifier checks — exported for the
+# same reason approval_signature_payload is.
+APPROVAL_DOMAIN = _APPROVAL_DOMAIN
 _APPROVAL_PROVENANCE_DOMAIN = (
     b"hey-kevin/voice-bakeoff/approval-provenance/v1\x00"
 )

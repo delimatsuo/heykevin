@@ -49,7 +49,7 @@ the owner's own signature.
 | `app/services/voice_bakeoff_nonce_ledger.py` | `FileBackedNonceLedger` — a persisted, file-locked, one-use nonce/approval-id/binding admission ledger. Replay of a consumed nonce, approval ID, or `binding_digest:epoch` pair is rejected, even across separate process invocations. |
 | `app/services/voice_bakeoff_credential_broker.py` | `NonproductionCredentialBroker` — resolves a credential grant only when environment-provided nonproduction values match the approval's own digest-pinned references exactly, and the resolved account/region is not on a hardcoded single-entry production denylist (`kevin-491315:us-central1` — this project's own GCP hosting project; see "Scope boundary" below). |
 | `app/services/voice_bakeoff_residue_audit.py` | `audit_residue()` — inspects (never deletes) a destination directory for files or symlinks older than a TTL. Read-only; a human decides what to do with anything it finds. Fails closed: if anything under the destination could not be inspected (e.g. an unreadable subdirectory), that path is reported in `unreadable_paths` and `passed` is `false` — it never silently reports a tree it could not fully walk as clean. |
-| `scripts/sign_voice_bakeoff_approval.py` | The owner's personal signing CLI. Signs a canonical JSON payload with the owner's own Ed25519 key under the real `_APPROVAL_DOMAIN` domain-separation constant from `app/services/voice_bakeoff_security_contracts.py`. |
+| `scripts/sign_voice_bakeoff_approval.py` | The owner's personal signing CLI. Signs a canonical JSON payload with the owner's own Ed25519 key under the approval domain-separation constant (public `APPROVAL_DOMAIN`, aliasing `_APPROVAL_DOMAIN`) from `app/services/voice_bakeoff_security_contracts.py`. |
 | `scripts/request_voice_bakeoff_review.py` | Builds a digest-only review request package (never the raw approval contents) and validates/parses an independent reviewer's response into a `TechnicalReviewReceipt`. **Not a standalone CLI** — it has no `argparse`/`__main__` entry point; it is a small function library (`build_receipt_request`, `parse_review_response`, `reviewer_is_procedurally_separate`) meant to be driven from a Python shell or a short script you write. |
 | `scripts/run_voice_architecture_bakeoff.py` | The runner. Performs real Ed25519 verification (via `OfflineApprovalVerifier`), real nonce-ledger admission, and real credential-broker checks, gated in earliest-boundary-first order — plus a residue audit that runs alongside them but never gates `verdict` (see "`residue_audit` is informational only" below). |
 
@@ -72,10 +72,13 @@ key does not exist yet — but Step 2 below requires `--trust-owner-public-key`
 a `--payload` file that only Step 2 produces. Neither step can go first on
 its own, so start here instead. Break the cycle by running the signing CLI
 once against a throwaway placeholder payload, purely to mint the key file —
-`load_or_create_owner_key()` creates `--key` (if it doesn't already exist,
-mode `0600`) *before* it ever reads `--payload`, so the payload's actual
-content does not matter for this one call. There is no dedicated
-"create-key" flag; this is the real, minimal command that accomplishes it:
+`load_owner_key()` creates `--key` (mode `0600`) *before* it ever reads
+`--payload`, so the payload's actual content does not matter for this one
+call — but only when you pass `--create-key`. That flag now exists and is
+required the first time: without it, a missing key file is a loud error
+instead of silently minting a new identity, so a mistyped `--key` path can
+never mint a throwaway key by accident. This is the real, minimal command
+that accomplishes it:
 
 ```bash
 mkdir -p ~/.config/hey-kevin
@@ -83,16 +86,18 @@ echo '{}' > /tmp/bootstrap_placeholder_payload.json
 python scripts/sign_voice_bakeoff_approval.py \
   --key ~/.config/hey-kevin/bakeoff_owner_key.pem \
   --payload /tmp/bootstrap_placeholder_payload.json \
-  --domain-name approval
+  --domain-name approval \
+  --create-key
 ```
 
 This prints a signature to stdout — discard it; it is not tied to any real
 approval and is not used anywhere. What matters is the key file this
 command leaves behind at `~/.config/hey-kevin/bakeoff_owner_key.pem`. Every
 later invocation of `sign_voice_bakeoff_approval.py` against the same
-`--key` path reuses that same file (`load_or_create_owner_key()` loads an
-existing key rather than regenerating it), so you only do this once, ever,
-per key path.
+`--key` path reuses that same file (`load_owner_key()` loads an existing
+key rather than regenerating it, regardless of whether `--create-key` is
+passed), so you only need `--create-key` this once, ever, per key path —
+every subsequent invocation (including Step 3 below) omits it.
 
 Now derive the matching **public** key hex from that same private key
 file — the value `--trust-owner-public-key` needs below, in Step 2. There is
@@ -234,7 +239,7 @@ byte cannot survive as a process argv element, so free-text domains could
 never reproduce the exact bytes `OfflineApprovalVerifier.verify()` checks
 against. `--domain-name approval` is a symbolic name that maps to the real
 constant internally. This reuses the same key file Step 0 already created
-at `~/.config/hey-kevin/bakeoff_owner_key.pem` — `load_or_create_owner_key()`
+at `~/.config/hey-kevin/bakeoff_owner_key.pem` — `load_owner_key()`
 loads an existing key file rather than regenerating it, so this step signs
 with the same key whose public half you already derived and passed as
 `--trust-owner-public-key` in Step 2. The command prints the hex-encoded

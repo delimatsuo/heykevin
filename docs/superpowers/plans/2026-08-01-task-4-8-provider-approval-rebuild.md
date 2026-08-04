@@ -1,5 +1,7 @@
 # Task 4.8 Provider-Approval Mechanism Rebuild Implementation Plan
 
+> **Superseded detail (2026-08-03):** code examples below reference `load_or_create_owner_key(path)`; that function is now `load_owner_key(path, *, create: bool)` with an explicit `--create-key` CLI flag — see docs/security/task-4-8-provider-approval-mechanism.md.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `scripts/run_voice_architecture_bakeoff.py`'s shape-only preflight and its unconditional `--execute-provider` rejection with a real, solo-owner-executable authorization mechanism — wiring the runner to the already-built (but currently unwired) Ed25519 envelope verification, adding a persisted one-use nonce ledger, a real nonproduction-only credential broker, real production-denylist enforcement, and a real residue audit — so that Task 3.4/4.8 can genuinely be authorized by one person, instead of by nine institutional roles that can never exist.

@@ -547,19 +547,19 @@ _OFFLINE_APPROVED_SOURCE_DIGESTS = {
         "96971e32581823ba659723b4bb2f0a03260c05a67f114c437b4a7d316d0ab9ac"
     ),
     "scripts.request_voice_bakeoff_review": (
-        "2a102679528d82ac46170053cdd76b475bec8984a9ba1b20f7bbff2ad9ccf8e6"
+        "09efca12dd862c32f7ac8d527d7c7fd0e53d6164f5977a332ec74dd92a211445"
     ),
     "app.services.voice_bakeoff_credential_broker": (
-        "d40630fe20fb0a930a59aa8e80a071e466b78725a239e6de74812ea65e6fd2ca"
+        "d2a25c0d9d7f57e96f0a80ca72d42c1ef00a129583bd0cd126bc5a97ba70d1ed"
     ),
     "app.services.voice_bakeoff_nonce_ledger": (
-        "ce23e77690a32725e543c55665e430273b2fde5e28ebfb3705a52f4c86042e45"
+        "70ea255ad960f11470a25c7f941ecc13abb492e0e4e9533fcd5c823c85e8f231"
     ),
     "app.services.voice_bakeoff_residue_audit": (
         "236deb489c68e27aaeec0439d5e411aa50f1d2c7461f17ee4f80214d0441d574"
     ),
     "app.services.voice_bakeoff_security_contracts": (
-        "0f49fcd1dce75d05d205c9349765720e316c0f5955f373d99f64bdc174f3ea12"
+        "f1dc62a157b94127b764c9bec030090ea52bcb2d322d16ac09fef4e28f0596be"
     ),
 }
 _OFFLINE_ALLOWED_IMPORTS = {
@@ -741,6 +741,7 @@ _OFFLINE_ALLOWED_IMPORTS = {
         ("from", "__future__", "annotations", ""),
         ("import", "dataclasses", "", ""),
         ("import", "hashlib", "", ""),
+        ("import", "hmac", "", ""),
         ("from", "typing", "Mapping", ""),
     },
     "app.services.voice_bakeoff_nonce_ledger": {

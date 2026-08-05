@@ -11,6 +11,7 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "test-twilio-number")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "test-user-number")
 
+from app.services.gated_actions import ActionKey
 from app.services.voice_pipeline import VoicePipeline
 
 
@@ -69,3 +70,51 @@ async def test_google_check_availability_distinguishes_provider_failure_from_no_
     result = json.loads(await pipeline._execute_tool("check_availability", {"days_ahead": 5}))
 
     assert result == {"error": "Calendar availability is temporarily unavailable."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name,tool_input,helper,expected",
+    [
+        (
+            "check_availability",
+            {"days_ahead": 5},
+            "app.services.calendar.get_available_slots",
+            {"available_slots": [], "days_checked": 5},
+        ),
+        (
+            "book_appointment",
+            {"title": "Estimate", "start_time": "2026-08-06T09:00:00Z", "end_time": "2026-08-06T10:00:00Z"},
+            "app.services.calendar.book_appointment",
+            {"success": True, "event_id": "event-1"},
+        ),
+    ],
+)
+async def test_google_calendar_budget_covers_token_refresh_round_trips(
+    monkeypatch, tool_name, tool_input, helper, expected
+):
+    """A calendar call that needs the 401-refresh-retry path must not time out.
+
+    That path is three sequential Google round-trips (request -> refresh ->
+    retry), so the old 3s budget could abort the exact recovery this module
+    exists to perform and surface it to the caller as a tool failure.
+    """
+    import asyncio
+
+    async def slow_helper(*_args, **_kwargs):
+        await asyncio.sleep(3.2)
+        return [] if tool_name == "check_availability" else "event-1"
+
+    monkeypatch.setattr(helper, slow_helper)
+    pipeline = _pipeline({
+        "contractor_id": "contractor-1",
+        "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
+        "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "integration_write_status": "approved",
+    })
+
+    result = json.loads(await pipeline._execute_tool(tool_name, tool_input))
+
+    assert result == expected

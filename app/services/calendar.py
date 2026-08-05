@@ -12,14 +12,20 @@ in _with_token_refresh() is the real backstop. Mirrors the refresh/retry
 shape in app/services/jobber.py.
 
 Availability is computed in the contractor's own timezone and business
-hours when those are configured on the contractor document
-(`timezone`, `business_hours_start`, `business_hours_end` — nothing in
-this codebase sets them yet, so today every contractor falls through to
-the UTC 9-5 default, unchanged from before this file supported
-per-contractor configuration). An explicitly-set but malformed value
-(bad IANA zone name, inverted hours) fails closed rather than guessing;
-a value that's simply absent falls back to the default rather than
-breaking availability for every contractor who has never configured it.
+hours (`timezone`, `business_hours_start`, `business_hours_end` on the
+contractor document). This is a deliberate behaviour change: the previous
+implementation generated slots at a hardcoded UTC 9-5 and *labelled* them
+as local time, so a contractor in America/Los_Angeles had callers offered
+"9:00 AM" for what was really 01:00 local. Most contractors do have these
+fields set — `ContractorCreate` has defaulted them since 2026-04-08, and
+device registration (app/api/voip.py) writes the handset's IANA timezone
+on every app launch — so this corrects quoted appointment times rather
+than being the no-op it would be if nothing populated them.
+
+An explicitly-set but malformed value (bad IANA zone name, inverted
+hours) fails closed rather than guessing; a value that's simply absent
+falls back to the UTC 9-5 default rather than breaking availability for
+a contractor who has never configured it.
 
 `zoneinfo.ZoneInfo` needs an IANA timezone database to resolve zone
 names, and Cloud Run's base image doesn't reliably ship a system one —
@@ -232,10 +238,11 @@ async def _with_token_refresh(contractor: dict, call):
 def _calendar_configuration(contractor: dict) -> tuple[ZoneInfo, dtime, dtime]:
     """Resolve the timezone + business hours to compute availability in.
 
-    Falls back to UTC 9-5 when nothing is configured (every contractor
-    today), but fails closed on a value that IS set and doesn't parse —
-    guessing past a garbage timezone risks quoting slots in the wrong
-    hours entirely, which is worse than refusing.
+    Falls back to UTC 9-5 only when nothing is configured, which is rare —
+    see the module docstring for what populates these fields. Fails closed
+    on a value that IS set and doesn't parse: guessing past a garbage
+    timezone risks quoting slots in the wrong hours entirely, which is
+    worse than refusing.
     """
     timezone_name = contractor.get("timezone") or DEFAULT_TIMEZONE
     start_value = contractor.get("business_hours_start") or DEFAULT_BUSINESS_HOURS_START

@@ -35,6 +35,14 @@ logger = get_logger(__name__)
 _SAFE_LOG_METRIC_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 _KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
 
+# Google Calendar tool calls can need three sequential round-trips when the
+# stored access token has expired: the original request (401), a token
+# refresh, then the retry. A 3s budget aborts that recovery and surfaces it
+# to the caller as a tool failure — the exact failure app/services/calendar.py
+# exists to prevent. 8s matches the widest budget already used elsewhere in
+# this module and still bounds how long a caller waits in silence.
+GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS = 8.0
+
 
 def _call_label(call_sid: str) -> str:
     return call_sid[:8] or "unknown"
@@ -1106,7 +1114,7 @@ class VoicePipeline:
                     try:
                         slots = await asyncio.wait_for(
                             gcal_slots(self._contractor_config, days),
-                            timeout=3.0,
+                            timeout=GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
                         )
                     except GoogleCalendarUnavailableError:
                         return json.dumps({"error": "Calendar availability is temporarily unavailable."})
@@ -1125,7 +1133,7 @@ class VoicePipeline:
                             end_time=tool_input.get("end_time", ""),
                             description=tool_input.get("description", ""),
                         ),
-                        timeout=3.0,
+                        timeout=GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
                     )
                     if event_id:
                         return json.dumps({"success": True, "event_id": event_id})

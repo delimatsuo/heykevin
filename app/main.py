@@ -11,7 +11,11 @@ import signal
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings, validate_runtime_safety
+from app.config import (
+    settings,
+    staging_native_live_safety_controls_enabled,
+    validate_runtime_safety,
+)
 from app.middleware.auth import verify_api_token
 from app.utils.logging import setup_logging, get_logger
 from app.webhooks.twilio_incoming import router as twilio_router
@@ -87,12 +91,16 @@ async def admin_page():
 @app.get("/health")
 async def health():
     """Health check with non-secret deploy identity."""
+    staging_live_safety = staging_native_live_safety_controls_enabled()
     return {
         "status": "ok",
         "environment": settings.environment,
         "service": os.getenv("K_SERVICE", ""),
         "revision": os.getenv("K_REVISION", ""),
         "deploy_sha": os.getenv("DEPLOY_SHA", ""),
+        "gemini_live_staging_safety_controls_enabled": staging_live_safety,
+        "gemini_live_model_tools_enabled": not staging_live_safety,
+        "gemini_live_automatic_terminal_actions_enabled": not staging_live_safety,
     }
 
 

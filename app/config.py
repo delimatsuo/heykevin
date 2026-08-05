@@ -128,6 +128,16 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 
+def staging_native_live_safety_controls_enabled() -> bool:
+    """Return whether the staging-only Live safety envelope is active.
+
+    This is intentionally derived from the deployment environment rather than a
+    mutable caller-facing setting.  The first native-Live qualification must
+    not expose model tools or turn model wording into an autonomous hangup.
+    """
+    return (settings.environment or "").strip().lower() == "staging"
+
+
 def decode_transcript_encryption_key(raw: str) -> bytes | None:
     """Return a valid 32-byte transcript key without logging key material."""
     if not raw or not raw.strip():

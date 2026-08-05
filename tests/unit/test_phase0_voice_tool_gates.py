@@ -103,9 +103,9 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
 async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
     created = []
 
-    async def fake_book_appointment(token, *, title, start_time, end_time, description):
+    async def fake_book_appointment(contractor, *, title, start_time, end_time, description):
         created.append({
-            "token": token,
+            "token": contractor.get("google_calendar_access_token"),
             "title": title,
             "start_time": start_time,
             "end_time": end_time,
@@ -176,7 +176,7 @@ async def test_google_calendar_create_error_logging_omits_response_text(monkeypa
 
     with caplog.at_level(logging.ERROR):
         result = await calendar.book_appointment(
-            "gcal-token",
+            {"contractor_id": "c1", "google_calendar_access_token": "gcal-token"},
             title="Jane Private repair",
             start_time="2026-07-01T13:00:00-04:00",
             end_time="2026-07-01T14:00:00-04:00",

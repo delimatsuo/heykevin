@@ -21,6 +21,7 @@ from app.services.urgency import (
     find_urgent_signal,
 )
 from app.services.voice_pipeline import (
+    GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
     _call_label,
     _log_tool_execution_failure,
     _tool_label,
@@ -80,6 +81,14 @@ class GeminiPipeline:
     PING_INTERVAL_SECONDS = 10.0
     PING_TIMEOUT_SECONDS = 5.0
     CLOSE_TIMEOUT_SECONDS = 1.0
+    # Outer backstop around VoicePipeline._execute_tool. Must stay strictly
+    # above the widest per-tool budget inside it, otherwise this generic
+    # timeout pre-empts the tool's own — in particular it would abort the
+    # Google Calendar 401-refresh-retry recovery and make that wider budget
+    # dead code on the Gemini path, which is the primary voice engine.
+    # Individual tools keep their own tighter budgets; this only bounds a
+    # tool that hangs without enforcing its own.
+    TOOL_DISPATCH_TIMEOUT_SECONDS = GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS + 2.0
     MAX_RECONNECT_ATTEMPTS = 1
     MAX_RECONNECT_AUDIO_BUFFER_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
     MAX_AUDIO_BACKLOG_BYTES = 96_000  # 12 seconds of 8 kHz mulaw audio
@@ -1470,7 +1479,7 @@ class GeminiPipeline:
             try:
                 result_str = await asyncio.wait_for(
                     temp_pipeline._execute_tool(tool_name, tool_args),
-                    timeout=5.0,
+                    timeout=self.TOOL_DISPATCH_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
                 result_str = json.dumps({"error": "Tool execution timed out"})

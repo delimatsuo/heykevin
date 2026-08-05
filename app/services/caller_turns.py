@@ -178,6 +178,18 @@ class RetrospectiveCallerTurn:
         }
 
 
+def retrospective_turn_observation(turn: RetrospectiveCallerTurn) -> dict[str, object]:
+    """Expose payload-free retrospective facts without granting live authority."""
+    return {
+        "scope": "retrospective_telemetry_only",
+        "status": turn.status.value,
+        "close_reason": turn.close_reason.value,
+        "epoch": turn.epoch,
+        "turn_id": turn.turn_id,
+        "event_count": turn.event_count,
+    }
+
+
 class CallerTurnAssembler:
     """Assemble bounded retrospective turns from receipt-ordered typed events."""
 

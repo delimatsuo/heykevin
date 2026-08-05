@@ -1,11 +1,15 @@
 """Receptionist call-state memory behavior."""
 
+import copy
+from dataclasses import asdict
 import json
+import pickle
 
 import pytest
 
 from app.services.receptionist_state import (
     AddressNeed,
+    BusinessScope,
     CallerIdentity,
     CallerObservation,
     CallbackConfirmation,
@@ -107,6 +111,37 @@ def test_intake_state_tracks_callback_and_scheduling_intent():
     assert "callback_intent:requested" in state.known_facts
 
 
+def test_intake_state_applies_and_restores_scope_identity_and_address_transitions():
+    state = IntakeState.new(
+        call_sid="CA_test",
+        caller_name="Synthetic Caller",
+        caller_source="synthetic_memory",
+        caller_confidence=0.95,
+    )
+
+    state.apply_caller_observation(
+        CallerObservation(
+            identity_confirmed=False,
+            business_scope=BusinessScope.OUT_OF_SCOPE,
+            business_scope_reason="synthetic unsupported service",
+            address_need=AddressNeed.REQUIRED_NOW,
+        )
+    )
+
+    assert state.caller_identity.confirmed is False
+    assert state.business_scope == BusinessScope.OUT_OF_SCOPE
+    assert state.business_scope_reason == "synthetic unsupported service"
+    assert state.address_need == AddressNeed.REQUIRED_NOW
+    assert state.phase == IntakePhase.UNDERSTAND_REQUEST
+
+    restored = IntakeState.from_dict(state.to_dict())
+    assert restored.caller_identity.confirmed is False
+    assert restored.business_scope == BusinessScope.OUT_OF_SCOPE
+    assert restored.business_scope_reason == "synthetic unsupported service"
+    assert restored.address_need == AddressNeed.REQUIRED_NOW
+    assert restored.side_effects_allowed is False
+
+
 def test_intake_state_tracks_callback_rejection_and_language():
     state = IntakeState.new(call_sid="CA_test", caller_phone="caller-id-ending-8667")
     state.callback_intent = CallbackIntent.REQUESTED
@@ -138,6 +173,61 @@ def test_intake_state_tracks_only_replacement_callback_last_four():
 
     with pytest.raises(ValueError, match="exactly four digits"):
         CallerObservation(callback_phone_last_four="caller-full-phone")
+
+
+@pytest.mark.parametrize(
+    "caller_phone_last_four",
+    ["123", "12345", "12ab", "caller-full-phone"],
+)
+def test_intake_state_restore_rejects_non_last_four_caller_phone(
+    caller_phone_last_four: str,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported["caller_phone_last_four"] = caller_phone_last_four
+
+    with pytest.raises(ValueError, match="exactly four digits"):
+        IntakeState.from_dict(exported)
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+@pytest.mark.parametrize("value", [1234, 0, False, True])
+def test_intake_state_restore_rejects_non_string_phone_last_four(
+    field_name: str,
+    value: object,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field_name] = value
+
+    with pytest.raises(TypeError, match=f"{field_name} must be a string"):
+        IntakeState.from_dict(exported)
+
+
+def test_intake_state_restore_rejects_non_boolean_side_effect_permission():
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported["side_effects_allowed"] = "false"
+
+    with pytest.raises(TypeError, match="side_effects_allowed must be a boolean"):
+        IntakeState.from_dict(exported)
+
+
+@pytest.mark.parametrize("confirmed", ["false", 0, 1, None])
+def test_intake_state_restore_rejects_non_boolean_identity_confirmation(
+    confirmed: object,
+):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported["caller_identity"]["confirmed"] = confirmed
+
+    with pytest.raises(TypeError, match="confirmed must be a boolean"):
+        IntakeState.from_dict(exported)
+
+
+def test_intake_state_restore_preserves_explicit_phase():
+    state = IntakeState.new(call_sid="CA_test")
+    state.phase = IntakePhase.WRAP_UP
+
+    restored = IntakeState.from_dict(state.to_dict())
+
+    assert restored.phase == IntakePhase.WRAP_UP
 
 
 def test_intake_state_records_asked_slots_without_duplicates():
@@ -312,3 +402,380 @@ def test_intake_state_does_not_escalate_explicitly_negated_emergency():
 
     assert state.intent == Intent.SERVICE_REQUEST
     assert state.urgency == Urgency.ROUTINE
+
+
+def _synthetic_full_phone() -> str:
+    return "-".join(("212", "555", "0123"))
+
+
+def _synthetic_slash_phone() -> str:
+    return "/".join(("212", "555", "0123"))
+
+
+def test_state_text_inputs_reject_full_phone_numbers():
+    phone = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        CallerIdentity(name=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerIdentity(source=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerObservation(service_object=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerObservation(business_scope_reason=phone)
+
+
+def test_state_text_inputs_reject_slash_separated_phone_numbers():
+    phone = _synthetic_slash_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        CallerIdentity(name=phone)
+    with pytest.raises(ValueError, match="full phone"):
+        CallerObservation(service_object=phone)
+
+
+@pytest.mark.parametrize("field", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_restore_rejects_full_phone_numbers_in_collections(field: str):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field] = [_synthetic_full_phone()]
+
+    with pytest.raises(ValueError, match="full phone"):
+        IntakeState.from_dict(exported)
+
+
+def test_state_rejects_full_phone_number_when_recording_asked_slot():
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="full phone"):
+        state.mark_slot_asked(_synthetic_full_phone())
+
+
+def test_state_rejects_full_phone_number_in_memory_reference():
+    with pytest.raises(ValueError, match="full phone"):
+        IntakeState.new(
+            call_sid="CA_test",
+            memory_refs_used=(_synthetic_full_phone(),),
+        )
+
+
+@pytest.mark.parametrize("field", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_direct_construction_rejects_scalar_collection(field: str):
+    with pytest.raises(TypeError, match=f"{field} must be a non-string collection"):
+        IntakeState(**{field: "single-value"})
+
+
+@pytest.mark.parametrize("field", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_restore_rejects_scalar_collection(field: str):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field] = "single-value"
+
+    with pytest.raises(TypeError, match=f"{field} must be a non-string collection"):
+        IntakeState.from_dict(exported)
+
+
+def test_state_new_rejects_scalar_memory_references():
+    with pytest.raises(TypeError, match="memory_refs_used must be a non-string collection"):
+        IntakeState.new(call_sid="CA_test", memory_refs_used="single-value")
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+def test_state_direct_construction_rejects_full_phone_last_four(field_name: str):
+    with pytest.raises(ValueError, match="exactly four digits"):
+        IntakeState(**{field_name: _synthetic_full_phone()})
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+@pytest.mark.parametrize("value", [1234, False])
+def test_state_direct_construction_rejects_non_string_phone_last_four(
+    field_name: str,
+    value: object,
+):
+    with pytest.raises(TypeError, match=f"{field_name} must be a string"):
+        IntakeState(**{field_name: value})
+
+
+@pytest.mark.parametrize("field_name", ["caller_phone_last_four", "callback_phone_last_four"])
+def test_state_restore_rejects_full_phone_last_four(field_name: str):
+    exported = IntakeState.new(call_sid="CA_test").to_dict()
+    exported[field_name] = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="exactly four digits"):
+        IntakeState.from_dict(exported)
+
+
+def test_state_last_four_fields_preserve_valid_and_legacy_empty_values():
+    state = IntakeState(
+        caller_phone_last_four="1234",
+        callback_phone_last_four="5678",
+    )
+
+    assert state.to_dict()["caller_phone_last_four"] == "1234"
+    assert state.to_dict()["callback_phone_last_four"] == "5678"
+    assert IntakeState.from_dict({}).caller_phone_last_four == ""
+    assert IntakeState.from_dict({}).callback_phone_last_four == ""
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("call_sid", _synthetic_full_phone()),
+        ("caller_phone_last_four", _synthetic_full_phone()),
+        ("callback_phone_last_four", _synthetic_full_phone()),
+        ("business_scope_reason", _synthetic_full_phone()),
+        ("service_object", _synthetic_full_phone()),
+        ("language", _synthetic_full_phone()),
+    ],
+)
+def test_state_rejects_full_phone_numbers_on_direct_scalar_mutation(
+    field_name: str,
+    value: str,
+):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError):
+        setattr(state, field_name, value)
+
+
+@pytest.mark.parametrize("field_name", ["name", "source"])
+def test_caller_identity_rejects_full_phone_numbers_on_direct_mutation(field_name: str):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="full phone"):
+        setattr(state.caller_identity, field_name, _synthetic_full_phone())
+
+
+@pytest.mark.parametrize("field_name", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_rejects_full_phone_numbers_on_direct_collection_assignment(
+    field_name: str,
+):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="full phone"):
+        setattr(state, field_name, [_synthetic_full_phone()])
+
+
+@pytest.mark.parametrize("field_name", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_rejects_full_phone_numbers_on_direct_collection_mutation(
+    field_name: str,
+):
+    state = IntakeState.new(call_sid="CA_test")
+    collection = getattr(state, field_name)
+
+    with pytest.raises(ValueError, match="full phone"):
+        if field_name == "known_facts":
+            collection.append(_synthetic_full_phone())
+        else:
+            collection.add(_synthetic_full_phone())
+
+
+def test_known_facts_rejects_every_text_ingress_mutator_atomically():
+    state = IntakeState(known_facts=["service_object:faucet"])
+    facts = state.known_facts
+    phone = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        facts.append(phone)
+    with pytest.raises(ValueError, match="full phone"):
+        facts.extend([phone])
+    with pytest.raises(ValueError, match="full phone"):
+        facts.insert(0, phone)
+    with pytest.raises(ValueError, match="full phone"):
+        facts[0:0] = [phone]
+    with pytest.raises(ValueError, match="full phone"):
+        facts += [phone]
+
+    assert facts == ["service_object:faucet"]
+
+
+@pytest.mark.parametrize("field_name", ["asked_slots", "memory_refs_used"])
+def test_text_sets_reject_every_ingress_mutator_atomically(field_name: str):
+    state = IntakeState(**{field_name: {"existing-value"}})
+    values = getattr(state, field_name)
+    phone = _synthetic_full_phone()
+
+    with pytest.raises(ValueError, match="full phone"):
+        values.add(phone)
+    with pytest.raises(ValueError, match="full phone"):
+        values.update({phone})
+    with pytest.raises(ValueError, match="full phone"):
+        values.__ior__({phone})
+    with pytest.raises(ValueError, match="full phone"):
+        values.__ixor__({phone})
+
+    assert values == {"existing-value"}
+
+
+@pytest.mark.parametrize("field_name", ["known_facts", "asked_slots", "memory_refs_used"])
+def test_state_rejects_scalar_collection_assignment_after_construction(field_name: str):
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(TypeError, match=f"{field_name} must be a non-string collection"):
+        setattr(state, field_name, "single-value")
+
+
+def test_post_construction_validation_preserves_normalized_state_values():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.service_object = " faucet "
+    state.caller_identity.name = " Synthetic Caller "
+    state.caller_identity.source = " fixture "
+
+    assert state.service_object == "faucet"
+    assert state.caller_identity.name == "Synthetic Caller"
+    assert state.caller_identity.source == "fixture"
+
+
+def test_caller_identity_rejects_invalid_confidence_on_direct_mutation():
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(ValueError, match="between zero and one"):
+        state.caller_identity.confidence = 1.1
+
+
+def test_state_requires_typed_caller_identity_replacement():
+    state = IntakeState.new(call_sid="CA_test")
+
+    with pytest.raises(TypeError, match="caller_identity must be a CallerIdentity"):
+        state.caller_identity = {"name": "Synthetic Caller"}
+
+    state.caller_identity = CallerIdentity(name="Synthetic Caller")
+    assert state.caller_identity.name == "Synthetic Caller"
+
+
+def test_state_preserves_valid_direct_collection_updates():
+    state = IntakeState.new(call_sid="CA_test")
+
+    state.known_facts = ["job_complexity:existing fixture"]
+    state.known_facts.append("urgency:routine")
+    state.asked_slots.add("service_action")
+    state.memory_refs_used.add("fixture-memory-ref")
+
+    assert state.known_facts == ["job_complexity:existing fixture", "urgency:routine"]
+    assert state.asked_slots == {"service_action"}
+    assert state.memory_refs_used == {"fixture-memory-ref"}
+
+
+def test_state_validated_collections_support_deepcopy():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+
+    restored = copy.deepcopy(state)
+
+    assert restored.to_dict() == state.to_dict()
+    assert restored.known_facts is not state.known_facts
+    assert restored.asked_slots is not state.asked_slots
+    assert restored.memory_refs_used is not state.memory_refs_used
+    with pytest.raises(ValueError, match="full phone"):
+        restored.known_facts.append(_synthetic_full_phone())
+
+
+def test_state_validated_collections_support_pickle_round_trip():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+
+    restored = pickle.loads(pickle.dumps(state))
+
+    assert restored.to_dict() == state.to_dict()
+    with pytest.raises(ValueError, match="full phone"):
+        restored.asked_slots.add(_synthetic_full_phone())
+
+
+def test_state_validated_collections_support_dataclass_conversion():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+
+    exported = asdict(state)
+
+    assert exported["known_facts"] == ["service_object:faucet"]
+    assert exported["asked_slots"] == {"service_action"}
+    assert exported["memory_refs_used"] == {"fixture-memory-ref"}
+
+
+def test_augmented_collection_assignment_preserves_existing_aliases():
+    state = IntakeState(
+        known_facts=["service_object:faucet"],
+        asked_slots={"service_action"},
+        memory_refs_used={"fixture-memory-ref"},
+    )
+    known_facts = state.known_facts
+    asked_slots = state.asked_slots
+    memory_refs_used = state.memory_refs_used
+
+    state.known_facts += ["urgency:routine"]
+    state.asked_slots |= {"callback_intent"}
+    state.memory_refs_used ^= {"fixture-memory-ref", "replacement-memory-ref"}
+
+    assert state.known_facts is known_facts
+    assert state.asked_slots is asked_slots
+    assert state.memory_refs_used is memory_refs_used
+    assert known_facts == ["service_object:faucet", "urgency:routine"]
+    assert asked_slots == {"service_action", "callback_intent"}
+    assert memory_refs_used == {"replacement-memory-ref"}
+
+
+@pytest.mark.parametrize("invalid_value", ["false", 0, 1, None])
+def test_caller_identity_requires_boolean_confirmed_assignment(invalid_value: object):
+    identity = CallerIdentity(confirmed=False)
+
+    with pytest.raises(TypeError, match="confirmed must be a boolean"):
+        identity.confirmed = invalid_value
+
+    assert identity.confirmed is False
+    with pytest.raises(TypeError, match="confirmed must be a boolean"):
+        CallerIdentity(confirmed=invalid_value)
+
+
+@pytest.mark.parametrize("invalid_value", ["false", 0, 1, None])
+def test_state_requires_boolean_side_effect_assignment(invalid_value: object):
+    state = IntakeState(side_effects_allowed=False)
+
+    with pytest.raises(TypeError, match="side_effects_allowed must be a boolean"):
+        state.side_effects_allowed = invalid_value
+
+    assert state.side_effects_allowed is False
+    with pytest.raises(TypeError, match="side_effects_allowed must be a boolean"):
+        IntakeState(side_effects_allowed=invalid_value)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "valid_value"),
+    [
+        ("phase", IntakePhase.GREETING),
+        ("business_scope", BusinessScope.UNCLEAR),
+        ("intent", Intent.UNKNOWN),
+        ("service_action", ServiceAction.UNKNOWN),
+        ("urgency", Urgency.UNKNOWN),
+        ("callback_intent", CallbackIntent.NONE),
+        ("callback_confirmation", CallbackConfirmation.UNKNOWN),
+        ("address_need", AddressNeed.NONE),
+    ],
+)
+def test_state_requires_typed_enum_assignment(field_name: str, valid_value: object):
+    state = IntakeState()
+    original_value = getattr(state, field_name)
+
+    for invalid_value in (valid_value.value, None, 0):
+        with pytest.raises(
+            TypeError,
+            match=f"{field_name} must be a {type(valid_value).__name__}",
+        ):
+            setattr(state, field_name, invalid_value)
+        assert getattr(state, field_name) is original_value
+
+        with pytest.raises(
+            TypeError,
+            match=f"{field_name} must be a {type(valid_value).__name__}",
+        ):
+            IntakeState(**{field_name: invalid_value})
+
+    setattr(state, field_name, valid_value)
+    assert getattr(state, field_name) is valid_value

@@ -12,13 +12,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import os
 import socket
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import pytest
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "test-number")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
+os.environ.setdefault("USER_PHONE", "test-user-number")
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +271,97 @@ def test_transcript_short_key_rejected(monkeypatch):
     monkeypatch.setattr(_settings, "transcript_encryption_key", short, raising=False)
     monkeypatch.setenv("TRANSCRIPT_ENCRYPTION_KEY", short)
     assert calls._encrypt_transcript("data") is None
+
+
+def test_protected_environment_refuses_plaintext_transcript_fallback(monkeypatch):
+    from app.config import settings as _settings
+    from app.db import calls
+
+    monkeypatch.setattr(_settings, "environment", "staging")
+    monkeypatch.setattr(_settings, "transcript_encryption_key", "", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_ENCRYPTION_KEY", raising=False)
+
+    with pytest.raises(calls.TranscriptEncryptionUnavailableError):
+        calls._maybe_encrypt_call_data({"transcript": "private transcript"})
+
+
+def test_development_preserves_legacy_plaintext_fallback(monkeypatch):
+    from app.config import settings as _settings
+    from app.db import calls
+
+    monkeypatch.setattr(_settings, "environment", "development")
+    monkeypatch.setattr(_settings, "transcript_encryption_key", "", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_ENCRYPTION_KEY", raising=False)
+    raw = {"transcript": "local development transcript"}
+
+    assert calls._maybe_encrypt_call_data(raw) == raw
+
+
+def test_protected_environment_rejects_unknown_transcript_shape(monkeypatch):
+    from app.config import settings as _settings
+    from app.db import calls
+
+    monkeypatch.setattr(_settings, "environment", "production")
+    unknown = {"transcript": {"raw": "unexpected transcript shape"}}
+
+    with pytest.raises(calls.TranscriptEncryptionUnavailableError):
+        calls._maybe_encrypt_call_data(unknown)
+
+    malformed_encrypted = {
+        "transcript": {
+            "version": 1,
+            "ciphertext": "not-valid-base64",
+            "nonce": "not-valid-base64",
+        }
+    }
+    with pytest.raises(calls.TranscriptEncryptionUnavailableError):
+        calls._maybe_encrypt_call_data(malformed_encrypted)
+
+    encrypted = {
+        "transcript": {
+            "version": 1,
+            "ciphertext": base64.b64encode(b"c" * 16).decode("ascii"),
+            "nonce": base64.b64encode(b"n" * 12).decode("ascii"),
+        }
+    }
+    assert calls._maybe_encrypt_call_data(encrypted) == encrypted
+    assert calls._maybe_encrypt_call_data({"transcript": ""}) == {"transcript": ""}
+
+
+@pytest.mark.asyncio
+async def test_protected_save_never_writes_plaintext_when_encryption_unavailable(
+    monkeypatch,
+    caplog,
+):
+    from app.config import settings as _settings
+    from app.db import calls
+
+    writes = []
+
+    class FakeDocument:
+        def set(self, data, merge=False):
+            writes.append((data, merge))
+
+    class FakeCollection:
+        def document(self, _document_id):
+            return FakeDocument()
+
+    class FakeDatabase:
+        def collection(self, _collection_name):
+            return FakeCollection()
+
+    monkeypatch.setattr(_settings, "environment", "production")
+    monkeypatch.setattr(_settings, "transcript_encryption_key", "", raising=False)
+    monkeypatch.delenv("TRANSCRIPT_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setattr(calls, "get_firestore_client", lambda: FakeDatabase())
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(calls.TranscriptEncryptionUnavailableError):
+            await calls.save_call("CA_redacted", {"transcript": "private transcript"})
+
+    assert writes == []
+    assert "exception_type=TranscriptEncryptionUnavailableError" in caplog.text
+    assert "private transcript" not in caplog.text
 
 
 def test_transcript_decrypt_with_wrong_key_returns_empty(monkeypatch):

@@ -1,9 +1,13 @@
 # Typed Receptionist Observation Qualification Plan
 
-> **Status:** Revised after panel review. This plan authorizes documentation,
-> offline contracts, synthetic fixtures, and mocked-provider tests only. It does
-> not authorize provider execution, real caller data, a runtime worker, live
-> pipeline wiring, staging, production, deployment, or changes to PR #76.
+> **Status:** Rebaselined on 2026-07-19 at current `main`
+> `218822f2a2d1fa06d285de12d1ebeaecd26f6461`. The plan file at `b9a0cf3` is
+> byte-identical to the file on that baseline, although that historical commit is
+> not itself an ancestor of `main`; its Gate 0 artifacts already exist. This
+> revision authorizes documentation, SHA-bound offline audits,
+> synthetic fixtures, and mocked-provider tests only. It does not authorize
+> provider execution, real caller data, a runtime worker, live pipeline wiring,
+> staging, production, deployment, or changes to PR #76.
 
 **Goal:** Determine whether Hey Kevin can reliably assemble a retrospective caller
 turn from Gemini Live events and extract a validated, multilingual
@@ -43,6 +47,32 @@ The merged controller rules remain non-negotiable:
 3. Schema-conformant model output remains untrusted until semantic validation.
 4. Missing, ambiguous, malformed, late, or rejected input causes no state change.
 5. Offline or retrospective evidence cannot be labeled as live behavior evidence.
+
+### 1.1 Current-main rebaseline
+
+The original Task 0A-0C creation sequence is historical. At immutable baseline
+`218822f2a2d1fa06d285de12d1ebeaecd26f6461`, the following artifacts already
+exist and must be audited rather than recreated:
+
+| Plan requirement | Existing artifact and test | Rebaseline result and known gap |
+| --- | --- | --- |
+| Provider-neutral retrospective assembly | `app/services/caller_turns.py`, `tests/unit/test_caller_turns.py`, `tests/fixtures/caller_turn_events/permutations.json` | focused synthetic-permutation coverage passed; no demonstrated offline contract gap |
+| Gemini event decoding and aggregate evaluator | `app/services/gemini_turn_events.py`, `scripts/evaluate_caller_turn_assembly.py`, associated unit tests | payload-free evaluator passed with exact fixture and source digests; no demonstrated offline contract gap |
+| Dry-run-first qualification command | `scripts/qualify_gemini_caller_turn_assembly.py`, manifest, qualification document, and unit tests | command and manifest exist with dry-run-first bounds; provider execution remains unreviewed and unauthorized, not an offline-code gap |
+| Live-path isolation | `app/services/gemini_pipeline.py`, `app/services/voice_pipeline.py` | static search found no Gate 0 artifact import or wiring; no demonstrated live-coupling gap |
+
+The rebaseline ran 95 focused Gate 0 tests and 737 full unit tests, with Ruff and
+Bandit passing on the Gate 0 source set. The synthetic evaluator passed with its
+source and fixture digests pinned, while retaining every provider, caller-data,
+staging, production, and release authorization field as `false`. Targeted privacy
+scans found only synthetic boundary data and fixed hashes, not credentials or caller
+data.
+
+The Gate 0A deliverable is an exact-SHA audit matrix. It must identify each
+requirement, the existing implementation and test, any demonstrated gap, and the
+expected offline evidence. Only a demonstrated gap may authorize a new offline
+test or implementation ticket. Re-running the historical creation tasks is not
+authorized.
 
 ## 2. Gate 0: Establish the Input Contract First
 
@@ -180,6 +210,20 @@ Record an ADR that states:
 4. that this surface cannot provide same-turn control;
 5. which future pre-response control surfaces remain candidates;
 6. that no shadow/runtime plan exists until Gate 0 receives a go decision.
+
+### 2.6 Rebaseline evidence separation
+
+Gate 0A may prove deterministic offline contract coverage only. Its evaluator must
+continue to report `turn_assembly_validated: false`,
+`provider_execution_authorized: false`, `real_caller_data_authorized: false`,
+`staging_authorized: false`, and `release_authorized: false`. A synthetic fixture
+pass cannot establish Gemini event ordering, provider behavior, caller-heard
+latency, same-turn control, or a go decision for Gate 0B.
+
+Gate 0B is the separately approved empirical provider qualification. It is the
+only gate that can evaluate the pre-registered ordering and lifecycle thresholds,
+and it still cannot establish caller experience or active control without later
+Twilio/media-egress evidence.
 
 ## 3. Evidence Taxonomy
 
@@ -444,9 +488,9 @@ evidence. This plan document does not grant it.
 Each task starts with a focused failing test, records RED, implements the minimum
 change, records GREEN, runs Ruff on touched Python, and creates a scoped commit.
 
-### Task 0A: Add the provider-neutral turn assembly contract
+### Task 0A: Audit the provider-neutral turn assembly contract
 
-**Create:**
+**Existing artifacts at the rebaseline SHA:**
 
 - `app/services/caller_turns.py`
 - `tests/unit/test_caller_turns.py`
@@ -456,12 +500,14 @@ change, records GREEN, runs Ruff on touched Python, and creates a scoped commit.
 classification, bounds, normalization, duplicate/stale rejection, resource caps,
 deterministic serialization, and teardown with no pending timers.
 
-**Implementation:** immutable event/turn types and pure assembler. Do not import it
-from a live pipeline.
+**Gap-only policy:** record the requirement-to-test matrix first. Do not modify the
+immutable event/turn types or pure assembler unless the matrix identifies a missing
+permutation, bound, lifecycle case, or isolation regression. It must remain absent
+from live pipelines.
 
-### Task 0B: Add the Gemini event adapter and Gate 0 evaluator
+### Task 0B: Audit the Gemini event adapter and Gate 0 evaluator
 
-**Create:**
+**Existing artifacts at the rebaseline SHA:**
 
 - `app/services/gemini_turn_events.py`
 - `scripts/evaluate_caller_turn_assembly.py`
@@ -473,12 +519,13 @@ from a live pipeline.
 order, no raw payload in reports, evidence taxonomy, fixture digest, exact model/SHA,
 and no live import.
 
-**Implementation:** pure raw-message adapter, local evaluator, and draft ADR. The
-default command is fixture-only and performs zero provider calls.
+**Gap-only policy:** verify the raw-message adapter, local evaluator, and ADR
+against the matrix. The default evaluator remains fixture-only and performs zero
+provider calls. Any new change requires a demonstrated offline gap.
 
-### Task 0C: Add a dry-run-first Live qualification command
+### Task 0C: Audit the dry-run-first Live qualification command
 
-**Create:**
+**Existing artifacts at the rebaseline SHA:**
 
 - `scripts/qualify_gemini_caller_turn_assembly.py`
 - `tests/unit/test_qualify_gemini_caller_turn_assembly.py`
@@ -541,22 +588,31 @@ the runner cannot silently substitute defaults.
   only;
 - a partial or interrupted run is nonauthorizing and cannot be promoted to a pass.
 
-**Implementation:** a mocked-testable injected WebSocket transport and an in-memory
-reducer around Tasks 0A-0B. The executable path remains unused until Gate 0B receives
-separate approval naming the exact pre-registration block.
+**Gap-only policy:** verify the mocked-testable injected WebSocket transport and
+in-memory reducer against the matrix. The current `--execute` path is deliberately
+hard-disabled and must continue to report `execution_blocked`; approval alone cannot
+make it runnable. Gate 0B requires a separately reviewed successor plan and
+implementation to merge before any execution approval can bind that successor's
+pre-registration block.
 
 ### Gate 0A: Offline review
 
-Stop after Tasks 0A-0C. Require focused/full unit tests, Ruff, Bandit, secret/PII
-scan, event-fixture provenance, no pipeline diff, and a panel review. No provider
-call is authorized.
+Stop after the SHA-bound Task 0A-0C audit. Require focused/full unit tests, Ruff,
+Bandit, secret/PII scan, event-fixture provenance, no pipeline diff, and a panel
+review. Record the evaluator output as offline synthetic evidence only; a `status`
+of `pass` cannot override the false evidence-taxonomy fields. No provider call is
+authorized.
 
-### Gate 0B: Synthetic Live empirical approval
+### Gate 0B: Reserved successor empirical qualification
 
-After separate approval naming the exact model, API version, endpoint, project,
-credential reference, manifest digest, attempt cap, wall-clock cap, timeout, and
-cost cap plus the canonical Live setup digest and runner/evaluator SHA, run the
-bounded purpose-recorded audio matrix. Put the aggregate redacted evidence and
+Gate 0B cannot use the current qualification command. Its provider path is
+deliberately hard-disabled. First, a separately reviewed successor plan and
+implementation must merge from fresh `main`, preserving no live-pipeline wiring and
+binding its own immutable source SHA. Only then may a separate execution approval
+name the exact model, API version, endpoint, non-production project, credential
+reference, manifest digest, attempt cap, wall-clock cap, timeout, cost cap, canonical
+Live setup digest, and successor runner/evaluator SHA. That successor may then run
+the bounded purpose-recorded audio matrix. Put aggregate redacted evidence and the
 finalized go/no-go ADR on a separate evidence branch and PR from current `main`.
 Tasks 1-4 remain prohibited until that evidence PR receives staff/security review,
 passes CI, and merges. If any pre-registered value drifts or Gate 0 fails, stop this
@@ -674,15 +730,19 @@ or caller-experience improvement.
 
 ## 9. PR Ownership and Order
 
-1. This branch contains the reviewed plan only.
-2. After the plan merges, Tasks 0A-0C use a fresh branch from current `origin/main`.
-3. Merge the Tasks 0A-0C implementation PR before any Gate 0B provider execution.
-4. If separately approved, run Gate 0B from that exact merged implementation SHA.
-   Put only aggregate redacted evidence and the finalized ADR on a new evidence PR
-   from current `main`.
-5. Tasks 1-4 remain prohibited until the Gate 0B evidence/ADR PR passes review and
-   CI and merges with a go decision. Then use a new fresh-main branch.
-6. Any worker/runtime implementation requires a new reviewed plan and new branch.
+1. This plan and the original Gate 0A-0C artifacts are already present on baseline
+   `218822f`. Begin with the SHA-bound audit matrix, not a historical creation PR.
+2. If the audit identifies a gap, create one new fresh-main branch containing only
+   the documented offline gap closure and rerun Gate 0A. If no gap exists, create
+   no implementation PR.
+3. Gate 0B cannot run from the current hard-disabled command. Only after a reviewed
+   successor plan and implementation merge from fresh `main` may a separate explicit
+   authorization bind that successor's exact source SHA and preregistration. Put only
+   aggregate redacted evidence and the finalized ADR on a new evidence PR from
+   current `main`.
+4. Tasks 1-4 remain prohibited until the Gate 0B evidence/ADR PR passes review and
+   CI and records a go decision. Then use a new fresh-main branch.
+5. Any worker/runtime implementation requires a new reviewed plan and new branch.
 
 Each successor starts from fresh `main` after its predecessor merges. Before every
 PR, record the exact base and head SHA. Use that immutable base for isolation checks,

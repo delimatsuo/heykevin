@@ -11,7 +11,16 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+.playwright-mcp/
+gha-creds-*.json
 .worktrees/
+# Claude Code's built-in worktree tool uses this path instead of .worktrees/.
+# Scoped to the subdirectory on purpose: .claude/deploy-config.yaml is tracked.
+.claude/worktrees/
+# Local-only: CI installs with `pip install -e ".[dev]"` and never reads this
+# lockfile, so committing it would imply a reproducibility guarantee CI doesn't
+# enforce. Pinning CI installs is a deliberate workflow change, not this file.
+uv.lock
 .DS_Store
 HANDOFF*.md
 HANDOFF-*.md

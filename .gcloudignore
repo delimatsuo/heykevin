@@ -1,0 +1,21 @@
+# Cloud Run builds need only the files consumed by Dockerfile.
+**
+
+!Dockerfile
+!pyproject.toml
+!.dockerignore
+!app/
+!app/**
+
+# Never upload credentials, local secrets, or interpreter artifacts.
+gha-creds-*.json
+**/gha-creds-*.json
+**/.env
+**/.env.*
+**/*.p8
+**/*.pem
+**/*.key
+**/*.p12
+**/__pycache__/**
+**/*.pyc
+**/*.pyo

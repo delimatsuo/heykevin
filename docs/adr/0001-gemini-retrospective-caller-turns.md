@@ -96,6 +96,7 @@ them:
 ## References
 
 - `docs/superpowers/plans/2026-07-14-typed-receptionist-observation-qualification.md`
+- [ADR 0002: Voice Architecture Bakeoff](0002-voice-architecture-bakeoff.md)
 - Gemini Live API: <https://ai.google.dev/api/live>
 - Gemini Live capabilities: <https://ai.google.dev/gemini-api/docs/live-api/capabilities>
 - Gemini Live tools: <https://ai.google.dev/gemini-api/docs/live-api/tools>

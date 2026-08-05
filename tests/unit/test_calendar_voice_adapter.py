@@ -118,3 +118,19 @@ async def test_google_calendar_budget_covers_token_refresh_round_trips(
     result = json.loads(await pipeline._execute_tool(tool_name, tool_input))
 
     assert result == expected
+
+
+def test_gemini_tool_dispatch_budget_exceeds_calendar_tool_budget():
+    """GeminiPipeline's outer tool budget must not cap the calendar budget.
+
+    GeminiPipeline delegates to VoicePipeline._execute_tool inside its own
+    asyncio.wait_for. Gemini is the primary voice engine, so if that outer
+    budget is the smaller of the two it wins, and the Google Calendar
+    401-refresh-retry recovery gets aborted with a generic "Tool execution
+    timed out" before the calendar path's own budget is ever reached —
+    making the wider inner budget dead code on the path that actually runs.
+    """
+    from app.services.gemini_pipeline import GeminiPipeline
+    from app.services.voice_pipeline import GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS
+
+    assert GeminiPipeline.TOOL_DISPATCH_TIMEOUT_SECONDS > GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS

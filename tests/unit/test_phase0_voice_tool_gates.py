@@ -103,7 +103,7 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
 async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
     created = []
 
-    async def fake_book_appointment(contractor, *, title, start_time, end_time, description):
+    async def fake_book_appointment(contractor, *, title, start_time, end_time, description, call_sid=""):
         created.append({
             "token": contractor.get("google_calendar_access_token"),
             "title": title,

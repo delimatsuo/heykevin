@@ -35,6 +35,7 @@ the `tzdata` PyPI package bundles it so this doesn't depend on the host.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import time
 from datetime import datetime, time as dtime, timedelta, timezone
@@ -373,17 +374,69 @@ async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dic
     return available[:MAX_RETURNED_SLOTS]
 
 
+def _deterministic_event_id(
+    contractor_id: str,
+    call_sid: str,
+    title: str,
+    start_time: str,
+    end_time: str,
+) -> str:
+    """Derive a stable Google event id for one intended appointment.
+
+    Keyed on the appointment's content, not just the call: the voice gate's
+    own idempotency key is `f"{call_sid}:{action}"`, constant for a whole
+    call, so deriving the id from that alone would make a caller's second
+    genuine booking collide with their first and vanish as a "duplicate".
+
+    Google requires base32hex (digits 0-9 and lowercase a-v) and a length
+    between 5 and 1024 characters.
+    """
+    seed = "|".join([contractor_id, call_sid, title, start_time, end_time]).encode()
+    digest = hashlib.sha256(seed).digest()
+    return base64.b32hexencode(digest).decode().lower().rstrip("=")[:32]
+
+
+def _is_duplicate_conflict(resp) -> bool:
+    """True only for Google's duplicate-identifier 409.
+
+    A 409 can also mean a genuine scheduling conflict, which must stay a
+    failure — laundering that into success would report a booking that
+    was never made.
+    """
+    if resp.status_code != 409:
+        return False
+    try:
+        errors = resp.json().get("error", {}).get("errors", [])
+    except Exception:
+        return False
+    return any(
+        isinstance(item, dict) and item.get("reason") == "duplicate" for item in errors
+    )
+
+
 async def book_appointment(
     contractor: dict,
     title: str,
     start_time: str,
     end_time: str,
     description: str = "",
+    call_sid: str = "",
 ) -> str | None:
     """Create a Google Calendar event. Returns event ID or None on failure.
 
     `contractor` is the contractor's config dict (see get_available_slots).
     start_time / end_time should be ISO 8601 strings.
+
+    When `call_sid` is supplied we send a deterministic event id so Google
+    enforces uniqueness per calendar: a retried tool call answers 409
+    /"duplicate" and resolves to the existing appointment instead of
+    double-booking the contractor. Nothing else in this codebase persists
+    a durable booking claim — `check_gated_action` only asserts that an
+    idempotency key is non-empty, it never compares one.
+
+    Google notes it "cannot guarantee that ID collisions will be detected
+    at event creation time", so treat this as strong best-effort
+    protection rather than an absolute guarantee.
     """
     body = {
         "summary": title,
@@ -391,6 +444,13 @@ async def book_appointment(
         "start": {"dateTime": start_time},
         "end": {"dateTime": end_time},
     }
+
+    event_id = ""
+    if call_sid:
+        event_id = _deterministic_event_id(
+            contractor.get("contractor_id", ""), call_sid, title, start_time, end_time
+        )
+        body["id"] = event_id
 
     async def _call(token: str):
         async with httpx.AsyncClient() as client:
@@ -410,8 +470,17 @@ async def book_appointment(
         return None
 
     if resp.status_code in (200, 201):
-        event_id = resp.json().get("id", "")
-        logger.info(f"Google Calendar event created: {event_id}")
+        created_id = resp.json().get("id", "")
+        logger.info(f"Google Calendar event created: {created_id}")
+        return created_id
+
+    if _is_duplicate_conflict(resp):
+        # Our own earlier insert already created this appointment. Reporting
+        # failure here would have Kevin apologise for a booking that is in
+        # fact on the calendar.
+        logger.info(
+            f"Google Calendar event already exists, treating as booked: {event_id}"
+        )
         return event_id
 
     logger.error(

@@ -846,7 +846,7 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
-    assert generation_config["max_output_tokens"] == 128
+    assert generation_config["max_output_tokens"] == 192
     await pipeline.stop()
 
 
@@ -1014,7 +1014,9 @@ async def test_gemini_audio_queue_preserves_audio_until_byte_budget_is_reached(
 
 
 @pytest.mark.asyncio
-async def test_gemini_second_audio_backlog_overflow_ends_call_without_retry():
+async def test_gemini_nonstaging_second_audio_backlog_overflow_ends_call_without_retry(
+    monkeypatch,
+):
     call_completed = asyncio.Event()
 
     async def noop(_arg1, _arg2=None):
@@ -1023,6 +1025,10 @@ async def test_gemini_second_audio_backlog_overflow_ends_call_without_retry():
     async def on_call_complete():
         call_completed.set()
 
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: False,
+    )
     pipeline = GeminiPipeline(
         on_audio_out=noop,
         on_transcript=noop,
@@ -1043,6 +1049,48 @@ async def test_gemini_second_audio_backlog_overflow_ends_call_without_retry():
 
     assert call_completed.is_set()
     assert websocket.sent_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_staging_second_audio_backlog_overflow_does_not_end_call(
+    monkeypatch,
+    caplog,
+):
+    call_completed = asyncio.Event()
+
+    async def noop(_arg1, _arg2=None):
+        return None
+
+    async def on_call_complete():
+        call_completed.set()
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: True,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=noop,
+        on_transcript=noop,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._interrupt_speaking = True
+    pipeline._audio_backlog_overflowed = True
+    pipeline._audio_backlog_recoveries = pipeline.MAX_AUDIO_BACKLOG_RECOVERIES
+    pipeline._response_turn_number = 7
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    assert not call_completed.is_set()
+    assert "voice_timing event=audio_backlog_recovery_exhausted" in caplog.text
+    assert "voice_timing event=terminal_action_suppressed" in caplog.text
+    assert "reason=staging_audio_backlog_safety" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1181,10 @@ async def test_gemini_goodbye_waits_for_audio_playout_before_hangup(monkeypatch)
         await real_sleep(0)
 
     monkeypatch.setattr("app.services.gemini_pipeline.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: False,
+    )
 
     async def noop_audio(_chunk: bytes):
         return None
@@ -1184,6 +1236,48 @@ async def test_gemini_goodbye_waits_for_audio_playout_before_hangup(monkeypatch)
     release_join.set()
     await asyncio.wait_for(completed.wait(), timeout=1)
     await task
+
+
+@pytest.mark.asyncio
+async def test_gemini_staging_suppresses_phrase_triggered_hangup(monkeypatch, caplog):
+    completed = asyncio.Event()
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    async def on_call_complete():
+        completed.set()
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: True,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+        on_call_complete=on_call_complete,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket([
+        json.dumps({"serverContent": {"turnComplete": True}}),
+    ])
+
+    async def goodbye_flush(*_args, **_kwargs):
+        return True
+
+    pipeline._flush_kevin_transcript = goodbye_flush
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    await pipeline._receive_loop()
+
+    assert not completed.is_set()
+    assert "voice_timing event=terminal_action_suppressed" in caplog.text
+    assert "reason=staging_native_safety" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1425,13 +1519,18 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     monkeypatch.setattr("app.services.gemini_pipeline.pcm24k_to_mulaw", lambda chunk: chunk)
 
     sent_chunks = []
-    marked_turns = []
+    first_marked_turns = []
+    final_marked_turns = []
 
     async def record_audio(chunk: bytes):
         sent_chunks.append(chunk)
 
     async def record_playback_mark(turn: int):
-        marked_turns.append(turn)
+        first_marked_turns.append(turn)
+
+    async def record_final_playback_mark(turn: int):
+        final_marked_turns.append(turn)
+        return True
 
     async def noop_transcript(_speaker: str, _text: str):
         return None
@@ -1443,6 +1542,7 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
         on_audio_out=record_audio,
         on_transcript=noop_transcript,
         on_response_first_media_sent=record_playback_mark,
+        on_response_end_media_sent=record_final_playback_mark,
         call_sid="CA_test",
         contractor_config=_plumbing_config(),
     )
@@ -1475,7 +1575,8 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert sent_chunks == [generated_audio]
-    assert marked_turns == [1]
+    assert first_marked_turns == [1]
+    assert final_marked_turns == [1]
     assert messages.count("voice_timing event=response_first_audio") == 1
     assert "latency_ms=" in messages
     assert "latency_basis=input_transcript_fragment" in messages
@@ -1484,6 +1585,9 @@ async def test_gemini_logs_response_latency_and_generated_duration_without_text(
     assert "words=5" in messages
     assert messages.count("voice_timing event=response_playout_drained") == 1
     assert "first_audio_to_playout_ms=" in messages
+    assert messages.count("voice_timing event=response_end_playback_mark_armed") == 1
+    assert messages.count("voice_timing event=response_end_playback_mark_requested") == 1
+    assert "accepted=True" in messages
     assert messages.count("voice_timing event=model_usage") == 1
     assert "prompt_tokens=4321" in messages
     assert "response_tokens=123" in messages
@@ -1577,10 +1681,17 @@ async def test_gemini_interrupted_response_logs_terminal_without_payload(caplog)
     async def clear_audio():
         return True
 
+    end_marks = []
+
+    async def record_end_mark(turn: int):
+        end_marks.append(turn)
+        return True
+
     pipeline = GeminiPipeline(
         on_audio_out=noop_audio,
         on_transcript=noop_transcript,
         on_clear_audio=clear_audio,
+        on_response_end_media_sent=record_end_mark,
         call_sid="CA_test",
         contractor_config=_plumbing_config(),
     )
@@ -1589,6 +1700,7 @@ async def test_gemini_interrupted_response_logs_terminal_without_payload(caplog)
     pipeline._response_first_audio_at = time.monotonic()
     pipeline._generated_audio_ms = 500
     pipeline._kevin_transcript_buf = [private_text]
+    pipeline._response_end_mark_pending = (2, pipeline._audio_epoch)
     pipeline._ws = _FakeGeminiWebSocket([
         json.dumps({"serverContent": {"interrupted": True}}),
         json.dumps({"serverContent": {"turnComplete": True}}),
@@ -1604,6 +1716,8 @@ async def test_gemini_interrupted_response_logs_terminal_without_payload(caplog)
     assert "voice_timing event=barge_in_clear" in messages
     assert "barge=1" in messages
     assert private_text not in messages
+    assert end_marks == []
+    assert pipeline._response_end_mark_pending is None
     assert pipeline._response_first_audio_at == 0.0
     assert pipeline._generated_audio_ms == 0
 

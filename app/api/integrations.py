@@ -386,6 +386,7 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
     tokens = resp.json()
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
+    expires_in = tokens.get("expires_in", 3300)
 
     if not access_token:
         raise HTTPException(status_code=502, detail="No access token in Google response")
@@ -393,6 +394,7 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
     db.collection("contractors").document(contractor_id).update({
         "google_calendar_access_token": access_token,
         "google_calendar_refresh_token": refresh_token,
+        "google_calendar_token_expires_at": time.time() + expires_in,
         "google_calendar_connected_at": time.time(),
     })
 

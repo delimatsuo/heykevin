@@ -1100,7 +1100,7 @@ class VoicePipeline:
                 if tool_name == "check_availability":
                     days = min(tool_input.get("days_ahead", 7), 14)
                     slots = await asyncio.wait_for(
-                        gcal_slots(token, days),
+                        gcal_slots(self._contractor_config, days),
                         timeout=3.0,
                     )
                     return json.dumps({"available_slots": slots, "days_checked": days})
@@ -1112,7 +1112,7 @@ class VoicePipeline:
 
                     event_id = await asyncio.wait_for(
                         gcal_book(
-                            token,
+                            self._contractor_config,
                             title=tool_input.get("title", "Appointment"),
                             start_time=tool_input.get("start_time", ""),
                             end_time=tool_input.get("end_time", ""),

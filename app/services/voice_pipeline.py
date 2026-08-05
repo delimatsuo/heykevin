@@ -1090,7 +1090,11 @@ class VoicePipeline:
 
         # --- Google Calendar tools ---
         if self._has_google_calendar() and not self._has_jobber():
-            from app.services.calendar import get_available_slots as gcal_slots, book_appointment as gcal_book
+            from app.services.calendar import (
+                GoogleCalendarUnavailableError,
+                get_available_slots as gcal_slots,
+                book_appointment as gcal_book,
+            )
 
             token = self._get_google_calendar_token()
             if not token:
@@ -1099,10 +1103,13 @@ class VoicePipeline:
             try:
                 if tool_name == "check_availability":
                     days = min(tool_input.get("days_ahead", 7), 14)
-                    slots = await asyncio.wait_for(
-                        gcal_slots(self._contractor_config, days),
-                        timeout=3.0,
-                    )
+                    try:
+                        slots = await asyncio.wait_for(
+                            gcal_slots(self._contractor_config, days),
+                            timeout=3.0,
+                        )
+                    except GoogleCalendarUnavailableError:
+                        return json.dumps({"error": "Calendar availability is temporarily unavailable."})
                     return json.dumps({"available_slots": slots, "days_checked": days})
 
                 elif tool_name == "book_appointment":

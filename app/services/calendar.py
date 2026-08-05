@@ -10,12 +10,31 @@ refresh). Contractors who connected before that field existed have no
 stored expiry; for them the proactive check is a no-op and the 401-retry
 in _with_token_refresh() is the real backstop. Mirrors the refresh/retry
 shape in app/services/jobber.py.
+
+Availability is computed in the contractor's own timezone and business
+hours when those are configured on the contractor document
+(`timezone`, `business_hours_start`, `business_hours_end` — nothing in
+this codebase sets them yet, so today every contractor falls through to
+the UTC 9-5 default, unchanged from before this file supported
+per-contractor configuration). An explicitly-set but malformed value
+(bad IANA zone name, inverted hours) fails closed rather than guessing;
+a value that's simply absent falls back to the default rather than
+breaking availability for every contractor who has never configured it.
+
+`zoneinfo.ZoneInfo` needs an IANA timezone database to resolve zone
+names, and Cloud Run's base image doesn't reliably ship a system one —
+the `tzdata` PyPI package bundles it so this doesn't depend on the host.
 """
 
+from __future__ import annotations
+
 import asyncio
+import hashlib
 import time
+from datetime import datetime, time as dtime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
 import httpx
-from datetime import datetime, timedelta, timezone
 
 from app.utils.logging import get_logger
 
@@ -25,7 +44,30 @@ FREEBUSY_URL = "https://www.googleapis.com/calendar/v3/freeBusy"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
+MAX_DAYS_AHEAD = 14
+MAX_RETURNED_SLOTS = 20
+DEFAULT_TIMEZONE = "UTC"
+DEFAULT_BUSINESS_HOURS_START = "09:00"
+DEFAULT_BUSINESS_HOURS_END = "17:00"
+
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _epoch_now() -> float:
+    return time.time()
+
+
+class GoogleCalendarUnavailableError(Exception):
+    """Raised when availability can't be determined reliably.
+
+    Distinguishes "the integration is broken" from "no slots are free" —
+    both used to surface identically as an empty list, which let a dead
+    integration look like a fully-booked calendar to the caller.
+    """
 
 
 async def _write_google_calendar_tokens(contractor_id: str, updates: dict):
@@ -73,7 +115,17 @@ def _token_expires_soon(contractor: dict, leeway_seconds: int = 120) -> bool:
     401-retry path is what actually protects those contractors.
     """
     expires_at = contractor.get("google_calendar_token_expires_at")
-    return isinstance(expires_at, (int, float)) and expires_at <= time.time() + leeway_seconds
+    return isinstance(expires_at, (int, float)) and expires_at <= _epoch_now() + leeway_seconds
+
+
+def _refresh_lock_key(contractor: dict) -> str:
+    contractor_id = str(contractor.get("contractor_id", ""))
+    if contractor_id:
+        return contractor_id
+    # Fall back to a hash, not the raw refresh token, as the in-process dict key —
+    # avoids a live OAuth secret sitting in something a future debug dump might print.
+    refresh_token = str(contractor.get("google_calendar_refresh_token", ""))
+    return hashlib.sha256(refresh_token.encode()).hexdigest()[:16]
 
 
 async def refresh_access_token(contractor: dict, *, force: bool = False) -> str | None:
@@ -85,12 +137,11 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
     """
     from app.config import settings
 
-    contractor_id = contractor.get("contractor_id", "")
-    lock_key = contractor_id or contractor.get("google_calendar_refresh_token", "")
-    lock = _REFRESH_LOCKS.setdefault(lock_key, asyncio.Lock())
+    lock = _REFRESH_LOCKS.setdefault(_refresh_lock_key(contractor), asyncio.Lock())
 
     async with lock:
         stale_token = contractor.get("google_calendar_access_token", "")
+        contractor_id = contractor.get("contractor_id", "")
         latest = await _read_google_calendar_tokens(contractor_id)
         if latest:
             contractor.update({k: v for k, v in latest.items() if v})
@@ -127,14 +178,14 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
                 logger.error("Google token refresh returned no access token")
                 return None
             # Google typically omits refresh_token on refresh (the original stays valid).
-            new_refresh_token = tokens.get("refresh_token", refresh_token)
+            new_refresh_token = tokens.get("refresh_token") or refresh_token
             expires_in = tokens.get("expires_in", 3300)
 
             updates = {
                 "google_calendar_access_token": access_token,
                 "google_calendar_refresh_token": new_refresh_token,
-                "google_calendar_token_expires_at": time.time() + expires_in,
-                "google_calendar_token_refreshed_at": time.time(),
+                "google_calendar_token_expires_at": _epoch_now() + expires_in,
+                "google_calendar_token_refreshed_at": _epoch_now(),
             }
 
             contractor.update(updates)
@@ -178,6 +229,54 @@ async def _with_token_refresh(contractor: dict, call):
     return await call(refreshed)
 
 
+def _calendar_configuration(contractor: dict) -> tuple[ZoneInfo, dtime, dtime]:
+    """Resolve the timezone + business hours to compute availability in.
+
+    Falls back to UTC 9-5 when nothing is configured (every contractor
+    today), but fails closed on a value that IS set and doesn't parse —
+    guessing past a garbage timezone risks quoting slots in the wrong
+    hours entirely, which is worse than refusing.
+    """
+    timezone_name = contractor.get("timezone") or DEFAULT_TIMEZONE
+    start_value = contractor.get("business_hours_start") or DEFAULT_BUSINESS_HOURS_START
+    end_value = contractor.get("business_hours_end") or DEFAULT_BUSINESS_HOURS_END
+
+    local_timezone = ZoneInfo(timezone_name)
+    business_start = dtime.fromisoformat(start_value)
+    business_end = dtime.fromisoformat(end_value)
+    if business_start >= business_end:
+        raise ValueError("Business hours must be a same-day interval")
+    return local_timezone, business_start, business_end
+
+
+def _busy_intervals(data: dict) -> list[tuple[datetime, datetime]]:
+    if not isinstance(data, dict):
+        raise ValueError("FreeBusy response must be an object")
+    calendars = data.get("calendars")
+    if not isinstance(calendars, dict):
+        raise ValueError("FreeBusy response is missing calendars")
+    primary = calendars.get("primary")
+    if not isinstance(primary, dict):
+        raise ValueError("FreeBusy response is missing the primary calendar")
+
+    errors = primary.get("errors") or []
+    if errors:
+        error_count = len(errors) if isinstance(errors, list) else 1
+        logger.error(f"Google FreeBusy calendar error: error_count={error_count}")
+        raise GoogleCalendarUnavailableError("Calendar provider rejected the calendar query")
+
+    busy_periods = primary.get("busy")
+    if not isinstance(busy_periods, list):
+        raise ValueError("FreeBusy response is missing busy intervals")
+
+    intervals = []
+    for period in busy_periods:
+        start = datetime.fromisoformat(period["start"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(period["end"].replace("Z", "+00:00"))
+        intervals.append((start, end))
+    return intervals
+
+
 async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dict]:
     """Query Google Calendar free/busy and return available 1-hour slots.
 
@@ -187,14 +286,29 @@ async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dic
     access token first if it's known to be expiring, and retries once
     more on a 401 for contractors whose expiry isn't tracked yet.
 
-    Returns list of dicts: [{"date": "Mon Jan 6", "start": "9:00 AM", "end": "10:00 AM"}, ...]
+    Raises GoogleCalendarUnavailableError when availability genuinely
+    can't be determined (bad config, provider failure/error, malformed
+    response) — never returns [] to mean "the integration is broken",
+    only to mean "no open slots in the window".
     """
-    now = datetime.now(timezone.utc)
-    end = now + timedelta(days=min(days_ahead, 14))
+    try:
+        local_timezone, business_start, business_end = _calendar_configuration(contractor)
+    except Exception as e:
+        # Exception text intentionally omitted: an invalid timezone name (contractor
+        # input) or ZoneInfoNotFoundError embeds the raw offending value in its message.
+        logger.error(f"Google Calendar configuration invalid: {type(e).__name__}")
+        raise GoogleCalendarUnavailableError("Calendar configuration is invalid") from e
+
+    days = max(1, min(int(days_ahead), MAX_DAYS_AHEAD))
+    now = _utc_now()
+    local_now = now.astimezone(local_timezone)
+    first_day = local_now.date() + timedelta(days=1)
+    query_end = datetime.combine(first_day + timedelta(days=days), dtime.min, tzinfo=local_timezone)
 
     body = {
         "timeMin": now.isoformat(),
-        "timeMax": end.isoformat(),
+        "timeMax": query_end.isoformat(),
+        "timeZone": local_timezone.key,
         "items": [{"id": "primary"}],
     }
 
@@ -212,40 +326,33 @@ async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dic
 
     resp = await _with_token_refresh(contractor, _call)
     if resp is None:
-        logger.error("Google FreeBusy error: no valid access token")
-        return []
-
+        raise GoogleCalendarUnavailableError("No valid Google Calendar access token")
     if resp.status_code != 200:
-        logger.error(f"Google FreeBusy error: {resp.status_code} {resp.text[:200]}")
-        return []
+        # Status only — resp.text is the provider's raw response body and may
+        # contain calendar/event details that don't belong in application logs.
+        logger.error(f"Google FreeBusy error: status_code={resp.status_code}")
+        raise GoogleCalendarUnavailableError("Calendar provider request failed")
 
-    data = resp.json()
-    busy_periods = data.get("calendars", {}).get("primary", {}).get("busy", [])
+    try:
+        busy = _busy_intervals(resp.json())
+    except GoogleCalendarUnavailableError:
+        raise
+    except Exception as e:
+        logger.error(f"Google FreeBusy response invalid: {type(e).__name__}")
+        raise GoogleCalendarUnavailableError("Calendar provider response is invalid") from e
 
-    # Convert busy periods to datetime objects
-    busy = []
-    for period in busy_periods:
-        busy.append((
-            datetime.fromisoformat(period["start"].replace("Z", "+00:00")),
-            datetime.fromisoformat(period["end"].replace("Z", "+00:00")),
-        ))
-
-    # Generate available 1-hour slots during business hours (9 AM - 5 PM local)
-    # We use UTC but label as local time — contractor's timezone would improve this
     available = []
-    day = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    for day_offset in range(days):
+        local_day = first_day + timedelta(days=day_offset)
+        slot_start = datetime.combine(local_day, business_start, tzinfo=local_timezone)
+        closing_time = datetime.combine(local_day, business_end, tzinfo=local_timezone)
 
-    for _ in range(min(days_ahead, 14)):
-        for hour in range(9, 17):  # 9 AM to 5 PM
-            slot_start = day.replace(hour=hour)
+        while slot_start + timedelta(hours=1) <= closing_time:
             slot_end = slot_start + timedelta(hours=1)
-
-            # Check if slot overlaps any busy period
             is_busy = any(
                 slot_start < b_end and slot_end > b_start
                 for b_start, b_end in busy
             )
-
             if not is_busy:
                 available.append({
                     "date": slot_start.strftime("%a %b %d"),
@@ -254,11 +361,9 @@ async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dic
                     "start_iso": slot_start.isoformat(),
                     "end_iso": slot_end.isoformat(),
                 })
+            slot_start = slot_end
 
-        day += timedelta(days=1)
-
-    # Cap at 20 slots to keep responses manageable
-    return available[:20]
+    return available[:MAX_RETURNED_SLOTS]
 
 
 async def book_appointment(

@@ -1,0 +1,438 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Task 4.8 Non-Executable Resource and Capability Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "preparation_only",
+        "review_ready_external_gates_required"
+      ]
+    },
+    "environment": {
+      "const": "bakeoff_nonproduction"
+    },
+    "production_denylist_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "resources": {
+      "type": "array",
+      "minItems": 24,
+      "maxItems": 24,
+      "items": {
+        "$ref": "#/$defs/resource"
+      }
+    },
+    "arm_dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "A": {
+          "const": [
+            "execution_principal",
+            "telephony",
+            "telephony_control_plane",
+            "native_voice",
+            "native_voice_control_plane",
+            "auth_token_store",
+            "nonce_store",
+            "active_execution_store",
+            "firestore",
+            "rtdb",
+            "logging_evidence",
+            "kms",
+            "immutable_custody",
+            "trust_store",
+            "credential_broker",
+            "residue_receipt_sink"
+          ]
+        },
+        "B1": {
+          "const": [
+            "execution_principal",
+            "telephony",
+            "telephony_control_plane",
+            "speech_to_text",
+            "speech_to_text_control_plane",
+            "text_generation",
+            "text_generation_control_plane",
+            "text_to_speech",
+            "text_to_speech_control_plane",
+            "auth_token_store",
+            "nonce_store",
+            "active_execution_store",
+            "firestore",
+            "rtdb",
+            "logging_evidence",
+            "kms",
+            "immutable_custody",
+            "trust_store",
+            "credential_broker",
+            "residue_receipt_sink"
+          ]
+        },
+        "B2": {
+          "const": [
+            "execution_principal",
+            "telephony",
+            "telephony_control_plane",
+            "conversation_relay",
+            "conversation_relay_control_plane",
+            "text_generation",
+            "text_generation_control_plane",
+            "auth_token_store",
+            "nonce_store",
+            "active_execution_store",
+            "firestore",
+            "rtdb",
+            "logging_evidence",
+            "kms",
+            "immutable_custody",
+            "trust_store",
+            "credential_broker",
+            "residue_receipt_sink"
+          ]
+        },
+        "C": {
+          "const": [
+            "execution_principal",
+            "telephony",
+            "telephony_control_plane",
+            "native_voice",
+            "native_voice_control_plane",
+            "auth_token_store",
+            "nonce_store",
+            "active_execution_store",
+            "firestore",
+            "rtdb",
+            "logging_evidence",
+            "kms",
+            "immutable_custody",
+            "trust_store",
+            "credential_broker",
+            "residue_receipt_sink"
+          ]
+        }
+      },
+      "required": [
+        "A",
+        "B1",
+        "B2",
+        "C"
+      ]
+    },
+    "probe_contracts": {
+      "type": "array",
+      "minItems": 69,
+      "maxItems": 69,
+      "items": {
+        "$ref": "#/$defs/probe_contract"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "environment",
+    "production_denylist_digest",
+    "resources",
+    "arm_dependencies",
+    "probe_contracts"
+  ],
+  "$defs": {
+    "nullable_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^ref_[A-Za-z0-9_-]{1,156}$"
+        }
+      ]
+    },
+    "nullable_digest": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource_id": {
+          "enum": [
+            "execution_principal",
+            "telephony",
+            "native_voice",
+            "speech_to_text",
+            "text_generation",
+            "text_to_speech",
+            "conversation_relay",
+            "auth_token_store",
+            "firestore",
+            "rtdb",
+            "logging_evidence",
+            "kms",
+            "immutable_custody",
+            "nonce_store",
+            "active_execution_store",
+            "trust_store",
+            "credential_broker",
+            "residue_receipt_sink",
+            "telephony_control_plane",
+            "native_voice_control_plane",
+            "speech_to_text_control_plane",
+            "text_generation_control_plane",
+            "text_to_speech_control_plane",
+            "conversation_relay_control_plane"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "identity",
+            "telephony",
+            "provider",
+            "state_store",
+            "evidence_store",
+            "key_management",
+            "immutable_store",
+            "trust_store",
+            "credential_broker",
+            "control_plane"
+          ]
+        },
+        "selection_status": {
+          "enum": [
+            "not_selected",
+            "selected_external_review_required"
+          ]
+        },
+        "provider_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "product_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "api_version_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "account_region_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "workload_destination_allowlist_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "control_plane_destination_allowlist_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "credential_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "identity_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "isolation_proof_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "residue_procedure_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        }
+      },
+      "required": [
+        "resource_id",
+        "kind",
+        "selection_status",
+        "provider_ref",
+        "product_ref",
+        "api_version_ref",
+        "account_region_ref",
+        "workload_destination_allowlist_ref",
+        "control_plane_destination_allowlist_ref",
+        "credential_ref",
+        "identity_ref",
+        "isolation_proof_ref",
+        "residue_procedure_ref"
+      ]
+    },
+    "probe_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "arm": {
+          "enum": [
+            "A",
+            "B1",
+            "B2",
+            "C"
+          ]
+        },
+        "fact": {
+          "enum": [
+            "dependency_identity_attestation",
+            "input_finality",
+            "pre_response_permit",
+            "generation_completed",
+            "generation_cancelled",
+            "generation_failed",
+            "transport_resolved",
+            "transport_partial",
+            "transport_cleared",
+            "transport_failed_delivery",
+            "caller_playback_classification",
+            "caller_activity",
+            "interruption",
+            "audible_stop",
+            "reconnect",
+            "epoch_invalidation",
+            "pre_auth_no_provider_work",
+            "response_correlated_normal_playback_receipt"
+          ]
+        },
+        "status": {
+          "enum": [
+            "unresolved",
+            "specified_external_review_required"
+          ]
+        },
+        "synthetic_fixture_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "capability_mapping_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "evidence_sink_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        },
+        "caller_audio_correlation_required": {
+          "type": "boolean"
+        },
+        "correlation_contract_ref": {
+          "$ref": "#/$defs/nullable_ref"
+        }
+      },
+      "required": [
+        "arm",
+        "fact",
+        "status",
+        "synthetic_fixture_digest",
+        "capability_mapping_ref",
+        "evidence_sink_ref",
+        "caller_audio_correlation_required",
+        "correlation_contract_ref"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "arm": {
+                "const": "B2"
+              }
+            },
+            "required": [
+              "arm"
+            ]
+          },
+          "then": {
+            "properties": {
+              "fact": {
+                "enum": [
+                  "dependency_identity_attestation",
+                  "input_finality",
+                  "pre_response_permit",
+                  "generation_completed",
+                  "generation_cancelled",
+                  "generation_failed",
+                  "transport_resolved",
+                  "transport_partial",
+                  "transport_cleared",
+                  "transport_failed_delivery",
+                  "caller_playback_classification",
+                  "caller_activity",
+                  "interruption",
+                  "audible_stop",
+                  "reconnect",
+                  "epoch_invalidation",
+                  "pre_auth_no_provider_work",
+                  "response_correlated_normal_playback_receipt"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "fact": {
+                "enum": [
+                  "dependency_identity_attestation",
+                  "input_finality",
+                  "pre_response_permit",
+                  "generation_completed",
+                  "generation_cancelled",
+                  "generation_failed",
+                  "transport_resolved",
+                  "transport_partial",
+                  "transport_cleared",
+                  "transport_failed_delivery",
+                  "caller_playback_classification",
+                  "caller_activity",
+                  "interruption",
+                  "audible_stop",
+                  "reconnect",
+                  "epoch_invalidation",
+                  "pre_auth_no_provider_work"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fact": {
+                "enum": [
+                  "transport_resolved",
+                  "transport_partial",
+                  "transport_cleared",
+                  "transport_failed_delivery",
+                  "caller_playback_classification",
+                  "caller_activity",
+                  "interruption",
+                  "audible_stop",
+                  "response_correlated_normal_playback_receipt"
+                ]
+              }
+            },
+            "required": [
+              "fact"
+            ]
+          },
+          "then": {
+            "properties": {
+              "caller_audio_correlation_required": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "caller_audio_correlation_required": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-execution": "unsupported"
+}

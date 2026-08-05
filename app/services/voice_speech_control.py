@@ -1,0 +1,910 @@
+"""Offline, provider-neutral speech authorization for the voice bakeoff.
+
+This module owns policy authorization and opaque render-to-audio correlation only.
+`VoiceLifecycle` remains the source of truth for observed playout and terminal
+state; candidate adapters must not infer either from this module.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from enum import Enum
+
+from app.services.voice_lifecycle import VoiceSemanticActKind as SemanticActKind
+from app.services.voice_lifecycle import VoiceSessionBinding
+
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_]{1,128}")
+_LOCALE = re.compile(r"[a-z]{2,3}(?:-[a-z]{2,8})?")
+
+
+def _identifier(value: object, name: str) -> str:
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+        raise ValueError(f"{name} is invalid")
+    return value
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def _act_id(binding: VoiceSessionBinding, turn_id: str, plan_id: str, index: int) -> str:
+    material = {
+        "binding": {
+            "environment": binding.environment,
+            "contractor_binding": binding.contractor_binding,
+            "call_binding": binding.call_binding,
+            "stream_binding": binding.stream_binding,
+            "epoch": binding.epoch,
+        },
+        "turn_id": turn_id,
+        "plan_id": plan_id,
+        "index": index,
+    }
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"act_{digest}"
+
+
+class FailureClass(str, Enum):
+    RECOVERABLE = "recoverable"
+    SECURITY = "security"
+    UNCERTAIN = "uncertain"
+    IRRECOVERABLE = "irrecoverable"
+
+
+class CancellationReason(str, Enum):
+    CALLER_ACTIVITY = "caller_activity"
+    INTERRUPTION = "interruption"
+    RECONNECT = "reconnect"
+    EPOCH_SUPERSEDED = "epoch_superseded"
+
+
+class ReplayMode(str, Enum):
+    EXACT = "exact"
+    SLOWER = "slower"
+
+
+_TERMINAL_KINDS = {
+    SemanticActKind.CLOSING,
+    SemanticActKind.OPT_OUT,
+    SemanticActKind.VOICEMAIL,
+}
+_NON_REPLAYABLE_KINDS = _TERMINAL_KINDS | {
+    SemanticActKind.LANGUAGE_CHOICE,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticAct:
+    """A typed act from the future provider-neutral planner, never a prompt."""
+
+    kind: SemanticActKind
+    text: str
+    question_slot: str | None = None
+    private_disclosure: bool = False
+    unsupported_promise: bool = False
+    complete: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, SemanticActKind):
+            raise ValueError("semantic act kind is invalid")
+        if not isinstance(self.text, str) or not self.text.strip() or len(self.text) > 4_096:
+            raise ValueError("semantic act text is invalid")
+        if self.kind is SemanticActKind.QUESTION:
+            _identifier(self.question_slot, "question slot")
+        elif self.question_slot is not None:
+            raise ValueError("only a question may reserve a slot")
+        if type(self.private_disclosure) is not bool or type(self.unsupported_promise) is not bool or type(self.complete) is not bool:
+            raise ValueError("semantic act policy flags are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SpokenPlan:
+    plan_id: str
+    acts: tuple[SemanticAct, ...]
+
+    def __post_init__(self) -> None:
+        _identifier(self.plan_id, "plan id")
+        if not self.acts or any(not isinstance(act, SemanticAct) for act in self.acts):
+            raise ValueError("spoken plan acts are invalid")
+        questions = [index for index, act in enumerate(self.acts) if act.kind is SemanticActKind.QUESTION]
+        if len(questions) > 1:
+            raise ValueError("spoken plan allows one question")
+        answers = [index for index, act in enumerate(self.acts) if act.kind is SemanticActKind.ANSWER]
+        if questions and answers and min(answers) > questions[0]:
+            raise ValueError("direct answer must precede a question")
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechPolicy:
+    normal_word_budget: int
+    safety_word_budget: int
+    required_safety_fragments: tuple[str, ...]
+    terminal_fragments: tuple[str, ...]
+    localized_safety_fragments: tuple[
+        tuple[str, tuple[str, ...]],
+        ...,
+    ] = ()
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int or value < 1 for value in (self.normal_word_budget, self.safety_word_budget)):
+            raise ValueError("speech budgets must be positive integers")
+        if not isinstance(self.required_safety_fragments, tuple) or not self.required_safety_fragments:
+            raise ValueError("safety fragments are required")
+        if any(not isinstance(fragment, str) or not fragment.strip() for fragment in self.required_safety_fragments):
+            raise ValueError("safety fragments are invalid")
+        if not isinstance(self.terminal_fragments, tuple) or not self.terminal_fragments:
+            raise ValueError("terminal fragments are required")
+        if any(not isinstance(fragment, str) or not fragment.strip() for fragment in self.terminal_fragments):
+            raise ValueError("terminal fragments are invalid")
+        locales: set[str] = set()
+        for entry in self.localized_safety_fragments:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or not _locale(entry[0])
+                or entry[0] in locales
+                or not isinstance(entry[1], tuple)
+                or not entry[1]
+                or any(
+                    not isinstance(fragment, str)
+                    or not fragment.strip()
+                    for fragment in entry[1]
+                )
+            ):
+                raise ValueError("localized safety fragments are invalid")
+            locales.add(entry[0])
+
+    def safety_fragments(self, locale: str) -> tuple[str, ...]:
+        selected = _locale(locale)
+        return dict(self.localized_safety_fragments).get(
+            selected,
+            self.required_safety_fragments,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechAuthorization:
+    binding: VoiceSessionBinding
+    turn_id: str
+    authorized_kinds: tuple[SemanticActKind, ...]
+    terminal_allowed: bool
+    answered_slots: tuple[str, ...] = ()
+    locale: str = "en"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.binding, VoiceSessionBinding):
+            raise ValueError("speech binding is invalid")
+        _identifier(self.turn_id, "turn id")
+        if not self.authorized_kinds or any(not isinstance(kind, SemanticActKind) for kind in self.authorized_kinds):
+            raise ValueError("authorized kinds are invalid")
+        if len(set(self.authorized_kinds)) != len(self.authorized_kinds) or type(self.terminal_allowed) is not bool:
+            raise ValueError("speech authorization is invalid")
+        if any(_identifier(slot, "answered slot") != slot for slot in self.answered_slots):
+            raise ValueError("answered slots are invalid")
+        _locale(self.locale)
+
+
+@dataclass(frozen=True, slots=True)
+class ReservedSpeech:
+    act_id: str
+    reservation_id: str | None
+    kind: SemanticActKind
+    text: str
+    binding: VoiceSessionBinding
+    turn_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AudioBinding:
+    act_id: str
+    text_digest: str
+    audio_id: str
+    binding: VoiceSessionBinding
+
+
+@dataclass(frozen=True, slots=True)
+class PlayoutBinding:
+    act_id: str
+    text_digest: str
+    audio_id: str
+    playout_id: str
+    binding: VoiceSessionBinding
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaySource:
+    act_id: str
+    kind: SemanticActKind
+    text: str
+    text_digest: str
+    binding: VoiceSessionBinding
+    turn_id: str
+    question_slot: str | None
+    locale: str
+
+    def __post_init__(self) -> None:
+        if (
+            _identifier(self.act_id, "replay source act id")
+            != self.act_id
+            or not isinstance(self.kind, SemanticActKind)
+            or self.kind in _NON_REPLAYABLE_KINDS
+            or not isinstance(self.text, str)
+            or not self.text
+            or (
+                not isinstance(self.text_digest, str)
+                or len(self.text_digest) != 64
+                or any(
+                    part not in "0123456789abcdef"
+                    for part in self.text_digest
+                )
+            )
+            or hashlib.sha256(
+                self.text.encode("utf-8")
+            ).hexdigest()
+            != self.text_digest
+            or not isinstance(self.binding, VoiceSessionBinding)
+            or _identifier(self.turn_id, "replay source turn id")
+            != self.turn_id
+            or (
+                self.kind is SemanticActKind.QUESTION
+                and _identifier(
+                    self.question_slot,
+                    "replay source question slot",
+                )
+                != self.question_slot
+            )
+            or (
+                self.kind is not SemanticActKind.QUESTION
+                and self.question_slot is not None
+            )
+            or _locale(self.locale) != self.locale
+        ):
+            raise ValueError("replay source is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayBinding:
+    act_id: str
+    source_act_id: str
+    request_id: str
+    mode: ReplayMode
+    text_digest: str
+    binding: VoiceSessionBinding
+
+    def __post_init__(self) -> None:
+        if (
+            _identifier(self.act_id, "replay act id") != self.act_id
+            or _identifier(
+                self.source_act_id,
+                "replay source act id",
+            )
+            != self.source_act_id
+            or _identifier(self.request_id, "replay request id")
+            != self.request_id
+            or not isinstance(self.mode, ReplayMode)
+            or (
+                not isinstance(self.text_digest, str)
+                or len(self.text_digest) != 64
+                or any(
+                    part not in "0123456789abcdef"
+                    for part in self.text_digest
+                )
+            )
+            or not isinstance(self.binding, VoiceSessionBinding)
+        ):
+            raise ValueError("replay binding is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RepairIntent:
+    original_act_id: str
+    repair_act_id: str
+    turn_id: str
+    epoch: int
+    confirmed_fact_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _identifier(self.original_act_id, "original act id")
+        _identifier(self.repair_act_id, "repair act id")
+        _identifier(self.turn_id, "repair turn id")
+        if type(self.epoch) is not int or self.epoch < 0:
+            raise ValueError("repair epoch is invalid")
+        if any(_identifier(item, "confirmed fact id") != item for item in self.confirmed_fact_ids):
+            raise ValueError("confirmed facts are invalid")
+
+
+@dataclass(slots=True)
+class _Record:
+    reserved: ReservedSpeech
+    question_slot: str | None = None
+    owns_question_slot_reservation: bool = False
+    locale: str = "en"
+    authorized: bool = False
+    cancelled: bool = False
+    audio: AudioBinding | None = None
+    playout: PlayoutBinding | None = None
+    streamed_text: str = ""
+    caller_observed_ordinal: int | None = None
+    replay_mode: ReplayMode | None = None
+    replay_source_act_id: str | None = None
+    replay_request_id: str | None = None
+
+
+class SpeechControl:
+    """Fail-closed policy reducer; it never calls TTS or a provider."""
+
+    def __init__(self, policy: SpeechPolicy) -> None:
+        if not isinstance(policy, SpeechPolicy):
+            raise ValueError("speech policy is invalid")
+        self.policy = policy
+        self._records: dict[str, _Record] = {}
+        self._reservation_batches: set[tuple[str, ...]] = set()
+        self._reserved_slots: set[tuple[VoiceSessionBinding, str]] = set()
+        self._repairs: set[tuple[VoiceSessionBinding, str]] = set()
+        self._replay_requests: set[
+            tuple[VoiceSessionBinding, str]
+        ] = set()
+        self._caller_observation_counter = 0
+
+    def reserve(self, plan: SpokenPlan, authorization: SpeechAuthorization) -> tuple[ReservedSpeech, ...]:
+        if not isinstance(plan, SpokenPlan) or not isinstance(authorization, SpeechAuthorization):
+            raise ValueError("speech plan or authorization is invalid")
+        for index, act in enumerate(plan.acts):
+            self._validate_act(act, authorization)
+            act_id = _act_id(authorization.binding, authorization.turn_id, plan.plan_id, index)
+            if act_id in self._records:
+                raise ValueError("speech act is already reserved")
+            if act.kind is SemanticActKind.QUESTION:
+                assert act.question_slot is not None
+                if act.question_slot in authorization.answered_slots:
+                    raise ValueError("question slot is already answered")
+                if (authorization.binding, act.question_slot) in self._reserved_slots:
+                    raise ValueError("question slot is already reserved")
+        reserved: list[ReservedSpeech] = []
+        for index, act in enumerate(plan.acts):
+            act_id = _act_id(authorization.binding, authorization.turn_id, plan.plan_id, index)
+            reservation_id = None
+            if act.kind is SemanticActKind.QUESTION:
+                assert act.question_slot is not None
+                slot_key = (authorization.binding, act.question_slot)
+                self._reserved_slots.add(slot_key)
+                reservation_id = f"reservation_{act_id}"
+            entry = ReservedSpeech(
+                act_id=act_id,
+                reservation_id=reservation_id,
+                kind=act.kind,
+                text=act.text,
+                binding=authorization.binding,
+                turn_id=authorization.turn_id,
+            )
+            self._records[act_id] = _Record(
+                reserved=entry,
+                question_slot=act.question_slot,
+                owns_question_slot_reservation=(
+                    act.question_slot is not None
+                ),
+                locale=authorization.locale,
+            )
+            reserved.append(entry)
+        batch = tuple(reserved)
+        self._reservation_batches.add(tuple(item.act_id for item in batch))
+        return batch
+
+    def rollback_reservation(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        """Atomically remove one still-pristine reservation batch.
+
+        The bakeoff coordinator uses this only when CallLifecycle rejects the
+        matching question reservation. Once any act has advanced, rollback fails
+        closed instead of erasing lifecycle evidence.
+        """
+        if not isinstance(reserved, tuple) or not reserved:
+            return False
+        act_ids = tuple(item.act_id for item in reserved if isinstance(item, ReservedSpeech))
+        if len(act_ids) != len(reserved) or len(set(act_ids)) != len(act_ids) or act_ids not in self._reservation_batches:
+            return False
+        records: list[_Record] = []
+        for item in reserved:
+            record = self._records.get(item.act_id)
+            if record is None or record.reserved != item or record.authorized or record.cancelled or record.audio is not None or record.playout is not None or record.streamed_text or (record.reserved.binding, item.act_id) in self._repairs:
+                return False
+            records.append(record)
+        for record in records:
+            self._records.pop(record.reserved.act_id)
+            if record.owns_question_slot_reservation:
+                assert record.question_slot is not None
+                self._reserved_slots.discard((record.reserved.binding, record.question_slot))
+            if record.replay_request_id is not None:
+                self._replay_requests.discard(
+                    (
+                        record.reserved.binding,
+                        record.replay_request_id,
+                    )
+                )
+        self._reservation_batches.discard(act_ids)
+        return True
+
+    def complete_reservation(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        """Release only the batch index after every act has canonical delivery."""
+        act_ids = tuple(item.act_id for item in reserved if isinstance(item, ReservedSpeech))
+        if len(act_ids) != len(reserved) or act_ids not in self._reservation_batches:
+            return False
+        if any(
+            (record := self._records.get(item.act_id)) is None
+            or record.reserved != item
+            or record.cancelled
+            for item in reserved
+        ):
+            return False
+        self._reservation_batches.remove(act_ids)
+        return True
+
+    def retire_reservation(self, reserved: tuple[ReservedSpeech, ...]) -> bool:
+        """Release a terminalized batch index while retaining its act evidence."""
+        act_ids = tuple(item.act_id for item in reserved if isinstance(item, ReservedSpeech))
+        if len(act_ids) != len(reserved) or act_ids not in self._reservation_batches:
+            return False
+        if any(
+            (record := self._records.get(item.act_id)) is None
+            or record.reserved != item
+            for item in reserved
+        ):
+            return False
+        self._reservation_batches.remove(act_ids)
+        return True
+
+    def force_retire_reservation(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Drop one exact batch only after every act is permanently sealed."""
+        if not isinstance(reserved, tuple) or not reserved:
+            return False
+        act_ids = tuple(
+            item.act_id
+            for item in reserved
+            if isinstance(item, ReservedSpeech)
+        )
+        if (
+            len(act_ids) != len(reserved)
+            or len(set(act_ids)) != len(act_ids)
+            or act_ids not in self._reservation_batches
+        ):
+            return False
+        records = tuple(
+            self._records.get(item.act_id)
+            for item in reserved
+        )
+        if any(
+            record is None
+            or record.reserved != item
+            or not record.cancelled
+            for item, record in zip(
+                reserved,
+                records,
+                strict=True,
+            )
+        ):
+            return False
+        self._reservation_batches.remove(act_ids)
+        return act_ids not in self._reservation_batches
+
+    def reservation_batch_count(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> int:
+        """Return content-free pending batch count for one exact binding."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return -1
+        return sum(
+            any(
+                (record := self._records.get(act_id))
+                is not None
+                and record.reserved.binding == binding
+                for act_id in act_ids
+            )
+            for act_ids in self._reservation_batches
+        )
+
+    def tracks_reservation_batch(
+        self,
+        reserved: tuple[ReservedSpeech, ...],
+    ) -> bool:
+        """Report whether one exact batch still needs retirement."""
+        if not isinstance(reserved, tuple) or not reserved:
+            return False
+        act_ids = tuple(
+            item.act_id
+            for item in reserved
+            if isinstance(item, ReservedSpeech)
+        )
+        return (
+            len(act_ids) == len(reserved)
+            and len(set(act_ids)) == len(act_ids)
+            and act_ids in self._reservation_batches
+        )
+
+    def authorize_text(self, act_id: str, text: str) -> bool:
+        record = self._records.get(act_id)
+        if record is None or record.cancelled or record.authorized or text != record.reserved.text:
+            return False
+        try:
+            self._validate_text(record.reserved.kind, text)
+        except ValueError:
+            return False
+        record.authorized = True
+        return True
+
+    def accept_segment(self, act_id: str, segment: str, *, final: bool) -> bool:
+        """Accept one bounded lower-risk segment before an adapter can send it to TTS."""
+        record = self._records.get(act_id)
+        if record is None or record.cancelled or not record.authorized:
+            return False
+        if record.reserved.kind in _TERMINAL_KINDS | {
+            SemanticActKind.QUESTION,
+            SemanticActKind.SAFETY,
+        }:
+            return False
+        if type(final) is not bool or not isinstance(segment, str) or not segment:
+            return False
+        combined = record.streamed_text + segment
+        if not record.reserved.text.startswith(combined):
+            return False
+        try:
+            self._validate_text(record.reserved.kind, combined)
+        except ValueError:
+            return False
+        if final != (combined == record.reserved.text):
+            return False
+        record.streamed_text = combined
+        return True
+
+    def bind_tts(self, act_id: str, *, audio_id: str) -> bool:
+        record = self._records.get(act_id)
+        if record is None or record.cancelled or not record.authorized or record.audio is not None:
+            return False
+        try:
+            _identifier(audio_id, "audio id")
+        except ValueError:
+            return False
+        record.audio = AudioBinding(
+            act_id=act_id,
+            text_digest=hashlib.sha256(record.reserved.text.encode("utf-8")).hexdigest(),
+            audio_id=audio_id,
+            binding=record.reserved.binding,
+        )
+        return True
+
+    def audio_binding(self, act_id: str) -> AudioBinding | None:
+        record = self._records.get(act_id)
+        return None if record is None else record.audio
+
+    def authorized_text_digest(self, act_id: str) -> str | None:
+        """Expose only the digest of one exact live authorized act."""
+        record = self._records.get(act_id)
+        if (
+            record is None
+            or record.cancelled
+            or not record.authorized
+        ):
+            return None
+        return hashlib.sha256(
+            record.reserved.text.encode("utf-8")
+        ).hexdigest()
+
+    def bind_playout(self, act_id: str, *, playout_id: str) -> bool:
+        record = self._records.get(act_id)
+        if record is None or record.cancelled or record.audio is None or record.playout is not None:
+            return False
+        try:
+            _identifier(playout_id, "playout id")
+        except ValueError:
+            return False
+        record.playout = PlayoutBinding(
+            act_id=act_id,
+            text_digest=record.audio.text_digest,
+            audio_id=record.audio.audio_id,
+            playout_id=playout_id,
+            binding=record.audio.binding,
+        )
+        return True
+
+    def playout_binding(self, act_id: str) -> PlayoutBinding | None:
+        record = self._records.get(act_id)
+        return None if record is None else record.playout
+
+    def record_caller_playback_observed(
+        self,
+        act_id: str,
+        *,
+        playout_id: str,
+    ) -> bool:
+        """Record one canonical caller-heard complete act for exact replay."""
+        record = self._records.get(act_id)
+        if (
+            record is None
+            or record.cancelled
+            or not record.authorized
+            or record.playout is None
+            or record.playout.playout_id != playout_id
+            or record.caller_observed_ordinal is not None
+        ):
+            return False
+        self._caller_observation_counter += 1
+        record.caller_observed_ordinal = (
+            self._caller_observation_counter
+        )
+        return True
+
+    def latest_replay_source(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> ReplaySource | None:
+        """Return only the latest exact caller-observed nonterminal act."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return None
+        eligible = tuple(
+            record
+            for record in self._records.values()
+            if record.reserved.binding == binding
+            and record.caller_observed_ordinal is not None
+            and record.authorized
+            and not record.cancelled
+            and record.playout is not None
+            and record.reserved.kind not in _NON_REPLAYABLE_KINDS
+        )
+        if not eligible:
+            return None
+        record = max(
+            eligible,
+            key=lambda item: item.caller_observed_ordinal or 0,
+        )
+        assert record.playout is not None
+        return ReplaySource(
+            act_id=record.reserved.act_id,
+            kind=record.reserved.kind,
+            text=record.reserved.text,
+            text_digest=record.playout.text_digest,
+            binding=record.reserved.binding,
+            turn_id=record.reserved.turn_id,
+            question_slot=record.question_slot,
+            locale=record.locale,
+        )
+
+    def reserve_replay(
+        self,
+        *,
+        source: ReplaySource,
+        request_id: str,
+        mode: ReplayMode,
+        authorization: SpeechAuthorization,
+    ) -> tuple[ReservedSpeech, ...]:
+        """Reserve one exact-content replay under fresh one-use authority."""
+        if (
+            not isinstance(source, ReplaySource)
+            or _identifier(request_id, "replay request id")
+            != request_id
+            or not isinstance(mode, ReplayMode)
+            or not isinstance(authorization, SpeechAuthorization)
+            or source != self.latest_replay_source(source.binding)
+            or authorization.binding != source.binding
+            or authorization.turn_id == source.turn_id
+            or authorization.authorized_kinds != (source.kind,)
+            or authorization.terminal_allowed
+            or authorization.answered_slots
+            or authorization.locale != source.locale
+            or (
+                source.binding,
+                request_id,
+            )
+            in self._replay_requests
+        ):
+            return ()
+        replay_material = json.dumps(
+            {
+                "domain": "hey-kevin/offline-speech-replay/v1",
+                "binding": {
+                    "environment": source.binding.environment,
+                    "contractor_binding":
+                        source.binding.contractor_binding,
+                    "call_binding": source.binding.call_binding,
+                    "stream_binding": source.binding.stream_binding,
+                    "epoch": source.binding.epoch,
+                },
+                "request_id": request_id,
+                "source_act_id": source.act_id,
+                "turn_id": authorization.turn_id,
+                "mode": mode.value,
+                "text_digest": source.text_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        act_id = (
+            "act_"
+            + hashlib.sha256(replay_material).hexdigest()
+        )
+        if act_id in self._records:
+            return ()
+        reserved = ReservedSpeech(
+            act_id=act_id,
+            reservation_id=(
+                f"reservation_{act_id}"
+                if source.kind is SemanticActKind.QUESTION
+                else None
+            ),
+            kind=source.kind,
+            text=source.text,
+            binding=source.binding,
+            turn_id=authorization.turn_id,
+        )
+        self._records[act_id] = _Record(
+            reserved=reserved,
+            question_slot=source.question_slot,
+            locale=source.locale,
+            replay_mode=mode,
+            replay_source_act_id=source.act_id,
+            replay_request_id=request_id,
+        )
+        self._reservation_batches.add((act_id,))
+        self._replay_requests.add(
+            (source.binding, request_id)
+        )
+        return (reserved,)
+
+    def replay_binding(self, act_id: str) -> ReplayBinding | None:
+        """Expose content-free exact replay provenance for qualification."""
+        record = self._records.get(act_id)
+        if (
+            record is None
+            or record.replay_mode is None
+            or record.replay_source_act_id is None
+            or record.replay_request_id is None
+        ):
+            return None
+        return ReplayBinding(
+            act_id=act_id,
+            source_act_id=record.replay_source_act_id,
+            request_id=record.replay_request_id,
+            mode=record.replay_mode,
+            text_digest=hashlib.sha256(
+                record.reserved.text.encode("utf-8")
+            ).hexdigest(),
+            binding=record.reserved.binding,
+        )
+
+    def cancel(self, act_id: str, *, reason: CancellationReason, superseding_epoch: int | None = None) -> bool:
+        record = self._records.get(act_id)
+        if record is None or record.cancelled or not isinstance(reason, CancellationReason):
+            return False
+        if reason is CancellationReason.EPOCH_SUPERSEDED and (type(superseding_epoch) is not int or superseding_epoch <= record.reserved.binding.epoch):
+            return False
+        if reason is not CancellationReason.EPOCH_SUPERSEDED and superseding_epoch is not None:
+            return False
+        record.cancelled = True
+        if record.owns_question_slot_reservation:
+            assert record.question_slot is not None
+            self._reserved_slots.discard((record.reserved.binding, record.question_slot))
+        return True
+
+    def hard_terminalize(self, act_id: str) -> bool:
+        """Irrevocably remove local speech authority after ambiguous cleanup."""
+        record = self._records.get(act_id)
+        if record is None:
+            return False
+        record.cancelled = True
+        if record.owns_question_slot_reservation:
+            assert record.question_slot is not None
+            self._reserved_slots.discard(
+                (
+                    record.reserved.binding,
+                    record.question_slot,
+                )
+            )
+        return not self.is_live(act_id)
+
+    def hard_terminalize_binding(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> bool:
+        """Irrevocably remove every speech authority for one exact binding."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return False
+        act_ids = self.act_ids_for_binding(binding)
+        for act_id in act_ids:
+            self.hard_terminalize(act_id)
+        return all(not self.is_live(act_id) for act_id in act_ids)
+
+    def act_ids_for_binding(
+        self,
+        binding: VoiceSessionBinding,
+    ) -> tuple[str, ...]:
+        """Return durable content-free act identities for one exact binding."""
+        if not isinstance(binding, VoiceSessionBinding):
+            return ()
+        return tuple(
+            act_id
+            for act_id, record in self._records.items()
+            if record.reserved.binding == binding
+        )
+
+    def is_cancelled(self, act_id: str) -> bool:
+        record = self._records.get(act_id)
+        return record is not None and record.cancelled
+
+    def is_live(self, act_id: str) -> bool:
+        """Return true only while exact speech authority remains usable."""
+        record = self._records.get(act_id)
+        return (
+            record is not None
+            and record.authorized
+            and not record.cancelled
+        )
+
+    def reserve_repair(
+        self,
+        *,
+        original_act_id: str,
+        failure: FailureClass,
+        plan: SpokenPlan,
+        authorization: SpeechAuthorization,
+        confirmed_fact_ids: tuple[str, ...],
+    ) -> RepairIntent | None:
+        if not isinstance(failure, FailureClass) or failure is not FailureClass.RECOVERABLE:
+            return None
+        record = self._records.get(original_act_id)
+        if record is None or record.reserved.kind is SemanticActKind.REPAIR or (record.reserved.binding, original_act_id) in self._repairs:
+            return None
+        if not isinstance(plan, SpokenPlan) or len(plan.acts) != 1 or plan.acts[0].kind is not SemanticActKind.REPAIR or authorization.binding != record.reserved.binding or authorization.turn_id != record.reserved.turn_id:
+            return None
+        try:
+            repair = self.reserve(plan, authorization)[0]
+            intent = RepairIntent(
+                original_act_id=original_act_id,
+                repair_act_id=repair.act_id,
+                turn_id=record.reserved.turn_id,
+                epoch=record.reserved.binding.epoch,
+                confirmed_fact_ids=confirmed_fact_ids,
+            )
+        except ValueError:
+            return None
+        self._repairs.add((record.reserved.binding, original_act_id))
+        return intent
+
+    def _validate_act(self, act: SemanticAct, authorization: SpeechAuthorization) -> None:
+        if act.kind in _TERMINAL_KINDS and not authorization.terminal_allowed:
+            raise ValueError("terminal semantic act is not authorized")
+        if act.kind not in authorization.authorized_kinds:
+            raise ValueError("semantic act is not authorized")
+        if act.private_disclosure or act.unsupported_promise or not act.complete:
+            raise ValueError("semantic act violates policy")
+        self._validate_text(act.kind, act.text)
+        if act.kind is SemanticActKind.SAFETY:
+            text = act.text.casefold()
+            if any(
+                fragment.casefold() not in text
+                for fragment in self.policy.safety_fragments(
+                    authorization.locale
+                )
+            ):
+                raise ValueError("safety semantic act is incomplete")
+
+    def _validate_text(self, kind: SemanticActKind, text: str) -> None:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("semantic act text is invalid")
+        budget = self.policy.safety_word_budget if kind is SemanticActKind.SAFETY else self.policy.normal_word_budget
+        if _word_count(text) > budget:
+            raise ValueError("semantic act exceeds speech budget")
+        if kind not in _TERMINAL_KINDS and any(fragment.casefold() in text.casefold() for fragment in self.policy.terminal_fragments):
+            raise ValueError("terminal wording is not authorized")
+
+
+def _locale(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or _LOCALE.fullmatch(value) is None
+    ):
+        raise ValueError("locale is invalid")
+    return value

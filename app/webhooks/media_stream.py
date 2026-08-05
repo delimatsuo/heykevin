@@ -100,12 +100,13 @@ async def _send_twilio_playback_mark(
     stream_sid: str,
     playback_marks: "_TwilioPlaybackMarks",
     turn: int,
+    phase: str = "first_media",
     call_sid: str,
 ) -> bool:
     """Request a Twilio transport receipt, not caller-heard latency evidence."""
     if not stream_sid:
         return False
-    name = playback_marks.reserve(turn=turn)
+    name = playback_marks.reserve(turn=turn, phase=phase)
     if not name:
         return False
     try:
@@ -193,6 +194,7 @@ class _TwilioIngressEvent:
 class _PendingPlaybackMark:
     turn: int
     sent_at: float
+    phase: str = "first_media"
     cleared: bool = False
 
 
@@ -205,12 +207,12 @@ class _TwilioPlaybackMarks:
         self._pending: dict[str, _PendingPlaybackMark] = {}
         self._sequence = 0
 
-    def reserve(self, *, turn: int) -> str | None:
+    def reserve(self, *, turn: int, phase: str = "first_media") -> str | None:
         self._sequence += 1
         name = f"response-{turn}-{self._sequence}"
-        return name if self.register(turn=turn, name=name) else None
+        return name if self.register(turn=turn, name=name, phase=phase) else None
 
-    def register(self, *, turn: int, name: str) -> bool:
+    def register(self, *, turn: int, name: str, phase: str = "first_media") -> bool:
         if len(self._pending) >= self._max_pending:
             logger.warning(
                 "voice_timing event=twilio_playback_mark_skipped call=%s "
@@ -220,7 +222,11 @@ class _TwilioPlaybackMarks:
                 self._max_pending,
             )
             return False
-        self._pending[name] = _PendingPlaybackMark(turn=turn, sent_at=time.monotonic())
+        self._pending[name] = _PendingPlaybackMark(
+            turn=turn,
+            sent_at=time.monotonic(),
+            phase=phase,
+        )
         return True
 
     def discard(self, name: str) -> None:
@@ -236,9 +242,10 @@ class _TwilioPlaybackMarks:
             return False
         logger.info(
             "voice_timing event=twilio_playback_mark_resolved call=%s "
-            "turn=%s status=%s media_to_mark_ms=%s",
+            "turn=%s phase=%s status=%s media_to_mark_ms=%s",
             _call_label(self._call_sid),
             pending.turn,
+            pending.phase,
             "cleared" if pending.cleared else "played",
             max(0, round((time.monotonic() - pending.sent_at) * 1_000)),
         )
@@ -713,6 +720,18 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
             stream_sid=stream_sid or "",
             playback_marks=playback_marks,
             turn=turn,
+            phase="first_media",
+            call_sid=call_sid,
+        )
+
+    async def on_response_end_media_sent(turn: int):
+        """Ask Twilio to acknowledge the final frame of a completed response."""
+        return await _send_twilio_playback_mark(
+            websocket,
+            stream_sid=stream_sid or "",
+            playback_marks=playback_marks,
+            turn=turn,
+            phase="response_end",
             call_sid=call_sid,
         )
 
@@ -852,6 +871,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 on_transcript=on_transcript,
                 on_clear_audio=on_clear_audio,
                 on_response_first_media_sent=on_response_first_media_sent,
+                on_response_end_media_sent=on_response_end_media_sent,
                 on_call_complete=on_call_complete,
                 on_urgency_detected=on_urgency_detected,
                 call_sid=call_sid,

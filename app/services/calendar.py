@@ -175,7 +175,7 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
                     timeout=10.0,
                 )
             if resp.status_code != 200:
-                logger.error(f"Google token refresh failed: {resp.status_code} {resp.text[:200]}")
+                logger.error(f"Google token refresh failed: status_code={resp.status_code}")
                 return None
 
             tokens = resp.json()

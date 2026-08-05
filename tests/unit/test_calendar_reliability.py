@@ -398,3 +398,34 @@ async def test_inverted_business_hours_fails_closed(monkeypatch):
         await calendar.get_available_slots(contractor, days_ahead=1)
 
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_token_refresh_failure_logging_uses_status_only(monkeypatch, caplog):
+    """The refresh path must not log provider-controlled response bodies.
+
+    Every other failure path in this module logs status or exception type
+    only. `refresh_access_token` had no callers before this change, so its
+    log line goes live on the recovery path for the first time here — and
+    a failed refresh is exactly when Google returns an error body.
+    """
+    from app import config
+
+    sensitive_payload = "refresh-error-detail-do-not-log"
+    monkeypatch.setattr(config.settings, "google_calendar_client_id", "client-id")
+    monkeypatch.setattr(config.settings, "google_calendar_client_secret", "client-secret")
+    _patch_client(monkeypatch, [_FakeResponse(400, {}, text=sensitive_payload)])
+    monkeypatch.setattr(calendar, "_read_google_calendar_tokens", lambda cid: _noop_async())
+    monkeypatch.setattr(calendar, "_write_google_calendar_tokens", lambda cid, updates: _noop_async())
+    contractor = {
+        "contractor_id": "contractor-1",
+        "google_calendar_refresh_token": "refresh-token",
+    }
+
+    with caplog.at_level(logging.ERROR):
+        result = await calendar.refresh_access_token(contractor)
+
+    assert result is None
+    assert "Google token refresh failed" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert sensitive_payload not in caplog.text

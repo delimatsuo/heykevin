@@ -71,6 +71,21 @@ enum AppStoreScreenshotFixtures {
 
     static var isEnabled: Bool { scenario != nil }
 
+    /// Fixed anchor time for deterministic screenshots.
+    /// Using a constant "now" eliminates wall-clock flakiness in labels and details.
+    static var now: Date {
+        var comps = DateComponents()
+        comps.calendar = Calendar(identifier: .gregorian)
+        comps.timeZone = TimeZone(secondsFromGMT: 0)
+        comps.year = 2025
+        comps.month = 1
+        comps.day = 15
+        comps.hour = 17
+        comps.minute = 0
+        comps.second = 0
+        return comps.date!
+    }
+
     static var seededCalls: [CallRecord] {
         guard let scenario else { return [] }
         return scenario.isBusiness ? businessCalls : personalCalls
@@ -108,7 +123,7 @@ enum AppStoreScreenshotFixtures {
                 callerPhone: scenario.isBusiness ? "+16505550187" : "+14155550126",
                 callerName: scenario.isBusiness ? "Maria Santos" : ""
             )
-            appState.callStartTime = Date().addingTimeInterval(-137)
+            appState.callStartTime = now.addingTimeInterval(-137)
             appState.transcriptLines = liveTranscript(forBusiness: scenario.isBusiness)
         case .businessRecents, .personalRecents, .businessDetail, .personalDetail:
             appState.clearActiveCall()
@@ -143,7 +158,7 @@ enum AppStoreScreenshotFixtures {
                 id: "business-urgent",
                 callerPhone: "+16505550187",
                 callerName: "Maria Santos",
-                timestamp: Date().addingTimeInterval(-6 * 60),
+                timestamp: now.addingTimeInterval(-6 * 60),
                 trustScore: 91,
                 outcome: "voicemail",
                 transcript: """
@@ -160,7 +175,7 @@ enum AppStoreScreenshotFixtures {
                 id: "business-install",
                 callerPhone: "+16505550163",
                 callerName: "Jake Thompson",
-                timestamp: Date().addingTimeInterval(-31 * 60),
+                timestamp: now.addingTimeInterval(-31 * 60),
                 trustScore: 82,
                 outcome: "voicemail",
                 transcript: """
@@ -177,7 +192,7 @@ enum AppStoreScreenshotFixtures {
                 id: "business-drain",
                 callerPhone: "+16505550109",
                 callerName: "Priya Shah",
-                timestamp: Date().addingTimeInterval(-96 * 60),
+                timestamp: now.addingTimeInterval(-96 * 60),
                 trustScore: 88,
                 outcome: "picked_up",
                 transcript: """
@@ -194,7 +209,7 @@ enum AppStoreScreenshotFixtures {
                 id: "business-follow-up",
                 callerPhone: "+16505550144",
                 callerName: "Daniel Kim",
-                timestamp: Date().addingTimeInterval(-4 * 60 * 60),
+                timestamp: now.addingTimeInterval(-4 * 60 * 60),
                 trustScore: 96,
                 outcome: "voicemail",
                 transcript: """
@@ -211,7 +226,7 @@ enum AppStoreScreenshotFixtures {
                 id: "business-spam",
                 callerPhone: "+18885550199",
                 callerName: "",
-                timestamp: Date().addingTimeInterval(-7 * 60 * 60),
+                timestamp: now.addingTimeInterval(-7 * 60 * 60),
                 trustScore: 3,
                 outcome: "spam",
                 transcript: "Caller: Congratulations, your business has been selected.",
@@ -228,7 +243,7 @@ enum AppStoreScreenshotFixtures {
                 id: "personal-estimate",
                 callerPhone: "+14155550126",
                 callerName: "City Auto",
-                timestamp: Date().addingTimeInterval(-9 * 60),
+                timestamp: now.addingTimeInterval(-9 * 60),
                 trustScore: 83,
                 outcome: "voicemail",
                 transcript: """
@@ -245,7 +260,7 @@ enum AppStoreScreenshotFixtures {
                 id: "personal-delivery",
                 callerPhone: "+14155550158",
                 callerName: "Delivery Desk",
-                timestamp: Date().addingTimeInterval(-42 * 60),
+                timestamp: now.addingTimeInterval(-42 * 60),
                 trustScore: 74,
                 outcome: "voicemail",
                 transcript: """
@@ -262,7 +277,7 @@ enum AppStoreScreenshotFixtures {
                 id: "personal-school",
                 callerPhone: "+14155550171",
                 callerName: "Riverside School",
-                timestamp: Date().addingTimeInterval(-2 * 60 * 60),
+                timestamp: now.addingTimeInterval(-2 * 60 * 60),
                 trustScore: 93,
                 outcome: "picked_up",
                 transcript: """
@@ -279,7 +294,7 @@ enum AppStoreScreenshotFixtures {
                 id: "personal-pharmacy",
                 callerPhone: "+14155550134",
                 callerName: "Local Pharmacy",
-                timestamp: Date().addingTimeInterval(-5 * 60 * 60),
+                timestamp: now.addingTimeInterval(-5 * 60 * 60),
                 trustScore: 89,
                 outcome: "voicemail",
                 transcript: """
@@ -296,7 +311,7 @@ enum AppStoreScreenshotFixtures {
                 id: "personal-spam",
                 callerPhone: "+18005550198",
                 callerName: "",
-                timestamp: Date().addingTimeInterval(-8 * 60 * 60),
+                timestamp: now.addingTimeInterval(-8 * 60 * 60),
                 trustScore: 2,
                 outcome: "spam",
                 transcript: "Caller: Your vehicle warranty is about to expire.",

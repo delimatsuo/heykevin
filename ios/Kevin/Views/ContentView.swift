@@ -485,6 +485,13 @@ struct LiveCallTab: View {
 
     private func startElapsedTimer() {
         elapsedTimer?.invalidate()
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isEnabled {
+            // Freeze the elapsed timer at a deterministic offset for screenshots.
+            elapsed = 137
+            return
+        }
+        #endif
         if let start = appState.callStartTime {
             elapsed = Date().timeIntervalSince(start)
         }

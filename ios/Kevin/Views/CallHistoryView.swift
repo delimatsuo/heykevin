@@ -168,6 +168,26 @@ struct CallRow: View {
 
     static func timeLabel(for date: Date) -> String {
         let calendar = Calendar.current
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isEnabled {
+            let now = AppStoreScreenshotFixtures.now
+            if calendar.isDate(date, inSameDayAs: now) {
+                let minutes = Int(now.timeIntervalSince(date) / 60)
+                if minutes < 1 { return String(localized: "now") }
+                if minutes < 60 { return String(localized: "\(minutes)m ago") }
+                return date.formatted(date: .omitted, time: .shortened)
+            } else if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+                      calendar.isDate(date, inSameDayAs: yesterday) {
+                return String(localized: "Yest.")
+            } else {
+                let weekday = date.formatted(.dateTime.weekday(.abbreviated))
+                if let days = calendar.dateComponents([.day], from: date, to: now).day, days < 7 {
+                    return weekday
+                }
+                return date.formatted(.dateTime.month(.abbreviated).day())
+            }
+        }
+        #endif
         if calendar.isDateInToday(date) {
             let minutes = Int(Date().timeIntervalSince(date) / 60)
             if minutes < 1 { return String(localized: "now") }

@@ -33,6 +33,16 @@ class AppState: ObservableObject {
         return url
     }()
 
+    // When taking App Store screenshots, avoid persisting any local state changes.
+    // This ensures fixture-only values do not leak into normal debug sessions.
+    #if DEBUG
+    private var inScreenshotFixture: Bool {
+        ProcessInfo.processInfo.environment["APP_STORE_SCREENSHOT_SCENARIO"] != nil
+    }
+    #else
+    private var inScreenshotFixture: Bool { false }
+    #endif
+
     // One-time migration from UserDefaults to Keychain for existing users
     private static func migrateToKeychain(_ key: String, keychainKey: String? = nil) -> String {
         let kcKey = keychainKey ?? key
@@ -51,10 +61,14 @@ class AppState: ObservableObject {
 
     // Onboarding
     @Published var isOnboarded: Bool = UserDefaults.standard.bool(forKey: "isOnboarded") {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") }
+        }
     }
     @Published var contractorId: String = migrateToKeychain("contractorId") {
         didSet {
+            if inScreenshotFixture { return }
             if contractorId.isEmpty {
                 KeychainManager.shared.delete("contractorId")
             } else {
@@ -67,6 +81,7 @@ class AppState: ObservableObject {
     // Subscription state (Keychain-backed — UI cache only, server is source of truth)
     @Published var subscriptionStatus: String = KeychainManager.shared.retrieve("subscriptionStatus") ?? "trial" {
         didSet {
+            if inScreenshotFixture { return }
             if subscriptionStatus.isEmpty {
                 KeychainManager.shared.delete("subscriptionStatus")
             } else {
@@ -76,6 +91,7 @@ class AppState: ObservableObject {
     }
     @Published var subscriptionTier: String = KeychainManager.shared.retrieve("subscriptionTier") ?? "none" {
         didSet {
+            if inScreenshotFixture { return }
             if subscriptionTier.isEmpty {
                 KeychainManager.shared.delete("subscriptionTier")
             } else {
@@ -85,6 +101,7 @@ class AppState: ObservableObject {
     }
     @Published var subscriptionUUID: String = KeychainManager.shared.retrieve("subscriptionUUID") ?? "" {
         didSet {
+            if inScreenshotFixture { return }
             if subscriptionUUID.isEmpty {
                 KeychainManager.shared.delete("subscriptionUUID")
             } else {
@@ -99,6 +116,7 @@ class AppState: ObservableObject {
 
     @Published var kevinNumber: String = UserDefaults.standard.string(forKey: "kevinNumber") ?? "" {
         didSet {
+            if inScreenshotFixture { return }
             DispatchQueue.main.async { UserDefaults.standard.set(self.kevinNumber, forKey: "kevinNumber") }
             // New number means forwarding needs to be re-activated
             if !kevinNumber.isEmpty {
@@ -110,10 +128,14 @@ class AppState: ObservableObject {
         }
     }
     @Published var forwardingActivated: Bool = UserDefaults.standard.bool(forKey: "forwardingActivated") {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.forwardingActivated, forKey: "forwardingActivated") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.forwardingActivated, forKey: "forwardingActivated") }
+        }
     }
     @Published var appleUserId: String = migrateToKeychain("appleUserId") {
         didSet {
+            if inScreenshotFixture { return }
             if appleUserId.isEmpty {
                 KeychainManager.shared.delete("appleUserId")
             } else {
@@ -142,16 +164,28 @@ class AppState: ObservableObject {
 
     // Settings
     @Published var userName: String = UserDefaults.standard.string(forKey: "userName") ?? "" {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.userName, forKey: "userName") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.userName, forKey: "userName") }
+        }
     }
     @Published var businessName: String = UserDefaults.standard.string(forKey: "businessName") ?? "" {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.businessName, forKey: "businessName") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.businessName, forKey: "businessName") }
+        }
     }
     @Published var serviceType: String = UserDefaults.standard.string(forKey: "serviceType") ?? "" {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.serviceType, forKey: "serviceType") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.serviceType, forKey: "serviceType") }
+        }
     }
     @Published var mode: String = UserDefaults.standard.string(forKey: "kevinMode") ?? "business" {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.mode, forKey: "kevinMode") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.mode, forKey: "kevinMode") }
+        }
     }
 
     var isPersonalMode: Bool { mode == "personal" }
@@ -165,7 +199,10 @@ class AppState: ObservableObject {
     }
 
     @Published var ringThroughContacts: Bool = UserDefaults.standard.object(forKey: "ringThroughContacts") as? Bool ?? true {
-        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.ringThroughContacts, forKey: "ringThroughContacts") } }
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.ringThroughContacts, forKey: "ringThroughContacts") }
+        }
     }
 
     // Explicit consent to upload contacts to the server. Separate from iOS contacts permission.
@@ -201,6 +238,7 @@ class AppState: ObservableObject {
         return Set(arr)
     }() {
         didSet {
+            if inScreenshotFixture { return }
             DispatchQueue.main.async {
                 UserDefaults.standard.set(Array(self.readCallIds), forKey: "readCallIds")
             }

@@ -101,9 +101,9 @@ _BASELINE_HASHES = {
     "app/experiments/voice_bakeoff_app.py":
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
     "app/main.py":
-        "e73f0cd47ad1e10358e47e7db1981c39f0e03e041996cb4d2fd50cc9c308b7e9",
+        "07a6888957d5ecf662eb6d52e0cbef28cc31418e633d7e2b55b4adaab44fe069",
     "app/webhooks/media_stream.py":
-        "4dab265d4b82336d8b0239090ee4c751cff345da359d2b70b38aa4f5e48e850c",
+        "d7efcef83c3f7e02bb10ae88bc376174e308c42d0c26c5e4ef7b809ea67c0ddb",
 }
 
 

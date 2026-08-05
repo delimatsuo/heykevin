@@ -1132,6 +1132,7 @@ class VoicePipeline:
                             start_time=tool_input.get("start_time", ""),
                             end_time=tool_input.get("end_time", ""),
                             description=tool_input.get("description", ""),
+                            call_sid=getattr(self, "_call_sid", ""),
                         ),
                         timeout=GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
                     )

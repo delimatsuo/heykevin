@@ -14,9 +14,12 @@ on:
         required: true
         type: choice
         options: [staging, production]
+      candidate_sha:
+        description: 'Exact 40-character remote branch-head SHA (staging only)'
+        required: false
+        type: string
 
 permissions:
-  id-token: write
   contents: read
 
 env:
@@ -26,6 +29,24 @@ env:
   STAGING_URL: https://kevin-api-staging-l63rergg7a-uc.a.run.app
   PRODUCTION_SERVICE: kevin-api
   PRODUCTION_URL: https://kevin-api-752910912062.us-central1.run.app
+  CLOUD_BUILD_IGNORE_POLICY: |-
+    **
+    !Dockerfile
+    !pyproject.toml
+    !.dockerignore
+    !app/
+    !app/**
+    gha-creds-*.json
+    **/gha-creds-*.json
+    **/.env
+    **/.env.*
+    **/*.p8
+    **/*.pem
+    **/*.key
+    **/*.p12
+    **/__pycache__/**
+    **/*.pyc
+    **/*.pyo
 
 jobs:
   test:
@@ -36,8 +57,13 @@ jobs:
     # depth). Push and workflow_dispatch are always allowed.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -55,13 +81,53 @@ jobs:
     name: Deploy to Staging
     needs: test
     runs-on: ubuntu-latest
-    if: ${{ github.ref == 'refs/heads/staging' && ((github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')) }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/staging') || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && github.ref == 'refs/heads/main' && inputs.candidate_sha != '') }}
     environment: staging
+    env:
+      STAGING_RUNTIME_SERVICE_ACCOUNT: ${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}
+      STAGING_BUILD_SERVICE_ACCOUNT: ${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }}
+      FIRESTORE_PROJECT_ID: ${{ vars.FIRESTORE_PROJECT_ID }}
+      FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
+      APNS_SANDBOX: ${{ vars.APNS_SANDBOX }}
+      PRODUCTION_TWILIO_ACCOUNT_SID: ${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}
     concurrency:
       group: deploy-staging
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Validate exact staging candidate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "candidate_sha must be an exact lowercase 40-character SHA" && exit 1)
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$CANDIDATE_SHA" || (echo "Checked-out SHA does not match candidate_sha" && exit 1)
+          git ls-remote --heads origin | awk '{print $1}' | grep -Fxq "$CANDIDATE_SHA" || (echo "candidate_sha must be the current head of a remote branch" && exit 1)
+
+      - name: Check staging isolation variables
+        run: |
+          test -n "$STAGING_RUNTIME_SERVICE_ACCOUNT" || (echo "Missing staging STAGING_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+          test -n "$STAGING_BUILD_SERVICE_ACCOUNT" || (echo "Missing staging STAGING_BUILD_SERVICE_ACCOUNT" && exit 1)
+          test -n "$FIRESTORE_PROJECT_ID" || (echo "Missing staging FIRESTORE_PROJECT_ID" && exit 1)
+          test "$FIRESTORE_PROJECT_ID" != "$GCP_PROJECT_ID" || (echo "Staging must not use production Firestore project" && exit 1)
+          test -n "$FIREBASE_DATABASE_URL" || (echo "Missing staging FIREBASE_DATABASE_URL" && exit 1)
+          case "$FIREBASE_DATABASE_URL" in
+            *kevin-491315-rtdb*) echo "Staging must not use production RTDB" && exit 1 ;;
+          esac
+          test "$APNS_SANDBOX" = "true" || (echo "Staging APNS_SANDBOX must be true" && exit 1)
+          test -n "$PRODUCTION_TWILIO_ACCOUNT_SID" || (echo "Missing staging PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
+
+      - name: Write trusted Cloud Build source policy
+        run: printf '%s\n' "$CLOUD_BUILD_IGNORE_POLICY" > .gcloudignore
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -72,47 +138,78 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      - name: Check staging isolation variables
-        run: |
-          test -n "${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_RUNTIME_SERVICE_ACCOUNT" && exit 1)
-          test -n "${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing staging STAGING_BUILD_SERVICE_ACCOUNT" && exit 1)
-          test -n "${{ vars.FIRESTORE_PROJECT_ID }}" || (echo "Missing staging FIRESTORE_PROJECT_ID" && exit 1)
-          test "${{ vars.FIRESTORE_PROJECT_ID }}" != "$GCP_PROJECT_ID" || (echo "Staging must not use production Firestore project" && exit 1)
-          test -n "${{ vars.FIREBASE_DATABASE_URL }}" || (echo "Missing staging FIREBASE_DATABASE_URL" && exit 1)
-          case "${{ vars.FIREBASE_DATABASE_URL }}" in
-            *kevin-491315-rtdb*) echo "Staging must not use production RTDB" && exit 1 ;;
-          esac
-          test -n "${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}" || (echo "Missing staging PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
-
       - name: Deploy to Cloud Run (Staging)
         run: |
-          gcloud run deploy $STAGING_SERVICE \
+          DEPLOY_SHA="$(git rev-parse HEAD)"
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          gcloud run deploy "$STAGING_SERVICE" \
             --source . \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
             --allow-unauthenticated \
-            --service-account ${{ vars.STAGING_RUNTIME_SERVICE_ACCOUNT }} \
-            --build-service-account ${{ vars.STAGING_BUILD_SERVICE_ACCOUNT }} \
-            --update-env-vars ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=${{ vars.FIRESTORE_PROJECT_ID }},FIREBASE_DATABASE_URL=${{ vars.FIREBASE_DATABASE_URL }},APNS_SANDBOX=${{ vars.APNS_SANDBOX || 'false' }},PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }},DEPLOY_SHA=$GITHUB_SHA \
-            --tag staging
+            --service-account "$STAGING_RUNTIME_SERVICE_ACCOUNT" \
+            --build-service-account "$STAGING_BUILD_SERVICE_ACCOUNT" \
+            --remove-secrets RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY \
+            --update-env-vars "ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=$STAGING_URL,FIRESTORE_PROJECT_ID=$FIRESTORE_PROJECT_ID,FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL,APNS_SANDBOX=$APNS_SANDBOX,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,RECEPTIONIST_OBSERVATION_SHADOW_ENABLED=false,DEPLOY_SHA=$DEPLOY_SHA" \
+            --tag staging \
+            --no-traffic
 
       - name: Health check
         run: |
           sleep 15
-          STAGING_URL=$(gcloud run services describe $STAGING_SERVICE \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
+          STAGING_TRAFFIC=$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='json(status.traffic)')
+          STAGING_TAG_URL=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_urls=[entry.get("url", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_urls[0] if len(tagged_urls) == 1 else "")' <<< "$STAGING_TRAFFIC")
+          STAGING_TAG_REVISION=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_revisions=[entry.get("revisionName", "") for entry in traffic if entry.get("tag") == "staging"]; print(tagged_revisions[0] if len(tagged_revisions) == 1 else "")' <<< "$STAGING_TRAFFIC")
+          test -n "$STAGING_TAG_URL" || (echo "Missing tagged staging revision URL" && exit 1)
+          test -n "$STAGING_TAG_REVISION" || (echo "Missing tagged staging revision" && exit 1)
+          CANDIDATE_HEALTH_JSON=$(curl -sf \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            --connect-timeout 5 \
+            --max-time 30 \
+            "$STAGING_TAG_URL/health")
+          CANDIDATE_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$CANDIDATE_HEALTH_JSON")
+          # DEPLOY_SHA is exported to GITHUB_ENV by the deployment step.
+          # shellcheck disable=SC2153
+          test "$CANDIDATE_SHA" = "$DEPLOY_SHA" || (echo "Tagged staging candidate deploy SHA mismatch" && exit 1)
+          gcloud run services update-traffic "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --to-revisions="${STAGING_TAG_REVISION}=100"
+          STAGING_URL=$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
             --format='value(status.url)')
-          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$STAGING_URL/health" || echo "000")
-          echo "Staging health: HTTP $STATUS at $STAGING_URL"
-          [ "$STATUS" = "200" ] || exit 1
+          HEALTH_JSON=$(curl -sf \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            --connect-timeout 5 \
+            --max-time 30 \
+            "$STAGING_URL/health")
+          DEPLOYED_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$HEALTH_JSON")
+          # shellcheck disable=SC2153
+          test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Staging traffic deploy SHA mismatch" && exit 1)
+          echo "Staging health verified for deploy SHA $DEPLOY_SHA"
 
   deploy-production:
     name: Deploy to Production
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production' && github.ref == 'refs/heads/main'
     environment: production
+    env:
+      PRODUCTION_RUNTIME_SERVICE_ACCOUNT: ${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}
+      PRODUCTION_BUILD_SERVICE_ACCOUNT: ${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}
+      PRODUCTION_TWILIO_ACCOUNT_SID: ${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }}
     concurrency:
       group: deploy-production
       cancel-in-progress: false
@@ -120,8 +217,20 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Refuse non-main production deploy
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           test "$GITHUB_REF" = "refs/heads/main" || (echo "Production deploys must run from main" && exit 1)
+          test -z "$CANDIDATE_SHA" || (echo "Production does not accept candidate_sha" && exit 1)
+
+      - name: Check production runtime variables
+        run: |
+          test -n "$PRODUCTION_RUNTIME_SERVICE_ACCOUNT" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
+          test -n "$PRODUCTION_BUILD_SERVICE_ACCOUNT" || (echo "Missing production PRODUCTION_BUILD_SERVICE_ACCOUNT" && exit 1)
+          test -n "$PRODUCTION_TWILIO_ACCOUNT_SID" || (echo "Missing production PRODUCTION_TWILIO_ACCOUNT_SID" && exit 1)
+
+      - name: Write trusted Cloud Build source policy
+        run: printf '%s\n' "$CLOUD_BUILD_IGNORE_POLICY" > .gcloudignore
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -132,29 +241,36 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      - name: Check production runtime variables
-        run: |
-          test -n "${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_RUNTIME_SERVICE_ACCOUNT" && exit 1)
-          test -n "${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }}" || (echo "Missing production PRODUCTION_BUILD_SERVICE_ACCOUNT" && exit 1)
-
       - name: Deploy to Cloud Run (Production)
         run: |
-          gcloud run deploy $PRODUCTION_SERVICE \
+          DEPLOY_SHA="$(git rev-parse HEAD)"
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          gcloud run deploy "$PRODUCTION_SERVICE" \
             --source . \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
             --allow-unauthenticated \
-            --service-account ${{ vars.PRODUCTION_RUNTIME_SERVICE_ACCOUNT }} \
-            --build-service-account ${{ vars.PRODUCTION_BUILD_SERVICE_ACCOUNT }} \
-            --update-env-vars ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=$PRODUCTION_URL,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=${{ vars.PRODUCTION_TWILIO_ACCOUNT_SID }},DEPLOY_SHA=$GITHUB_SHA
+            --service-account "$PRODUCTION_RUNTIME_SERVICE_ACCOUNT" \
+            --build-service-account "$PRODUCTION_BUILD_SERVICE_ACCOUNT" \
+            --remove-secrets RECEPTIONIST_OBSERVATION_SHADOW_CALLER_HMAC_KEY \
+            --update-env-vars "ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=$PRODUCTION_URL,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,RECEPTIONIST_OBSERVATION_SHADOW_ENABLED=false,DEPLOY_SHA=$DEPLOY_SHA"
 
       - name: Health check
         run: |
           sleep 15
-          PROD_URL=$(gcloud run services describe $PRODUCTION_SERVICE \
-            --project $GCP_PROJECT_ID \
-            --region $GCP_REGION \
+          PROD_URL=$(gcloud run services describe "$PRODUCTION_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
             --format='value(status.url)')
-          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$PROD_URL/health" || echo "000")
-          echo "Production health: HTTP $STATUS at $PROD_URL"
-          [ "$STATUS" = "200" ] || exit 1
+          HEALTH_JSON=$(curl -sf \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            --connect-timeout 5 \
+            --max-time 30 \
+            "$PROD_URL/health")
+          DEPLOYED_SHA=$(python -c 'import json,sys; print(json.load(sys.stdin).get("deploy_sha", ""))' <<< "$HEALTH_JSON")
+          # DEPLOY_SHA is exported to GITHUB_ENV by the deployment step.
+          # shellcheck disable=SC2153
+          test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Production health deploy SHA mismatch" && exit 1)
+          echo "Production health verified for deploy SHA $DEPLOY_SHA"

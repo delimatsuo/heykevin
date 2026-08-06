@@ -126,6 +126,11 @@ async def _run_business(monkeypatch, *, job_data, contractor, vcard_url="", crea
     monkeypatch.setattr(post_call, "_capture_jobber_lead", fake_capture_jobber_lead)
     monkeypatch.setattr(post_call, "_send_summary_push", fake_save_call)
     monkeypatch.setattr(post_call, "_get_vcard_url", lambda _contractor: vcard_url)
+    monkeypatch.setattr(
+        post_call,
+        "_update_caller_contact",
+        lambda *_args, **_kwargs: fake_save_call(),
+    )
 
     await post_call._process_business(
         transcript_text="Caller: I need a leaky faucet fixed",
@@ -141,21 +146,6 @@ async def _run_business(monkeypatch, *, job_data, contractor, vcard_url="", crea
 
 def _caller_sends(sent):
     return [item for item in sent if item[0] and item[0][0] == CALLER_PHONE]
-
-
-@pytest.mark.asyncio
-async def test_contractor_sms_shows_service_area_when_street_address_is_missing():
-    msg = await post_call._format_contractor_sms(
-        _job_card(
-            "service_request",
-            address="",
-            service_area="San Mateo",
-            urgency="routine",
-        ),
-        "job-1",
-    )
-
-    assert "Area: San Mateo" in msg
 
 
 @pytest.mark.asyncio
@@ -330,25 +320,16 @@ async def test_allowed_auto_reply_sends_with_caller_auto_reply_action_and_contex
         (_contractor(jobber_access_token="token", jobber_lead_capture_enabled=True), True),
     ],
 )
-async def test_jobber_lead_capture_is_scheduled_only_when_feature_flag_enabled(
+async def test_jobber_lead_capture_is_awaited_only_when_feature_flag_enabled(
     monkeypatch, contractor, expected
 ):
-    scheduled = []
-
-    def fake_create_task(coro):
-        scheduled.append(coro)
-        coro.close()
-        return object()
-
-    monkeypatch.setattr(post_call.asyncio, "create_task", fake_create_task)
-
-    await _run_business(
+    _, _, created_jobs = await _run_business(
         monkeypatch,
         job_data=_job_card("service_request"),
         contractor=contractor,
     )
 
-    assert bool(scheduled) is expected
+    assert bool(created_jobs) is expected
 
 
 @pytest.mark.asyncio

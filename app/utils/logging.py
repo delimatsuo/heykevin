@@ -9,46 +9,6 @@ from contextvars import ContextVar
 call_sid_var: ContextVar[str] = ContextVar("call_sid", default="")
 
 
-TRACE_FIELD_NAMES = {
-    "event",
-    "call_sid",
-    "caller_phone",
-    "trust_score",
-    "route",
-    "action",
-    "duration_ms",
-    "contractor_id",
-    "source",
-    "resource_id",
-    "allowed",
-    "reason",
-    "turn_id",
-    "stage",
-    "status",
-    "voice_engine",
-    "provider",
-    "attempt",
-    "http_status",
-    "bytes_total",
-    "bytes_sent",
-    "audio_seconds",
-    "utterance_chars",
-    "word_count",
-    "transcript_chars",
-    "first_audio_ms",
-    "stream_sid",
-    "stop_reason",
-    "content_block_types",
-    "has_caller_name",
-    "has_callback_number",
-    "has_issue",
-    "has_service_area",
-    "urgency_detected",
-}
-
-_DISALLOWED_TRACE_FIELDS = {"raw_text", "transcript", "prompt", "messages", "request_body", "response_body"}
-
-
 class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log_entry = {
@@ -63,7 +23,18 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
         # Include any extra fields
-        for key in TRACE_FIELD_NAMES:
+        for key in (
+            "caller_phone",
+            "trust_score",
+            "route",
+            "action",
+            "duration_ms",
+            "contractor_id",
+            "source",
+            "resource_id",
+            "allowed",
+            "reason",
+        ):
             if hasattr(record, key):
                 value = getattr(record, key)
                 if key == "caller_phone" and isinstance(value, str):
@@ -90,17 +61,3 @@ def setup_logging(level: str = "INFO"):
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
-
-
-def trace_event(logger: logging.Logger, event: str, **fields):
-    """Emit a structured, privacy-safe call trace event.
-
-    Trace events intentionally allow only bounded metadata fields. Do not pass
-    transcript text, prompts, request bodies, or response bodies here.
-    """
-    safe_fields = {"event": str(event)}
-    for key, value in fields.items():
-        if key in _DISALLOWED_TRACE_FIELDS or key not in TRACE_FIELD_NAMES:
-            continue
-        safe_fields[key] = value
-    logger.info("call_trace", extra=safe_fields)

@@ -103,9 +103,9 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
 async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
     created = []
 
-    async def fake_book_appointment(token, *, title, start_time, end_time, description):
+    async def fake_book_appointment(contractor, *, title, start_time, end_time, description, call_sid=""):
         created.append({
-            "token": token,
+            "token": contractor.get("google_calendar_access_token"),
             "title": title,
             "start_time": start_time,
             "end_time": end_time,
@@ -176,7 +176,7 @@ async def test_google_calendar_create_error_logging_omits_response_text(monkeypa
 
     with caplog.at_level(logging.ERROR):
         result = await calendar.book_appointment(
-            "gcal-token",
+            {"contractor_id": "c1", "google_calendar_access_token": "gcal-token"},
             title="Jane Private repair",
             start_time="2026-07-01T13:00:00-04:00",
             end_time="2026-07-01T14:00:00-04:00",
@@ -330,7 +330,8 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
         }
     ]
     assert created == []
-    assert "Gemini tool call: book_appointment call_sid=CA-GEMINI-PRIVACY" in caplog.text
+    assert "voice_event event=tool_call call=CA-GEMIN tool=book_appointment" in caplog.text
+    assert "CA-GEMINI-PRIVACY" not in caplog.text
     for sensitive_value in (
         "Jane Private",
         "123 Secret Lane",
@@ -339,6 +340,40 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
         "client-sensitive",
     ):
         assert sensitive_value not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gemini_tool_log_allowlists_provider_tool_name(monkeypatch, caplog):
+    from app.services.voice_pipeline import VoicePipeline
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    async def fake_execute_tool(_self, _tool_name, _tool_input):
+        return json.dumps({"error": "Unavailable"})
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute_tool)
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA-GEMINI-PRIVATE-LONG",
+        contractor_config={"contractor_id": "c1"},
+    )
+    pipeline._ws = FakeWebSocket()
+    provider_tool_name = "private_tool\nforged_event"
+
+    with caplog.at_level(logging.INFO):
+        await pipeline._handle_tool_calls(
+            [{"id": "tool-1", "name": provider_tool_name, "args": {}}]
+        )
+
+    assert "voice_event event=tool_call call=CA-GEMIN tool=unknown" in caplog.text
+    assert provider_tool_name not in caplog.text
+    assert "CA-GEMINI-PRIVATE-LONG" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -402,7 +437,8 @@ async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitiz
         }
     ]
     assert "book_appointment" in caplog.text
-    assert "CA-GEMINI-EXCEPTION" in caplog.text
+    assert "call=CA-GEMIN" in caplog.text
+    assert "CA-GEMINI-EXCEPTION" not in caplog.text
     assert "RuntimeError" in caplog.text
     response_payload = json.dumps(pipeline._ws.sent)
     for sensitive_value in sensitive_values:
@@ -529,7 +565,7 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
     with caplog.at_level(logging.INFO):
         await pipeline._handle_caller_speech("I need help with a leak.")
 
-    assert "Tool call: book_appointment call_sid=CA123" in caplog.text
+    assert "voice_event event=tool_call call=CA123 tool=book_appointment" in caplog.text
     for sensitive_value in (
         "Jane Private",
         "123 Secret Lane",
@@ -580,3 +616,103 @@ async def test_gemini_tool_calls_delegate_to_voice_pipeline_with_call_sid(monkey
             }
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_staging_disables_model_tools_and_denies_calls_without_payload_logs(
+    monkeypatch,
+    caplog,
+):
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    async def fail_if_executed(*_args, **_kwargs):
+        raise AssertionError("A staging model tool must not execute")
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", fail_if_executed)
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        call_sid="CA-GEMINI-STAGING-PRIVATE",
+        contractor_config={
+            "contractor_id": "c1",
+            "jobber_access_token": "private-jobber-token",
+            "google_calendar_access_token": "private-calendar-token",
+        },
+    )
+    pipeline._ws = FakeWebSocket()
+    private_tool_args = {
+        "phone": "+15551234567",
+        "note": "private address and customer information",
+    }
+    caplog.set_level(logging.INFO, logger="app.services.gemini_pipeline")
+
+    assert pipeline._build_gemini_tools() == []
+    await pipeline._handle_tool_calls([
+        {
+            "id": "private-tool-id",
+            "name": "check_customer",
+            "args": private_tool_args,
+        }
+    ])
+
+    assert pipeline._ws.sent == [{
+        "tool_response": {
+            "function_responses": [{
+                "id": "private-tool-id",
+                "name": "check_customer",
+                "response": {"error": "Tools are unavailable for this call."},
+            }],
+        }
+    }]
+    assert "voice_timing event=live_tools_disabled" in caplog.text
+    assert "voice_timing event=tool_call_denied" in caplog.text
+    for private_value in (
+        "CA-GEMINI-STAGING-PRIVATE",
+        "private-jobber-token",
+        "private-calendar-token",
+        "+15551234567",
+        "private address",
+    ):
+        assert private_value not in caplog.text
+
+
+def test_gemini_nonstaging_retains_configured_model_tools(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: False,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        contractor_config={"jobber_access_token": "configured"},
+    )
+
+    declarations = pipeline._build_gemini_tools()
+
+    assert declarations == [{
+        "function_declarations": [{
+            "name": "check_customer",
+            "description": (
+                "Look up the caller in the business's customer database by phone number."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "phone": {
+                        "type": "STRING",
+                        "description": "Phone number in E.164 format",
+                    },
+                },
+                "required": ["phone"],
+            },
+        }],
+    }]

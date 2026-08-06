@@ -64,8 +64,7 @@ def _build_extraction_prompt(transcript: str, contractor: dict | None = None) ->
   - unknown: can't determine from the transcript
 - caller_name: string (the caller's name, empty if not given)
 - business_name: string (caller's company/organization if mentioned, empty if not)
-- service_area: string (city/town or service area if given, empty if not)
-- address: string (full street address only if the caller volunteered it, empty if not)
+- address: string (service address if given, empty if not)
 - issue_description: string (one-line summary of why they called)
 - urgency: string (one of: "emergency", "same_day", "routine", "quote", "none")
   - For service_request or out_of_scope calls involving danger: emergency/same_day/routine/quote based on severity
@@ -83,11 +82,6 @@ Scope rules:
 - If the request is not clearly covered by the listed services or knowledge base, prefer out_of_scope over service_request.
 - Only use service_request when the caller's request appears related to this business's actual services.
 
-Location rules:
-- Put city, town, neighborhood, or service-area information in service_area.
-- Put a full street address in address only when the caller volunteered it.
-- Missing a full street address is acceptable and should not make the job card incomplete.
-
 Urgency guide:
 - emergency: flooding, gas leak, no heat in winter, sparking/fire, burning smell, electrical panel danger, sewage backup
 - same_day: no hot water, broken fixture, toilet won't flush, AC not working in summer
@@ -97,27 +91,10 @@ Urgency guide:
 <transcript>{transcript}</transcript>"""
 
 
-def _content_block_types(content_blocks: list) -> list[str]:
-    block_types = []
-    for block in content_blocks or []:
-        if isinstance(block, dict):
-            block_types.append(str(block.get("type", "unknown")))
-        else:
-            block_types.append(type(block).__name__)
-    return block_types
-
-
-def _first_text_block(content_blocks: list) -> str:
-    for block in content_blocks or []:
-        if isinstance(block, dict) and isinstance(block.get("text"), str):
-            return block["text"]
-    return ""
-
-
 async def extract_job_card(transcript: str, caller_phone: str, contractor: dict | None = None) -> dict:
     """Extract structured job information from a call transcript.
 
-    Returns dict with: caller_name, caller_phone, service_area, address, issue_description,
+    Returns dict with: caller_name, caller_phone, address, issue_description,
     urgency (emergency|same_day|routine|quote), and message (if they left one).
     """
     try:
@@ -140,15 +117,7 @@ async def extract_job_card(transcript: str, caller_phone: str, contractor: dict 
 
             if response.status_code == 200:
                 data = response.json()
-                content_blocks = data.get("content", [])
-                text = _first_text_block(content_blocks)
-                if not text:
-                    logger.error(
-                        "Job card extraction returned no text block: stop_reason=%s content_block_types=%s",
-                        data.get("stop_reason", ""),
-                        _content_block_types(content_blocks),
-                    )
-                    raise ValueError("no_text_content")
+                text = data["content"][0]["text"]
                 # Handle markdown code blocks
                 if "```" in text:
                     text = text.split("```")[1]
@@ -160,7 +129,6 @@ async def extract_job_card(transcript: str, caller_phone: str, contractor: dict 
                 result.setdefault("call_type", "unknown")
                 result.setdefault("caller_name", "")
                 result.setdefault("business_name", "")
-                result.setdefault("service_area", "")
                 result.setdefault("address", "")
                 result.setdefault("issue_description", "")
                 result.setdefault("urgency", "none")
@@ -185,7 +153,6 @@ async def extract_job_card(transcript: str, caller_phone: str, contractor: dict 
         "caller_name": "",
         "business_name": "",
         "caller_phone": caller_phone,
-        "service_area": "",
         "address": "",
         "issue_description": "Call transcript available",
         "call_type": "unknown",

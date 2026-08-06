@@ -3,14 +3,19 @@
 FastAPI application entry point.
 """
 
-import signal
 import asyncio
+from contextlib import suppress
 import os
+import signal
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings, validate_runtime_safety
+from app.config import (
+    settings,
+    staging_native_live_safety_controls_enabled,
+    validate_runtime_safety,
+)
 from app.middleware.auth import verify_api_token
 from app.utils.logging import setup_logging, get_logger
 from app.webhooks.twilio_incoming import router as twilio_router
@@ -39,6 +44,7 @@ logger = get_logger(__name__)
 
 # Graceful shutdown flag
 _shutting_down = False
+_post_call_worker_task: asyncio.Task | None = None
 
 app = FastAPI(
     title="Kevin",
@@ -85,12 +91,16 @@ async def admin_page():
 @app.get("/health")
 async def health():
     """Health check with non-secret deploy identity."""
+    staging_live_safety = staging_native_live_safety_controls_enabled()
     return {
         "status": "ok",
         "environment": settings.environment,
         "service": os.getenv("K_SERVICE", ""),
         "revision": os.getenv("K_REVISION", ""),
         "deploy_sha": os.getenv("DEPLOY_SHA", ""),
+        "gemini_live_staging_safety_controls_enabled": staging_live_safety,
+        "gemini_live_model_tools_enabled": not staging_live_safety,
+        "gemini_live_automatic_terminal_actions_enabled": not staging_live_safety,
     }
 
 
@@ -188,6 +198,110 @@ async def _orphan_call_cleanup():
             logger.warning(f"Orphan call cleanup error: {e}")
 
 
+async def _call_retention_sweep():
+    """Enforce the documented 90-day call-record retention. Runs every 6 hours.
+
+    `cleanup_old_calls` has always existed but was only reachable from a manual
+    admin endpoint, so nothing ever ran it — production accumulated call records
+    well past the retention window that CLAUDE.md states as a privacy property.
+
+    Each pass deletes at most MAX_BATCHES * 500 records so a large backlog drains
+    over several runs rather than in one long burst of Firestore writes.
+    """
+    from app.db.calls import cleanup_old_calls
+
+    MAX_BATCHES = 4
+
+    while True:
+        await asyncio.sleep(6 * 3600)
+        try:
+            total = 0
+            for _ in range(MAX_BATCHES):
+                deleted = await cleanup_old_calls()
+                total += deleted
+                # A short batch means the backlog is drained.
+                if deleted < 500:
+                    break
+            if total:
+                logger.info(f"Call retention sweep: deleted {total} expired record(s)")
+        except Exception as e:
+            logger.warning(f"Call retention sweep error: {e}")
+
+
+async def _lapsed_trial_sweep():
+    """Transition lapsed trials from `trial` to `expired`. Runs every 6 hours.
+
+    Without this, nothing ever writes `expired` for a trial user: the only other
+    writer is the App Store notification handler, and a user who never subscribed
+    has no App Store transaction to generate one. Accounts therefore sat in
+    `trial` indefinitely, which left `_expired_contractor_cleanup` (which selects
+    on `subscription_status == "expired"`) with nothing to act on.
+
+    Only `trial` is swept. See `should_expire_trial` for why `active` is excluded.
+    """
+    import time
+    from google.cloud import firestore
+    from app.db.firestore_client import get_firestore_client
+    from app.services.subscription import should_expire_trial
+
+    while True:
+        await asyncio.sleep(6 * 3600)
+        try:
+            db = get_firestore_client()
+            loop = asyncio.get_event_loop()
+            now = time.time()
+
+            docs = await loop.run_in_executor(
+                None,
+                lambda: list(
+                    db.collection("contractors")
+                    .where("subscription_status", "==", "trial")
+                    .stream()
+                ),
+            )
+
+            def _expire_if_still_trial(doc_id: str) -> bool:
+                """Re-check status inside a transaction before writing.
+
+                StoreKit verification or an App Store notification can flip an
+                account from `trial` to `active` between the query above and this
+                write. An unconditional update would then clobber a freshly paid
+                subscription back to `expired` and expose it to the number-release
+                cleanup, so the status is re-read transactionally.
+                """
+                ref = db.collection("contractors").document(doc_id)
+
+                @firestore.transactional
+                def _txn(transaction):
+                    snapshot = ref.get(transaction=transaction)
+                    if not snapshot.exists:
+                        return False
+                    current = snapshot.to_dict() or {}
+                    if not should_expire_trial(current, now):
+                        return False
+                    transaction.update(ref, {"subscription_status": "expired"})
+                    return True
+
+                return _txn(db.transaction())
+
+            swept = 0
+            for doc in docs:
+                if not should_expire_trial(doc.to_dict() or {}, now):
+                    continue
+                try:
+                    if await loop.run_in_executor(None, lambda d=doc: _expire_if_still_trial(d.id)):
+                        swept += 1
+                except Exception as e:
+                    logger.warning(
+                        "Lapsed trial sweep failed for one contractor: %s", type(e).__name__
+                    )
+
+            if swept:
+                logger.info(f"Lapsed trial sweep: marked {swept} trial(s) expired")
+        except Exception as e:
+            logger.warning(f"Lapsed trial sweep error: {e}")
+
+
 async def _expired_contractor_cleanup():
     """Periodically clean up contractors with deleted app for 14+ days.
 
@@ -200,8 +314,7 @@ async def _expired_contractor_cleanup():
     import time
     from app.db.firestore_client import get_firestore_client
     from app.services.sms import send_sms
-
-    FOURTEEN_DAYS = 14 * 86400
+    from app.services.subscription import is_safe_to_release_number
 
     while True:
         await asyncio.sleep(6 * 3600)  # Every 6 hours
@@ -209,7 +322,6 @@ async def _expired_contractor_cleanup():
             db = get_firestore_client()
             loop = asyncio.get_event_loop()
             now = time.time()
-            cutoff = now - FOURTEEN_DAYS
 
             docs = await loop.run_in_executor(
                 None,
@@ -223,11 +335,31 @@ async def _expired_contractor_cleanup():
 
             for doc in docs:
                 data = doc.to_dict()
-                deleted_at = data.get("deleted_app_detected_at")
-                if not deleted_at or deleted_at > cutoff:
+                # Releasing a number that still has live forwarding sends this
+                # user's calls to whoever Twilio assigns it to next. The guard
+                # requires both an aged deletion signal and a quiet number.
+                if not is_safe_to_release_number(data, now):
                     continue
 
                 contractor_id = doc.id
+
+                # Re-validate on a fresh read immediately before acting. The
+                # query snapshot above ages as this loop progresses, and a
+                # forwarded call or a device re-registration arriving in that
+                # window writes exactly the evidence that must block release
+                # (review finding on PR #143). Deciding on the stale snapshot
+                # could release a number whose forward just proved live.
+                fresh = await loop.run_in_executor(
+                    None,
+                    lambda cid=contractor_id: db.collection("contractors").document(cid).get(),
+                )
+                data = fresh.to_dict() or {}
+                if not data.get("active") or not is_safe_to_release_number(data, time.time()):
+                    logger.info(
+                        f"14-day cleanup: skipping {contractor_id} — state changed since snapshot"
+                    )
+                    continue
+
                 owner_phone = data.get("owner_phone", "")
                 twilio_number = data.get("twilio_number", "")
 
@@ -255,6 +387,8 @@ async def _expired_contractor_cleanup():
 
 @app.on_event("startup")
 async def startup():
+    global _post_call_worker_task
+
     # Validate required config
     required = ['twilio_account_sid', 'twilio_auth_token', 'anthropic_api_key',
                 'deepgram_api_key', 'elevenlabs_api_key', 'api_bearer_token']
@@ -270,7 +404,13 @@ async def startup():
 
     # Start orphan call cleanup background task
     asyncio.create_task(_orphan_call_cleanup())
+    asyncio.create_task(_call_retention_sweep())
+    asyncio.create_task(_lapsed_trial_sweep())
     asyncio.create_task(_expired_contractor_cleanup())
+    from app.services.post_call_handoff import post_call_worker_loop
+
+    if _post_call_worker_task is None or _post_call_worker_task.done():
+        _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
 
     # F-21: drop the redacted Twilio number from startup logs entirely. Even
     # the last 4 digits are unnecessary signal in centralised logs and the
@@ -280,6 +420,13 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _post_call_worker_task
+
+    if _post_call_worker_task is not None:
+        _post_call_worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _post_call_worker_task
+        _post_call_worker_task = None
     logger.info("Kevin shutting down — finishing in-flight requests")
 
 

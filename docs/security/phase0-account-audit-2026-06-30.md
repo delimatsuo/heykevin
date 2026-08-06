@@ -100,8 +100,8 @@ Project: `kevin-staging-491315`
 - One production contractor has connected Google Calendar.
 - One production contractor is active or trialing on a business tier.
 - Nine production estimate records exist, all pending and 31-90 days old.
-- Staging has no contractor or estimate records, so staging smoke tests require
-  creating or seeding a test contractor.
+- At audit time, staging had no contractor or estimate records. A staging smoke
+  contractor was created after this audit; see the post-audit note below.
 
 Default-off gates will therefore block all caller-facing SMS/MMS, estimate
 token/result sends, and integration write actions after release unless explicit
@@ -109,8 +109,7 @@ account flags and approval fields are backfilled first.
 
 Recommended release decision: do not backfill any caller-facing SMS, estimate,
 Jobber, or Google Calendar write gates until A2P/SMS compliance, owner approval,
-and integration-write safety are explicitly approved. Keep the PR draft until a
-staging test contractor exists and the smoke matrix passes.
+and integration-write safety are explicitly approved.
 
 ## Post-Audit Staging Seed
 
@@ -119,3 +118,8 @@ disposable contractor in staging Firestore: `codex_phase0_smoke`. This is a
 Codex-managed test record for programmatic staging smoke only. It rotates a
 scoped staging API token on each smoke run and keeps all Phase 0 action gates in
 the default-off posture.
+
+On 2026-07-01, staging deploy `kevin-api-staging-00032-tel` passed the
+programmatic mutable smoke. The smoke confirmed default-off estimate token and
+text reply gates, cross-tenant call-action denial, and read-only account/work
+queue surfaces against staging Firestore and RTDB.

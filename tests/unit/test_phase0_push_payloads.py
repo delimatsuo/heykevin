@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -60,6 +62,137 @@ def test_media_stream_active_call_fallback_requires_owner_context():
     assert media_stream._active_call_fallback("CA123", None) is None
     assert media_stream._active_call_fallback("CA123", {"caller_phone": "+15551234567"}) is None
     assert media_stream._active_call_fallback("CA123", {"contractor_id": "contractor-1"}) is None
+
+
+@pytest.mark.asyncio
+async def test_media_stream_uses_authenticated_fallback_without_retry_delay(monkeypatch):
+    lookup_count = 0
+
+    async def miss_active_call(_call_sid: str):
+        nonlocal lookup_count
+        lookup_count += 1
+        return None
+
+    async def unexpected_sleep(_delay: float):
+        pytest.fail("authenticated stream context must not incur a retry delay")
+
+    monkeypatch.setattr(media_stream, "get_active_call", miss_active_call)
+    monkeypatch.setattr(media_stream.asyncio, "sleep", unexpected_sleep)
+
+    active_call = await media_stream._resolve_active_call(
+        "CA123",
+        {
+            "contractor_id": "contractor-1",
+            "caller_phone": "test-caller-number",
+            "caller_name": "Pat Customer",
+        },
+    )
+
+    assert lookup_count == 1
+    assert active_call is not None
+    assert active_call.contractor_id == "contractor-1"
+
+
+@pytest.mark.asyncio
+async def test_twilio_audio_send_failure_returns_false_without_logging_payload(caplog):
+    private_error = "private provider failure with caller context"
+    private_audio = b"private outbound audio"
+
+    class FailingWebSocket:
+        async def send_json(self, _payload):
+            raise RuntimeError(private_error)
+
+    delivered = await media_stream._send_twilio_audio(
+        FailingWebSocket(),
+        stream_sid="stream-1",
+        mulaw_chunk=private_audio,
+        call_sid="CA123",
+    )
+
+    assert delivered is False
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=twilio_audio_send_error" in messages
+    assert private_error not in messages
+    assert private_audio.decode() not in messages
+
+
+@pytest.mark.asyncio
+async def test_call_completion_closes_stream_when_twilio_update_fails(monkeypatch, caplog):
+    private_error = "private Twilio failure with caller context"
+    close_codes = []
+
+    class FailingCall:
+        def update(self, **_kwargs):
+            raise RuntimeError(private_error)
+
+    class FakeClient:
+        def calls(self, _call_sid):
+            return FailingCall()
+
+    class FakeWebSocket:
+        async def close(self, *, code):
+            close_codes.append(code)
+
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: FakeClient())
+    caplog.set_level(logging.INFO, logger="app.webhooks.media_stream")
+
+    completed = await media_stream._complete_twilio_call(
+        call_sid="CA_test",
+        websocket=FakeWebSocket(),
+    )
+
+    assert completed is False
+    assert close_codes == [1000]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=call_hangup_error" in messages
+    assert "event=call_stream_close_fallback" in messages
+    assert private_error not in messages
+
+
+@pytest.mark.asyncio
+async def test_call_completion_uses_twilio_update_without_closing_stream(monkeypatch):
+    updates = []
+
+    class SuccessfulCall:
+        def update(self, **kwargs):
+            updates.append(kwargs)
+
+    class FakeClient:
+        def calls(self, call_sid):
+            assert call_sid == "CA_test"
+            return SuccessfulCall()
+
+    class FakeWebSocket:
+        async def close(self, **_kwargs):
+            pytest.fail("successful Twilio update must not close the stream locally")
+
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: FakeClient())
+
+    completed = await media_stream._complete_twilio_call(
+        call_sid="CA_test",
+        websocket=FakeWebSocket(),
+    )
+
+    assert completed is True
+    assert updates == [{"twiml": "<Response><Hangup/></Response>"}]
+
+
+@pytest.mark.asyncio
+async def test_max_duration_uses_provider_independent_message_and_hangup_twiml():
+    updates = []
+
+    async def complete_call(*, twiml: str):
+        updates.append(twiml)
+
+    await media_stream._finish_max_call_duration(complete_call)
+
+    assert len(updates) == 1
+    root = ET.fromstring(updates[0])
+    assert root.tag == "Response"
+    assert root.findtext("Say") == (
+        "This call has reached the maximum duration. Please call back to continue."
+    )
+    assert root.find("Hangup") is not None
 
 
 def test_voip_push_body_does_not_include_arbitrary_reason():

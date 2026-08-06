@@ -205,6 +205,36 @@ async def test_admin_contractor_detail_masks_secrets_and_summarizes_device(monke
 
 
 @pytest.mark.asyncio
+async def test_admin_contractor_detail_includes_jobber_status_without_tokens(monkeypatch):
+    fake_db = _FakeFirestore(
+        [
+            _FakeDoc("contractor-1", {
+                "active": True,
+                "owner_name": "A Contractor",
+                "jobber_access_token": "jobber-access-secret",
+                "jobber_refresh_token": "jobber-refresh-secret",
+                "jobber_connected_at": 123.0,
+                "jobber_lead_capture_enabled": True,
+                "jobber_lead_capture_updated_at": 456.0,
+            }),
+        ],
+    )
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+
+    contractor = response["contractor"]
+    assert "jobber_access_token" not in contractor
+    assert "jobber_refresh_token" not in contractor
+    assert response["jobber"] == {
+        "connected": True,
+        "connected_at": 123.0,
+        "lead_capture_enabled": True,
+        "lead_capture_updated_at": 456.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_admin_list_calls_redacts_phone_and_hides_transcript(monkeypatch):
     fake_db = _FakeFirestore(
         [],
@@ -281,17 +311,25 @@ async def test_admin_call_items_include_jobber_sync_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admin_call_items_accept_summary_present_flag(monkeypatch):
+async def test_admin_list_calls_uses_job_card_for_existing_call_summary(monkeypatch):
     fake_db = _FakeFirestore(
         [],
         collections={
             "calls": [
-                _FakeDoc("summary-call", {
-                    "call_sid": "summary-call",
+                _FakeDoc("call-with-job", {
+                    "call_sid": "call-with-job",
                     "contractor_id": "contractor-1",
                     "timestamp": 100,
                     "caller_phone": "+15550001111",
-                    "summary_present": True,
+                    "route_taken": "ai_screening",
+                }),
+            ],
+            "jobs": [
+                _FakeDoc("job-1", {
+                    "call_sid": "call-with-job",
+                    "call_type": "service_request",
+                    "issue_description": "Caller needs toilet replacement pricing",
+                    "urgency": "quote",
                 }),
             ],
         },
@@ -301,6 +339,7 @@ async def test_admin_call_items_accept_summary_present_flag(monkeypatch):
     response = await admin_api.admin_list_calls(_admin_request())
 
     call = response["calls"][0]
+    assert call["outcome"] == "service_request"
     assert call["has_summary"] is True
     assert "summary" not in call
 

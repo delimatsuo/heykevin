@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "collection_status": "pending",
+  "provenance_policy": {
+    "synthetic_scripts_only": true,
+    "purpose_recorded_adult_speakers_only": true,
+    "real_call_data_prohibited": true,
+    "production_audio_prohibited": true
+  },
+  "speakers": [],
+  "cases": []
+}

@@ -16,14 +16,14 @@ Do not merge or deploy until all rows below have an owner and an outcome.
 |---|---|---|
 | Deployment source of truth | Confirm whether production deploys only by manual `workflow_dispatch` from `main`, as `.github/workflows/deploy.yml` currently states. If any other path auto-deploys `main`, block merge until a release window and rollback path are set. | Pending |
 | Production account audit | Count contractors that would be affected by default-off gates. Do not print customer names, phone numbers, transcripts, tokens, or message bodies. | Complete: see `docs/security/phase0-account-audit-2026-06-30.md`. |
-| Staging account audit | Confirm a test contractor can exercise disabled and enabled gate paths without touching production Firestore, RTDB, APNs, or Twilio data. | Partial: `scripts/phase0_staging_smoke.py` seeded `codex_phase0_smoke` in staging Firestore and read-only API smoke passes. Mutable gate smoke is pending a staging deploy of this PR SHA. |
-| Backfill decision | Decide which existing side effects stay disabled and which accounts, if any, receive explicit flags before release. | Pending |
-| Staging smoke | Run the smoke matrix below against staging after deployment. | Partial: read-only staging smoke passes against revision `kevin-api-staging-00031-xic`; mutable safety checks were skipped because the deployed SHA does not match this PR. |
+| Staging account audit | Confirm a test contractor can exercise disabled and enabled gate paths without touching production Firestore, RTDB, APNs, or Twilio data. | Complete: `scripts/phase0_staging_smoke.py` seeded `codex_phase0_smoke` in staging Firestore and mutable gate smoke passed against staging revision `kevin-api-staging-00032-tel`. |
+| Backfill decision | Decide which existing side effects stay disabled and which accounts, if any, receive explicit flags before release. | Complete: do not backfill caller-facing SMS, estimate, Jobber, or Google Calendar write gates before A2P/SMS compliance, owner approval, and integration-write safety are explicitly approved. |
+| Staging smoke | Run the smoke matrix below against staging after deployment. | Complete: staging deploy and mutable safety smoke passed on 2026-07-01. |
 | Production release | Only after the above pass, mark the PR ready for review and merge in an approved window. | Pending |
 
 ## Current Audit Status
 
-Last updated: 2026-06-30.
+Last updated: 2026-07-01.
 
 - ADC reauthentication was completed for `delimatsuo@gmail.com`.
 - The account can read Cloud Run service metadata for production and staging.
@@ -40,18 +40,26 @@ Last updated: 2026-06-30.
   500 during smoke. The staging index was created programmatically and reached
   `READY`; `app/db/jobs.py` also now has a missing-index fallback so this
   endpoint fails soft if another environment lacks the index.
-- Programmatic read-only staging smoke passes:
+- Staging PR #37 was merged into `staging` to deploy this Phase 0 backend
+  candidate through the protected staging path. GitHub rebase-merged the same
+  patch series as staging commit `3cde31abdd524f4d503de5640cbef942ef7d0d15`.
+  The staging workflow passed tests, deployed `kevin-api-staging-00032-tel`,
+  and production deploy was skipped.
+- Programmatic mutable staging smoke passed with no skips:
 
   ```bash
   .venv/bin/python scripts/phase0_staging_smoke.py \
-    --expected-sha "$(git rev-parse HEAD)" \
-    --mutable-checks
+    --expected-sha "$(git rev-parse origin/staging)" \
+    --require-expected-sha \
+    --mutable-checks \
+    --database-url "$(gh variable get FIREBASE_DATABASE_URL --repo delimatsuo/heykevin --env staging)"
   ```
 
-  The mutable checks are skipped while staging health reports a different
-  `deploy_sha` from this PR. Run the same command again after deploying this
-  PR to staging; at that point skipped mutable checks must either pass or name
-  the remaining permission/manual blocker.
+  Verified outcomes: scoped contractor profile allowed; cross-contractor
+  profile denied; active-call, calls, jobs, settings, Jobber status, and Google
+  Calendar status read paths passed; estimate token creation was blocked by the
+  default-off gate; cross-tenant call action was denied; text reply was blocked
+  by the default-off gate.
 - Production has no `gated_actions`, `sms_compliance_status`,
   `integration_write_status`, or `automation_approvals` configured on any
   contractor document. Default-off gates will block caller-facing SMS/MMS,
@@ -65,7 +73,7 @@ Last updated: 2026-06-30.
   into tickets, PR comments, or chat. Secret Manager migration and rotation are
   outside this PR but remain production hardening work.
 
-Recommended backfill decision:
+Backfill decision:
 
 - Do not backfill caller-facing SMS, estimate, Jobber, or Google Calendar write
   gates before A2P/SMS compliance, owner approval, and integration-write safety

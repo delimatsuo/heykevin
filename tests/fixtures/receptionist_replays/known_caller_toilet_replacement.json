@@ -1,0 +1,59 @@
+{
+  "scenario": "known_caller_toilet_replacement",
+  "initial_state": {
+    "call_sid": "CA_redacted",
+    "phase": "greeting",
+    "caller_identity": {
+      "name": "Jonathan",
+      "confidence": 0.93,
+      "source": "customer_memory",
+      "confirmed": true
+    },
+    "caller_phone_last_four": "8667",
+    "business_scope": "unclear",
+    "business_scope_reason": "",
+    "intent": "unknown",
+    "service_object": "",
+    "service_action": "unknown",
+    "urgency": "unknown",
+    "known_facts": [],
+    "asked_slots": [],
+    "callback_intent": "none",
+    "address_need": "none",
+    "memory_refs_used": ["scoped-memory-ref-1"],
+    "side_effects_allowed": false
+  },
+  "private_memory_lines": [
+    "Prior service: kitchen sink drain repair.",
+    "Recent request: caller asked about toilet replacement pricing."
+  ],
+  "turns": [
+    {
+      "speaker": "caller",
+      "text": "Hi, this is Jonathan. I wanted to know how much to replace a toilet.",
+      "observation": {
+        "language": "en",
+        "identity_confirmed": true,
+        "intent": "pricing_question",
+        "service_object": "toilet",
+        "service_action": "replace"
+      },
+      "expect": {
+        "service_object": "toilet",
+        "service_action": "replace",
+        "forbidden_slots": [
+          "service_action",
+          "service_object",
+          "callback_number",
+          "service_address"
+        ],
+        "instruction_excludes": [
+          "repair, replacement, or new installation?",
+          "callback number?",
+          "service address?",
+          "full-phone-number"
+        ]
+      }
+    }
+  ]
+}

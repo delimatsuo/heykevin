@@ -642,9 +642,21 @@ struct SettingsView: View {
                 Spacer()
                 Button {
                     if !appState.kevinNumber.isEmpty {
+                        // Match the code to the carrier. Hardcoding the GSM code
+                        // here sent Verizon users a code their network ignores —
+                        // and then showed them a green checkmark for it.
+                        let code = appState.isVerizonCarrier
+                            ? "*71\(dialNumber)"
+                            : "*61*\(dialNumber)%23"
+                        dialCode(code)
+                        // Set the optimistic flag only after dialing is attempted.
+                        // This still records intent rather than fact — the device
+                        // cannot read forwarding state — but it no longer claims
+                        // success before anything has happened. Ground truth is
+                        // the server's forwarding_last_seen_at, derived from
+                        // Twilio's ForwardedFrom on a real forwarded call.
                         UserDefaults.standard.set(appState.kevinNumber, forKey: "forwardingActivatedFor")
                         appState.forwardingActivated = true
-                        dialCode("*61*\(dialNumber)%23")
                     }
                 } label: {
                     Text(appState.forwardingActivated ? "Re-activate" : "Unverified")

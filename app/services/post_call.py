@@ -6,6 +6,9 @@ Supports two modes:
 """
 
 import asyncio
+from dataclasses import dataclass, field
+import logging
+import re
 import time
 
 from app.db import calls as call_db
@@ -17,9 +20,57 @@ from app.services import jobber as jobber_service
 from app.services.side_effect_audit import record_gate_decision
 from app.services.sms import send_sms, send_mms
 from app.config import settings
-from app.utils.logging import get_logger, redact_phone
+from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+_SAFE_LOG_METRIC_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
+
+
+def _call_label(call_sid: str) -> str:
+    return str(call_sid or "")[:8] or "unknown"
+
+
+def _safe_log_metric(value: object) -> str:
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    sanitized = _SAFE_LOG_METRIC_PATTERN.sub("_", str(value or "")[:40]).strip("_.:-")
+    return sanitized or "unknown"
+
+
+def _log_post_call_event(
+    event: str,
+    call_sid: str = "",
+    *,
+    level: int = logging.INFO,
+    **metrics: object,
+) -> None:
+    metric_text = " ".join(
+        f"{key}={_safe_log_metric(value)}" for key, value in metrics.items()
+    )
+    suffix = f" {metric_text}" if metric_text else ""
+    logger.log(
+        level,
+        "post_call_event event=%s call=%s%s",
+        event,
+        _call_label(call_sid),
+        suffix,
+    )
+
+
+def _log_post_call_exception(
+    event: str,
+    error: BaseException,
+    call_sid: str = "",
+    *,
+    level: int = logging.WARNING,
+) -> None:
+    _log_post_call_event(
+        event,
+        call_sid,
+        level=level,
+        exception_type=type(error).__name__,
+    )
 
 # Auto-reply rate limit moved to Firestore (auto_reply_timestamps collection)
 
@@ -50,6 +101,47 @@ SAFE_SUMMARY_URGENCY_LABELS = {
 }
 
 
+@dataclass(frozen=True)
+class PostCallResult:
+    status: str
+    completed_effects: tuple[str, ...]
+    failed_effects: tuple[str, ...]
+
+
+@dataclass
+class _PostCallTracker:
+    completed: set[str] = field(default_factory=set)
+    failed: set[str] = field(default_factory=set)
+
+    def record(self, effect: str, succeeded: bool | None) -> None:
+        if succeeded is None:
+            return
+        target = self.completed if succeeded else self.failed
+        target.add(effect)
+
+    def result(self) -> PostCallResult:
+        if self.failed and self.completed:
+            status = "partial"
+        elif self.failed:
+            status = "failed"
+        else:
+            status = "complete"
+        return PostCallResult(
+            status=status,
+            completed_effects=tuple(sorted(self.completed)),
+            failed_effects=tuple(sorted(self.failed)),
+        )
+
+
+def _record_effect(
+    tracker: _PostCallTracker | None,
+    effect: str,
+    succeeded: bool | None,
+) -> None:
+    if tracker:
+        tracker.record(effect, succeeded)
+
+
 def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "") -> str:
     """Return lock-screen-safe summary copy with no raw issue text."""
     urgency_label = SAFE_SUMMARY_URGENCY_LABELS.get((urgency or "").strip().lower())
@@ -58,42 +150,6 @@ def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "")
     if call_type == "service_request":
         return "New service call summary. Open Kevin for details."
     return "New call summary. Open Kevin for details."
-
-
-def _call_summary_from_job_data(job_data: dict) -> str:
-    """Return the one-line summary mirrored onto the call record."""
-    for key in ("issue_description", "message"):
-        value = (job_data.get(key) or "").strip()
-        if value:
-            return value
-    call_type = (job_data.get("call_type") or "").strip()
-    return call_type.replace("_", " ") if call_type else ""
-
-
-def _call_outcome_from_job_data(job_data: dict) -> str:
-    call_type = (job_data.get("call_type") or "unknown").strip().lower()
-    if call_type == "spam":
-        return "spam"
-    if _call_summary_from_job_data(job_data) or job_data.get("caller_name") or job_data.get("callback_number"):
-        return "message_taken"
-    return "screened"
-
-
-def _call_record_updates_from_job_data(job_data: dict, job_id: str = "") -> dict:
-    """Build non-secret call-list metadata from a post-call job card."""
-    updates = {
-        "caller_name": job_data.get("caller_name", ""),
-        "call_type": job_data.get("call_type", "unknown"),
-        "urgency": job_data.get("urgency", "none"),
-        "outcome": _call_outcome_from_job_data(job_data),
-    }
-    summary = _call_summary_from_job_data(job_data)
-    updates["summary_present"] = bool(summary)
-    if job_data.get("callback_number"):
-        updates["callback_number"] = job_data["callback_number"]
-    if job_id:
-        updates["job_id"] = job_id
-    return updates
 
 
 def _post_call_gate(contractor: dict, action: ActionKey, call_sid: str, *, owner_confirmed: bool = False):
@@ -114,6 +170,70 @@ def _post_call_gate(contractor: dict, action: ActionKey, call_sid: str, *, owner
     return decision, context
 
 
+def _call_summary_from_job_data(job_data: dict) -> str:
+    return (job_data.get("issue_description") or job_data.get("message") or "").strip()
+
+
+def _digits_only(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def _normalize_callback_number(callback_number: str, caller_phone: str) -> str:
+    """Resolve last-four caller-ID confirmations to a dialable callback number."""
+    callback = (callback_number or "").strip()
+    if not callback:
+        return ""
+
+    callback_digits = _digits_only(callback)
+    caller_digits = _digits_only(caller_phone)
+
+    if len(callback_digits) >= 7:
+        return callback
+
+    if len(callback_digits) == 4:
+        if caller_digits.endswith(callback_digits):
+            return caller_phone
+        return ""
+
+    lowered = callback.lower()
+    if caller_phone and any(
+        phrase in lowered
+        for phrase in ("caller id", "caller-id", "same number", "that number", "this number")
+    ):
+        return caller_phone
+
+    return callback
+
+
+def _normalize_job_callback_data(job_data: dict) -> dict:
+    normalized = dict(job_data)
+    normalized["callback_number"] = _normalize_callback_number(
+        str(normalized.get("callback_number", "")),
+        str(normalized.get("caller_phone", "")),
+    )
+    return normalized
+
+
+def _call_record_updates_from_job_data(job_data: dict) -> dict:
+    updates = {"caller_name": job_data.get("caller_name", "")}
+    if job_data.get("callback_number"):
+        updates["callback_number"] = job_data["callback_number"]
+
+    summary = _call_summary_from_job_data(job_data)
+    if summary:
+        updates["summary"] = summary
+
+    call_type = job_data.get("call_type", "")
+    if call_type:
+        updates["call_type"] = call_type
+
+    urgency = job_data.get("urgency", "")
+    if urgency:
+        updates["urgency"] = urgency
+
+    return updates
+
+
 async def process_post_call(
     transcript_lines: list,
     caller_phone: str,
@@ -122,9 +242,10 @@ async def process_post_call(
     twilio_number: str = "",
     contractor: dict = None,
     caller_language: str = "en",
-):
+) -> PostCallResult:
     """Full post-call pipeline: extract -> save -> notify contractor + caller."""
     contractor = contractor or {}
+    tracker = _PostCallTracker()
     mode = contractor.get("effective_mode") or effective_mode(contractor)
 
     # Treat legacy "kevin" mode as "business"
@@ -137,14 +258,33 @@ async def process_post_call(
         if mode == "personal":
             await _process_personal(transcript_text, caller_phone, call_sid,
                                     contractor_phone, twilio_number,
-                                    user_language=contractor.get("user_language", "en"))
+                                    user_language=contractor.get("user_language", "en"),
+                                    contractor=contractor,
+                                    tracker=tracker)
         else:
             await _process_business(transcript_text, caller_phone, call_sid,
                                     contractor_phone, twilio_number, contractor,
-                                    caller_language=caller_language)
+                                    caller_language=caller_language,
+                                    tracker=tracker)
 
-    except Exception as e:
-        logger.error(f"Post-call processing failed: {e}", exc_info=True)
+    except Exception as error:
+        _log_post_call_exception(
+            "processing_error",
+            error,
+            call_sid,
+            level=logging.ERROR,
+        )
+        tracker.record("processing", False)
+
+    result = tracker.result()
+    _log_post_call_event(
+        "processing_result",
+        call_sid,
+        status=result.status,
+        completed_count=len(result.completed_effects),
+        failed_count=len(result.failed_effects),
+    )
+    return result
 
 
 async def _process_personal(
@@ -154,6 +294,8 @@ async def _process_personal(
     contractor_phone: str,
     twilio_number: str = "",
     user_language: str = "en",
+    contractor: dict | None = None,
+    tracker: _PostCallTracker | None = None,
 ):
     """Personal mode: simple notification, no job card extraction."""
     # Simple extraction: just get name and reason via Claude (with retry)
@@ -163,26 +305,42 @@ async def _process_personal(
         try:
             job_data = await extract_job_card(transcript_text, caller_phone)
             break
-        except Exception as e:
+        except Exception as error:
             if attempt == 0:
-                logger.warning(f"Job card extraction failed, retrying: {e}")
+                _log_post_call_exception("job_card_extract_retry", error, call_sid)
                 await asyncio.sleep(1)
             else:
-                logger.error(f"Job card extraction failed permanently: {e}")
+                _log_post_call_exception(
+                    "job_card_extract_failed",
+                    error,
+                    call_sid,
+                    level=logging.ERROR,
+                )
                 job_data = {"caller_phone": caller_phone, "call_type": "unknown"}
 
     name = job_data.get("caller_name", "") or "Unknown caller"
     reason = job_data.get("issue_description", "") or job_data.get("message", "") or "No details"
     callback = job_data.get("callback_number", "") or caller_phone
-    job_data["caller_name"] = name
 
-    # Mirror post-call metadata to the call record for admin/support views.
-    call_updates = _call_record_updates_from_job_data(job_data)
-    await call_db.save_call(call_sid, call_updates)
+    call_job_data = dict(job_data)
+    call_job_data["caller_name"] = name
+    call_job_data.setdefault("caller_phone", caller_phone)
+    call_job_data = _normalize_job_callback_data(call_job_data)
+    call_saved = await call_db.save_call(
+        call_sid,
+        _call_record_updates_from_job_data(call_job_data),
+    )
+    _record_effect(tracker, "call_record", call_saved)
+    contact_saved = await _update_caller_contact(
+        job_data,
+        (contractor or {}).get("contractor_id", ""),
+        call_sid,
+    )
+    _record_effect(tracker, "caller_contact", contact_saved)
 
     # Send simple SMS to owner (in their language)
-    owner_phone = contractor_phone or getattr(settings, "user_phone", "")
-    if owner_phone:
+    owner_phone = contractor_phone
+    if owner_phone and twilio_number:
         sms = (
             f"Missed call from {name}\n"
             f"Re: {reason}\n"
@@ -202,16 +360,38 @@ async def _process_personal(
                     )}],
                 )
                 sms = resp.content[0].text.strip()
-            except Exception as e:
-                logger.warning(f"Personal SMS translation failed: {e}")
+            except Exception as error:
+                _log_post_call_exception("personal_sms_translation_error", error, call_sid)
         try:
-            await send_sms(owner_phone, sms, from_number=twilio_number)
-            logger.info(f"Personal mode SMS sent to: {redact_phone(owner_phone)}")
-        except Exception as e:
-            logger.error(f"Personal mode SMS failed to {redact_phone(owner_phone)}: {e}")
+            sent = await send_sms(owner_phone, sms, from_number=twilio_number)
+            _record_effect(tracker, "owner_sms", sent)
+            if sent:
+                _log_post_call_event("personal_sms_sent", call_sid)
+            else:
+                _log_post_call_event(
+                    "personal_sms_failed",
+                    call_sid,
+                    level=logging.ERROR,
+                )
+        except Exception as error:
+            _record_effect(tracker, "owner_sms", False)
+            _log_post_call_exception(
+                "personal_sms_error",
+                error,
+                call_sid,
+                level=logging.ERROR,
+            )
+    else:
+        _record_effect(tracker, "owner_sms", False)
+        _log_post_call_event(
+            "personal_sms_configuration_missing",
+            call_sid,
+            level=logging.ERROR,
+        )
 
     # Send call summary push for personal mode
-    await _send_summary_push(job_data, {})
+    summary_sent = await _send_summary_push(job_data, contractor or {})
+    _record_effect(tracker, "summary_push", summary_sent)
 
 
 async def _process_business(
@@ -222,6 +402,7 @@ async def _process_business(
     twilio_number: str,
     contractor: dict,
     caller_language: str = "en",
+    tracker: _PostCallTracker | None = None,
 ):
     """Business mode: full job card + estimate link + vCard."""
     # 1. Extract structured job card from transcript (with retry)
@@ -230,65 +411,92 @@ async def _process_business(
         try:
             job_data = await extract_job_card(transcript_text, caller_phone, contractor=contractor)
             break
-        except Exception as e:
+        except Exception as error:
             if attempt == 0:
-                logger.warning(f"Job card extraction failed, retrying: {e}")
+                _log_post_call_exception("job_card_extract_retry", error, call_sid)
                 await asyncio.sleep(1)
             else:
-                logger.error(f"Job card extraction failed permanently: {e}")
+                _log_post_call_exception(
+                    "job_card_extract_failed",
+                    error,
+                    call_sid,
+                    level=logging.ERROR,
+                )
                 job_data = {"caller_phone": caller_phone, "call_type": "unknown"}
     job_data["call_sid"] = call_sid
     job_data.setdefault("caller_phone", caller_phone)
+    job_data = _normalize_job_callback_data(job_data)
     contractor_id = contractor.get("contractor_id", "")
     if contractor_id:
         job_data["contractor_id"] = contractor_id
+
+    call_saved = await call_db.save_call(
+        call_sid,
+        _call_record_updates_from_job_data(job_data),
+    )
+    _record_effect(tracker, "call_record", call_saved)
+    contact_saved = await _update_caller_contact(
+        job_data,
+        contractor_id,
+        call_sid,
+    )
+    _record_effect(tracker, "caller_contact", contact_saved)
 
     # 2. Save to Firestore (with idempotency check on call_sid)
     job_data["transcript"] = transcript_text
     existing_job = await job_db.get_job_by_call_sid(call_sid)
     if existing_job:
         job_id = existing_job["job_id"]
-        logger.info(f"Job already exists for call_sid {call_sid}, skipping creation: {job_id}")
+        _log_post_call_event("job_create_deduplicated", call_sid)
     else:
-        job_id = await job_db.save_job(job_data)
-
-    # Mirror post-call metadata to the call record for admin/support views.
-    call_updates = _call_record_updates_from_job_data(job_data, job_id)
+        job_data_for_storage = dict(job_data)
+        job_data_for_storage.pop("transcript", None)
+        job_id = await job_db.save_job(job_data_for_storage)
+    _record_effect(tracker, "job_record", True)
 
     # 2b. Best-effort Jobber lead capture for service requests.
     if (
         contractor.get("jobber_access_token")
+        and job_data.get("call_type") == "service_request"
         and _jobber_lead_capture_enabled(contractor)
     ):
-        if job_data.get("call_type") == "service_request":
-            asyncio.create_task(_capture_jobber_lead(contractor, job_data, job_id))
-        else:
-            call_updates.update({
-                "jobber_sync_status": "skipped",
-                "jobber_sync_error": "non_service_request",
-                "jobber_sync_finished_at": time.time(),
-            })
-
-    await call_db.save_call(call_sid, call_updates)
+        jobber_captured = await _capture_jobber_lead(contractor, job_data, job_id)
+        _record_effect(tracker, "jobber_lead", jobber_captured)
 
     # 3. Send SMS to contractor (in their language)
     user_language = contractor.get("user_language", "en")
-    if contractor_phone:
+    if contractor_phone and twilio_number:
         contractor_sms = await _format_contractor_sms(job_data, job_id, user_language=user_language)
         try:
-            await send_sms(contractor_phone, contractor_sms, from_number=twilio_number)
-            logger.info(f"Job card SMS sent to contractor: {redact_phone(contractor_phone)}")
-        except Exception as e:
-            logger.error(f"Job card SMS to contractor failed: {e}")
+            sent = await send_sms(
+                contractor_phone,
+                contractor_sms,
+                from_number=twilio_number,
+            )
+            _record_effect(tracker, "owner_sms", sent)
+            if sent:
+                _log_post_call_event("contractor_sms_sent", call_sid)
+            else:
+                _log_post_call_event(
+                    "contractor_sms_failed",
+                    call_sid,
+                    level=logging.ERROR,
+                )
+        except Exception as error:
+            _record_effect(tracker, "owner_sms", False)
+            _log_post_call_exception(
+                "contractor_sms_error",
+                error,
+                call_sid,
+                level=logging.ERROR,
+            )
     else:
-        owner_phone = getattr(settings, "user_phone", "")
-        if owner_phone:
-            contractor_sms = await _format_contractor_sms(job_data, job_id, user_language=user_language)
-            try:
-                await send_sms(owner_phone, contractor_sms, from_number=twilio_number)
-                logger.info(f"Job card SMS sent to owner: {redact_phone(owner_phone)}")
-            except Exception as e:
-                logger.error(f"Job card SMS to owner failed: {e}")
+        _record_effect(tracker, "owner_sms", False)
+        _log_post_call_event(
+            "owner_sms_configuration_missing",
+            call_sid,
+            level=logging.ERROR,
+        )
 
     # 4. Send confirmation SMS to caller (service requests only)
     call_type = job_data.get("call_type", "unknown")
@@ -331,9 +539,20 @@ async def _process_business(
                 else:
                     logger.info("Caller confirmation SMS blocked by gate", extra={"reason": decision.reason.value})
             if sent_confirmation:
-                logger.info(f"Confirmation SMS sent to caller: {redact_phone(caller_phone)}")
-        except Exception as e:
-            logger.error(f"Confirmation SMS to caller failed: {e}")
+                _log_post_call_event("caller_confirmation_sent", call_sid)
+            _record_effect(
+                tracker,
+                "caller_confirmation",
+                sent_confirmation if decision.allowed else None,
+            )
+        except Exception as error:
+            _record_effect(tracker, "caller_confirmation", False)
+            _log_post_call_exception(
+                "caller_confirmation_error",
+                error,
+                call_sid,
+                level=logging.ERROR,
+            )
 
     # 5. For non-service calls, still send vCard if we have one
     elif caller_phone and caller_phone != contractor_phone and call_type not in ("spam",):
@@ -345,7 +564,7 @@ async def _process_business(
                 action = ActionKey.CALLER_VCARD_MMS
                 decision, context = _post_call_gate(contractor, action, call_sid)
                 if decision.allowed:
-                    await send_mms(
+                    vcard_sent = await send_mms(
                         caller_phone,
                         msg,
                         media_url=vcard_url,
@@ -354,30 +573,121 @@ async def _process_business(
                         action=action,
                         gate_context=context,
                     )
+                    _record_effect(tracker, "caller_vcard", vcard_sent)
                 else:
                     logger.info("Caller vCard MMS blocked by gate", extra={"reason": decision.reason.value})
-            except Exception as e:
-                logger.error(f"vCard MMS to caller failed: {e}")
+            except Exception as error:
+                _record_effect(tracker, "caller_vcard", False)
+                _log_post_call_exception(
+                    "caller_vcard_error",
+                    error,
+                    call_sid,
+                    level=logging.ERROR,
+                )
 
         # 5b. Auto-reply SMS for non-service calls (opt-in)
         if contractor.get("auto_reply_sms", False):
             decision, context = _post_call_gate(contractor, ActionKey.CALLER_AUTO_REPLY, call_sid)
             if decision.allowed:
-                await _send_auto_reply(
+                auto_reply_sent = await _send_auto_reply(
                     caller_phone,
                     contractor,
                     twilio_number,
                     transcript_text,
                     caller_language=caller_language,
                     gate_context=context,
+                    call_sid=call_sid,
                 )
+                _record_effect(tracker, "caller_auto_reply", auto_reply_sent)
             else:
                 logger.info("Auto-reply blocked by gate", extra={"reason": decision.reason.value})
 
     # 6. Send call summary push notification
-    await _send_summary_push(job_data, contractor)
+    summary_sent = await _send_summary_push(job_data, contractor)
+    _record_effect(tracker, "summary_push", summary_sent)
 
-    logger.info(f"Post-call processing complete: job {job_id}")
+    _log_post_call_event("processing_complete", call_sid)
+
+
+async def _update_caller_contact(
+    job_data: dict,
+    contractor_id: str,
+    call_sid: str,
+) -> bool | None:
+    """Persist one tenant-scoped caller contact from the claimed job card."""
+    caller_phone = str(job_data.get("caller_phone") or "")
+    caller_name = str(job_data.get("caller_name") or "")
+    business_name = str(job_data.get("business_name") or "")
+    if not contractor_id or not caller_phone or not (caller_name or business_name):
+        return None
+
+    from app.db.contacts import get_caller_contact, upsert_caller_contact
+
+    try:
+        existing = await get_caller_contact(contractor_id, caller_phone) or {}
+        now = time.time()
+        summary = _call_summary_from_job_data(job_data)
+        if existing:
+            updates = {
+                "last_call_at": now,
+                "last_call_sid": call_sid,
+            }
+            if caller_name and not existing.get("caller_name"):
+                updates["caller_name"] = caller_name
+            if business_name and not existing.get("business_name"):
+                updates["business_name"] = business_name
+            if summary:
+                history = [
+                    item
+                    for item in list(existing.get("call_history") or [])
+                    if isinstance(item, dict) and item.get("call_sid") != call_sid
+                ]
+                history.append(
+                    {
+                        "date": now,
+                        "call_sid": call_sid,
+                        "summary": summary,
+                    }
+                )
+                updates["call_history"] = history[-20:]
+            saved = await upsert_caller_contact(
+                contractor_id,
+                caller_phone,
+                updates,
+                merge=True,
+            )
+        else:
+            data = {
+                "caller_name": caller_name,
+                "business_name": business_name,
+                "phone": caller_phone,
+                "created_at": now,
+                "last_call_at": now,
+                "last_call_sid": call_sid,
+                "notes": "",
+                "tags": [],
+                "call_history": [],
+            }
+            if summary:
+                data["call_history"] = [
+                    {
+                        "date": now,
+                        "call_sid": call_sid,
+                        "summary": summary,
+                    }
+                ]
+            saved = await upsert_caller_contact(
+                contractor_id,
+                caller_phone,
+                data,
+                merge=False,
+            )
+        if saved:
+            _log_post_call_event("caller_contact_saved", call_sid)
+        return saved
+    except Exception as error:
+        _log_post_call_exception("caller_contact_error", error, call_sid)
+        return False
 
 
 async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str = "en") -> str:
@@ -390,7 +700,6 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
     name = job_data.get("caller_name", "") or "Unknown"
     business = job_data.get("business_name", "")
     phone = job_data.get("caller_phone", "")
-    service_area = job_data.get("service_area", "")
     address = job_data.get("address", "")
     issue = job_data.get("issue_description", "")
     message = job_data.get("message", "")
@@ -407,8 +716,6 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
         lines.append(f"\U0001f4de {phone}")
     if address:
         lines.append(f"\U0001f4cd {address}")
-    elif service_area:
-        lines.append(f"Area: {service_area}")
     if issue:
         lines.append(f"Re: {issue}")
 
@@ -440,8 +747,8 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
                 )}],
             )
             sms = resp.content[0].text.strip()
-        except Exception as e:
-            logger.warning(f"Contractor SMS translation failed: {e}")
+        except Exception as error:
+            _log_post_call_exception("contractor_sms_translation_error", error)
 
     return sms
 
@@ -498,8 +805,12 @@ async def _format_caller_sms_with_estimate(
                             f"\n\n\U0001f4f7 Want a free AI diagnosis and estimate? "
                             f"Upload a photo or video of the issue:\n{estimate_url}"
                         )
-        except Exception as e:
-            logger.warning(f"Failed to create estimate token: {e}")
+        except Exception as error:
+            _log_post_call_exception(
+                "estimate_token_error",
+                error,
+                str(job_data.get("call_sid", "")),
+            )
 
     return base_msg
 
@@ -520,27 +831,44 @@ async def _send_summary_push(job_data: dict, contractor: dict):
         # Only send summary if the caller actually left a message
         if not issue and call_type in ("spam", "unknown"):
             logger.info("No message left — skipping summary push")
-            return
+            return None
 
         contractor_id = contractor.get("contractor_id", "")
         device_token = await get_device_token(contractor_id=contractor_id)
         if not device_token:
-            return
+            return None
 
         urgency = job_data.get("urgency", "")
         body = _safe_summary_push_body(caller_name, call_type, urgency)
 
-        await send_regular_push(
+        sent = await send_regular_push(
             device_token=device_token,
             title="Call Summary",
             body=body,
             call_sid=job_data.get("call_sid", ""),
             caller_phone=job_data.get("caller_phone", ""),
             caller_name=caller_name,
+            contractor_id=contractor_id,
         )
-        logger.info(f"Call summary push sent for {call_type} call from {caller_name[:1] if caller_name else ''}***")
-    except Exception as e:
-        logger.warning(f"Call summary push failed: {e}")
+        if sent:
+            _log_post_call_event(
+                "summary_push_sent",
+                str(job_data.get("call_sid", "")),
+            )
+            return True
+        _log_post_call_event(
+            "summary_push_failed",
+            str(job_data.get("call_sid", "")),
+            level=logging.ERROR,
+        )
+        return False
+    except Exception as error:
+        _log_post_call_exception(
+            "summary_push_error",
+            error,
+            str(job_data.get("call_sid", "")),
+        )
+        return False
 
 
 def _detect_spanish(transcript_text: str) -> bool:
@@ -563,7 +891,7 @@ async def _send_auto_reply(
 ):
     """Send a courtesy auto-reply SMS to the caller in their language. Opt-in, rate-limited via Firestore."""
     if not caller_phone:
-        return
+        return None
 
     # Per-phone dedup: max 1 auto-reply per phone per hour (Firestore-backed)
     now = time.time()
@@ -579,16 +907,16 @@ async def _send_auto_reply(
         if doc.exists:
             last_sent = doc.to_dict().get("last_sent", 0)
             if now - last_sent < 3600:
-                logger.info(f"Auto-reply skipped (dedup): {redact_phone(caller_phone)}")
-                return
-    except Exception as e:
-        logger.warning(f"Auto-reply rate limit check failed: {e}")
-        return  # Fail closed — skip if we can't verify
+                _log_post_call_event("auto_reply_deduplicated", call_sid)
+                return None
+    except Exception as error:
+        _log_post_call_exception("auto_reply_rate_limit_error", error, call_sid)
+        return False
 
     # Block premium/shortcode numbers (less than 10 digits or starts with non-1)
     if len(phone_key) < 10 or (len(phone_key) == 11 and not phone_key.startswith("1")):
-        logger.info(f"Auto-reply skipped (invalid destination): {redact_phone(caller_phone)}")
-        return
+        _log_post_call_event("auto_reply_invalid_destination", call_sid)
+        return None
 
     owner_name = contractor.get("owner_name", "")
     business_name = contractor.get("business_name", owner_name or "us")
@@ -613,8 +941,8 @@ async def _send_auto_reply(
                 )}],
             )
             msg = resp.content[0].text.strip()
-        except Exception as e:
-            logger.warning(f"Auto-reply translation failed, falling back to English: {e}")
+        except Exception as error:
+            _log_post_call_exception("auto_reply_translation_error", error, call_sid)
             msg = f"Thanks for calling {business_name}! {reply_name} got your message and will get back to you shortly."
 
     try:
@@ -623,7 +951,7 @@ async def _send_auto_reply(
             actor="system",
             idempotency_key=f"{call_sid}:caller_auto_reply" if call_sid else "",
         )
-        await send_sms(
+        sent = await send_sms(
             caller_phone,
             msg,
             from_number=twilio_number,
@@ -631,14 +959,23 @@ async def _send_auto_reply(
             action=ActionKey.CALLER_AUTO_REPLY,
             gate_context=gate_context,
         )
+        if not sent:
+            _log_post_call_event(
+                "auto_reply_delivery_failed",
+                call_sid,
+                level=logging.ERROR,
+            )
+            return False
         # Record timestamp in Firestore
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None, lambda: db.collection("auto_reply_timestamps").document(phone_key).set({"last_sent": now})
         )
-        logger.info(f"Auto-reply SMS sent to: {redact_phone(caller_phone)} (lang={caller_language})")
-    except Exception as e:
-        logger.warning(f"Auto-reply SMS failed: {e}")
+        _log_post_call_event("auto_reply_sent", call_sid)
+        return True
+    except Exception as error:
+        _log_post_call_exception("auto_reply_error", error, call_sid)
+        return False
 
 
 def _get_vcard_url(contractor: dict) -> str:
@@ -649,14 +986,15 @@ def _get_vcard_url(contractor: dict) -> str:
     try:
         from app.services.vcard import generate_signed_vcard_url
         return generate_signed_vcard_url(contractor_id)
-    except Exception as e:
-        logger.warning(f"Failed to generate vCard URL: {e}")
+    except Exception as error:
+        _log_post_call_exception("vcard_url_error", error)
         return ""
 
 
 JOBBER_LOOKUP_TIMEOUT_SECONDS = 8.0
 JOBBER_MUTATION_TIMEOUT_SECONDS = 15.0
 JOBBER_NOTE_LIMIT = 5000
+PHONE_LIKE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().,\-]{6,}\d)(?!\w)")
 
 
 def _jobber_lead_capture_enabled(contractor: dict) -> bool:
@@ -692,11 +1030,11 @@ def _format_jobber_lead_note(job_data: dict) -> str:
     ]
     for label, value in fields:
         if value:
-            lines.append(f"{label}: {value}")
+            lines.append(f"{label}: {_mask_phone_like_text(str(value))}")
 
     transcript = (job_data.get("transcript") or "").strip()
     if transcript:
-        lines.extend(["", "Transcript:", transcript])
+        lines.extend(["", "Transcript:", _mask_phone_like_text(transcript)])
 
     note = "\n".join(lines).strip()
     if len(note) > JOBBER_NOTE_LIMIT:
@@ -704,16 +1042,27 @@ def _format_jobber_lead_note(job_data: dict) -> str:
     return note
 
 
+def _mask_phone_like_text(text: str) -> str:
+    """Mask phone-shaped text in external notes while keeping the last 4 digits."""
+    def _replace(match: re.Match) -> str:
+        digits = re.sub(r"\D", "", match.group(0))
+        if len(digits) < 7:
+            return match.group(0)
+        return f"***{digits[-4:]}"
+
+    return PHONE_LIKE_RE.sub(_replace, text)
+
+
 async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
     """Best-effort: capture a service-request call as a Jobber Request."""
     if not _jobber_lead_capture_enabled(contractor):
-        return
+        return None
 
     call_sid = job_data.get("call_sid", "")
     try:
         claimed = await job_db.claim_jobber_sync(job_id)
         if not claimed:
-            return
+            return None
 
         caller_phone = job_data.get("caller_phone", "")
         customer = None
@@ -736,7 +1085,7 @@ async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
         property_id = _jobber_property_id(customer)
         if not client_id:
             await _mark_jobber_sync_failed(job_id, call_sid, "client_missing")
-            return
+            return False
 
         request = await asyncio.wait_for(
             jobber_service.create_request(
@@ -752,7 +1101,7 @@ async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
         request_id = (request or {}).get("id", "")
         if not request_id:
             await _mark_jobber_sync_failed(job_id, call_sid, "request_create_failed")
-            return
+            return False
 
         note_id = ""
         try:
@@ -766,11 +1115,8 @@ async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
             ) or ""
         except asyncio.TimeoutError:
             logger.warning("Jobber request note creation timed out")
-        except Exception as exc:
-            logger.warning(
-                "Jobber request note creation failed: exception_type=%s",
-                type(exc).__name__,
-            )
+        except Exception as error:
+            _log_post_call_exception("jobber_note_error", error, call_sid)
 
         updates = {
             "jobber_sync_status": "succeeded",
@@ -786,17 +1132,20 @@ async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
 
         await job_db.update_job(job_id, updates)
         await _mirror_jobber_sync_to_call(call_sid, updates)
-        logger.info("Jobber lead captured for call %s", call_sid[:8])
+        _log_post_call_event("jobber_lead_captured", call_sid)
+        return True
     except asyncio.CancelledError:
         await _mark_jobber_sync_failed(job_id, call_sid, "cancelled")
         raise
     except asyncio.TimeoutError:
         await _mark_jobber_sync_failed(job_id, call_sid, "timeout")
         logger.warning("Jobber lead capture timed out")
-    except Exception as exc:
-        error_type = type(exc).__name__
+        return False
+    except Exception as error:
+        error_type = type(error).__name__
         await _mark_jobber_sync_failed(job_id, call_sid, error_type)
-        logger.warning("Jobber lead capture failed: exception_type=%s", error_type)
+        _log_post_call_exception("jobber_lead_capture_error", error, call_sid)
+        return False
 
 
 def _jobber_client_id(customer: dict | None) -> str:
@@ -833,8 +1182,5 @@ async def _mirror_jobber_sync_to_call(call_sid: str, updates: dict):
         await call_db.save_call(call_sid, updates)
     except asyncio.CancelledError:
         logger.warning("Jobber sync call mirror cancelled")
-    except Exception as exc:
-        logger.warning(
-            "Jobber sync call mirror failed: exception_type=%s",
-            type(exc).__name__,
-        )
+    except Exception as error:
+        _log_post_call_exception("jobber_sync_mirror_error", error, call_sid)

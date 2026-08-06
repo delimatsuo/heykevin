@@ -1,0 +1,247 @@
+[
+  {
+    "scenario": "pricing_only_no_callback",
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "phase": "greeting",
+      "caller_identity": {"name": "", "confidence": 0.0, "source": "", "confirmed": false},
+      "caller_phone_last_four": "8667",
+      "business_scope": "unclear",
+      "business_scope_reason": "",
+      "intent": "unknown",
+      "service_object": "",
+      "service_action": "unknown",
+      "urgency": "unknown",
+      "known_facts": [],
+      "asked_slots": [],
+      "callback_intent": "none",
+      "callback_confirmation": "unknown",
+      "address_need": "none",
+      "memory_refs_used": [],
+      "side_effects_allowed": false,
+      "language": "unknown"
+    },
+    "private_memory_lines": [],
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "How much does it cost to replace a faucet?",
+        "observation": {
+          "intent": "pricing_question",
+          "service_object": "faucet",
+          "service_action": "replace"
+        },
+        "expect": {
+          "service_object": "faucet",
+          "service_action": "replace",
+          "forbidden_slots": ["service_action", "service_object", "callback_number", "service_address"],
+          "instruction_excludes": ["callback number?", "service address?", "PRIVATE_SOURCE", "full-phone-number"]
+        }
+      }
+    ]
+  },
+  {
+    "scenario": "callback_rejected",
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "phase": "collect_intake",
+      "caller_identity": {"name": "", "confidence": 0.0, "source": "", "confirmed": false},
+      "caller_phone_last_four": "8667",
+      "business_scope": "unclear",
+      "business_scope_reason": "",
+      "intent": "callback",
+      "service_object": "faucet",
+      "service_action": "repair",
+      "urgency": "unknown",
+      "known_facts": [],
+      "asked_slots": ["callback_confirmation"],
+      "callback_intent": "requested",
+      "callback_confirmation": "unknown",
+      "address_need": "none",
+      "memory_refs_used": [],
+      "side_effects_allowed": false,
+      "language": "unknown"
+    },
+    "private_memory_lines": [],
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "No, that is not the right number.",
+        "observation": {"callback_confirmation": "rejected"},
+        "expect": {
+          "action_name": "ask_callback_number",
+          "allowed_slots": ["callback_number"],
+          "instruction_excludes": ["service address?", "full-phone-number", "PRIVATE_SOURCE"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "What is the best callback number?",
+        "observed": {"asked_slots": ["callback_number"]},
+        "expect": {"asked_slots_state": ["callback_number"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "Use the replacement number I provided.",
+        "observation": {"callback_phone_last_four": "4321"},
+        "expect": {
+          "action_name": "confirm_callback_last_four",
+          "allowed_slots": ["callback_confirmation"],
+          "forbidden_slots": ["callback_number"],
+          "instruction_includes": ["Callback number ending: 4321"],
+          "instruction_excludes": [
+            "Caller ID ending: 8667",
+            "full-phone-number",
+            "PRIVATE_SOURCE"
+          ]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Should the business call the number ending in 4321?",
+        "observed": {"asked_slots": ["callback_confirmation"]},
+        "expect": {"asked_slots_state": ["callback_confirmation"]}
+      },
+      {
+        "speaker": "caller",
+        "text": "Yes, that is correct.",
+        "observation": {
+          "callback_intent": "accepted",
+          "callback_confirmation": "confirmed"
+        },
+        "expect": {
+          "callback_intent": "accepted",
+          "callback_confirmation": "confirmed",
+          "action_name": "wrap_up",
+          "forbidden_slots": ["callback_number", "callback_confirmation"]
+        }
+      },
+      {
+        "speaker": "assistant",
+        "text": "Got it. The business will call you back.",
+        "observed": {"asked_slots": []}
+      }
+    ]
+  },
+  {
+    "scenario": "blocked_caller_id_callback",
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "phase": "collect_intake",
+      "caller_identity": {"name": "", "confidence": 0.0, "source": "", "confirmed": false},
+      "caller_phone_last_four": "",
+      "business_scope": "unclear",
+      "business_scope_reason": "",
+      "intent": "unknown",
+      "service_object": "",
+      "service_action": "unknown",
+      "urgency": "unknown",
+      "known_facts": [],
+      "asked_slots": [],
+      "callback_intent": "none",
+      "callback_confirmation": "unknown",
+      "address_need": "none",
+      "memory_refs_used": [],
+      "side_effects_allowed": false,
+      "language": "unknown"
+    },
+    "private_memory_lines": [],
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Please call me back.",
+        "observation": {"intent": "callback", "callback_intent": "requested"},
+        "expect": {
+          "action_name": "ask_callback_number",
+          "allowed_slots": ["callback_number"],
+          "instruction_excludes": ["service address?", "full-phone-number", "PRIVATE_SOURCE"]
+        }
+      }
+    ]
+  },
+  {
+    "scenario": "mixed_language_request",
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "phase": "greeting",
+      "caller_identity": {"name": "", "confidence": 0.0, "source": "", "confirmed": false},
+      "caller_phone_last_four": "8667",
+      "business_scope": "unclear",
+      "business_scope_reason": "",
+      "intent": "unknown",
+      "service_object": "",
+      "service_action": "unknown",
+      "urgency": "unknown",
+      "known_facts": [],
+      "asked_slots": [],
+      "callback_intent": "none",
+      "callback_confirmation": "unknown",
+      "address_need": "none",
+      "memory_refs_used": [],
+      "side_effects_allowed": false,
+      "language": "unknown"
+    },
+    "private_memory_lines": [],
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Hola, necesito precio para reemplazar un bano.",
+        "observation": {
+          "language": "es",
+          "intent": "service_request",
+          "service_object": "",
+          "service_action": "replace"
+        },
+        "expect": {
+          "language": "es",
+          "service_action": "replace",
+          "forbidden_slots": ["service_action", "callback_number", "service_address"],
+          "instruction_includes": ["Language: es"],
+          "instruction_excludes": ["callback number?", "service address?", "full-phone-number"]
+        }
+      }
+    ]
+  },
+  {
+    "scenario": "exact_quote_refusal",
+    "initial_state": {
+      "call_sid": "CA_redacted",
+      "phase": "greeting",
+      "caller_identity": {"name": "", "confidence": 0.0, "source": "", "confirmed": false},
+      "caller_phone_last_four": "8667",
+      "business_scope": "unclear",
+      "business_scope_reason": "",
+      "intent": "unknown",
+      "service_object": "",
+      "service_action": "unknown",
+      "urgency": "unknown",
+      "known_facts": [],
+      "asked_slots": [],
+      "callback_intent": "none",
+      "callback_confirmation": "unknown",
+      "address_need": "none",
+      "memory_refs_used": [],
+      "side_effects_allowed": false,
+      "language": "unknown"
+    },
+    "private_memory_lines": [],
+    "turns": [
+      {
+        "speaker": "caller",
+        "text": "Can you guarantee the exact price to replace a toilet?",
+        "observation": {
+          "intent": "pricing_question",
+          "service_object": "toilet",
+          "service_action": "replace"
+        },
+        "expect": {
+          "service_object": "toilet",
+          "service_action": "replace",
+          "forbidden_slots": ["service_action", "service_object", "callback_number", "service_address"],
+          "instruction_includes": ["answer_direct_question"],
+          "instruction_excludes": ["guarantee an exact quote", "service address?", "full-phone-number"]
+        }
+      }
+    ]
+  }
+]

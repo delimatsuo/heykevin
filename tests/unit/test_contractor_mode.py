@@ -180,6 +180,34 @@ async def test_trial_user_with_business_tier_can_switch_to_business_mode(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_business_subscriber_can_switch_to_personal_mode(monkeypatch):
+    updates_seen = {}
+
+    async def fail_get_contractor(*args, **kwargs):
+        raise AssertionError("switching to Personal mode must not require a tier lookup")
+
+    async def fake_update_contractor(contractor_id, updates):
+        updates_seen["contractor_id"] = contractor_id
+        updates_seen["updates"] = updates
+        return True
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fail_get_contractor)
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+
+    response = await contractors_api.api_update_contractor(
+        "contractor-1",
+        contractors_api.ContractorUpdate(mode="personal"),
+        _admin_request(),
+    )
+
+    assert response == {"status": "ok"}
+    assert updates_seen == {
+        "contractor_id": "contractor-1",
+        "updates": {"mode": "personal"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_active_personal_subscriber_cannot_switch_to_business_mode(monkeypatch):
     async def fake_get_contractor(contractor_id):
         return {

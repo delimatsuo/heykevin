@@ -342,6 +342,24 @@ async def _expired_contractor_cleanup():
                     continue
 
                 contractor_id = doc.id
+
+                # Re-validate on a fresh read immediately before acting. The
+                # query snapshot above ages as this loop progresses, and a
+                # forwarded call or a device re-registration arriving in that
+                # window writes exactly the evidence that must block release
+                # (review finding on PR #143). Deciding on the stale snapshot
+                # could release a number whose forward just proved live.
+                fresh = await loop.run_in_executor(
+                    None,
+                    lambda cid=contractor_id: db.collection("contractors").document(cid).get(),
+                )
+                data = fresh.to_dict() or {}
+                if not data.get("active") or not is_safe_to_release_number(data, time.time()):
+                    logger.info(
+                        f"14-day cleanup: skipping {contractor_id} — state changed since snapshot"
+                    )
+                    continue
+
                 owner_phone = data.get("owner_phone", "")
                 twilio_number = data.get("twilio_number", "")
 

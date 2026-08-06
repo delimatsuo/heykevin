@@ -999,9 +999,11 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
     and consent implications and is a product decision; this handler's job is to
     stop dropping messages.
 
-    Always returns 200 with empty TwiML, even on lookup or write failure —
-    Twilio retries non-2xx responses, and a retry cannot help a message we have
-    already received.
+    Response semantics matter here (review finding on PR #143): an unrecognized
+    To number returns 200 — redelivery cannot make the number recognized. But a
+    lookup or persistence failure returns 500 so Twilio redelivers the webhook
+    and the message gets another chance to be stored. Redelivery is idempotent
+    because the record is keyed by MessageSid.
     """
     form_data = await request.form()
     to_number = str(form_data.get("To", "") or "")
@@ -1011,6 +1013,18 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
         num_media = int(str(form_data.get("NumMedia", "0") or "0"))
     except (TypeError, ValueError):
         num_media = 0
+
+    # MMS attachments arrive as MediaUrl{N}/MediaContentType{N} form fields.
+    # Without capturing them, an image-only message would be acknowledged and
+    # its content silently discarded.
+    media = []
+    for i in range(min(num_media, 10)):
+        url = str(form_data.get(f"MediaUrl{i}", "") or "")
+        if url:
+            media.append({
+                "url": url,
+                "content_type": str(form_data.get(f"MediaContentType{i}", "") or ""),
+            })
 
     try:
         contractor = await _lookup_contractor_for_message(to_number)
@@ -1024,6 +1038,7 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
                     "to_number": to_number,
                     "body": str(form_data.get("Body", "") or ""),
                     "num_media": num_media,
+                    "media": media,
                     "received_at": time.time(),
                 },
             )
@@ -1036,6 +1051,8 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
             logger.warning("Inbound message to an unrecognized number — dropped")
     except Exception as e:
         logger.error(f"Failed to record inbound message: {type(e).__name__}")
+        # Non-2xx → Twilio redelivers later; the write is idempotent by SID.
+        return twiml_response("<Response></Response>", status_code=500)
 
     return twiml_response("<Response></Response>")
 

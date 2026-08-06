@@ -644,6 +644,28 @@ struct OnboardingView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
+            // Carrier choice comes FIRST: the dial buttons below derive their
+            // codes from it. When this sat below the buttons, a Verizon user
+            // following the screen top-to-bottom dialed GSM codes their network
+            // silently ignores before ever reaching the picker (review finding
+            // on PR #143).
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "Your carrier"))
+                    .font(.subheadline.weight(.medium))
+                Picker(String(localized: "Your carrier"), selection: $isVerizon) {
+                    Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
+                    Text(String(localized: "Verizon")).tag(true)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: isVerizon) { _, newValue in
+                    appState.isVerizonCarrier = newValue
+                }
+                Text(String(localized: "Verizon uses different codes — pick first, then dial."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             VStack(spacing: 12) {
                 // Step 1: Clear existing forwarding
                 Button {
@@ -723,28 +745,6 @@ struct OnboardingView: View {
             Text(String(localized: "Your Kevin number: \(kevinNumber)"))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
-
-            // Verizon uses an incompatible code family (*71 / *73) from every
-            // other US carrier (*61* / ##61#). This was previously a caption-sized
-            // opt-in link defaulting to non-Verizon, so a Verizon user who missed
-            // it dialed a code their network silently ignores. It is now an
-            // explicit choice on the same screen as the code itself.
-            VStack(alignment: .leading, spacing: 6) {
-                Text(String(localized: "Your carrier"))
-                    .font(.subheadline.weight(.medium))
-                Picker(String(localized: "Your carrier"), selection: $isVerizon) {
-                    Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
-                    Text(String(localized: "Verizon")).tag(true)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: isVerizon) { _, newValue in
-                    appState.isVerizonCarrier = newValue
-                }
-                Text(String(localized: "Verizon uses different codes. Picking the wrong one means the codes above will not work."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer()
 

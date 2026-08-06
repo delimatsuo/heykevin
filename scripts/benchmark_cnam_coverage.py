@@ -204,15 +204,29 @@ async def filter_to_unknown_callers(records: list[dict]) -> tuple[list[dict], in
 
     kept: list[dict] = []
     dropped = 0
+    check_failures = 0
     for record in records:
         try:
             contact = await get_contact(record["phone"], record.get("contractor_id", ""))
         except Exception:
-            contact = None
+            # A failed check is NOT a miss. Treating it as "unknown caller" would
+            # keep saved contacts in the sample and inflate the usable-name rate
+            # (review finding on PR #143). Drop the record instead.
+            check_failures += 1
+            continue
         if contact:
             dropped += 1
             continue
         kept.append(record)
+    if check_failures:
+        print(
+            f"WARNING: {check_failures} contact check(s) failed; those numbers were "
+            "excluded from the sample rather than assumed unknown.",
+            file=sys.stderr,
+        )
+        if check_failures > max(2, len(records) // 10):
+            print("Too many contact-check failures for a trustworthy sample; aborting.", file=sys.stderr)
+            raise SystemExit(1)
     return kept, dropped
 
 
@@ -342,7 +356,10 @@ def build_report(results: list[dict], with_line_type: bool, sampling: dict) -> s
     per_lookup = COST_CALLER_NAME + (COST_LINE_TYPE if with_line_type else 0.0)
     spend = total * per_lookup
     if named:
-        lines.append(f"cost per usable name ${total * COST_CALLER_NAME / named:.4f}")
+        # Divide the FULL per-lookup spend by names returned. Charging only the
+        # caller-name fee here while the run also paid for line type understated
+        # the unit cost by ~44% (review finding on PR #143).
+        lines.append(f"cost per usable name ${spend / named:.4f}")
     else:
         lines.append("cost per usable name n/a — no usable names returned")
 

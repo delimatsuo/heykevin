@@ -114,8 +114,12 @@ async def test_malformed_media_count_does_not_raise(wired):
 
 
 @pytest.mark.asyncio
-async def test_persistence_failure_still_returns_200(monkeypatch):
-    """A Firestore blip must not make Twilio redeliver a message we already got."""
+async def test_persistence_failure_returns_500_for_redelivery(monkeypatch):
+    """A Firestore blip must make Twilio redeliver, not lose the message.
+
+    Returning 200 on a failed write acknowledges a message that was never
+    stored. Redelivery is idempotent because records are keyed by MessageSid.
+    """
 
     async def fake_lookup(to_number):
         return {"contractor_id": "c-123"}
@@ -127,7 +131,28 @@ async def test_persistence_failure_still_returns_200(monkeypatch):
     monkeypatch.setattr(twilio_incoming, "_record_inbound_message", boom)
 
     response = await twilio_incoming.handle_inbound_message(_FakeFormRequest(_form()))
-    assert response.status_code == 200
+    assert response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_mms_attachments_are_persisted(wired):
+    """An image-only MMS must keep its MediaUrl/MediaContentType, not just a count."""
+    await twilio_incoming.handle_inbound_message(
+        _FakeFormRequest(
+            _form(
+                Body="",
+                NumMedia="2",
+                MediaUrl0="https://api.twilio.com/media/ME0",
+                MediaContentType0="image/jpeg",
+                MediaUrl1="https://api.twilio.com/media/ME1",
+                MediaContentType1="image/png",
+            )
+        )
+    )
+    assert wired["payload"]["media"] == [
+        {"url": "https://api.twilio.com/media/ME0", "content_type": "image/jpeg"},
+        {"url": "https://api.twilio.com/media/ME1", "content_type": "image/png"},
+    ]
 
 
 @pytest.mark.asyncio

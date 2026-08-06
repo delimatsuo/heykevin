@@ -279,6 +279,37 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     # callers (global bearer token) bypass Apple verification.
     await _enforce_apple_identity(request, body.apple_user_id, body.apple_identity_token)
 
+    # Deduplicate on apple_user_id first. It arrives on a verified Apple identity
+    # token, so it cannot be spoofed by the caller — unlike owner_phone, which
+    # needed the hijack guard below. It is also available earlier in onboarding
+    # than the phone, which is why dedupe used to miss entirely: 22 production
+    # records have no owner_phone, and 19 Apple IDs ended up owning more than one
+    # account because this check did not exist.
+    if body.apple_user_id and body.apple_user_id.strip():
+        from app.db.contractors import get_contractor_by_apple_user_id
+        try:
+            by_apple = await get_contractor_by_apple_user_id(body.apple_user_id.strip())
+        except Exception as e:
+            # A dedupe lookup failure must not block signup. Degrading here
+            # reproduces the pre-existing behaviour (a possible duplicate),
+            # which is strictly better than refusing to create the account.
+            logger.warning("apple_user_id dedupe lookup failed: %s", type(e).__name__)
+            by_apple = None
+        if by_apple:
+            from app.middleware.auth import generate_contractor_token
+            contractor_id = by_apple["contractor_id"]
+            logger.info("Returning existing contractor %s matched on apple_user_id", contractor_id)
+            subscription_uuid = await ensure_subscription_uuid(contractor_id, by_apple)
+            raw_token, token_hash = generate_contractor_token(contractor_id)
+            await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            return {
+                "status": "ok",
+                "contractor_id": contractor_id,
+                "existing": True,
+                "api_token": raw_token,
+                "subscription_uuid": subscription_uuid,
+            }
+
     # Deduplicate: if owner_phone is provided, check for existing contractor.
     #
     # Audit F-4: this lookup branch previously trusted owner_phone alone.

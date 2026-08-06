@@ -130,14 +130,32 @@ async def get_contractor_by_owner_phone(owner_phone: str) -> Optional[dict]:
         return None
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
-    docs = await loop.run_in_executor(
-        None,
-        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("owner_phone", "==", normalized)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
-    )
-    if docs:
-        data = docs[0].to_dict()
-        data["contractor_id"] = docs[0].id
-        return data
+
+    def _query(value: str):
+        return list(
+            db.collection(COLLECTION)
+            .where(filter=FieldFilter("owner_phone", "==", value))
+            .where(filter=FieldFilter("active", "==", True))
+            .limit(1)
+            .stream()
+        )
+
+    # Firestore compares strings exactly. `owner_phone` was historically stored
+    # unnormalized — production holds "(415) 555-1234" and bare digits alongside
+    # E.164 — so a normalized-only query silently missed those records and the
+    # caller created a duplicate account. New writes are normalized; this second
+    # lookup covers the records written before that.
+    candidates = [normalized]
+    raw = owner_phone.strip()
+    if raw and raw != normalized:
+        candidates.append(raw)
+
+    for candidate in candidates:
+        docs = await loop.run_in_executor(None, lambda c=candidate: _query(c))
+        if docs:
+            data = docs[0].to_dict()
+            data["contractor_id"] = docs[0].id
+            return data
     return None
 
 
@@ -214,6 +232,13 @@ async def get_contractor_by_pin(pin: str) -> Optional[dict]:
 async def create_contractor(data: dict) -> str:
     """Create a new contractor profile. Returns the contractor_id."""
     db = get_firestore_client()
+    # Store owner_phone canonically. Firestore matches strings exactly, so
+    # writing raw formats here is what broke dedupe on the next signup.
+    if data.get("owner_phone"):
+        from app.utils.phone import normalize_phone
+        canonical = normalize_phone(str(data["owner_phone"]))
+        if canonical:
+            data["owner_phone"] = canonical
     data["created_at"] = time.time()
     data["active"] = True
     data.setdefault("mode", "kevin")

@@ -175,6 +175,28 @@ async def _ring_expired_contractor(
         logger.error(f"_ring_expired_contractor failed: {e}", exc_info=True)
 
 
+async def _record_forwarding_evidence(contractor_id: str, seen_at: float):
+    """Stamp forwarding_last_seen_at after a carrier-confirmed forwarded call.
+
+    Best-effort and fire-and-forget: this is observability, and it must never
+    delay or fail the call it was observed on. Throttled to hourly so a busy
+    account does not write on every inbound call.
+    """
+    try:
+        from app.db.contractors import get_contractor, update_contractor
+
+        contractor = await get_contractor(contractor_id)
+        if not contractor:
+            return
+        previous = contractor.get("forwarding_last_seen_at") or 0
+        if isinstance(previous, (int, float)) and seen_at - previous < 3600:
+            return
+        await update_contractor(contractor_id, {"forwarding_last_seen_at": seen_at})
+        logger.info(f"Forwarding confirmed live via ForwardedFrom: {contractor_id}")
+    except Exception as e:
+        logger.warning(f"Could not record forwarding evidence: {type(e).__name__}")
+
+
 async def _handle_deleted_app(
     contractor_id: str,
     caller_phone: str,
@@ -225,6 +247,17 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             owner_phone = contractor.get("owner_phone", "")
             business_name = contractor.get("business_name", f"{owner_name}'s office")
             logger.info(f"Contractor found: {business_name} ({contractor_id})")
+
+            # ForwardedFrom is the only positive proof that a user's call
+            # forwarding is actually live — iOS exposes no forwarding state and
+            # the onboarding step cannot verify itself. Carrier-dependent, so
+            # absence means nothing; presence is conclusive.
+            from app.utils.phone import forwarding_confirms_owner
+
+            if forwarding_confirms_owner(form_data.get("ForwardedFrom", ""), owner_phone):
+                asyncio.create_task(
+                    _record_forwarding_evidence(contractor_id, time.time())
+                )
         else:
             contractor_id = ""
             owner_name = settings.user_name
@@ -233,17 +266,22 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             contractor = {}
             logger.info("No contractor found — using default settings")
 
-        # Subscription check — must happen BEFORE routing decisions
-        subscription_status = contractor.get("subscription_status", "trial") if contractor else "trial"
-        subscription_expires = contractor.get("subscription_expires", 0) if contractor else 0
-        now = time.time()
+        # Subscription check — must happen BEFORE routing decisions.
+        # evaluate_subscription_access compares the expiry to the clock for trials
+        # (which we time ourselves) but deliberately fails open on stale `active`
+        # expiries, which may just be a missed Apple renewal notification.
+        from app.services.subscription import evaluate_subscription_access
 
-        # Treat as active if: trial, active, or expires timestamp is in the future (fail-open)
-        is_subscription_active = (
-            subscription_status in ("trial", "active")
-            or (subscription_status == "expired" and subscription_expires > now)
-            or not contractor  # No contractor → use legacy flow
-        )
+        now = time.time()
+        is_subscription_active, access_reason = evaluate_subscription_access(contractor, now)
+
+        if access_reason == "active_stale_expiry_needs_reconciliation":
+            logger.warning(
+                "Subscription expiry is stale for %s — allowing call, needs App Store "
+                "reconciliation (status=active, expired %.0fd ago)",
+                contractor_id,
+                (now - (contractor.get("subscription_expires") or now)) / 86400,
+            )
 
         if not is_subscription_active and contractor:
             # Expired subscription — special handling
@@ -274,6 +312,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                     call_sid=call_sid,
                     conference_name=conference_name,
                     access_token=access_token,
+                    contractor_id=contractor_id,
                 )
 
             if push_succeeded:
@@ -475,6 +514,7 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
             call_sid=call_sid,
             conference_name=conference_name,
             access_token=access_token,
+            contractor_id=contractor_id,
         )
 
         logger.info(f"VoIP push sent for known contact: {caller_name[:1] if caller_name else ''}*** ({redact_phone(caller_phone)})")

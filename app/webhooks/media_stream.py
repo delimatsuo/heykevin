@@ -837,6 +837,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 reason="urgent_call",
                 call_sid=call_sid,
                 conference_name=urgent_conf,
+                contractor_id=_cid,
             )
 
         # Also send critical push notification without lock-screen-sensitive context.
@@ -852,6 +853,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 call_sid=call_sid,
                 caller_phone=caller_phone,
                 caller_name=caller_name,
+                contractor_id=_cid,
             )
 
         logger.info("media_event event=urgency_escalated call=%s", _call_label(call_sid))

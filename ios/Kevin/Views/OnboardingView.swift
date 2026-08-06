@@ -694,59 +694,62 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.plain)
 
-                // Step 3: Test
-                Button {
-                    let digits = kevinNumber.filter { $0.isNumber }
-                    if let url = URL(string: "tel:\(digits)") {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    HStack {
-                        Text("3")
-                            .font(.caption.bold())
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(.green))
-                            .foregroundStyle(.white)
-                        Text(String(localized: "Test it — call your Kevin number"))
-                            .font(.subheadline)
-                        Spacer()
-                        Image(systemName: "phone.fill")
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
+                // There is deliberately no "test" button here. The previous
+                // version dialed the Kevin number directly, which reaches Kevin
+                // whether or not forwarding is configured — so it confirmed
+                // success for users who had set nothing up. A real test requires
+                // someone calling the user's own number and the call diverting,
+                // which the device cannot stage for itself.
             }
+
+            // iOS Live Voicemail answers calls on-device before the carrier's
+            // no-answer timer fires, so the forward never triggers. Apple's own
+            // guidance is to turn it off when carrier forwarding misbehaves.
+            // There is no URL scheme that deep-links here — Settings can only be
+            // opened to our own app's pane — so these are plain instructions.
+            VStack(alignment: .leading, spacing: 6) {
+                Label(String(localized: "Turn off Live Voicemail first"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.orange)
+                Text(String(localized: "If Live Voicemail is on, your iPhone answers before Kevin can. Open Settings, find Phone, then Live Voicemail, and switch it off."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(Color.orange.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
 
             Text(String(localized: "Your Kevin number: \(kevinNumber)"))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            if !isVerizon {
-                Button {
-                    isVerizon = true
-                    appState.isVerizonCarrier = true
-                } label: {
-                    Text(String(localized: "Verizon customer? Tap here"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .underline()
+            // Verizon uses an incompatible code family (*71 / *73) from every
+            // other US carrier (*61* / ##61#). This was previously a caption-sized
+            // opt-in link defaulting to non-Verizon, so a Verizon user who missed
+            // it dialed a code their network silently ignores. It is now an
+            // explicit choice on the same screen as the code itself.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "Your carrier"))
+                    .font(.subheadline.weight(.medium))
+                Picker(String(localized: "Your carrier"), selection: $isVerizon) {
+                    Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
+                    Text(String(localized: "Verizon")).tag(true)
                 }
-            } else {
-                Button {
-                    isVerizon = false
-                    appState.isVerizonCarrier = false
-                } label: {
-                    Text(String(localized: "✓ Using Verizon codes — tap to switch back"))
-                        .font(.caption)
-                        .foregroundStyle(.blue)
+                .pickerStyle(.segmented)
+                .onChange(of: isVerizon) { _, newValue in
+                    appState.isVerizonCarrier = newValue
                 }
+                Text(String(localized: "Verizon uses different codes. Picking the wrong one means the codes above will not work."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer()
 
             Button {
+                recordForwardingOutcome(didSetUp: true)
                 completeOnboarding()
             } label: {
                 Text(String(localized: "I'm All Set"))
@@ -758,6 +761,7 @@ struct OnboardingView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14))
 
             Button(String(localized: "Skip for now")) {
+                recordForwardingOutcome(didSetUp: false)
                 completeOnboarding()
             }
             .font(.subheadline)
@@ -1315,6 +1319,31 @@ struct OnboardingView: View {
             }
         } catch {
             errorMessage = String(localized: "Failed to activate Business mode. Please try again.")
+        }
+    }
+
+    /// Record which exit the user took from the forwarding step.
+    ///
+    /// Previously "I'm All Set" and "Skip for now" were indistinguishable — both
+    /// called `completeOnboarding()` and wrote nothing — so a user who skipped
+    /// setup looked exactly like one who completed it, and nobody could be nudged.
+    ///
+    /// This records *intent*, not truth: the device cannot verify that forwarding
+    /// is live. Ground truth arrives server-side as `forwarding_last_seen_at`,
+    /// derived from Twilio's `ForwardedFrom` on a genuinely forwarded call. The
+    /// gap between the two is the activation funnel we could not previously see.
+    ///
+    /// Fire-and-forget: a failed PATCH must never block onboarding completion.
+    private func recordForwardingOutcome(didSetUp: Bool) {
+        let contractorId = appState.contractorId
+        guard !contractorId.isEmpty else { return }
+        let field = didSetUp ? "forwarding_self_reported_at" : "forwarding_skipped_at"
+        let payload: [String: Any] = [
+            field: Date().timeIntervalSince1970,
+            "forwarding_carrier_family": isVerizon ? "verizon" : "gsm",
+        ]
+        Task {
+            _ = try? await APIClient.shared.patchContractor(contractorId, body: payload)
         }
     }
 

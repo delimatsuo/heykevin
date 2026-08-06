@@ -155,6 +155,12 @@ class ContractorUpdate(BaseModel):
     apple_user_id: Optional[str] = Field(default=None, max_length=100)
     dial_in_pin: Optional[str] = Field(default=None, max_length=10)
     cnam_lookup_enabled: Optional[bool] = None
+    # Forwarding-step intent. Deliberately NOT in PROTECTED_FIELDS: these record
+    # what the user told us they did, which is client-side by definition. Server
+    # truth about forwarding lives in forwarding_last_seen_at, which IS protected.
+    forwarding_self_reported_at: Optional[float] = None
+    forwarding_skipped_at: Optional[float] = None
+    forwarding_carrier_family: Optional[str] = Field(default=None, max_length=16)
     # International fields
     country_code: Optional[str] = Field(default=None, max_length=2)
     business_address: Optional[str] = Field(default=None, max_length=500)

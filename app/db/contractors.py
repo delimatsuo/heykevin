@@ -23,6 +23,9 @@ PROTECTED_FIELDS = frozenset({
     "twilio_number",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
+    # Forwarding truth — derived from carrier signalling, never client-asserted.
+    # A client that could write this would be able to fake an activated forward.
+    "forwarding_last_seen_at",
     # Integrations — feature flags are enabled by backend/admin flows only.
     "jobber_lead_capture_enabled",
     # Identity bindings — written only at account creation / authenticated migration.

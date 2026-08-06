@@ -157,3 +157,45 @@ def test_production_record_shapes():
         _c(subscription_status="trial", subscription_expires=now - 67 * DAY), now
     )
     assert (allowed, reason) == (False, "trial_expired")
+
+
+# ---- Bugbot findings on PR #143 --------------------------------------------
+
+
+def test_expired_status_with_missing_expiry_is_denied():
+    """Fail-open covers unknown state, not explicitly terminal state.
+
+    Returning early on a missing timestamp let an `expired` account regain
+    full access purely because its expiry was absent.
+    """
+    now = time.time()
+    allowed, reason = evaluate_subscription_access(
+        _c(subscription_status="expired", subscription_expires=0), now
+    )
+    assert allowed is False
+    assert reason == "expired"
+
+
+def test_cancelled_status_with_missing_expiry_is_denied():
+    now = time.time()
+    allowed, _ = evaluate_subscription_access(
+        _c(subscription_status="cancelled", subscription_expires=None), now
+    )
+    assert allowed is False
+
+
+def test_trial_with_missing_expiry_still_fails_open():
+    """Only terminal statuses lose the benefit of the doubt."""
+    now = time.time()
+    allowed, _ = evaluate_subscription_access(
+        _c(subscription_status="trial", subscription_expires=0), now
+    )
+    assert allowed is True
+
+
+def test_active_with_missing_expiry_still_fails_open():
+    now = time.time()
+    allowed, _ = evaluate_subscription_access(
+        _c(subscription_status="active", subscription_expires=0), now
+    )
+    assert allowed is True

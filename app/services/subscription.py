@@ -92,6 +92,12 @@ def evaluate_subscription_access(
 
     if not expires:
         # Unknown expiry is unknown state, not expired state.
+        # An explicitly terminal status is known state, not unknown state, so the
+        # fail-open default must not apply to it. Returning early here would let
+        # an `expired` or `cancelled` account regain full access purely because
+        # its timestamp was missing.
+        if status in _TERMINAL_STATUSES:
+            return False, "expired"
         return True, "missing_expiry"
 
     if status in _LOCALLY_MANAGED_STATUSES:

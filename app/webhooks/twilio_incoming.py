@@ -208,11 +208,21 @@ async def _handle_deleted_app(
         from app.db.contractors import update_contractor, get_contractor
         import time
 
-        # Set deleted_app_detected_at if not already set
+        # Deliberately does NOT stamp deleted_app_detected_at. This path runs on
+        # *any* VoIP push failure — an APNs outage, a network blip, a briefly
+        # invalid token — none of which mean the app was uninstalled. That was
+        # harmless while nothing consumed the field, but the 14-day cleanup is
+        # live now, so a false positive here starts a countdown to releasing a
+        # working user's number.
+        #
+        # APNs 410 is the authoritative signal and is handled in
+        # app/services/push_notification.py. This handler just serves voicemail.
         contractor = await get_contractor(contractor_id)
-        if contractor and not contractor.get("deleted_app_detected_at"):
-            await update_contractor(contractor_id, {"deleted_app_detected_at": time.time()})
-            logger.info(f"Deleted app detected: {contractor_id}")
+        if contractor:
+            logger.info(
+                "VoIP push failed for %s — serving voicemail (not treating as deletion)",
+                contractor_id,
+            )
 
     except Exception as e:
         logger.error(f"_handle_deleted_app failed: {e}", exc_info=True)

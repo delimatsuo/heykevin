@@ -240,6 +240,28 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .padding(.vertical)
 
+            // Carrier-required SMS consent disclosure. US A2P 10DLC review needs a
+            // verifiable opt-in: the recipient must be shown who is texting them,
+            // what for, how often, that rates apply, and how to stop — at the point
+            // they hand over the number. Its absence is why the first campaign
+            // registration was rejected (error 30909, unverifiable Call to Action).
+            // Wording here must stay in sync with the registered campaign's
+            // message flow and with heykevin.one/terms.
+            VStack(spacing: 8) {
+                Text(String(localized: "By continuing you agree to receive service text messages from Hey Kevin at this number — call summaries, voicemail alerts, and account notices. Message frequency varies with your call volume. Message and data rates may apply. Reply STOP to cancel, HELP for help."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                HStack(spacing: 12) {
+                    Link(String(localized: "Terms"), destination: URL(string: "https://heykevin.one/terms")!)
+                        .font(.caption)
+                    Link(String(localized: "Privacy Policy"), destination: URL(string: "https://heykevin.one/privacy")!)
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal)
+
             Spacer()
 
             Button {

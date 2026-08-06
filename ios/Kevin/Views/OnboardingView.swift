@@ -1205,6 +1205,11 @@ struct OnboardingView: View {
             }
         }
 
+        // Ask for push permission here, not at cold launch. The number now
+        // exists and the user has seen what Kevin does, so the system alert
+        // arrives with context. A denial is unrecoverable in-app and disables
+        // the live-call screen and call summaries entirely.
+        AppDelegate.requestPushAuthorization()
         step = .forwarding
         isLoading = false
     }

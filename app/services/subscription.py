@@ -21,6 +21,169 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+# Statuses whose expiry timestamp is written by Apple (App Store Server
+# Notifications). A past timestamp on these is ambiguous — see
+# evaluate_subscription_access.
+_APPLE_MANAGED_STATUSES = frozenset({"active"})
+
+# Statuses whose expiry we set ourselves and can therefore trust.
+_LOCALLY_MANAGED_STATUSES = frozenset({"trial"})
+
+# Statuses that mean the paid term is ending; access lasts until the timestamp.
+_TERMINAL_STATUSES = frozenset({"expired", "cancelled"})
+
+# The product's free trial length. Historical records disagree — 93 production
+# accounts carry a 3-day `subscription_expires` against 5 with 14 — so trial end
+# is derived from `trial_start` rather than trusting the stored value.
+TRIAL_PERIOD_DAYS = 14
+
+
+def trial_expires_at(contractor: Optional[dict]) -> float:
+    """Effective end of a contractor's free trial.
+
+    Returns the later of the stored `subscription_expires` and
+    `trial_start + TRIAL_PERIOD_DAYS`. Deriving from `trial_start` repairs the
+    short-window records in place, with no migration; using max() means this can
+    only ever extend a trial, so a promo or manual extension still wins.
+
+    Returns 0.0 when neither field is usable, which callers treat as unknown
+    (and therefore allowed) rather than expired.
+    """
+    if not contractor:
+        return 0.0
+
+    stored = contractor.get("subscription_expires")
+    stored_ts = float(stored) if isinstance(stored, (int, float)) and stored else 0.0
+
+    started = contractor.get("trial_start")
+    if isinstance(started, (int, float)) and started:
+        return max(stored_ts, float(started) + TRIAL_PERIOD_DAYS * 86400)
+
+    return stored_ts
+
+
+def evaluate_subscription_access(
+    contractor: Optional[dict], now: float
+) -> tuple[bool, str]:
+    """Decide whether an inbound call gets paid features. Returns (allowed, reason).
+
+    Fail-open is deliberate (CLAUDE.md design decision #1): an absent contractor,
+    a missing expiry, or an unrecognized status all grant access. A false denial
+    silences a paying customer's phone, which is far worse than a false grant.
+
+    `trial` expiry IS enforced. We write that timestamp ourselves at account
+    creation, nothing external can change it, so a past value is trustworthy.
+    Before this function existed the gate never compared it to the clock, which
+    left trials serving paid features indefinitely after lapsing.
+
+    `active` expiry is NOT enforced, only flagged. That timestamp is advanced by
+    Apple's DID_RENEW notification, so a past value means either the subscription
+    lapsed or the notification never arrived — indistinguishable from Firestore
+    alone. Denying on that ambiguity would cut off customers Apple is still
+    billing. Callers should reconcile flagged accounts against the App Store
+    Server API out of band, and only then write a terminal status.
+    """
+    if not contractor:
+        return True, "no_contractor"
+
+    status = str(contractor.get("subscription_status") or "").strip().lower()
+    raw_expires = contractor.get("subscription_expires")
+    expires = raw_expires if isinstance(raw_expires, (int, float)) else 0.0
+
+    if not expires:
+        # Unknown expiry is unknown state, not expired state.
+        # An explicitly terminal status is known state, not unknown state, so the
+        # fail-open default must not apply to it. Returning early here would let
+        # an `expired` or `cancelled` account regain full access purely because
+        # its timestamp was missing.
+        if status in _TERMINAL_STATUSES:
+            return False, "expired"
+        return True, "missing_expiry"
+
+    if status in _LOCALLY_MANAGED_STATUSES:
+        # Derived from trial_start, not the stored expiry — see trial_expires_at.
+        if trial_expires_at(contractor) > now:
+            return True, "trial_active"
+        return False, "trial_expired"
+
+    if status in _APPLE_MANAGED_STATUSES:
+        if expires > now:
+            return True, "subscription_active"
+        return True, "active_stale_expiry_needs_reconciliation"
+
+    if status in _TERMINAL_STATUSES:
+        if expires > now:
+            return True, "expired_grace_period"
+        return False, "expired"
+
+    return True, "unrecognized_status"
+
+
+# How long a number must be quiet before we will hand it back to Twilio.
+NUMBER_RELEASE_QUIET_DAYS = 14
+
+
+def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
+    """True only if releasing this contractor's Twilio number cannot strand a forward.
+
+    Two independent conditions, both required:
+
+    1. App deletion was detected at least NUMBER_RELEASE_QUIET_DAYS ago.
+    2. No carrier-confirmed forwarded call has arrived within that same window.
+
+    Condition 2 is the one that matters. Twilio reassigns released numbers to other
+    customers after the FCC's 45-day aging period. If a user's forward is still
+    live when we release, their missed calls and voicemails start landing on a
+    stranger's phone system — and nothing in our stack would ever notice. Holding
+    the number instead costs about a dollar a month, so this fails closed on every
+    ambiguity: missing signal, unparseable timestamp, or absent record all mean no.
+
+    Note that condition 2 can only ever *block* a release. ForwardedFrom is
+    carrier-dependent, so its absence is not evidence the forward is gone — it is
+    simply the absence of a reason to keep waiting.
+    """
+    if not contractor:
+        return False
+
+    quiet_window = NUMBER_RELEASE_QUIET_DAYS * 86400
+
+    deleted_at = contractor.get("deleted_app_detected_at")
+    if not isinstance(deleted_at, (int, float)) or not deleted_at:
+        return False
+    if now - deleted_at < quiet_window:
+        return False
+
+    if "forwarding_last_seen_at" in contractor:
+        last_seen = contractor.get("forwarding_last_seen_at")
+        if last_seen is not None:
+            if not isinstance(last_seen, (int, float)) or not last_seen:
+                # Present but unreadable — we cannot rule out a live forward.
+                return False
+            if now - last_seen < quiet_window:
+                return False
+
+    return True
+
+
+def should_expire_trial(contractor: Optional[dict], now: float) -> bool:
+    """True if this contractor is a lapsed trial that should be marked expired.
+
+    Deliberately narrower than "not allowed by the gate": it only ever selects
+    `trial` accounts, never `active` ones. An `active` account with a past expiry
+    may simply be missing an Apple renewal notification, and writing a terminal
+    status on that guess would cancel service for a paying customer. Those are
+    reconciled against the App Store Server API instead.
+    """
+    if not contractor:
+        return False
+    if str(contractor.get("subscription_status") or "").strip().lower() not in _LOCALLY_MANAGED_STATUSES:
+        return False
+    expires = trial_expires_at(contractor)
+    if not expires:
+        return False
+    return expires <= now
+
+
 @dataclass(frozen=True)
 class VerificationResult:
     """Outcome of an Apple App Store transaction verification.
@@ -628,6 +791,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     device_token=device_token,
                     title="Your Kevin subscription has ended",
                     body="Subscribe to keep Kevin screening your calls.",
+                    contractor_id=contractor_id,
                 )
         except Exception as push_err:
             logger.warning(f"Expiry push failed (non-critical): {push_err}")

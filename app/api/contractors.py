@@ -149,12 +149,17 @@ class ContractorUpdate(BaseModel):
     ring_through_contacts: Optional[bool] = None
     sit_tone_enabled: Optional[bool] = None
     auto_reply_sms: Optional[bool] = None
-    cnam_lookup_enabled: Optional[bool] = None
     jobber_lead_capture_enabled: Optional[bool] = None
     twilio_number: Optional[str] = Field(default=None, max_length=20)
     apple_user_id: Optional[str] = Field(default=None, max_length=100)
     dial_in_pin: Optional[str] = Field(default=None, max_length=10)
     cnam_lookup_enabled: Optional[bool] = None
+    # Forwarding-step intent. Deliberately NOT in PROTECTED_FIELDS: these record
+    # what the user told us they did, which is client-side by definition. Server
+    # truth about forwarding lives in forwarding_last_seen_at, which IS protected.
+    forwarding_self_reported_at: Optional[float] = None
+    forwarding_skipped_at: Optional[float] = None
+    forwarding_carrier_family: Optional[str] = Field(default=None, max_length=16)
     # International fields
     country_code: Optional[str] = Field(default=None, max_length=2)
     business_address: Optional[str] = Field(default=None, max_length=500)
@@ -273,6 +278,37 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     # Onboarding endpoint — Apple identity token is verified here. Admin
     # callers (global bearer token) bypass Apple verification.
     await _enforce_apple_identity(request, body.apple_user_id, body.apple_identity_token)
+
+    # Deduplicate on apple_user_id first. It arrives on a verified Apple identity
+    # token, so it cannot be spoofed by the caller — unlike owner_phone, which
+    # needed the hijack guard below. It is also available earlier in onboarding
+    # than the phone, which is why dedupe used to miss entirely: 22 production
+    # records have no owner_phone, and 19 Apple IDs ended up owning more than one
+    # account because this check did not exist.
+    if body.apple_user_id and body.apple_user_id.strip():
+        from app.db.contractors import get_contractor_by_apple_user_id
+        try:
+            by_apple = await get_contractor_by_apple_user_id(body.apple_user_id.strip())
+        except Exception as e:
+            # A dedupe lookup failure must not block signup. Degrading here
+            # reproduces the pre-existing behaviour (a possible duplicate),
+            # which is strictly better than refusing to create the account.
+            logger.warning("apple_user_id dedupe lookup failed: %s", type(e).__name__)
+            by_apple = None
+        if by_apple:
+            from app.middleware.auth import generate_contractor_token
+            contractor_id = by_apple["contractor_id"]
+            logger.info("Returning existing contractor %s matched on apple_user_id", contractor_id)
+            subscription_uuid = await ensure_subscription_uuid(contractor_id, by_apple)
+            raw_token, token_hash = generate_contractor_token(contractor_id)
+            await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            return {
+                "status": "ok",
+                "contractor_id": contractor_id,
+                "existing": True,
+                "api_token": raw_token,
+                "subscription_uuid": subscription_uuid,
+            }
 
     # Deduplicate: if owner_phone is provided, check for existing contractor.
     #

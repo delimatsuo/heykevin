@@ -23,6 +23,9 @@ PROTECTED_FIELDS = frozenset({
     "twilio_number",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
+    # Forwarding truth — derived from carrier signalling, never client-asserted.
+    # A client that could write this would be able to fake an activated forward.
+    "forwarding_last_seen_at",
     # Integrations — feature flags are enabled by backend/admin flows only.
     "jobber_lead_capture_enabled",
     # Identity bindings — written only at account creation / authenticated migration.
@@ -127,14 +130,32 @@ async def get_contractor_by_owner_phone(owner_phone: str) -> Optional[dict]:
         return None
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
-    docs = await loop.run_in_executor(
-        None,
-        lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("owner_phone", "==", normalized)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
-    )
-    if docs:
-        data = docs[0].to_dict()
-        data["contractor_id"] = docs[0].id
-        return data
+
+    def _query(value: str):
+        return list(
+            db.collection(COLLECTION)
+            .where(filter=FieldFilter("owner_phone", "==", value))
+            .where(filter=FieldFilter("active", "==", True))
+            .limit(1)
+            .stream()
+        )
+
+    # Firestore compares strings exactly. `owner_phone` was historically stored
+    # unnormalized — production holds "(415) 555-1234" and bare digits alongside
+    # E.164 — so a normalized-only query silently missed those records and the
+    # caller created a duplicate account. New writes are normalized; this second
+    # lookup covers the records written before that.
+    candidates = [normalized]
+    raw = owner_phone.strip()
+    if raw and raw != normalized:
+        candidates.append(raw)
+
+    for candidate in candidates:
+        docs = await loop.run_in_executor(None, lambda c=candidate: _query(c))
+        if docs:
+            data = docs[0].to_dict()
+            data["contractor_id"] = docs[0].id
+            return data
     return None
 
 
@@ -211,6 +232,13 @@ async def get_contractor_by_pin(pin: str) -> Optional[dict]:
 async def create_contractor(data: dict) -> str:
     """Create a new contractor profile. Returns the contractor_id."""
     db = get_firestore_client()
+    # Store owner_phone canonically. Firestore matches strings exactly, so
+    # writing raw formats here is what broke dedupe on the next signup.
+    if data.get("owner_phone"):
+        from app.utils.phone import normalize_phone
+        canonical = normalize_phone(str(data["owner_phone"]))
+        if canonical:
+            data["owner_phone"] = canonical
     data["created_at"] = time.time()
     data["active"] = True
     data.setdefault("mode", "kevin")
@@ -225,7 +253,11 @@ async def create_contractor(data: dict) -> str:
     trial_start = data.setdefault("trial_start", time.time())
     data.setdefault("subscription_status", "trial")
     data.setdefault("subscription_tier", "none")
-    data.setdefault("subscription_expires", trial_start + 3 * 86400)  # 3-day grace; real trial is Apple's 2-week intro offer
+    # 14-day free trial. This previously wrote a 3-day window, which left 93
+    # accounts expiring 11 days early; the gate now derives trial end from
+    # trial_start (see subscription.trial_expires_at) so those records heal too.
+    from app.services.subscription import TRIAL_PERIOD_DAYS
+    data.setdefault("subscription_expires", trial_start + TRIAL_PERIOD_DAYS * 86400)
     data.setdefault("deleted_app_detected_at", None)
     data.setdefault("subscription_uuid", str(_uuid.uuid4()))
     loop = asyncio.get_event_loop()

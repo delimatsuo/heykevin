@@ -848,6 +848,7 @@ async def _send_summary_push(job_data: dict, contractor: dict):
             call_sid=job_data.get("call_sid", ""),
             caller_phone=job_data.get("caller_phone", ""),
             caller_name=caller_name,
+            contractor_id=contractor_id,
         )
         if sent:
             _log_post_call_event(

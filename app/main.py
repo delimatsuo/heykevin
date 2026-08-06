@@ -198,6 +198,36 @@ async def _orphan_call_cleanup():
             logger.warning(f"Orphan call cleanup error: {e}")
 
 
+async def _call_retention_sweep():
+    """Enforce the documented 90-day call-record retention. Runs every 6 hours.
+
+    `cleanup_old_calls` has always existed but was only reachable from a manual
+    admin endpoint, so nothing ever ran it — production accumulated call records
+    well past the retention window that CLAUDE.md states as a privacy property.
+
+    Each pass deletes at most MAX_BATCHES * 500 records so a large backlog drains
+    over several runs rather than in one long burst of Firestore writes.
+    """
+    from app.db.calls import cleanup_old_calls
+
+    MAX_BATCHES = 4
+
+    while True:
+        await asyncio.sleep(6 * 3600)
+        try:
+            total = 0
+            for _ in range(MAX_BATCHES):
+                deleted = await cleanup_old_calls()
+                total += deleted
+                # A short batch means the backlog is drained.
+                if deleted < 500:
+                    break
+            if total:
+                logger.info(f"Call retention sweep: deleted {total} expired record(s)")
+        except Exception as e:
+            logger.warning(f"Call retention sweep error: {e}")
+
+
 async def _lapsed_trial_sweep():
     """Transition lapsed trials from `trial` to `expired`. Runs every 6 hours.
 
@@ -336,6 +366,7 @@ async def startup():
 
     # Start orphan call cleanup background task
     asyncio.create_task(_orphan_call_cleanup())
+    asyncio.create_task(_call_retention_sweep())
     asyncio.create_task(_lapsed_trial_sweep())
     asyncio.create_task(_expired_contractor_cleanup())
     from app.services.post_call_handoff import post_call_worker_loop

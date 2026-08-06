@@ -149,7 +149,6 @@ class ContractorUpdate(BaseModel):
     ring_through_contacts: Optional[bool] = None
     sit_tone_enabled: Optional[bool] = None
     auto_reply_sms: Optional[bool] = None
-    cnam_lookup_enabled: Optional[bool] = None
     jobber_lead_capture_enabled: Optional[bool] = None
     twilio_number: Optional[str] = Field(default=None, max_length=20)
     apple_user_id: Optional[str] = Field(default=None, max_length=100)

@@ -951,6 +951,84 @@ async def handle_dial_in(request: Request, _=Depends(verify_twilio_signature)):
         return twiml_response(str(response))
 
 
+async def _lookup_contractor_for_message(to_number: str):
+    """Resolve the contractor who owns the number an inbound message arrived on."""
+    from app.db.contractors import get_contractor_by_twilio_number
+
+    return await get_contractor_by_twilio_number(to_number)
+
+
+async def _record_inbound_message(contractor_id: str, payload: dict) -> bool:
+    """Persist an inbound message under the owning contractor."""
+    from app.db.firestore_client import get_firestore_client
+
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: db.collection("contractors")
+        .document(contractor_id)
+        .collection("inbound_messages")
+        .document(payload["message_sid"])
+        .set(payload),
+    )
+    return True
+
+
+@router.post("/webhooks/twilio/mms-incoming")
+async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signature)):
+    """Receive SMS/MMS sent to a Kevin number.
+
+    Every provisioned number points its `sms_url` here (see
+    `app/db/contractors.py`), but this route did not exist — so every text a
+    caller sent to a Kevin number returned 404 and Twilio recorded an 11200
+    HTTP retrieval failure. The messages were lost silently.
+
+    Deliberately does not auto-reply. Responding to inbound traffic carries A2P
+    and consent implications and is a product decision; this handler's job is to
+    stop dropping messages.
+
+    Always returns 200 with empty TwiML, even on lookup or write failure —
+    Twilio retries non-2xx responses, and a retry cannot help a message we have
+    already received.
+    """
+    form_data = await request.form()
+    to_number = str(form_data.get("To", "") or "")
+    message_sid = str(form_data.get("MessageSid", "") or "")
+
+    try:
+        num_media = int(str(form_data.get("NumMedia", "0") or "0"))
+    except (TypeError, ValueError):
+        num_media = 0
+
+    try:
+        contractor = await _lookup_contractor_for_message(to_number)
+        if contractor:
+            await _record_inbound_message(
+                contractor["contractor_id"],
+                {
+                    "message_sid": message_sid,
+                    "from_number": normalize_phone(str(form_data.get("From", "") or ""))
+                    or str(form_data.get("From", "") or ""),
+                    "to_number": to_number,
+                    "body": str(form_data.get("Body", "") or ""),
+                    "num_media": num_media,
+                    "received_at": time.time(),
+                },
+            )
+            logger.info(
+                "Inbound message recorded for %s (media=%d)",
+                contractor["contractor_id"],
+                num_media,
+            )
+        else:
+            logger.warning("Inbound message to an unrecognized number — dropped")
+    except Exception as e:
+        logger.error(f"Failed to record inbound message: {type(e).__name__}")
+
+    return twiml_response("<Response></Response>")
+
+
 @router.post("/webhooks/twilio/fallback")
 async def handle_fallback(request: Request, _=Depends(verify_twilio_signature)):
     """Emergency fallback. Zero dependencies. Just forward."""

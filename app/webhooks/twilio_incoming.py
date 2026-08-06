@@ -681,6 +681,7 @@ async def _post_routing_tasks(
                             call_sid=call_sid,
                             caller_phone=caller_phone,
                             caller_name=caller_name,
+                            contractor_id=contractor_id,
                         )
                     else:
                         logger.warning(f"No push token for contractor {contractor_id} — notification not sent")

@@ -791,6 +791,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     device_token=device_token,
                     title="Your Kevin subscription has ended",
                     body="Subscribe to keep Kevin screening your calls.",
+                    contractor_id=contractor_id,
                 )
         except Exception as push_err:
             logger.warning(f"Expiry push failed (non-critical): {push_err}")

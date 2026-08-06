@@ -147,8 +147,25 @@ async def register_device(request: Request, body: DeviceRegister):
         # Per-contractor device tokens: contractors/{id}/devices/primary
         db.document(f"contractors/{body.contractor_id}/devices/primary").set(data, merge=True)
 
-        # Save timezone and language to contractor doc (updates on every app launch)
+        # A live registration proves the app is installed, which supersedes any
+        # earlier APNs 410. Without this, a 410 caused by token rotation or a
+        # device restore would stamp deleted_app_detected_at permanently, and the
+        # 14-day cleanup could later release the number of a user whose app is
+        # still on their phone.
         device_updates = {}
+        try:
+            from app.db.contractors import get_contractor
+            existing = await get_contractor(body.contractor_id)
+            if existing and existing.get("deleted_app_detected_at"):
+                device_updates["deleted_app_detected_at"] = None
+                logger.info(
+                    "Device re-registered for %s — clearing stale deletion signal",
+                    body.contractor_id,
+                )
+        except Exception as e:
+            logger.warning("Could not check deletion signal: %s", type(e).__name__)
+
+        # Save timezone and language to contractor doc (updates on every app launch)
         if body.timezone:
             device_updates["timezone"] = body.timezone
         if body.language:

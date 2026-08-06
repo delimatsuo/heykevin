@@ -240,6 +240,7 @@ async def _lapsed_trial_sweep():
     Only `trial` is swept. See `should_expire_trial` for why `active` is excluded.
     """
     import time
+    from google.cloud import firestore
     from app.db.firestore_client import get_firestore_client
     from app.services.subscription import should_expire_trial
 
@@ -259,18 +260,37 @@ async def _lapsed_trial_sweep():
                 ),
             )
 
+            def _expire_if_still_trial(doc_id: str) -> bool:
+                """Re-check status inside a transaction before writing.
+
+                StoreKit verification or an App Store notification can flip an
+                account from `trial` to `active` between the query above and this
+                write. An unconditional update would then clobber a freshly paid
+                subscription back to `expired` and expose it to the number-release
+                cleanup, so the status is re-read transactionally.
+                """
+                ref = db.collection("contractors").document(doc_id)
+
+                @firestore.transactional
+                def _txn(transaction):
+                    snapshot = ref.get(transaction=transaction)
+                    if not snapshot.exists:
+                        return False
+                    current = snapshot.to_dict() or {}
+                    if not should_expire_trial(current, now):
+                        return False
+                    transaction.update(ref, {"subscription_status": "expired"})
+                    return True
+
+                return _txn(db.transaction())
+
             swept = 0
             for doc in docs:
                 if not should_expire_trial(doc.to_dict() or {}, now):
                     continue
                 try:
-                    await loop.run_in_executor(
-                        None,
-                        lambda d=doc: db.collection("contractors")
-                        .document(d.id)
-                        .update({"subscription_status": "expired"}),
-                    )
-                    swept += 1
+                    if await loop.run_in_executor(None, lambda d=doc: _expire_if_still_trial(d.id)):
+                        swept += 1
                 except Exception as e:
                     logger.warning(
                         "Lapsed trial sweep failed for one contractor: %s", type(e).__name__

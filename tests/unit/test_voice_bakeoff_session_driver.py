@@ -67,7 +67,7 @@ _LIVE_ROUTE_PATHS = (
 )
 _EXPECTED_LIVE_HASHES = {
     Path("app/main.py"):
-        "7a68202b072f84710721df2dfe7d784b8dd5d36b6c70c3316dd3af264d663f42",
+        "ea13402b73f2a7c672f7ad0fac4b55172d42be51761af22be445653e3d49cab9",
     Path("app/webhooks/media_stream.py"):
         "2739ebc8df9a9c7c82001607d23d19dbe1f4ca92262499ffb5e52b1d3d5c0d6a",
     Path("app/experiments/voice_bakeoff_app.py"):

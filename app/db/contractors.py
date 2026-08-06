@@ -228,7 +228,11 @@ async def create_contractor(data: dict) -> str:
     trial_start = data.setdefault("trial_start", time.time())
     data.setdefault("subscription_status", "trial")
     data.setdefault("subscription_tier", "none")
-    data.setdefault("subscription_expires", trial_start + 3 * 86400)  # 3-day grace; real trial is Apple's 2-week intro offer
+    # 14-day free trial. This previously wrote a 3-day window, which left 93
+    # accounts expiring 11 days early; the gate now derives trial end from
+    # trial_start (see subscription.trial_expires_at) so those records heal too.
+    from app.services.subscription import TRIAL_PERIOD_DAYS
+    data.setdefault("subscription_expires", trial_start + TRIAL_PERIOD_DAYS * 86400)
     data.setdefault("deleted_app_detected_at", None)
     data.setdefault("subscription_uuid", str(_uuid.uuid4()))
     loop = asyncio.get_event_loop()

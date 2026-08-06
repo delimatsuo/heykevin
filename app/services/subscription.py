@@ -32,6 +32,35 @@ _LOCALLY_MANAGED_STATUSES = frozenset({"trial"})
 # Statuses that mean the paid term is ending; access lasts until the timestamp.
 _TERMINAL_STATUSES = frozenset({"expired", "cancelled"})
 
+# The product's free trial length. Historical records disagree — 93 production
+# accounts carry a 3-day `subscription_expires` against 5 with 14 — so trial end
+# is derived from `trial_start` rather than trusting the stored value.
+TRIAL_PERIOD_DAYS = 14
+
+
+def trial_expires_at(contractor: Optional[dict]) -> float:
+    """Effective end of a contractor's free trial.
+
+    Returns the later of the stored `subscription_expires` and
+    `trial_start + TRIAL_PERIOD_DAYS`. Deriving from `trial_start` repairs the
+    short-window records in place, with no migration; using max() means this can
+    only ever extend a trial, so a promo or manual extension still wins.
+
+    Returns 0.0 when neither field is usable, which callers treat as unknown
+    (and therefore allowed) rather than expired.
+    """
+    if not contractor:
+        return 0.0
+
+    stored = contractor.get("subscription_expires")
+    stored_ts = float(stored) if isinstance(stored, (int, float)) and stored else 0.0
+
+    started = contractor.get("trial_start")
+    if isinstance(started, (int, float)) and started:
+        return max(stored_ts, float(started) + TRIAL_PERIOD_DAYS * 86400)
+
+    return stored_ts
+
 
 def evaluate_subscription_access(
     contractor: Optional[dict], now: float
@@ -66,7 +95,8 @@ def evaluate_subscription_access(
         return True, "missing_expiry"
 
     if status in _LOCALLY_MANAGED_STATUSES:
-        if expires > now:
+        # Derived from trial_start, not the stored expiry — see trial_expires_at.
+        if trial_expires_at(contractor) > now:
             return True, "trial_active"
         return False, "trial_expired"
 
@@ -142,8 +172,8 @@ def should_expire_trial(contractor: Optional[dict], now: float) -> bool:
         return False
     if str(contractor.get("subscription_status") or "").strip().lower() not in _LOCALLY_MANAGED_STATUSES:
         return False
-    expires = contractor.get("subscription_expires")
-    if not isinstance(expires, (int, float)) or not expires:
+    expires = trial_expires_at(contractor)
+    if not expires:
         return False
     return expires <= now
 

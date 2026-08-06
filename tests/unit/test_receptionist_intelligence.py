@@ -796,9 +796,19 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
     activity_detection = realtime_config["automatic_activity_detection"]
     assert realtime_config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
     assert realtime_config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
-    assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_HIGH"
+
+    # Fast endpointing (PR #73): Kevin must still decide quickly that the caller
+    # has finished and start replying. These are the latency-critical knobs.
     assert activity_detection["end_of_speech_sensitivity"] == "END_SENSITIVITY_HIGH"
     assert activity_detection["silence_duration_ms"] <= 500
+
+    # Interruption sensitivity is deliberately NOT aggressive. HIGH with 100ms of
+    # padding let phone-line noise cut Kevin off mid-word (call CA54f11e, three
+    # barge-ins in 104 seconds). This side trades interrupt latency for not
+    # truncating Kevin, and must not be raised back without re-testing on a real
+    # call.
+    assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_LOW"
+    assert activity_detection["prefix_padding_ms"] >= 300
     await pipeline.stop()
 
 

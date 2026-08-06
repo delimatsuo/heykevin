@@ -342,11 +342,34 @@ class GeminiPipeline:
                     },
                     "input_audio_transcription": {},
                     "output_audio_transcription": {},
+                    # The start and end halves of this config do different jobs and
+                    # are tuned separately.
+                    #
+                    # END side (end_of_speech_sensitivity, silence_duration_ms)
+                    # controls how quickly Kevin decides the caller has finished
+                    # and starts replying. Deliberately aggressive for low latency
+                    # — see PR #73, "Fix Gemini voice latency pacing" — and left
+                    # alone here.
+                    #
+                    # START side controls what interrupts Kevin mid-sentence, and
+                    # was the cause of a real defect. START_SENSITIVITY_HIGH with
+                    # only 100ms of prefix padding is the most trigger-happy
+                    # setting available; paired with START_OF_ACTIVITY_INTERRUPTS,
+                    # any brief sound on a phone line — road noise, breathing, a
+                    # cough, line static — registered as "the caller started
+                    # speaking" and cut Kevin off mid-word. Call CA54f11e took
+                    # three barge-ins in 104 seconds that way.
+                    #
+                    # LOW plus 300ms of padding demands clearer evidence of real
+                    # speech before interrupting, while still capturing the first
+                    # syllable. A genuine barge-in now registers marginally later,
+                    # which is the right side to err on: being cut off mid-sentence
+                    # reads as broken, a barge-in 200ms later reads as normal.
                     "realtime_input_config": {
                         "automatic_activity_detection": {
-                            "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                            "start_of_speech_sensitivity": "START_SENSITIVITY_LOW",
                             "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                            "prefix_padding_ms": 100,
+                            "prefix_padding_ms": 300,
                             "silence_duration_ms": 500,
                         },
                         "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",

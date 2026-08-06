@@ -26,6 +26,7 @@ from app.services.voice_pipeline import (
     _log_tool_execution_failure,
     _tool_label,
     _tool_execution_error_response,
+    _tool_timeout_response,
     build_system_prompt,
     is_owner_availability_hold,
 )
@@ -1482,7 +1483,7 @@ class GeminiPipeline:
                     timeout=self.TOOL_DISPATCH_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                result_str = json.dumps({"error": "Tool execution timed out"})
+                result_str = _tool_timeout_response()
             except Exception as e:
                 _log_tool_execution_failure(tool_name, self._call_sid, e)
                 result_str = _tool_execution_error_response()

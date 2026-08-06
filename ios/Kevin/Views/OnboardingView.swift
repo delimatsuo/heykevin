@@ -16,7 +16,6 @@ struct OnboardingView: View {
     @State private var phoneNumber = ""
     @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var showPaywall = false
-    @State private var didPrepareInitialStep = false
 
     private let businessProductID = "com.kevin.callscreen.business.monthly"
 
@@ -57,9 +56,6 @@ struct OnboardingView: View {
                 }
                 .padding()
             }
-        }
-        .task {
-            await prepareInitialStep()
         }
         .sheet(isPresented: $showPaywall) {
             PaywallView(
@@ -243,6 +239,28 @@ struct OnboardingView: View {
                 .font(.title3)
                 .multilineTextAlignment(.center)
                 .padding(.vertical)
+
+            // Carrier-required SMS consent disclosure. US A2P 10DLC review needs a
+            // verifiable opt-in: the recipient must be shown who is texting them,
+            // what for, how often, that rates apply, and how to stop — at the point
+            // they hand over the number. Its absence is why the first campaign
+            // registration was rejected (error 30909, unverifiable Call to Action).
+            // Wording here must stay in sync with the registered campaign's
+            // message flow and with heykevin.one/terms.
+            VStack(spacing: 8) {
+                Text(String(localized: "By continuing you agree to receive service text messages from Hey Kevin at this number — call summaries, voicemail alerts, and account notices. Message frequency varies with your call volume. Message and data rates may apply. Reply STOP to cancel, HELP for help."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                HStack(spacing: 12) {
+                    Link(String(localized: "Terms"), destination: URL(string: "https://heykevin.one/terms")!)
+                        .font(.caption)
+                    Link(String(localized: "Privacy Policy"), destination: URL(string: "https://heykevin.one/privacy")!)
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal)
 
             Spacer()
 
@@ -784,59 +802,6 @@ struct OnboardingView: View {
 
     // MARK: - Logic
 
-    @MainActor
-    private func prepareInitialStep() async {
-        guard !didPrepareInitialStep else { return }
-        didPrepareInitialStep = true
-
-        guard appState.pendingModeChange else { return }
-
-        // Mode changes are launched from Settings for an existing, authenticated
-        // account. Do not ask for Sign in with Apple again just to patch mode.
-        guard !appState.contractorId.isEmpty else {
-            appState.pendingModeChange = false
-            return
-        }
-
-        appState.pendingModeChange = false
-        ownerName = appState.userName
-        businessName = appState.businessName
-        if !appState.serviceType.isEmpty {
-            serviceType = appState.serviceType
-        }
-        selectedMode = appState.mode == "personal" ? "business" : "personal"
-        kevinNumber = appState.kevinNumber
-        step = .modeSelect
-
-        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
-            let name = profile["owner_name"] as? String ?? ""
-            let biz = profile["business_name"] as? String ?? ""
-            let svc = profile["service_type"] as? String ?? ""
-            let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? appState.mode
-            let number = profile["twilio_number"] as? String ?? ""
-
-            if !name.isEmpty {
-                ownerName = name
-                appState.userName = name
-            }
-            if !biz.isEmpty {
-                businessName = biz
-                appState.businessName = biz
-            }
-            if !svc.isEmpty {
-                serviceType = svc
-                appState.serviceType = svc
-            }
-            let normalizedMode = mode == "personal" ? "personal" : "business"
-            appState.mode = normalizedMode
-            selectedMode = normalizedMode == "personal" ? "business" : "personal"
-            if !number.isEmpty {
-                kevinNumber = number
-                appState.kevinNumber = number
-            }
-        }
-    }
-
     private func handleSignIn(_ result: Result<ASAuthorization, Error>) {
         switch result {
         case .success(let auth):
@@ -873,13 +838,6 @@ struct OnboardingView: View {
     }
 
     private func tryRestore() async {
-        // If user explicitly triggered mode change, skip restore and go to mode select
-        if appState.pendingModeChange {
-            appState.pendingModeChange = false
-            await MainActor.run { step = .modeSelect }
-            return
-        }
-
         // 1. Check if contractorId is already saved (Keychain, migrated from UserDefaults)
         if !appState.contractorId.isEmpty {
             if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {

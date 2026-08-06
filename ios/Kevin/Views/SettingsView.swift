@@ -20,6 +20,8 @@ struct SettingsView: View {
     @State private var importMessage = ""
     @State private var syncMessage = ""
     @State private var showModeChangeAlert = false
+    @State private var isSwitchingMode = false
+    @State private var modeChangeError = ""
     @State private var isSaving = false
     @State private var saveError = ""
     @State private var knowledgeLengthWarning = ""
@@ -117,12 +119,23 @@ struct SettingsView: View {
                                 Spacer()
                                 Text(appState.isPersonalMode ? String(localized: "Personal Assistant") : String(localized: "Business Assistant"))
                                     .foregroundStyle(appState.isPersonalMode ? .purple : .blue)
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(Color.secondary)
-                                    .font(.caption)
+                                if isSwitchingMode {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .foregroundStyle(Color.secondary)
+                                        .font(.caption)
+                                }
                             }
                         }
                         .foregroundStyle(.primary)
+                        .disabled(isSwitchingMode)
+
+                        if !modeChangeError.isEmpty {
+                            Text(modeChangeError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
 
                         Button {
                             Task {
@@ -185,12 +198,23 @@ struct SettingsView: View {
                                 Spacer()
                                 Text(String(localized: "Business Assistant"))
                                     .foregroundStyle(.blue)
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(.tertiary)
-                                    .font(.caption)
+                                if isSwitchingMode {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .foregroundStyle(.tertiary)
+                                        .font(.caption)
+                                }
                             }
                         }
                         .foregroundStyle(.primary)
+                        .disabled(isSwitchingMode)
+
+                        if !modeChangeError.isEmpty {
+                            Text(modeChangeError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
                     } header: {
                         Text(String(localized: "My Business"))
                     }
@@ -561,12 +585,13 @@ struct SettingsView: View {
             }
             .alert(String(localized: "Change Mode"), isPresented: $showModeChangeAlert) {
                 Button(String(localized: "Switch Mode")) {
-                    appState.pendingModeChange = true
-                    appState.isOnboarded = false
+                    Task { await switchMode() }
                 }
                 Button(String(localized: "Cancel"), role: .cancel) {}
             } message: {
-                Text(String(localized: "This will take you through the setup again so you can switch between Personal and Business mode. Your Kevin number will be kept."))
+                Text(appState.isPersonalMode
+                     ? String(localized: "Kevin will switch to Business mode: smart intake questions, business hours, and a knowledge base for FAQs. Your Kevin number will be kept.")
+                     : String(localized: "Kevin will switch to Personal mode: unknown callers are screened, saved contacts ring through. Your Kevin number will be kept."))
             }
             .task {
                 await loadKnowledge()
@@ -841,6 +866,46 @@ struct SettingsView: View {
             await updateContractorSetting("business_hours_start", start)
             await updateContractorSetting("business_hours_end", end)
         }
+    }
+
+    /// Switches Personal <-> Business mode with a direct PATCH.
+    ///
+    /// This used to hand off to `pendingModeChange` + `isOnboarded = false`,
+    /// re-running the full onboarding wizard (mode select, business info entry,
+    /// a contacts-permission re-prompt, a provisioning spinner) just to flip one
+    /// field on an account that already has a Kevin number. That multi-screen
+    /// detour was the reported bug: Cloud Run logs showed mode-switch attempts
+    /// never produced a single network call, meaning the flow was going nowhere
+    /// before it ever reached the point that would persist anything. The
+    /// backend capability this needs — PATCH mode, entitlement-checked — already
+    /// existed and is exactly what onboarding's own "fast path" falls back to
+    /// for a contractor that already has a number. This calls it directly.
+    /// `@MainActor` is explicit here, matching the other save helpers in this
+    /// file: every line below mutates observable state, and a mutation landing
+    /// off the main thread would leave the row showing the old mode — the exact
+    /// symptom this fix exists to remove.
+    @MainActor
+    private func switchMode() async {
+        guard !appState.contractorId.isEmpty else { return }
+        let targetMode = appState.isPersonalMode ? "business" : "personal"
+
+        isSwitchingMode = true
+        modeChangeError = ""
+
+        // Ask the server rather than trusting the cached subscription tier. A 403
+        // is a real answer ("needs Business"), so it routes to the paywall; the
+        // local tier is only a UI cache and can be stale, which would otherwise
+        // paywall someone who is already entitled.
+        switch await APIClient.shared.updateContractorMode(contractorId: appState.contractorId, mode: targetMode) {
+        case .success:
+            appState.mode = targetMode
+        case .entitlementRequired:
+            showPaywall = true
+        case .failed:
+            modeChangeError = String(localized: "Could not switch mode. Please try again.")
+        }
+
+        isSwitchingMode = false
     }
 
     private func updateContractorSetting(_ key: String, _ value: Any) async {

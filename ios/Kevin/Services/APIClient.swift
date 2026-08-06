@@ -577,7 +577,18 @@ class APIClient {
 
     // MARK: - Contractor Mode
 
-    func updateContractorMode(contractorId: String, mode: String) async -> Bool {
+    /// Outcome of a mode change, distinguishing "not entitled" from "it broke".
+    ///
+    /// The server is the authority on entitlement (the local subscription tier is
+    /// only a UI cache), so a 403 here is a real answer — the account needs a
+    /// Business subscription — not a failure to retry.
+    enum ModeUpdateResult {
+        case success
+        case entitlementRequired
+        case failed
+    }
+
+    func updateContractorMode(contractorId: String, mode: String) async -> ModeUpdateResult {
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)")!
@@ -589,10 +600,14 @@ class APIClient {
             authorize(&request)
 
             let (_, response) = try await session.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
+            switch (response as? HTTPURLResponse)?.statusCode {
+            case 200: return .success
+            case 403: return .entitlementRequired
+            default: return .failed
+            }
         } catch {
             debugLog("Update mode failed: \(error.localizedDescription)")
-            return false
+            return .failed
         }
     }
 

@@ -368,6 +368,13 @@ class GeminiPipeline:
             tools = self._build_gemini_tools()
             if tools:
                 setup["setup"]["tools"] = tools
+            # Always log the tool surface: during the CAfed098 diagnosis it was
+            # impossible to tell from logs whether zero tool calls meant the
+            # model ignored its tools or never had any.
+            self._log_voice_timing(
+                "live_tools_registered",
+                count=len(tools[0]["function_declarations"]) if tools else 0,
+            )
 
             setup_started_at = time.monotonic()
             await self._ws.send(json.dumps(setup))
@@ -402,8 +409,19 @@ class GeminiPipeline:
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._ensure_audio_playout_task()
 
-            # Gemini owns voice activity and turn detection. A transcript-based
-            # silence timer races speech that Gemini detects before transcribing it.
+            if start_background_tasks:
+                # Stall watchdog. 598b8fa removed this start call because a
+                # transcript-based timer can race speech Gemini has detected
+                # but not yet transcribed; the result (call CAfed098) was a
+                # 30-second dead-air stall with no recovery when a truncated
+                # turn dropped Kevin's closing question. Re-enabled with the
+                # race addressed instead of avoided: the silence clock counts
+                # from the last activity on EITHER side, so an in-flight
+                # caller transcript defers the prompt, and a genuinely
+                # colliding "Are you still there?" is interruptible by the
+                # caller's speech (START_OF_ACTIVITY_INTERRUPTS).
+                self._start_silence_watchdog()
+
             if start_background_tasks and self._call_sid:
                 # Start RTDB command polling (for decline/take_message from iOS app)
                 self._command_check_task = asyncio.create_task(self._command_check_loop())
@@ -1577,6 +1595,25 @@ class GeminiPipeline:
             self._assistant_instruction_pending = False
             raise
 
+    def _start_silence_watchdog(self) -> None:
+        """Schedule the caller-silence loop, replacing any stale task."""
+        if self._silence_check_task and not self._silence_check_task.done():
+            return
+        self._silence_check_task = asyncio.create_task(self._silence_check_loop())
+
+    def _caller_silence_elapsed_seconds(self) -> float:
+        """Seconds since the last activity on either side of the call.
+
+        Counting from ``max(kevin, caller)`` rather than Kevin alone is what
+        makes the watchdog safe against 598b8fa's race: caller speech that
+        Gemini heard but only just transcribed refreshes the caller timestamp
+        and defers the prompt, instead of the prompt talking over the caller.
+        """
+        last_activity = max(self._last_kevin_speech_time, self._last_caller_speech_time)
+        if last_activity <= 0:
+            return 0.0
+        return time.time() - last_activity
+
     async def _silence_check_loop(self):
         """Prompt once after caller silence, then end the call if silence continues."""
         try:
@@ -1589,8 +1626,10 @@ class GeminiPipeline:
 
                 now = time.time()
                 if self._caller_silence_prompted_at is None:
-                    elapsed = now - self._last_kevin_speech_time
-                    if elapsed >= self.CALLER_SILENCE_PROMPT_SECONDS:
+                    if (
+                        self._caller_silence_elapsed_seconds()
+                        >= self.CALLER_SILENCE_PROMPT_SECONDS
+                    ):
                         await self._prompt_for_caller_silence()
                     continue
 

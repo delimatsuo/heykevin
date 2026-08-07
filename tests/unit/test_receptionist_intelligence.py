@@ -1776,7 +1776,15 @@ async def test_gemini_barge_in_resets_caller_silence_state():
 
 
 @pytest.mark.asyncio
-async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatch):
+async def test_gemini_start_enables_silence_watchdog(monkeypatch):
+    """The stall watchdog must run when background tasks are enabled.
+
+    This deliberately reverses 598b8fa, which disabled the watchdog to avoid
+    racing speech Gemini had heard but not yet transcribed. The observed cost
+    of no watchdog was a 30-second dead-air stall (call CAfed098, 2026-08-06)
+    ending in a hangup; the race is now addressed by counting silence from the
+    last activity on either side (see _caller_silence_elapsed_seconds).
+    """
     websocket = _FakeGeminiWebSocket()
 
     async def fake_connect(*_args, **_kwargs):
@@ -1800,7 +1808,8 @@ async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatc
         started = await pipeline.start(send_greeting=False, start_background_tasks=True)
 
         assert started
-        assert pipeline._silence_check_task is None
+        assert pipeline._silence_check_task is not None
+        assert not pipeline._silence_check_task.done()
     finally:
         await pipeline.stop()
 

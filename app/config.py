@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4
+    # Text model for the ConversationRelay engine. gemini-2.5-flash is gated
+    # ("no longer available to new users") for this API project — keep this on
+    # a current GA flash model. Env-overridable so a model retirement is a
+    # config change, not a deploy.
+    relay_text_model: str = "gemini-3.5-flash"
 
     # Twilio Voice SDK (for iOS app)
     twilio_api_key_sid: str = ""      # API Key SID (not the Account SID)

@@ -249,3 +249,22 @@ def test_relay_twiml_engine_switch():
     assert '<Language code="multi"' in twiml
     assert '<Parameter name="ws_token" value="tok_abc"' in twiml
     assert "Kevin" in twiml  # welcomeGreeting present
+
+
+def test_generate_body_disables_thinking_and_uses_configured_model():
+    """CA80d3fd regression: model must come from settings (2.5-flash is gated
+    for this API project) and thinking must be pinned off — current flash
+    models otherwise burn the whole token budget on thoughts and return
+    empty text, which the caller hears as Kevin not understanding anything.
+    """
+    from app.config import settings
+
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "ok"}]])
+
+    body = pipeline._build_generate_body([{"role": "user", "parts": [{"text": "hi"}]}])
+
+    assert body["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+    assert settings.relay_text_model != "gemini-2.5-flash"
+    assert body["generationConfig"]["maxOutputTokens"] > 0
+    assert body["system_instruction"]["parts"][0]["text"]

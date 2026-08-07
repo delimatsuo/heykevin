@@ -31,10 +31,12 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Text model for the relay brain. Deliberately NOT the native-audio family —
-# text models have none of the audio-generation truncation behavior and their
-# function calling is the reliable kind.
-RELAY_TEXT_MODEL = "gemini-2.5-flash"
+# Text model for the relay brain comes from settings.relay_text_model —
+# deliberately NOT the native-audio family: text models have none of the
+# audio-generation truncation behavior and their function calling is the
+# reliable kind. First live call (CA80d3fd) 404'd on the hardcoded
+# gemini-2.5-flash: the model is listed by ListModels but gated ("no longer
+# available to new users"), so the model id must stay configurable.
 
 # Text tokens, not audio: 256 is several sentences. The prompt enforces
 # "ONE or two short sentences"; this is a runaway guard, same philosophy as
@@ -286,22 +288,32 @@ class RelayPipeline:
                 function_calls.append(part["functionCall"])
         return text_out, function_calls
 
-    async def _stream_generate_httpx(self, contents: list[dict]):
-        """Real transport: Gemini streamGenerateContent over SSE."""
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{RELAY_TEXT_MODEL}:streamGenerateContent?alt=sse"
-        )
+    def _build_generate_body(self, contents: list[dict]) -> dict:
         body: dict = {
             "system_instruction": {"parts": [{"text": self._system_prompt}]},
             "contents": contents,
             "generationConfig": {
                 "temperature": settings.gemini_live_temperature,
                 "maxOutputTokens": MAX_REPLY_TOKENS,
+                # Current flash models think by default and will burn the
+                # entire token budget on thoughts, returning empty text
+                # (observed live on gemini-3.5-flash). A receptionist needs
+                # the first token, not deliberation — same setting the Live
+                # engine pins via gemini_live_thinking_budget.
+                "thinkingConfig": {"thinkingBudget": 0},
             },
         }
         if self._tools:
             body["tools"] = self._tools
+        return body
+
+    async def _stream_generate_httpx(self, contents: list[dict]):
+        """Real transport: Gemini streamGenerateContent over SSE."""
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{settings.relay_text_model}:streamGenerateContent?alt=sse"
+        )
+        body = self._build_generate_body(contents)
 
         async with httpx.AsyncClient(timeout=GENERATE_TIMEOUT_SECONDS) as client:
             async with client.stream(

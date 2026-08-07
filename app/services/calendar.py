@@ -53,6 +53,11 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 MAX_DAYS_AHEAD = 14
 MAX_RETURNED_SLOTS = 20
+# Bound slots per day BEFORE the overall cap. Without this, an open calendar
+# fills MAX_RETURNED_SLOTS with the earliest ~2.5 days of hourly slots and
+# later days never reach the model — on live call CAb4533d Kevin could not
+# offer a Tuesday five days out because the tool never showed him one.
+MAX_SLOTS_PER_DAY = 3
 DEFAULT_TIMEZONE = "UTC"
 DEFAULT_BUSINESS_HOURS_START = "09:00"
 DEFAULT_BUSINESS_HOURS_END = "17:00"
@@ -355,7 +360,11 @@ async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dic
         slot_start = datetime.combine(local_day, business_start, tzinfo=local_timezone)
         closing_time = datetime.combine(local_day, business_end, tzinfo=local_timezone)
 
-        while slot_start + timedelta(hours=1) <= closing_time:
+        day_slots = 0
+        while (
+            slot_start + timedelta(hours=1) <= closing_time
+            and day_slots < MAX_SLOTS_PER_DAY
+        ):
             slot_end = slot_start + timedelta(hours=1)
             is_busy = any(
                 slot_start < b_end and slot_end > b_start
@@ -369,6 +378,7 @@ async def get_available_slots(contractor: dict, days_ahead: int = 7) -> list[dic
                     "start_iso": slot_start.isoformat(),
                     "end_iso": slot_end.isoformat(),
                 })
+                day_slots += 1
             slot_start = slot_end
 
     return available[:MAX_RETURNED_SLOTS]

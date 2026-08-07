@@ -192,7 +192,17 @@ class RelayPipeline:
                 _call_label(self._call_sid),
                 str(message.get("description", ""))[:200],
             )
-        # setup is consumed by the webhook layer; dtmf is not enabled.
+        elif msg_type not in ("setup", "dtmf"):
+            # events="tokens-played" is enabled in TwiML but the receipt
+            # message's shape is undocumented — log unknown types (keys only,
+            # no content) so a real call reveals it and goodbye teardown can
+            # later key off playback receipts instead of a fixed grace sleep.
+            logger.info(
+                "relay_event event=unknown_message_type call=%s type=%s keys=%s",
+                _call_label(self._call_sid),
+                str(msg_type)[:40],
+                ",".join(sorted(str(k)[:20] for k in message.keys()))[:120],
+            )
 
     async def _handle_prompt(self, message: dict) -> None:
         last = bool(message.get("last", False))

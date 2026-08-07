@@ -73,6 +73,8 @@ def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> st
     after_hours = mode != "personal" and not is_business_hours(contractor)
     greeting = build_greeting_text(contractor, after_hours)
 
+    from app.services.voice_pipeline import ELEVENLABS_VOICE_ID
+
     ws_url = settings.cloud_run_url.replace("https://", "wss://")
     response = VoiceResponse()
     connect = Connect()
@@ -81,6 +83,14 @@ def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> st
         welcome_greeting=greeting,
         welcome_greeting_interruptible="any",
         interruptible="any",
+        # Kevin's established voice (Eric) — without this, ConversationRelay
+        # uses its own ElevenLabs default and Kevin sounds like a stranger.
+        voice=ELEVENLABS_VOICE_ID,
+        # Playback receipts. The exact message shape is undocumented, so the
+        # pipeline logs unknown message types instead of acting on these yet;
+        # once observed on a real call, goodbye teardown can key off them
+        # instead of the fixed grace sleep.
+        events="tokens-played",
     )
     relay.language(code="multi")
     relay.parameter(name="ws_token", value=ws_token)

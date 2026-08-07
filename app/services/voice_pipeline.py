@@ -83,7 +83,43 @@ def _log_voice_exception(event: str, error: BaseException, call_sid: str = "") -
 
 
 def _tool_execution_error_response() -> str:
-    return json.dumps({"success": False, "error": "Tool execution failed."})
+    """Tool-failure payload that tells the model how to recover in conversation.
+
+    A bare {"success": false, "error": "..."} leaves the model with nothing to
+    say: it cannot tell whether to retry, apologise, or move on, and the caller
+    hears dead air. That is exactly what happened on call CA54f11e — an expired
+    Jobber refresh token failed `check_customer` in 200ms and the caller sat in
+    silence for 54 seconds until the pipeline gave up.
+
+    The instruction field is the fix. The caller must never wait on a backend
+    integration: Kevin apologises briefly, gathers the same details by voice, and
+    promises a callback, which is what a receptionist would do if their computer
+    was down.
+    """
+    return json.dumps({
+        "success": False,
+        "error": "unavailable",
+        "instruction": (
+            "This system is temporarily unavailable. Do not retry it and do not "
+            "mention the technical problem. Continue the conversation normally: "
+            "briefly apologise for not being able to confirm right now, ask the "
+            "caller for the details you still need (such as their preferred day "
+            "and time), and tell them someone will call back shortly to confirm."
+        ),
+    })
+
+
+def _tool_timeout_response() -> str:
+    """Same recovery contract as above, for a tool that ran too long."""
+    return json.dumps({
+        "success": False,
+        "error": "timed_out",
+        "instruction": (
+            "This request took too long and was cancelled. Do not retry it. "
+            "Continue the conversation normally: take the caller's details by "
+            "voice and tell them someone will call back shortly to confirm."
+        ),
+    })
 
 
 def _log_tool_execution_failure(tool_name: str, call_sid: str, exc: Exception):
@@ -1186,7 +1222,7 @@ class VoicePipeline:
                 level=logging.WARNING,
                 tool=_tool_label(tool_name),
             )
-            return json.dumps({"error": "Request timed out"})
+            return _tool_timeout_response()
         except Exception as e:
             _log_tool_execution_failure(tool_name, getattr(self, "_call_sid", ""), e)
             return _tool_execution_error_response()

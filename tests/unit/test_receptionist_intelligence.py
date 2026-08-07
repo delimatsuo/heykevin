@@ -846,7 +846,11 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
-    assert generation_config["max_output_tokens"] == 192
+    # 512 is a runaway guard (~20s at the measured 26 tok/s), not a length
+    # control — response length is enforced by the system prompt. Values low
+    # enough to act as a length control (192 ≈ 7.4s) chop replies mid-word;
+    # see MAX_RESPONSE_OUTPUT_TOKENS in gemini_pipeline.py before changing.
+    assert generation_config["max_output_tokens"] == 512
     await pipeline.stop()
 
 

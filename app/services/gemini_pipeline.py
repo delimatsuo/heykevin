@@ -96,7 +96,17 @@ class GeminiPipeline:
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
-    MAX_RESPONSE_OUTPUT_TOKENS = 192
+    # Runaway guard only — NOT a length control. Native-audio output measures
+    # ~26 tokens/second (verified across 20+ production turns on 2026-08-06),
+    # so a token cap always lands mid-word by construction. At 192 the cap
+    # chopped any reply longer than ~7.4s (call CA54f11e turn 5 hit it at
+    # exactly 7,400ms), and the 256→128→192 history of this knob shows it
+    # being oscillated to fight verbosity — that job belongs to the system
+    # prompt ("ONE or two short sentences per response"), which cuts at
+    # sentence boundaries instead of mid-word. 512 ≈ 20s of speech: high
+    # enough that a prompt-compliant reply never hits it, low enough to stop
+    # a runaway turn well before the 12s audio-backlog guard has to.
+    MAX_RESPONSE_OUTPUT_TOKENS = 512
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",

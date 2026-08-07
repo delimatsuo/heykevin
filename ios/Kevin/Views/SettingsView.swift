@@ -696,18 +696,41 @@ struct SettingsView: View {
                 .disabled(appState.kevinNumber.isEmpty)
             }
 
-            // Push notifications
+            // Push notifications.
+            //
+            // The action depends on whether iOS has a decision on file:
+            //
+            // - notDetermined: nobody has ever asked. Settings shows no
+            //   Notifications row for an app in this state, so sending the user
+            //   there strands them on a pane with Siri, Search, and Language and
+            //   no way to enable anything. Ask for permission instead.
+            // - denied: the row exists, so deep-link straight to it with
+            //   openNotificationSettingsURLString (iOS 15.4+). The general
+            //   openSettingsURLString only opens the app's top-level pane and
+            //   makes the user hunt.
             SetupRow(
                 title: "Push Notifications",
                 ok: pushOK,
                 okLabel: "Enabled",
-                failLabel: pushPermission == .denied ? "Blocked — tap to enable" : "Not enabled"
+                failLabel: pushPermission == .denied ? "Blocked in iOS Settings" : "Not enabled"
             ) {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
+                if pushPermission == .denied {
+                    if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } else {
+                    AppDelegate.requestPushAuthorization { _ in
+                        Task { await refreshPushPermission() }
+                    }
                 }
             } actionLabel: {
-                AnyView(Text("Open Settings").font(.caption.weight(.medium)).foregroundStyle(.blue))
+                AnyView(
+                    Text(pushPermission == .denied
+                         ? String(localized: "Open Settings")
+                         : String(localized: "Enable"))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.blue)
+                )
             }
 
             // Subscription

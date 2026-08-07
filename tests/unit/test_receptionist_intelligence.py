@@ -176,6 +176,30 @@ def test_business_prompt_confirms_only_phone_last_four():
     assert "6-5-0, 6-9-1, 8-6-6-7" not in prompt
 
 
+def test_callback_confirmation_spells_out_digits_as_words():
+    """Live call regression (2026-08-07): Kevin read caller ID ending in
+    8667 as "eight thousand six hundred sixty-seven" instead of "eight six
+    six seven" — a plain digit string in prompt text is read as one number
+    by TTS. ElevenLabs' own guidance: spell digits as words for reliable
+    digit-by-digit pronunciation (hyphens alone aren't reliable either).
+    """
+    config = _plumbing_config()
+    prompt = build_system_prompt(config, caller_phone="+16505551234")
+
+    # "one two three four" — the RULES example always says "eight six six
+    # seven"; only the CALLBACK NUMBER POLICY line reflects the real caller.
+    assert "Is the number ending in one two three four" in prompt
+    prompt = build_system_prompt(config, caller_phone="+16505558667")
+
+    assert "Is the number ending in eight six six seven the best number" in prompt
+    assert "ending in 8667" in prompt  # unspoken form still guards the raw digits
+    assert "8-6-6-7" not in prompt
+    # "eight thousand..." legitimately appears once, as the explicit
+    # never-say-it-this-way counter-example in the RULES section.
+    assert prompt.count("eight thousand") == 1
+    assert "never" in prompt.split("eight thousand")[0][-40:].lower()
+
+
 def test_personal_prompt_confirms_only_phone_last_four():
     prompt = build_system_prompt(
         {
@@ -283,8 +307,11 @@ def test_after_hours_prompt_defers_callback_number_until_callback_intent():
 def test_prompt_uses_caller_id_last_four_without_exposing_full_number():
     prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
 
+    # Confirmation is spoken as words (see test_callback_confirmation_spells_
+    # out_digits_as_words) — this test guards the separate concern that the
+    # full number is never embedded.
     assert "caller ID number ending in 8667" in prompt
-    assert "Is the number ending in 8667 the best number for a callback?" in prompt
+    assert "Is the number ending in eight six six seven the best number for a callback?" in prompt
     assert "+16504228667" not in prompt
     assert "6504228667" not in prompt
 

@@ -124,7 +124,15 @@ class RelayPipeline:
         self._history: list[dict] = []
         self._language = "en"
         self._active = True
-        self._generating = False
+        # Turn epoch gates every outbound token: superseding caller speech or
+        # a barge-in bumps it, and any in-flight generation stops sending the
+        # instant its epoch is stale. Without this, tokens from a cancelled
+        # turn keep arriving at Twilio and TTS resumes mid-thought after the
+        # caller spoke — heard live on CA73dbd1 as audio "breaking up" and
+        # Kevin answering the wrong (older) utterance.
+        self._turn_epoch = 0
+        self._generate_task: Optional[asyncio.Task] = None
+        self._streamed_text = ""
         self._urgency_signalled = False
         self._unavailable_said = False
         self._ending = False
@@ -145,8 +153,20 @@ class RelayPipeline:
 
     async def stop(self) -> None:
         self._active = False
+        self._turn_epoch += 1
+        if self._generate_task and not self._generate_task.done():
+            self._generate_task.cancel()
         if self._command_task and not self._command_task.done():
             self._command_task.cancel()
+
+    async def wait_idle(self) -> None:
+        """Await the in-flight generation, if any (tests and shutdown)."""
+        task = self._generate_task
+        if task:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     @property
     def language(self) -> str:
@@ -155,12 +175,17 @@ class RelayPipeline:
     # --- inbound events from ConversationRelay ---------------------------
 
     async def handle_message(self, message: dict) -> None:
-        """Dispatch one decoded ConversationRelay WebSocket message."""
+        """Dispatch one decoded ConversationRelay WebSocket message.
+
+        Must never block on generation: prompts and interrupts arriving while
+        a reply is being generated are what cancel it, so this dispatcher has
+        to stay responsive. Generation runs as a task (_start_generation).
+        """
         msg_type = message.get("type", "")
         if msg_type == "prompt":
             await self._handle_prompt(message)
         elif msg_type == "interrupt":
-            self._handle_interrupt(message)
+            await self._handle_interrupt(message)
         elif msg_type == "error":
             logger.warning(
                 "relay_event event=twilio_error call=%s description=%s",
@@ -170,12 +195,17 @@ class RelayPipeline:
         # setup is consumed by the webhook layer; dtmf is not enabled.
 
     async def _handle_prompt(self, message: dict) -> None:
+        last = bool(message.get("last", False))
+        text = (message.get("voicePrompt") or "").strip()
+        logger.info(
+            "relay_event event=prompt_received call=%s last=%s chars=%d",
+            _call_label(self._call_sid),
+            last,
+            len(text),
+        )
         # Interim results arrive with last=false; only complete utterances
         # drive a turn. ConversationRelay owns endpointing.
-        if not message.get("last", False):
-            return
-        text = (message.get("voicePrompt") or "").strip()
-        if not text:
+        if not last or not text:
             return
         lang = message.get("lang") or ""
         if lang:
@@ -189,28 +219,83 @@ class RelayPipeline:
             if self._on_urgency_detected:
                 await self._on_urgency_detected(text)
 
+        # Caller speech supersedes any reply still being generated: record
+        # what was actually spoken of it, then answer the fuller history.
+        await self._supersede_in_flight()
         self._history.append({"role": "user", "parts": [{"text": text}]})
-        await self._generate_reply()
+        self._start_generation()
 
-    def _handle_interrupt(self, message: dict) -> None:
-        """Caller barged in: keep only what was actually spoken in history."""
+    async def _handle_interrupt(self, message: dict) -> None:
+        """Caller barged in: stop generating and keep only what was spoken."""
         spoken = (message.get("utteranceUntilInterrupt") or "").strip()
-        for entry in reversed(self._history):
-            if entry.get("role") == "model":
-                parts = entry.get("parts", [])
-                if parts and "text" in parts[0]:
-                    parts[0]["text"] = spoken or parts[0]["text"]
-                break
+        in_flight = self._generate_task and not self._generate_task.done()
+        partial = self._streamed_text
+        self._cancel_generation()
+        if in_flight and partial:
+            # The interrupted turn never reached history — record the spoken
+            # portion so the model knows where it was cut off.
+            self._history.append(
+                {"role": "model", "parts": [{"text": spoken or partial}]}
+            )
+            if self._on_transcript:
+                await self._on_transcript("Kevin", spoken or partial)
+        else:
+            for entry in reversed(self._history):
+                if entry.get("role") == "model":
+                    parts = entry.get("parts", [])
+                    if parts and "text" in parts[0]:
+                        parts[0]["text"] = spoken or parts[0]["text"]
+                    break
         logger.info(
-            "relay_event event=caller_interrupt call=%s", _call_label(self._call_sid)
+            "relay_event event=caller_interrupt call=%s in_flight=%s",
+            _call_label(self._call_sid),
+            bool(in_flight),
+        )
+
+    # --- generation lifecycle --------------------------------------------
+
+    def _cancel_generation(self) -> None:
+        """Invalidate the current epoch and cancel any in-flight generation."""
+        self._turn_epoch += 1
+        task = self._generate_task
+        if task and not task.done():
+            task.cancel()
+        self._generate_task = None
+        self._streamed_text = ""
+
+    async def _supersede_in_flight(self) -> None:
+        """Cancel an in-flight reply, preserving its spoken partial in history."""
+        in_flight = self._generate_task and not self._generate_task.done()
+        partial = self._streamed_text
+        self._cancel_generation()
+        if in_flight and partial:
+            self._history.append({"role": "model", "parts": [{"text": partial}]})
+            if self._on_transcript:
+                await self._on_transcript("Kevin", partial)
+
+    def _start_generation(self, extra_instruction: str = "") -> None:
+        if self._ending:
+            return
+        self._turn_epoch += 1
+        epoch = self._turn_epoch
+        self._streamed_text = ""
+        self._generate_task = asyncio.create_task(
+            self._generate_reply(epoch, extra_instruction)
         )
 
     # --- generation ------------------------------------------------------
 
-    async def _generate_reply(self, extra_instruction: str = "") -> None:
-        if self._generating or self._ending:
+    async def _send_current(self, epoch: int, message: dict) -> None:
+        """Send to Twilio only while this generation's epoch is still live."""
+        if epoch != self._turn_epoch:
+            raise asyncio.CancelledError()
+        if message.get("type") == "text" and message.get("token"):
+            self._streamed_text += message["token"]
+        await self._send(message)
+
+    async def _generate_reply(self, epoch: int, extra_instruction: str = "") -> None:
+        if self._ending:
             return
-        self._generating = True
         try:
             contents = list(self._history)
             if extra_instruction:
@@ -221,7 +306,9 @@ class RelayPipeline:
             reply_text = ""
             for _round in range(MAX_TOOL_ROUNDS):
                 started_at = time.monotonic()
-                text_out, function_calls, raw_parts = await self._run_stream(contents)
+                text_out, function_calls, raw_parts = await self._run_stream(
+                    epoch, contents
+                )
                 reply_text += text_out
                 logger.info(
                     "relay_event event=reply_generated call=%s ms=%d tool_calls=%d",
@@ -255,21 +342,28 @@ class RelayPipeline:
                 ]
 
             # Close the TTS turn even if the model produced no text.
-            await self._send({"type": "text", "token": "", "last": True})
+            await self._send_current(epoch, {"type": "text", "token": "", "last": True})
 
             if reply_text:
                 self._history.append(
                     {"role": "model", "parts": [{"text": reply_text}]}
                 )
+                self._streamed_text = ""
                 if self._on_transcript:
                     await self._on_transcript("Kevin", reply_text)
-                await self._maybe_end_on_goodbye(reply_text)
+                await self._maybe_end_on_goodbye(epoch, reply_text)
+        except asyncio.CancelledError:
+            # Superseded by newer caller speech or a barge-in. The successor
+            # turn owns the channel now — no apology, no closing token.
+            raise
         except Exception as error:
             logger.error(
                 "relay_event event=generate_error call=%s type=%s",
                 _call_label(self._call_sid),
                 type(error).__name__,
             )
+            if epoch != self._turn_epoch:
+                return
             # Never leave the caller in silence: degrade with a short apology.
             await self._send(
                 {
@@ -278,11 +372,9 @@ class RelayPipeline:
                     "last": True,
                 }
             )
-        finally:
-            self._generating = False
 
     async def _run_stream(
-        self, contents: list[dict]
+        self, epoch: int, contents: list[dict]
     ) -> tuple[str, list[dict], list[dict]]:
         """Run one streaming generate; forward text tokens as they arrive.
 
@@ -297,8 +389,8 @@ class RelayPipeline:
         async for part in self._stream_generate(contents):
             if "text" in part and part["text"]:
                 text_out += part["text"]
-                await self._send(
-                    {"type": "text", "token": part["text"], "last": False}
+                await self._send_current(
+                    epoch, {"type": "text", "token": part["text"], "last": False}
                 )
                 if "thoughtSignature" in part:
                     raw_parts.append(dict(part))
@@ -426,20 +518,24 @@ class RelayPipeline:
 
     # --- goodbye / end ---------------------------------------------------
 
-    async def _maybe_end_on_goodbye(self, reply_text: str) -> None:
+    async def _maybe_end_on_goodbye(self, epoch: int, reply_text: str) -> None:
         from app.services.gemini_pipeline import GeminiPipeline
 
         lowered = reply_text.lower()
         if not any(phrase in lowered for phrase in GeminiPipeline.GOODBYE_PHRASES):
             return
-        self._ending = True
         logger.info(
             "relay_event event=goodbye_detected call=%s", _call_label(self._call_sid)
         )
         # Twilio is still speaking the goodbye; give TTS time to play out
         # before tearing the session down. tokens-played events would make
-        # this exact — revisit once the events attribute is enabled.
+        # this exact — revisit once the events attribute is enabled. The sleep
+        # is cancellable and the epoch is re-checked: a caller who speaks up
+        # during the grace window ("wait, one more thing") aborts the hangup.
         await asyncio.sleep(4)
+        if epoch != self._turn_epoch:
+            return
+        self._ending = True
         await self.end_call()
 
     async def end_call(self) -> None:
@@ -479,7 +575,8 @@ class RelayPipeline:
                 owner_name = self._contractor_config.get(
                     "owner_name", settings.user_name
                 )
-                await self._generate_reply(
+                await self._supersede_in_flight()
+                self._start_generation(
                     extra_instruction=(
                         f"SYSTEM INSTRUCTION: The owner ({owner_name}) has declined "
                         "the call. Tell the caller they are unavailable and offer to "

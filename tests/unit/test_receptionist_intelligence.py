@@ -856,7 +856,11 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
-    assert generation_config["max_output_tokens"] == 192
+    # 512 is a runaway guard (~20s at the measured 26 tok/s), not a length
+    # control — response length is enforced by the system prompt. Values low
+    # enough to act as a length control (192 ≈ 7.4s) chop replies mid-word;
+    # see MAX_RESPONSE_OUTPUT_TOKENS in gemini_pipeline.py before changing.
+    assert generation_config["max_output_tokens"] == 512
     await pipeline.stop()
 
 
@@ -1782,7 +1786,15 @@ async def test_gemini_barge_in_resets_caller_silence_state():
 
 
 @pytest.mark.asyncio
-async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatch):
+async def test_gemini_start_enables_silence_watchdog(monkeypatch):
+    """The stall watchdog must run when background tasks are enabled.
+
+    This deliberately reverses 598b8fa, which disabled the watchdog to avoid
+    racing speech Gemini had heard but not yet transcribed. The observed cost
+    of no watchdog was a 30-second dead-air stall (call CAfed098, 2026-08-06)
+    ending in a hangup; the race is now addressed by counting silence from the
+    last activity on either side (see _caller_silence_elapsed_seconds).
+    """
     websocket = _FakeGeminiWebSocket()
 
     async def fake_connect(*_args, **_kwargs):
@@ -1806,7 +1818,8 @@ async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatc
         started = await pipeline.start(send_greeting=False, start_background_tasks=True)
 
         assert started
-        assert pipeline._silence_check_task is None
+        assert pipeline._silence_check_task is not None
+        assert not pipeline._silence_check_task.done()
     finally:
         await pipeline.stop()
 

@@ -68,6 +68,12 @@ def _pipeline(recorder: _Recorder, parts_script, **overrides) -> RelayPipeline:
     )
 
 
+async def _drive(pipeline: RelayPipeline, message: dict) -> None:
+    """Deliver a message and wait for the (task-based) generation to finish."""
+    await pipeline.handle_message(message)
+    await pipeline.wait_idle()
+
+
 @pytest.mark.asyncio
 async def test_prompt_streams_tokens_and_closes_turn():
     recorder = _Recorder()
@@ -75,7 +81,7 @@ async def test_prompt_streams_tokens_and_closes_turn():
         recorder, [[{"text": "We can help "}, {"text": "with that."}]]
     )
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "My toilet is broken", "lang": "en-US", "last": True}
     )
 
@@ -91,7 +97,7 @@ async def test_interim_prompts_are_ignored():
     recorder = _Recorder()
     pipeline = _pipeline(recorder, [[{"text": "hi"}]])
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "My toi", "lang": "en-US", "last": False}
     )
 
@@ -104,7 +110,7 @@ async def test_language_tracked_from_prompt():
     recorder = _Recorder()
     pipeline = _pipeline(recorder, [[{"text": "Claro!"}]])
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "Hola necesito ayuda", "lang": "es-US", "last": True}
     )
 
@@ -116,10 +122,10 @@ async def test_urgency_keyword_fires_escalation_once():
     recorder = _Recorder()
     pipeline = _pipeline(recorder, [[{"text": "Stay calm, help is coming."}]])
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "There is a gas leak in my kitchen", "last": True}
     )
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "I said gas leak!", "last": True}
     )
 
@@ -131,10 +137,10 @@ async def test_interrupt_truncates_last_kevin_turn():
     recorder = _Recorder()
     pipeline = _pipeline(recorder, [[{"text": "Our hours are nine to five on weekdays."}]])
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "What are your hours?", "last": True}
     )
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {
             "type": "interrupt",
             "utteranceUntilInterrupt": "Our hours are nine",
@@ -156,7 +162,7 @@ async def test_goodbye_reply_ends_call(monkeypatch):
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "Thanks, that's all", "last": True}
     )
 
@@ -186,7 +192,7 @@ async def test_tool_round_executes_and_continues(monkeypatch):
 
     monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute)
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "Can I book tomorrow?", "last": True}
     )
 
@@ -213,7 +219,7 @@ async def test_generate_failure_degrades_gracefully():
         stream_generate=broken_stream,
     )
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "Hello?", "last": True}
     )
 
@@ -317,7 +323,7 @@ async def test_tool_round_preserves_thought_signature_and_call_id(monkeypatch):
         stream_generate=fake_stream,
     )
 
-    await pipeline.handle_message(
+    await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "Can I book tomorrow?", "last": True}
     )
 
@@ -333,3 +339,86 @@ async def test_tool_round_preserves_thought_signature_and_call_id(monkeypatch):
     assert response_turn["parts"][0]["functionResponse"]["response"] == {
         "available": ["14:00"]
     }
+
+
+@pytest.mark.asyncio
+async def test_new_prompt_supersedes_inflight_generation():
+    """CA73dbd1 regression: caller speech during generation must cancel the
+    in-flight reply (its spoken partial preserved in history) and answer the
+    fuller history — never silently drop the utterance or keep streaming
+    stale tokens over the caller.
+    """
+    recorder = _Recorder()
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fake_stream(contents):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {"text": "Let me check the sched"}
+            await release.wait()  # hangs until cancelled
+            yield {"text": "ule for you."}
+        else:
+            yield {"text": "Yes, 2pm tomorrow works."}
+
+    pipeline = RelayPipeline(
+        contractor_config=_contractor(),
+        call_sid="CA_relay_test",
+        send_to_twilio=recorder.send,
+        on_transcript=recorder.on_transcript,
+        stream_generate=fake_stream,
+    )
+
+    await pipeline.handle_message(
+        {"type": "prompt", "voicePrompt": "Do you do toilets?", "last": True}
+    )
+    await asyncio.sleep(0)  # let the first generation start streaming
+    await _drive(
+        pipeline,
+        {"type": "prompt", "voicePrompt": "Actually just book me tomorrow 2pm", "last": True},
+    )
+
+    # The stale turn's partial is in history; the new reply answered.
+    model_texts = [
+        h["parts"][0].get("text", "")
+        for h in pipeline._history
+        if h["role"] == "model"
+    ]
+    assert "Let me check the sched" in model_texts
+    assert "Yes, 2pm tomorrow works." in model_texts
+    # No tokens from the cancelled turn arrive after the new turn's tokens.
+    tokens = [m["token"] for m in recorder.sent if m["type"] == "text"]
+    assert "ule for you." not in tokens
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_inflight_and_preserves_spoken_portion():
+    recorder = _Recorder()
+    release = asyncio.Event()
+
+    async def fake_stream(contents):
+        yield {"text": "We are open nine to"}
+        await release.wait()  # hangs until cancelled
+        yield {"text": " five weekdays."}
+
+    pipeline = RelayPipeline(
+        contractor_config=_contractor(),
+        call_sid="CA_relay_test",
+        send_to_twilio=recorder.send,
+        on_transcript=recorder.on_transcript,
+        stream_generate=fake_stream,
+    )
+
+    await pipeline.handle_message(
+        {"type": "prompt", "voicePrompt": "What are your hours?", "last": True}
+    )
+    await asyncio.sleep(0)
+    await _drive(
+        pipeline,
+        {"type": "interrupt", "utteranceUntilInterrupt": "We are open", "durationUntilInterruptMs": 900},
+    )
+
+    model_turns = [h for h in pipeline._history if h["role"] == "model"]
+    assert model_turns[-1]["parts"][0]["text"] == "We are open"
+    tokens = [m["token"] for m in recorder.sent if m["type"] == "text"]
+    assert " five weekdays." not in tokens

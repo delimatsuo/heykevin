@@ -55,6 +55,39 @@ def _screening_twiml(call_sid: str, ws_token: str = "") -> str:
     return str(response)
 
 
+def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> str:
+    """TwiML for the ConversationRelay engine (contractor voice_engine=relay).
+
+    Twilio owns STT (Deepgram, `multi` auto language detection), TTS
+    (ElevenLabs) and barge-in; our /relay-stream WebSocket exchanges text
+    only. The deterministic greeting is spoken by Twilio via welcomeGreeting
+    before our server says a word, so time-to-first-audio does not depend on
+    any model. STT/TTS providers are left at Twilio defaults (Deepgram +
+    ElevenLabs) — both required for automatic language detection.
+    """
+    from app.services.quiet_hours import is_business_hours
+    from app.services.entitlements import effective_mode
+    from app.services.relay_pipeline import build_greeting_text
+
+    mode = contractor.get("effective_mode") or effective_mode(contractor)
+    after_hours = mode != "personal" and not is_business_hours(contractor)
+    greeting = build_greeting_text(contractor, after_hours)
+
+    ws_url = settings.cloud_run_url.replace("https://", "wss://")
+    response = VoiceResponse()
+    connect = Connect()
+    relay = connect.conversation_relay(
+        url=f"{ws_url}/relay-stream/{call_sid}",
+        welcome_greeting=greeting,
+        welcome_greeting_interruptible="any",
+        interruptible="any",
+    )
+    relay.language(code="multi")
+    relay.parameter(name="ws_token", value=ws_token)
+    response.append(connect)
+    return str(response)
+
+
 def _safe_incoming_call_push_body(caller_name: str = "", caller_phone: str = "") -> str:
     """Return lock-screen-safe incoming screening copy without caller identity."""
     return "Kevin is screening a call. Open Kevin for details."
@@ -482,7 +515,12 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
 
         elif route == Route.AI_SCREENING:
-            # Connect caller directly to Kevin via Media Streams + Gemini
+            # Engine per contractor: "relay" hands the audio layer to Twilio
+            # ConversationRelay; anything else keeps the Media Streams bridge.
+            if contractor.get("voice_engine") == "relay":
+                return twiml_response(
+                    _relay_screening_twiml(call_sid, ws_token, contractor)
+                )
             return twiml_response(_screening_twiml(call_sid, ws_token=ws_token))
 
         elif route == Route.SPAM_BLOCK:

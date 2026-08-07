@@ -100,8 +100,12 @@ _IMPLEMENTATION_FILES = {
 _BASELINE_HASHES = {
     "app/experiments/voice_bakeoff_app.py":
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
+    # Re-pinned 2026-08-07: app/main.py legitimately gained the /relay-stream
+    # router registration (live ConversationRelay engine, PR #149). The pin's
+    # job is to force exactly this kind of deliberate acknowledgment — update
+    # it only alongside a reviewed change to main.py, never to silence a diff.
     "app/main.py":
-        "481182b0b70a43dfc395186a8f9f2a732854a95d525af81a87a051813c55bcac",
+        "057a810dd5eb2e08651fd965f9264c48681e5bb17ce87bad4fafb4260c6e0334",
     "app/webhooks/media_stream.py":
         "2739ebc8df9a9c7c82001607d23d19dbe1f4ca92262499ffb5e52b1d3d5c0d6a",
 }

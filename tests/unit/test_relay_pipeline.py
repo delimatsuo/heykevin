@@ -268,3 +268,68 @@ def test_generate_body_disables_thinking_and_uses_configured_model():
     assert settings.relay_text_model != "gemini-2.5-flash"
     assert body["generationConfig"]["maxOutputTokens"] > 0
     assert body["system_instruction"]["parts"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_tool_round_preserves_thought_signature_and_call_id(monkeypatch):
+    """CAcae04f regression: Gemini 3.x requires functionCall parts to be
+    replayed VERBATIM — including thoughtSignature — or every tool round is
+    rejected with 400 'Function call is missing a thought_signature'. The
+    functionResponse must also echo the call id when one was assigned.
+    """
+    recorder = _Recorder()
+    captured_contents = []
+    calls = {"n": 0}
+
+    scripts = [
+        [
+            {
+                "functionCall": {
+                    "name": "check_availability",
+                    "args": {"day": "tomorrow"},
+                    "id": "call_abc123",
+                },
+                "thoughtSignature": "SIG_XYZ",
+            }
+        ],
+        [{"text": "Tomorrow at 2pm works."}],
+    ]
+
+    async def fake_stream(contents):
+        captured_contents.append([json.loads(json.dumps(c)) for c in contents])
+        index = min(calls["n"], len(scripts) - 1)
+        calls["n"] += 1
+        for part in scripts[index]:
+            yield part
+
+    async def fake_execute(self, tool_name, tool_args):
+        return json.dumps({"available": ["14:00"]})
+
+    from app.services.voice_pipeline import VoicePipeline
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute)
+
+    pipeline = RelayPipeline(
+        contractor_config=_contractor(),
+        call_sid="CA_relay_test",
+        send_to_twilio=recorder.send,
+        on_transcript=recorder.on_transcript,
+        stream_generate=fake_stream,
+    )
+
+    await pipeline.handle_message(
+        {"type": "prompt", "voicePrompt": "Can I book tomorrow?", "last": True}
+    )
+
+    assert len(captured_contents) == 2
+    second_request = captured_contents[1]
+    model_turn = second_request[-2]
+    assert model_turn["role"] == "model"
+    assert model_turn["parts"][0]["thoughtSignature"] == "SIG_XYZ"
+    assert model_turn["parts"][0]["functionCall"]["id"] == "call_abc123"
+    response_turn = second_request[-1]
+    assert response_turn["role"] == "user"
+    assert response_turn["parts"][0]["functionResponse"]["id"] == "call_abc123"
+    assert response_turn["parts"][0]["functionResponse"]["response"] == {
+        "available": ["14:00"]
+    }

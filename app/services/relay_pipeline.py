@@ -221,7 +221,7 @@ class RelayPipeline:
             reply_text = ""
             for _round in range(MAX_TOOL_ROUNDS):
                 started_at = time.monotonic()
-                text_out, function_calls = await self._run_stream(contents)
+                text_out, function_calls, raw_parts = await self._run_stream(contents)
                 reply_text += text_out
                 logger.info(
                     "relay_event event=reply_generated call=%s ms=%d tool_calls=%d",
@@ -231,20 +231,27 @@ class RelayPipeline:
                 )
                 if not function_calls:
                     break
+                # The model turn must be echoed back with its parts VERBATIM:
+                # Gemini 3.x functionCall parts carry a thoughtSignature the
+                # API requires on replay — rebuilding the part from just the
+                # functionCall drops it and every tool round 400s ("Function
+                # call is missing a thought_signature"), observed live on
+                # call CAcae04f. raw_parts preserves signatures and ids.
+                function_response_parts = []
+                for fc in function_calls:
+                    response_payload = await self._execute_tool(fc)
+                    function_response = {
+                        "name": fc.get("name", ""),
+                        "response": response_payload,
+                    }
+                    if fc.get("id"):
+                        function_response["id"] = fc["id"]
+                    function_response_parts.append(
+                        {"functionResponse": function_response}
+                    )
                 contents = contents + [
-                    {"role": "model", "parts": [{"functionCall": fc} for fc in function_calls]},
-                    {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "functionResponse": {
-                                    "name": fc.get("name", ""),
-                                    "response": await self._execute_tool(fc),
-                                }
-                            }
-                            for fc in function_calls
-                        ],
-                    },
+                    {"role": "model", "parts": raw_parts},
+                    {"role": "user", "parts": function_response_parts},
                 ]
 
             # Close the TTS turn even if the model produced no text.
@@ -274,19 +281,39 @@ class RelayPipeline:
         finally:
             self._generating = False
 
-    async def _run_stream(self, contents: list[dict]) -> tuple[str, list[dict]]:
-        """Run one streaming generate; forward text tokens as they arrive."""
+    async def _run_stream(
+        self, contents: list[dict]
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Run one streaming generate; forward text tokens as they arrive.
+
+        Returns (concatenated_text, function_calls, raw_parts). raw_parts is
+        the model turn as the API delivered it — consecutive unsigned text
+        deltas merged, every part carrying a thoughtSignature (and every
+        functionCall part) preserved verbatim for history replay.
+        """
         text_out = ""
         function_calls: list[dict] = []
+        raw_parts: list[dict] = []
         async for part in self._stream_generate(contents):
             if "text" in part and part["text"]:
                 text_out += part["text"]
                 await self._send(
                     {"type": "text", "token": part["text"], "last": False}
                 )
+                if "thoughtSignature" in part:
+                    raw_parts.append(dict(part))
+                elif (
+                    raw_parts
+                    and "text" in raw_parts[-1]
+                    and "thoughtSignature" not in raw_parts[-1]
+                ):
+                    raw_parts[-1]["text"] += part["text"]
+                else:
+                    raw_parts.append({"text": part["text"]})
             elif "functionCall" in part:
                 function_calls.append(part["functionCall"])
-        return text_out, function_calls
+                raw_parts.append(dict(part))
+        return text_out, function_calls, raw_parts
 
     def _build_generate_body(self, contents: list[dict]) -> dict:
         body: dict = {
@@ -322,6 +349,18 @@ class RelayPipeline:
                 headers={"x-goog-api-key": settings.gemini_api_key},
                 json=body,
             ) as response:
+                if response.status_code >= 400:
+                    # Google error bodies name the exact contract violation
+                    # (e.g. "missing a thought_signature") — without this the
+                    # log shows only HTTPStatusError and the cause needs a
+                    # live reproduction to find.
+                    error_body = await response.aread()
+                    logger.error(
+                        "relay_event event=llm_http_error call=%s status=%d body=%s",
+                        _call_label(self._call_sid),
+                        response.status_code,
+                        error_body.decode(errors="replace")[:300],
+                    )
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):

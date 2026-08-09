@@ -86,9 +86,15 @@ class RelayPipeline:
 
     # Goodbye teardown, in polls of PLAYBACK_POLL_SECONDS. See _await_playout.
     PLAYBACK_POLL_SECONDS = 0.25
-    PLAYBACK_QUIET_POLLS = 6      # 1.5s of silence after the last receipt
+    # Receipts during one utterance were 1.5-6.6s apart on CA0438f3, so
+    # quiescence is a weak signal and this window has to clear the widest
+    # observed gap. It is the fallback, not the primary path.
+    PLAYBACK_QUIET_POLLS = 32     # 8.0s of silence after the last receipt
     PLAYBACK_FALLBACK_POLLS = 16  # 4.0s when no receipts ever arrive
     PLAYBACK_MAX_POLLS = 60       # 15s hard cap
+    # Speech is "done" at 90% of the characters we streamed: TTS may not
+    # voice trailing punctuation, and waiting on an exact match would stall.
+    PLAYBACK_COMPLETE_RATIO = 0.9
 
     def __init__(
         self,
@@ -143,6 +149,8 @@ class RelayPipeline:
         self._unavailable_said = False
         self._ending = False
         self._playback_receipts = 0
+        self._played_chars_sum = 0
+        self._played_chars_max = 0
         self._command_task: Optional[asyncio.Task] = None
         self._tools = self._build_tools()
 
@@ -206,12 +214,23 @@ class RelayPipeline:
             # still playing, which is all the goodbye teardown needs. `value`
             # can carry spoken text, so it is never logged.
             self._playback_receipts += 1
+            # When `value` carries the played text we can measure progress
+            # against what we streamed, which beats inferring completion from
+            # silence. Both encodings are covered without knowing which
+            # Twilio uses: sum for per-fragment receipts, max for cumulative
+            # ones. Only lengths are read — `value` is spoken content and is
+            # never logged.
+            value = message.get("value")
+            if isinstance(value, str) and value:
+                self._played_chars_sum += len(value)
+                self._played_chars_max = max(self._played_chars_max, len(value))
             logger.info(
-                "relay_event event=playback_receipt call=%s type=%s name=%s keys=%s",
+                "relay_event event=playback_receipt call=%s type=%s name=%s keys=%s value_chars=%d",
                 _call_label(self._call_sid),
                 str(msg_type)[:40],
                 str(message.get("name", ""))[:40],
                 ",".join(sorted(str(k)[:20] for k in message.keys()))[:120],
+                len(value) if isinstance(value, str) else -1,
             )
 
     async def _handle_prompt(self, message: dict) -> None:
@@ -547,36 +566,52 @@ class RelayPipeline:
         logger.info(
             "relay_event event=goodbye_detected call=%s", _call_label(self._call_sid)
         )
-        if not await self._await_playout(epoch):
+        if not await self._await_playout(epoch, reply_text):
             return
         self._ending = True
         await self.end_call()
 
-    async def _await_playout(self, epoch: int) -> bool:
+    async def _await_playout(self, epoch: int, spoken_text: str = "") -> bool:
         """Wait for Twilio to finish speaking. False means the caller spoke.
 
-        A fixed grace used to end the call on a timer regardless of whether
-        the goodbye had finished playing — on CA40a9f4 the disconnect went out
-        at ~20:25:40.7 and a playback receipt arrived at 20:25:41.1, so the
-        caller really was cut off mid-sentence.
+        Two earlier attempts both hung up mid-goodbye. A fixed 4s grace ended
+        the call on a timer (CA40a9f4: `end` at 20:25:40.7, receipt at
+        20:25:41.1). Replacing it with 1.5s of receipt silence was no better
+        (CA0438f3: teardown ~21:05:46.2, receipt at 21:05:46.71) because
+        receipts within a single utterance are 1.5-6.6s apart, so the quiet
+        window expires *between* receipts while audio is still playing.
 
-        `events="tokens-played"` gives us receipts while TTS plays. Twilio
-        documents the subscription but not the message body, so this reads
-        nothing out of them and only counts arrivals: while they keep coming,
-        audio is still playing; once they go quiet, it has finished. Three
-        bounds keep that honest — a fallback grace for contractors whose TwiML
-        predates the events attribute and who will never send a receipt, a
-        hard cap so an endless receipt stream cannot pin the line open, and an
-        epoch check every poll so "wait, one more thing" still cancels.
+        Silence is therefore a weak signal. The strong one is arithmetic: we
+        know how many characters we streamed for this turn, and when the
+        receipt carries the played text we can count characters played and
+        stop the moment they account for what we sent. Twilio documents the
+        `events="tokens-played"` subscription but not the receipt body, so
+        both plausible encodings are handled — summed fragments and a
+        cumulative string — and only lengths are read, never content.
+
+        Everything else is a bound, not a signal: a quiet window wide enough
+        to clear the largest observed inter-receipt gap, a 4s grace for
+        contractors whose TwiML predates the events attribute and will never
+        send a receipt, a hard cap, and a per-poll epoch check so "wait, one
+        more thing" still cancels the hangup.
         """
+        self._played_chars_sum = 0
+        self._played_chars_max = 0
+        target = len(spoken_text or "")
         seen = self._playback_receipts
         heard_playback = False
         quiet_polls = 0
+        reason = "cap"
 
         for poll in range(self.PLAYBACK_MAX_POLLS):
             await asyncio.sleep(self.PLAYBACK_POLL_SECONDS)
             if epoch != self._turn_epoch:
                 return False
+
+            played = max(self._played_chars_sum, self._played_chars_max)
+            if target and played >= target * self.PLAYBACK_COMPLETE_RATIO:
+                reason = "measured"
+                break
 
             if self._playback_receipts > seen:
                 seen = self._playback_receipts
@@ -587,10 +622,19 @@ class RelayPipeline:
             quiet_polls += 1
             if heard_playback:
                 if quiet_polls >= self.PLAYBACK_QUIET_POLLS:
-                    return True
+                    reason = "quiet"
+                    break
             elif poll + 1 >= self.PLAYBACK_FALLBACK_POLLS:
-                return True
+                reason = "no_receipts"
+                break
 
+        logger.info(
+            "relay_event event=playout_done call=%s via=%s played_chars=%d target_chars=%d",
+            _call_label(self._call_sid),
+            reason,
+            max(self._played_chars_sum, self._played_chars_max),
+            target,
+        )
         return True
 
     async def end_call(self) -> None:

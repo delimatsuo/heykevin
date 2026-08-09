@@ -766,8 +766,8 @@ async def _format_contractor_sms(
 
     lines = [f"{icon} {header}"]
 
-    # Kevin never books on the caller's behalf, so a requested slot leads the
-    # message as the one thing the owner has to act on.
+    # A request is only recorded when Kevin could not book the slot himself,
+    # so it leads the message as the one thing the owner has to act on.
     appointment_request = job_data.get("appointment_request") or {}
     if appointment_request:
         when = _format_requested_time(

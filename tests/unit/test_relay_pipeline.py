@@ -533,3 +533,124 @@ async def test_caller_speaking_during_playout_aborts_the_hangup(monkeypatch):
 
     assert {"type": "end"} not in recorder.sent
     assert not recorder.completed
+
+
+# --- playout completion is measured, not guessed --------------------------
+#
+# Quiescence alone is not a completion signal: on CA0438f3 receipts during a
+# single utterance were 1.5-6.6s apart, so a 1.5s "quiet" window expired
+# between two receipts and hung up mid-goodbye. The receipt body is
+# undocumented, but when it carries the played text we can compare its length
+# against what we streamed and know exactly when speech has finished.
+
+
+def _measured_teardown(pipeline: RelayPipeline) -> None:
+    """Put quiescence far out of reach so only measured completion can end it."""
+    pipeline.PLAYBACK_QUIET_POLLS = 30
+    pipeline.PLAYBACK_FALLBACK_POLLS = 30
+    pipeline.PLAYBACK_MAX_POLLS = 60
+
+
+@pytest.mark.asyncio
+async def test_playout_ends_as_soon_as_the_spoken_text_is_accounted_for(monkeypatch):
+    recorder = _Recorder()
+    reply = "Thanks for calling. Goodbye!"
+    pipeline = _pipeline(recorder, [[{"text": reply}]])
+    _measured_teardown(pipeline)
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        if polls["n"] == 1:
+            # One receipt reporting the whole utterance as played.
+            await pipeline.handle_message(
+                {"type": "info", "name": "tokensPlayed", "value": reply}
+            )
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Bye", "last": True})
+
+    assert {"type": "end"} in recorder.sent
+    # Must not sit through the quiet window once playback is demonstrably done.
+    assert polls["n"] <= 3
+
+
+@pytest.mark.asyncio
+async def test_playout_handles_incremental_receipts(monkeypatch):
+    """Receipts that each carry only the newly played fragment."""
+    recorder = _Recorder()
+    reply = "Thanks for calling. Goodbye!"
+    pipeline = _pipeline(recorder, [[{"text": reply}]])
+    _measured_teardown(pipeline)
+
+    fragments = ["Thanks for ", "calling. ", "Goodbye!"]
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        if polls["n"] <= len(fragments):
+            await pipeline.handle_message(
+                {"type": "info", "name": "tokensPlayed",
+                 "value": fragments[polls["n"] - 1]}
+            )
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Bye", "last": True})
+
+    assert {"type": "end"} in recorder.sent
+    assert polls["n"] <= len(fragments) + 2
+
+
+@pytest.mark.asyncio
+async def test_playout_does_not_end_early_on_a_partial_receipt(monkeypatch):
+    """Half the goodbye played is not the whole goodbye played."""
+    recorder = _Recorder()
+    reply = "Thanks for calling Test Plumbing. Have a great day!"
+    pipeline = _pipeline(recorder, [[{"text": reply}]])
+    _measured_teardown(pipeline)
+    pipeline.PLAYBACK_QUIET_POLLS = 6
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        if polls["n"] == 1:
+            await pipeline.handle_message(
+                {"type": "info", "name": "tokensPlayed", "value": reply[:10]}
+            )
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Bye", "last": True})
+
+    # Ends only via the quiet fallback, well after the partial receipt.
+    assert {"type": "end"} in recorder.sent
+    assert polls["n"] > pipeline.PLAYBACK_QUIET_POLLS
+
+
+@pytest.mark.asyncio
+async def test_playout_falls_back_when_the_receipt_carries_no_text(monkeypatch):
+    """A non-string value tells us nothing; quiescence must still bound it."""
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "Take care!"}]])
+    _measured_teardown(pipeline)
+    pipeline.PLAYBACK_QUIET_POLLS = 6
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        if polls["n"] <= 2:
+            await pipeline.handle_message(
+                {"type": "info", "name": "tokensPlayed", "value": 42}
+            )
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Bye", "last": True})
+
+    assert {"type": "end"} in recorder.sent
+    assert polls["n"] <= pipeline.PLAYBACK_MAX_POLLS

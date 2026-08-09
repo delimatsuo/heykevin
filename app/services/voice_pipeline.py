@@ -474,11 +474,12 @@ RULES:
         )
 
     base_prompt += (
-        "\n\nSCHEDULING: You can offer times, but you cannot confirm an appointment yourself. "
-        "Only say an appointment is booked if book_appointment returns a confirmed booking. "
-        "Otherwise treat the time as a request: say you will pass it to the owner, who will "
-        "confirm it with the caller directly. Never tell a caller a slot is reserved, held, "
-        "or all set before that confirmation."
+        "\n\nSCHEDULING: Only offer specific times that check_availability returned to you. "
+        "Never invent a time or guess when the owner is free. You cannot confirm an "
+        "appointment yourself: say one is booked only if book_appointment returns a "
+        "confirmed booking. Otherwise treat the time as a request — tell the caller you "
+        "will pass it to the owner, who will confirm it with them directly. Never say a "
+        "slot is reserved, held, or all set before that confirmation."
     )
 
     # Prompt injection fence: instruct the model to treat caller speech as untrusted

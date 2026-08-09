@@ -231,6 +231,9 @@ def test_business_prompt_forbids_claiming_an_unconfirmed_appointment():
     lowered = prompt.lower()
     assert "booked" in lowered
     assert "request" in lowered
+    # Contractors with no calendar connected get this rule too, so it must not
+    # read as permission to invent times.
+    assert "check_availability" in prompt
 
 
 @pytest.mark.asyncio

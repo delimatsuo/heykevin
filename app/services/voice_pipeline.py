@@ -184,12 +184,34 @@ def _phone_last_four(phone: str) -> str:
     return digits[-4:] if len(digits) >= 4 else ""
 
 
+_DIGIT_WORDS = {
+    "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+    "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+}
+
+
+def _spelled_out_digits(digits: str) -> str:
+    """Render digits as space-separated words so TTS reads them one at a time.
+
+    A raw digit string embedded as plain text gets read as a whole number by
+    TTS — ElevenLabs' own guidance is that spelled-out words are the reliable
+    way to force digit-by-digit pronunciation; hyphen-separated digits can
+    still be read as a number by some engines. This is prompt text the model
+    repeats verbatim in a scripted confirmation question, not the stored
+    value — callback_phone_last_four etc. stay plain digits everywhere else
+    (matching, logs, Firestore).
+    """
+    return " ".join(_DIGIT_WORDS.get(ch, ch) for ch in digits)
+
+
 def _callback_number_policy(caller_phone: str = "") -> str:
     """Build caller-ID-aware callback collection rules without exposing full numbers."""
     last_four = _phone_last_four(caller_phone)
+    spoken_last_four = _spelled_out_digits(last_four)
     caller_id_line = (
         f"- Caller ID is available as the default callback number. Use only the caller ID number ending in {last_four}; never say the full caller ID.\n"
-        f"- When callback intent exists, ask exactly: \"Is the number ending in {last_four} the best number for a callback?\""
+        f"- When callback intent exists, ask exactly: \"Is the number ending in {spoken_last_four} the best number for a callback?\" "
+        f"Say each digit as a separate word ({spoken_last_four}) — never as a single number."
         if last_four
         else "- Caller ID is not available to you."
     )
@@ -298,7 +320,7 @@ RECEPTIONIST OPERATING POLICY:
 
 RULES:
 - ONE or two short sentences per response.
-- NEVER repeat what the caller said back to them. For phone numbers, confirm only the last 4 digits (e.g., "Got it, ending in 8-6-6-7?"). Do not read back the full phone number.
+- NEVER repeat what the caller said back to them. For phone numbers, confirm only the last 4 digits, spoken as separate words (e.g., "Got it, ending in eight six six seven?"). Do not read back the full phone number. Do not say the digits as a single number (never "eight thousand six hundred sixty-seven").
 - NEVER ask for information already provided.
 - If the caller gives you their message in one go (name + reason + number), just confirm and end. Do NOT prompt them for things they already gave you.
 - Sound natural, warm, like a real assistant.
@@ -419,7 +441,7 @@ RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
 RULES:
 - Be warm, friendly, and professional. You represent {business_name}.
 - Keep spoken turns brief. Use one or two short sentences per response, never more, and ask one short question at a time.
-- NEVER repeat or paraphrase what the caller just said back to them. For phone numbers, confirm only the last 4 digits (e.g., "Got it, ending in 8-6-6-7?"). Do not read back the full phone number.
+- NEVER repeat or paraphrase what the caller just said back to them. For phone numbers, confirm only the last 4 digits, spoken as separate words (e.g., "Got it, ending in eight six six seven?"). Do not read back the full phone number. Do not say the digits as a single number (never "eight thousand six hundred sixty-seven").
 - NEVER ask for information the caller already provided.
 - Do not say {owner_name} is unavailable unless the system says so, the owner declines, or you are explicitly taking a routine message.
 - NEVER make small talk or ask casual questions.

@@ -7,9 +7,11 @@ Supports two modes:
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime
 import logging
 import re
 import time
+from zoneinfo import ZoneInfo
 
 from app.db import calls as call_db
 from app.db import jobs as job_db
@@ -426,6 +428,14 @@ async def _process_business(
     job_data["call_sid"] = call_sid
     job_data.setdefault("caller_phone", caller_phone)
     job_data = _normalize_job_callback_data(job_data)
+
+    # Written mid-call by the booking tool when the owner has not enabled
+    # automatic booking. Structured, so it beats re-reading a time out of the
+    # transcript.
+    appointment_request = await _load_appointment_request(call_sid)
+    if appointment_request:
+        job_data["appointment_request"] = appointment_request
+
     contractor_id = contractor.get("contractor_id", "")
     if contractor_id:
         job_data["contractor_id"] = contractor_id
@@ -466,7 +476,9 @@ async def _process_business(
     # 3. Send SMS to contractor (in their language)
     user_language = contractor.get("user_language", "en")
     if contractor_phone and twilio_number:
-        contractor_sms = await _format_contractor_sms(job_data, job_id, user_language=user_language)
+        contractor_sms = await _format_contractor_sms(
+            job_data, job_id, user_language=user_language, contractor=contractor
+        )
         try:
             sent = await send_sms(
                 contractor_phone,
@@ -690,7 +702,54 @@ async def _update_caller_contact(
         return False
 
 
-async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str = "en") -> str:
+async def _load_appointment_request(call_sid: str) -> dict:
+    """Read the slot the caller asked for, recorded mid-call by the booking tool."""
+    try:
+        record = await call_db.get_call(call_sid)
+    except Exception as error:
+        _log_post_call_exception("appointment_request_load_failed", error, call_sid)
+        return {}
+    request = (record or {}).get("appointment_request")
+    return request if isinstance(request, dict) else {}
+
+
+def _contractor_zone(contractor: dict | None):
+    """Resolve the contractor's IANA timezone, or None when unusable."""
+    name = (contractor or {}).get("timezone") or ""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def _format_requested_time(start_time: str, contractor: dict | None) -> str:
+    """Render a requested slot as the contractor's own wall clock.
+
+    Falls back to the raw value rather than dropping the line: a time we
+    cannot parse is still the only record of what the caller asked for.
+    """
+    try:
+        parsed = datetime.fromisoformat(start_time)
+    except (TypeError, ValueError):
+        return start_time
+
+    zone = _contractor_zone(contractor)
+    if zone is not None:
+        parsed = parsed.astimezone(zone) if parsed.tzinfo else parsed.replace(tzinfo=zone)
+
+    hour = parsed.hour % 12 or 12
+    meridiem = "AM" if parsed.hour < 12 else "PM"
+    return f"{parsed:%a}, {parsed:%b} {parsed.day} at {hour}:{parsed:%M} {meridiem}"
+
+
+async def _format_contractor_sms(
+    job_data: dict,
+    job_id: str,
+    user_language: str = "en",
+    contractor: dict | None = None,
+) -> str:
     """Format the SMS for the contractor in their language."""
     call_type = job_data.get("call_type", "unknown")
     urgency = job_data.get("urgency", "none")
@@ -706,6 +765,15 @@ async def _format_contractor_sms(job_data: dict, job_id: str, user_language: str
     callback = job_data.get("callback_number", "")
 
     lines = [f"{icon} {header}"]
+
+    # A request is only recorded when Kevin could not book the slot himself,
+    # so it leads the message as the one thing the owner has to act on.
+    appointment_request = job_data.get("appointment_request") or {}
+    if appointment_request:
+        when = _format_requested_time(
+            appointment_request.get("start_time", ""), contractor
+        )
+        lines.append(f"\U0001f4c5 APPOINTMENT REQUEST: {when} (not confirmed)")
 
     if business:
         lines.append(f"From: {name} ({business})")

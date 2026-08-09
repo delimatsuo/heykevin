@@ -373,7 +373,7 @@ struct SettingsView: View {
                     } header: {
                         Text(String(localized: "Integrations"))
                     } footer: {
-                        Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar to check availability and book appointments."))
+                        Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm."))
                     }
                 }
 

@@ -52,14 +52,17 @@ struct SettingsView: View {
                         Text(String(localized: "Name"))
                         Spacer()
                         Text(appState.userName)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.secondary)
                     }
 
                     HStack {
                         Text(String(localized: "Plan"))
                         Spacer()
+                        // Deliberately not status-colored: a green "Business"
+                        // reads as "OK" and re-conflates plan with status, which
+                        // is the confusion this section exists to remove.
                         Text(planLabel)
-                            .foregroundStyle(subscriptionStatusColor)
+                            .foregroundStyle(Color.secondary)
                     }
 
                     Button {
@@ -84,7 +87,7 @@ struct SettingsView: View {
                                 Text(String(localized: "Manage Subscription"))
                                 Spacer()
                                 Image(systemName: "arrow.up.right.square")
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             }
                         }
                         .foregroundStyle(.primary)
@@ -174,14 +177,14 @@ struct SettingsView: View {
                                      ? String(localized: "Receptionist mode: intake questions, business hours, knowledge base. Requires a Business plan.")
                                      : String(localized: "Kevin only screens unknown callers and takes messages. Your business setup is kept."))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             if isSwitchingMode {
                                 ProgressView()
                             } else {
                                 Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                                     .font(.caption)
                             }
                         }
@@ -233,27 +236,26 @@ struct SettingsView: View {
                         Text(String(localized: "Outside these hours, Kevin will tell callers you're closed and take a message."))
                     }
 
-                    // MARK: - Services & Pricing
+                    // MARK: - Knowledge Base
+                    //
+                    // Services and knowledge are the same job — teaching Kevin
+                    // about the business — so they share one card. They open
+                    // differently (push vs sheet), so both titles are styled
+                    // primary with a trailing chevron to read as one list.
 
                     Section {
                         NavigationLink {
                             ServicesView()
                         } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(String(localized: "Services & Pricing"))
-                                        .font(.subheadline)
-                                    Text(String(localized: "Add your services so Kevin can quote estimates"))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(String(localized: "Services & Pricing"))
+                                    .font(.subheadline)
+                                Text(String(localized: "Add your services so Kevin can quote estimates"))
+                                    .font(.caption)
+                                    .foregroundStyle(Color.secondary)
                             }
                         }
-                    }
 
-                    // MARK: - Knowledge Base
-
-                    Section {
                         Button {
                             showKnowledgeEditor = true
                         } label: {
@@ -261,13 +263,15 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(String(localized: "Business Knowledge"))
                                         .font(.subheadline)
+                                        .foregroundStyle(Color.primary)
                                     Text(String(localized: "Tell Kevin about your business so he can answer questions"))
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Color.secondary)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right")
-                                    .foregroundStyle(.tertiary)
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             }
                         }
 
@@ -310,7 +314,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Schedule checking, job creation, customer lookup"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             if appState.jobberConnected {
@@ -342,9 +346,9 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(String(localized: "Google Calendar"))
                                     .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Availability checking, appointment booking"))
+                                Text(String(localized: "Availability checking, appointment requests"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             if appState.googleCalendarConnected {
@@ -386,7 +390,7 @@ struct SettingsView: View {
                                 .font(.subheadline.weight(.medium))
                             Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.secondary)
                         }
                     }
 
@@ -404,7 +408,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Forward missed calls to Kevin"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             Image(systemName: "phone.arrow.right")
@@ -424,7 +428,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Stop forwarding, calls ring normally"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             Image(systemName: "xmark.circle")
@@ -444,7 +448,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Nuclear option — clears every forwarding type at once"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             Image(systemName: "exclamationmark.octagon")
@@ -492,7 +496,7 @@ struct SettingsView: View {
                             Text(String(localized: "Privacy Policy"))
                             Spacer()
                             Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
                         }
                     }
                     .foregroundStyle(.primary)
@@ -502,7 +506,7 @@ struct SettingsView: View {
                             Text(String(localized: "Terms of Service"))
                             Spacer()
                             Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
                         }
                     }
                     .foregroundStyle(.primary)
@@ -517,7 +521,7 @@ struct SettingsView: View {
                         Text(String(localized: "Version"))
                         Spacer()
                         Text("1.0.0")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.secondary)
                     }
 
                     #if DEBUG
@@ -600,7 +604,7 @@ struct SettingsView: View {
                     Text(String(localized: "Kevin Number"))
                     Spacer()
                     Text(formattedKevinNumber)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.secondary)
                         .textSelection(.enabled)
                 }
             } else {
@@ -716,8 +720,11 @@ struct SettingsView: View {
                 SetupRow(
                     title: "Subscription",
                     ok: subOK,
-                    okLabel: appState.subscriptionStatus == "trial" ? "Free trial" : "Active",
-                    failLabel: "Expired"
+                    // Both labels come from planLabel so this row and the
+                    // Account & Plan row can never contradict each other; the
+                    // check/warning icon already carries the pass-fail signal.
+                    okLabel: planLabel,
+                    failLabel: planLabel
                 ) {
                     showPaywall = true
                 } actionLabel: {
@@ -1137,7 +1144,7 @@ San Jose, Santa Clara, Campbell
                                     .font(.subheadline.weight(.medium))
                                 Text(isRecording ? String(localized: "Recording...") : String(localized: "Talk and Kevin will learn"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                         }
                     }
@@ -1172,7 +1179,7 @@ San Jose, Santa Clara, Campbell
                     if knowledgeText.isEmpty {
                         Text(placeholder)
                             .font(.system(.subheadline, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             .padding(.top, 8)
                             .padding(.leading, 5)
                             .allowsHitTesting(false)
@@ -1199,7 +1206,7 @@ San Jose, Santa Clara, Campbell
                 // Tip
                 Text(String(localized: "Type your services, or tap the mic to describe them by voice. Kevin uses this to answer caller questions."))
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                     .padding(.horizontal)
                     .padding(.top, 4)
                     .padding(.bottom, 8)

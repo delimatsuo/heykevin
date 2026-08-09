@@ -85,7 +85,11 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
         created.append((args, kwargs))
         return "event-1"
 
+    async def fake_save_call(*_args, **_kwargs):
+        return True
+
     monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+    monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
 
     pipeline = _pipeline({
         "contractor_id": "c1",
@@ -95,7 +99,10 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
     })
     result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
 
-    assert result == {"success": False, "error": "Owner confirmation is required for this action."}
+    # Unapproved automation becomes an owner-confirmed request, never a write.
+    # See tests/unit/test_appointment_requests.py for the request contract.
+    assert result["booked"] is False
+    assert result["status"] == "request_recorded"
     assert created == []
 
 

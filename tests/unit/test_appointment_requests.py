@@ -1,0 +1,243 @@
+"""Appointment requests: what happens when Kevin cannot book automatically.
+
+Auto-booking is off by default (`GOOGLE_CREATE_EVENT` is a gated write). That
+is a product decision, not a failure, so a denied booking has to come back to
+the model as a *recorded request* — otherwise the model reads a bare error,
+retries the tool, and improvises a reassurance the caller hears as "reserved".
+"""
+
+import json
+import os
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
+os.environ.setdefault("USER_PHONE", "+15550000001")
+
+import pytest
+
+from app.services import post_call
+from app.services.gated_actions import ActionKey
+from app.services.voice_pipeline import VoicePipeline, build_system_prompt
+
+
+async def _noop(*_args, **_kwargs):
+    return None
+
+
+def _pipeline(config, call_sid="CA123"):
+    return VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        on_call_complete=_noop,
+        call_sid=call_sid,
+        contractor_config=config,
+    )
+
+
+BOOKING_ARGS = {
+    "title": "Faucet repair - John Smith",
+    "start_time": "2026-08-11T10:00:00-04:00",
+    "end_time": "2026-08-11T11:00:00-04:00",
+    "description": "Kitchen sink leaking",
+}
+
+
+def _unauthorized_contractor():
+    """Google Calendar connected, but no authorization to write to it."""
+    return {
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+    }
+
+
+@pytest.fixture
+def no_calendar_write(monkeypatch):
+    """Fail loudly if a denied booking ever reaches Google Calendar."""
+    created = []
+
+    async def fake_book_appointment(*args, **kwargs):
+        created.append((args, kwargs))
+        return "event-1"
+
+    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+    return created
+
+
+@pytest.fixture
+def saved_calls(monkeypatch):
+    saved = []
+
+    async def fake_save_call(call_sid, data):
+        saved.append((call_sid, data))
+        return True
+
+    monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
+    return saved
+
+
+# --- tool layer -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_booking_is_recorded_as_a_request(no_calendar_write, saved_calls):
+    pipeline = _pipeline(_unauthorized_contractor())
+
+    result = json.loads(await pipeline._execute_tool("book_appointment", BOOKING_ARGS))
+
+    assert result["status"] == "request_recorded"
+    assert result["booked"] is False
+    assert no_calendar_write == []
+
+
+@pytest.mark.asyncio
+async def test_recorded_request_tells_the_model_not_to_claim_a_booking(
+    no_calendar_write, saved_calls
+):
+    pipeline = _pipeline(_unauthorized_contractor())
+
+    result = json.loads(await pipeline._execute_tool("book_appointment", BOOKING_ARGS))
+    message = result["message"].lower()
+
+    assert "not booked" in message
+    assert "confirm" in message
+    assert "book_appointment" in message  # explicit "do not retry" instruction
+
+
+@pytest.mark.asyncio
+async def test_recorded_request_is_persisted_to_the_call_record(
+    no_calendar_write, saved_calls
+):
+    pipeline = _pipeline(_unauthorized_contractor(), call_sid="CAbooking")
+
+    await pipeline._execute_tool("book_appointment", BOOKING_ARGS)
+
+    assert len(saved_calls) == 1
+    call_sid, data = saved_calls[0]
+    assert call_sid == "CAbooking"
+    request = data["appointment_request"]
+    assert request["start_time"] == BOOKING_ARGS["start_time"]
+    assert request["end_time"] == BOOKING_ARGS["end_time"]
+    assert request["title"] == BOOKING_ARGS["title"]
+    assert request["status"] == "pending_owner_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_owner_confirmation_gate_also_produces_a_request(no_calendar_write, saved_calls):
+    """Flag on and integration approved, but automation not approved."""
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+        "integration_write_status": "approved",
+        "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+    })
+
+    result = json.loads(await pipeline._execute_tool("book_appointment", BOOKING_ARGS))
+
+    assert result["status"] == "request_recorded"
+    assert no_calendar_write == []
+
+
+@pytest.mark.asyncio
+async def test_genuine_gate_failures_stay_errors(no_calendar_write, saved_calls):
+    """A missing contractor is a bug, not a booking request — do not paper over it."""
+    pipeline = _pipeline({"google_calendar_access_token": "gcal-token"})
+
+    result = json.loads(await pipeline._execute_tool("book_appointment", BOOKING_ARGS))
+
+    assert result["success"] is False
+    assert "status" not in result
+    assert saved_calls == []
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_break_the_call(no_calendar_write, monkeypatch):
+    """Firestore is best-effort here; the contractor still gets the call SMS."""
+
+    async def failing_save(*_args, **_kwargs):
+        raise RuntimeError("firestore down")
+
+    monkeypatch.setattr("app.db.calls.save_call", failing_save)
+    pipeline = _pipeline(_unauthorized_contractor())
+
+    result = json.loads(await pipeline._execute_tool("book_appointment", BOOKING_ARGS))
+
+    assert result["status"] == "request_recorded"
+
+
+# --- contractor SMS -------------------------------------------------------
+
+
+def _job_data(**overrides):
+    data = {
+        "call_type": "service_request",
+        "urgency": "none",
+        "caller_name": "John Smith",
+        "caller_phone": "+15551234567",
+        "issue_description": "Leaky kitchen faucet",
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.mark.asyncio
+async def test_contractor_sms_leads_with_the_appointment_request():
+    job_data = _job_data(appointment_request={
+        "start_time": "2026-08-11T10:00:00-04:00",
+        "status": "pending_owner_confirmation",
+    })
+
+    sms = await post_call._format_contractor_sms(
+        job_data, "job-1", contractor={"timezone": "America/New_York"}
+    )
+
+    lines = sms.splitlines()
+    assert "APPOINTMENT REQUEST" in lines[1]
+    assert "Tue, Aug 11 at 10:00 AM" in sms
+    assert "not confirmed" in sms.lower()
+
+
+@pytest.mark.asyncio
+async def test_contractor_sms_renders_the_request_in_the_contractor_timezone():
+    """A UTC-stamped request must not quote the contractor a UTC wall clock."""
+    job_data = _job_data(appointment_request={"start_time": "2026-08-11T14:00:00+00:00"})
+
+    sms = await post_call._format_contractor_sms(
+        job_data, "job-1", contractor={"timezone": "America/New_York"}
+    )
+
+    assert "Tue, Aug 11 at 10:00 AM" in sms
+
+
+@pytest.mark.asyncio
+async def test_contractor_sms_survives_an_unparseable_requested_time():
+    job_data = _job_data(appointment_request={"start_time": "whenever works"})
+
+    sms = await post_call._format_contractor_sms(job_data, "job-1", contractor={})
+
+    assert "APPOINTMENT REQUEST" in sms
+    assert "whenever works" in sms
+
+
+# --- prompt guidance ------------------------------------------------------
+
+
+def test_business_prompt_forbids_claiming_an_unconfirmed_appointment():
+    """The tool result says this too, but only after Kevin has already spoken."""
+    prompt = build_system_prompt({"contractor_id": "c1", "effective_mode": "business"})
+
+    assert "SCHEDULING" in prompt
+    lowered = prompt.lower()
+    assert "booked" in lowered
+    assert "request" in lowered
+
+
+@pytest.mark.asyncio
+async def test_contractor_sms_without_a_request_is_unchanged():
+    sms = await post_call._format_contractor_sms(
+        _job_data(), "job-1", contractor={"timezone": "America/New_York"}
+    )
+
+    assert "APPOINTMENT REQUEST" not in sms
+    assert sms.splitlines()[1] == "From: John Smith"

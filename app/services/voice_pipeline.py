@@ -22,7 +22,7 @@ from websockets.exceptions import ConnectionClosed
 
 from app.config import settings
 from app.services.entitlements import effective_mode
-from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services.gated_actions import ActionKey, GateContext, GateReason, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
 from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
@@ -42,6 +42,15 @@ _KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
 # exists to prevent. 8s matches the widest budget already used elsewhere in
 # this module and still bounds how long a caller waits in silence.
 GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS = 8.0
+
+# Gate denials that mean "this owner has not turned on automatic booking"
+# rather than "something went wrong". These become appointment requests the
+# owner confirms; every other denial stays an error.
+_BOOKING_REQUEST_REASONS = frozenset({
+    GateReason.FEATURE_DISABLED,
+    GateReason.COMPLIANCE_NOT_APPROVED,
+    GateReason.OWNER_CONFIRMATION_REQUIRED,
+})
 
 
 def _call_label(call_sid: str) -> str:
@@ -463,6 +472,14 @@ RULES:
             f"\n- Do NOT say \"let me see if {pronoun}'s available\" — instead say \"I can take a message and make sure {owner_name} gets it first thing.\""
             f"\n- Still collect their name and reason for calling. Only confirm callback details if the caller asks for or agrees to callback, scheduling, or follow-up."
         )
+
+    base_prompt += (
+        "\n\nSCHEDULING: You can offer times, but you cannot confirm an appointment yourself. "
+        "Only say an appointment is booked if book_appointment returns a confirmed booking. "
+        "Otherwise treat the time as a request: say you will pass it to the owner, who will "
+        "confirm it with the caller directly. Never tell a caller a slot is reserved, held, "
+        "or all set before that confirmation."
+    )
 
     # Prompt injection fence: instruct the model to treat caller speech as untrusted
     base_prompt += (
@@ -1151,6 +1168,54 @@ class VoicePipeline:
         )
         return decision
 
+    async def _record_appointment_request(self, tool_input: dict) -> str:
+        """Pass a requested slot to the owner instead of booking it.
+
+        Automated calendar writes stay off unless the owner turns them on, so
+        a denied booking is the ordinary path here, not a failure. Answering
+        with a bare error made the model treat it as a transient fault: on
+        call CA9c4f4d it retried four times and then improvised a reassurance
+        the caller heard as a held slot. The request is written to the call
+        record so the post-call SMS can lead with the time the caller asked
+        for.
+        """
+        request = {
+            "title": tool_input.get("title", ""),
+            "start_time": tool_input.get("start_time", ""),
+            "end_time": tool_input.get("end_time", ""),
+            "description": tool_input.get("description", ""),
+            "status": "pending_owner_confirmation",
+        }
+        call_sid = getattr(self, "_call_sid", "")
+        if call_sid:
+            try:
+                from app.db.calls import save_call
+
+                saved = await save_call(call_sid, {"appointment_request": request})
+            except Exception as error:
+                saved = False
+                _log_tool_execution_failure("record_appointment_request", call_sid, error)
+            if not saved:
+                # Not fatal: the owner still gets the call SMS and transcript,
+                # so only the machine-readable time is lost.
+                _log_voice_event(
+                    "appointment_request_persist_failed",
+                    call_sid,
+                    level=logging.WARNING,
+                )
+        return json.dumps({
+            "status": "request_recorded",
+            "booked": False,
+            "requested_start": request["start_time"],
+            "message": (
+                "Not booked. This account does not book automatically, so the time was "
+                "passed to the owner as a request. Tell the caller you have sent the "
+                "request and the owner will confirm the appointment with them directly. "
+                "Do not say it is booked, reserved, or held. Do not call "
+                "book_appointment again on this call."
+            ),
+        })
+
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool call (Jobber or Google Calendar) and return the result as a string."""
 
@@ -1181,6 +1246,8 @@ class VoicePipeline:
                 elif tool_name == "book_appointment":
                     decision = self._check_tool_write_gate(ActionKey.GOOGLE_CREATE_EVENT)
                     if not decision.allowed:
+                        if decision.reason in _BOOKING_REQUEST_REASONS:
+                            return await self._record_appointment_request(tool_input)
                         return json.dumps({"success": False, "error": decision.message})
 
                     event_id = await asyncio.wait_for(

@@ -422,3 +422,114 @@ async def test_interrupt_cancels_inflight_and_preserves_spoken_portion():
     assert model_turns[-1]["parts"][0]["text"] == "We are open"
     tokens = [m["token"] for m in recorder.sent if m["type"] == "text"]
     assert " five weekdays." not in tokens
+
+
+# --- goodbye teardown waits for playback ---------------------------------
+#
+# Twilio documents the events="tokens-played" subscription but not the shape
+# of the receipt it sends, so these tests pin the one thing we rely on: a
+# receipt ARRIVING means audio is still playing. Nothing reads its contents.
+
+
+def _fast_teardown(pipeline: RelayPipeline) -> None:
+    """Shrink the poll budget so tests don't wait on real playout timing."""
+    pipeline.PLAYBACK_QUIET_POLLS = 2
+    pipeline.PLAYBACK_FALLBACK_POLLS = 4
+    pipeline.PLAYBACK_MAX_POLLS = 20
+
+
+@pytest.mark.asyncio
+async def test_goodbye_waits_while_playback_receipts_keep_arriving(monkeypatch):
+    """The abrupt hangup on CA40a9f4: `end` went out while TTS was still playing."""
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "Thanks for calling. Goodbye!"}]])
+    _fast_teardown(pipeline)
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        # Keep "playing" for the first few polls, then fall silent.
+        if polls["n"] <= 6:
+            await pipeline.handle_message(
+                {"type": "info", "name": "tokensPlayed", "value": "..."}
+            )
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline,
+        {"type": "prompt", "voicePrompt": "That's all, thanks", "last": True}
+    )
+
+    assert {"type": "end"} in recorder.sent
+    # Must outlast the receipts rather than firing on a fixed grace.
+    assert polls["n"] > 6
+
+
+@pytest.mark.asyncio
+async def test_goodbye_falls_back_to_a_grace_when_no_receipts_arrive(monkeypatch):
+    """Contractors whose TwiML lacks the events attribute must still hang up."""
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "Have a great day!"}]])
+    _fast_teardown(pipeline)
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline,
+        {"type": "prompt", "voicePrompt": "Bye", "last": True}
+    )
+
+    assert {"type": "end"} in recorder.sent
+    assert polls["n"] <= pipeline.PLAYBACK_MAX_POLLS
+
+
+@pytest.mark.asyncio
+async def test_goodbye_never_hangs_up_on_endless_receipts(monkeypatch):
+    """A receipt stream that never stops must not hold the call open forever."""
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "Take care!"}]])
+    _fast_teardown(pipeline)
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        await pipeline.handle_message({"type": "info", "name": "tokensPlayed"})
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline,
+        {"type": "prompt", "voicePrompt": "Bye", "last": True}
+    )
+
+    assert {"type": "end"} in recorder.sent
+    assert polls["n"] <= pipeline.PLAYBACK_MAX_POLLS + 2
+
+
+@pytest.mark.asyncio
+async def test_caller_speaking_during_playout_aborts_the_hangup(monkeypatch):
+    """"Wait, one more thing" during the goodbye must keep the call alive."""
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "Have a great day!"}]])
+    _fast_teardown(pipeline)
+
+    polls = {"n": 0}
+
+    async def counting_sleep(_seconds):
+        polls["n"] += 1
+        if polls["n"] == 1:
+            pipeline._turn_epoch += 1  # caller barged in
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+
+    await _drive(pipeline,
+        {"type": "prompt", "voicePrompt": "Bye", "last": True}
+    )
+
+    assert {"type": "end"} not in recorder.sent
+    assert not recorder.completed

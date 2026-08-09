@@ -84,6 +84,12 @@ def build_greeting_text(contractor_config: dict, after_hours: bool) -> str:
 class RelayPipeline:
     """One ConversationRelay session: history, generation, tools, commands."""
 
+    # Goodbye teardown, in polls of PLAYBACK_POLL_SECONDS. See _await_playout.
+    PLAYBACK_POLL_SECONDS = 0.25
+    PLAYBACK_QUIET_POLLS = 6      # 1.5s of silence after the last receipt
+    PLAYBACK_FALLBACK_POLLS = 16  # 4.0s when no receipts ever arrive
+    PLAYBACK_MAX_POLLS = 60       # 15s hard cap
+
     def __init__(
         self,
         *,
@@ -136,6 +142,7 @@ class RelayPipeline:
         self._urgency_signalled = False
         self._unavailable_said = False
         self._ending = False
+        self._playback_receipts = 0
         self._command_task: Optional[asyncio.Task] = None
         self._tools = self._build_tools()
 
@@ -193,14 +200,17 @@ class RelayPipeline:
                 str(message.get("description", ""))[:200],
             )
         elif msg_type not in ("setup", "dtmf"):
-            # events="tokens-played" is enabled in TwiML but the receipt
-            # message's shape is undocumented — log unknown types (keys only,
-            # no content) so a real call reveals it and goodbye teardown can
-            # later key off playback receipts instead of a fixed grace sleep.
+            # Playback receipt from events="tokens-played". Twilio documents
+            # the subscription but not the message body, so we deliberately
+            # read nothing out of it: its ARRIVAL is the signal that audio is
+            # still playing, which is all the goodbye teardown needs. `value`
+            # can carry spoken text, so it is never logged.
+            self._playback_receipts += 1
             logger.info(
-                "relay_event event=unknown_message_type call=%s type=%s keys=%s",
+                "relay_event event=playback_receipt call=%s type=%s name=%s keys=%s",
                 _call_label(self._call_sid),
                 str(msg_type)[:40],
+                str(message.get("name", ""))[:40],
                 ",".join(sorted(str(k)[:20] for k in message.keys()))[:120],
             )
 
@@ -537,16 +547,51 @@ class RelayPipeline:
         logger.info(
             "relay_event event=goodbye_detected call=%s", _call_label(self._call_sid)
         )
-        # Twilio is still speaking the goodbye; give TTS time to play out
-        # before tearing the session down. tokens-played events would make
-        # this exact — revisit once the events attribute is enabled. The sleep
-        # is cancellable and the epoch is re-checked: a caller who speaks up
-        # during the grace window ("wait, one more thing") aborts the hangup.
-        await asyncio.sleep(4)
-        if epoch != self._turn_epoch:
+        if not await self._await_playout(epoch):
             return
         self._ending = True
         await self.end_call()
+
+    async def _await_playout(self, epoch: int) -> bool:
+        """Wait for Twilio to finish speaking. False means the caller spoke.
+
+        A fixed grace used to end the call on a timer regardless of whether
+        the goodbye had finished playing — on CA40a9f4 the disconnect went out
+        at ~20:25:40.7 and a playback receipt arrived at 20:25:41.1, so the
+        caller really was cut off mid-sentence.
+
+        `events="tokens-played"` gives us receipts while TTS plays. Twilio
+        documents the subscription but not the message body, so this reads
+        nothing out of them and only counts arrivals: while they keep coming,
+        audio is still playing; once they go quiet, it has finished. Three
+        bounds keep that honest — a fallback grace for contractors whose TwiML
+        predates the events attribute and who will never send a receipt, a
+        hard cap so an endless receipt stream cannot pin the line open, and an
+        epoch check every poll so "wait, one more thing" still cancels.
+        """
+        seen = self._playback_receipts
+        heard_playback = False
+        quiet_polls = 0
+
+        for poll in range(self.PLAYBACK_MAX_POLLS):
+            await asyncio.sleep(self.PLAYBACK_POLL_SECONDS)
+            if epoch != self._turn_epoch:
+                return False
+
+            if self._playback_receipts > seen:
+                seen = self._playback_receipts
+                heard_playback = True
+                quiet_polls = 0
+                continue
+
+            quiet_polls += 1
+            if heard_playback:
+                if quiet_polls >= self.PLAYBACK_QUIET_POLLS:
+                    return True
+            elif poll + 1 >= self.PLAYBACK_FALLBACK_POLLS:
+                return True
+
+        return True
 
     async def end_call(self) -> None:
         try:

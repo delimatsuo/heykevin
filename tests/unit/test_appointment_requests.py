@@ -223,6 +223,20 @@ async def test_contractor_sms_survives_an_unparseable_requested_time():
 # --- prompt guidance ------------------------------------------------------
 
 
+def test_business_prompt_asks_kevin_to_close_warmly():
+    """Call CA40a9f4 ended on "Deli will reach out directly to you" and hung up.
+
+    The scheduling rule told Kevin what to convey but nothing about closing,
+    so he delivered the fact and stopped. The sign-off also carries the
+    goodbye phrase the teardown listens for.
+    """
+    prompt = build_system_prompt({"contractor_id": "c1", "effective_mode": "business"})
+
+    lowered = prompt.lower()
+    assert "thank" in lowered
+    assert "goodbye" in lowered
+
+
 def test_business_prompt_forbids_claiming_an_unconfirmed_appointment():
     """The tool result says this too, but only after Kevin has already spoken."""
     prompt = build_system_prompt({"contractor_id": "c1", "effective_mode": "business"})

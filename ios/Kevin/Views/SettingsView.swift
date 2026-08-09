@@ -600,7 +600,15 @@ struct SettingsView: View {
             // Kevin number — always visible; this is the number calls forward
             // to (and the number businesses hand out).
             if numberOK {
-                HStack {
+                HStack(spacing: 12) {
+                    // Invisible stand-in for SetupRow's status icon. This row
+                    // has nothing to warn about, but without the gutter its
+                    // text sits flush-left while every row below is indented,
+                    // leaving the card with a ragged left edge.
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .hidden()
+
                     Text(String(localized: "Kevin Number"))
                     Spacer()
                     Text(formattedKevinNumber)
@@ -797,15 +805,6 @@ struct SettingsView: View {
         case "trial": return String(localized: "View Plans")
         case "active": return String(localized: "Change Plan")
         default: return String(localized: "Subscribe to Kevin AI")
-        }
-    }
-
-    private var subscriptionStatusColor: Color {
-        switch appState.subscriptionStatus {
-        case "trial": return .blue
-        case "active": return .green
-        case "expired", "cancelled": return .red
-        default: return .blue
         }
     }
 

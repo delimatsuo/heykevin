@@ -22,7 +22,7 @@ from app.db.cache import (
 from app.services.relay_pipeline import RelayPipeline
 from app.services.voice_pipeline import _call_label
 from app.webhooks.media_stream import (
-    TRANSCRIPT_THROTTLE,
+    LiveTranscriptPusher,
     _log_safe_exception,
     _resolve_active_call,
 )
@@ -93,7 +93,7 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         return
 
     transcript_lines: list[str] = []
-    last_rtdb_update = 0.0
+    transcript_pusher = LiveTranscriptPusher(call_sid, transcript_lines)
     call_redirected = False
     pipeline = None
     active_call = None
@@ -122,18 +122,10 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         await websocket.send_text(json.dumps(message))
 
     async def on_transcript(speaker: str, text: str):
-        nonlocal last_rtdb_update
         transcript_lines.append(f"{speaker}: {text}")
         if len(transcript_lines) > 500:
             transcript_lines[:] = transcript_lines[-500:]
-        now = time.time()
-        if now - last_rtdb_update >= TRANSCRIPT_THROTTLE:
-            last_rtdb_update = now
-            asyncio.create_task(
-                update_active_call(
-                    call_sid, {"transcript_buffer": "\n".join(transcript_lines)}
-                )
-            )
+        transcript_pusher.push()
 
     async def on_urgency_detected(transcript_snippet: str):
         # Same escalation path as the media-stream engine, minus the audio

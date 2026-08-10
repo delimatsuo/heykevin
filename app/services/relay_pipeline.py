@@ -26,7 +26,12 @@ from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.quiet_hours import is_business_hours
 from app.services.urgency import find_urgent_signal
-from app.services.voice_pipeline import VoicePipeline, _call_label, build_system_prompt
+from app.services.voice_pipeline import (
+    VoicePipeline,
+    _call_label,
+    build_system_prompt,
+    is_owner_availability_hold,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -96,6 +101,19 @@ class RelayPipeline:
     # voice trailing punctuation, and waiting on an exact match would stall.
     PLAYBACK_COMPLETE_RATIO = 0.9
 
+    # "Let me see if Deli is available" arms this; at timeout Kevin returns
+    # with the unavailability message. Same 30s the other engines use.
+    OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30.0
+
+    # Dead-air guard. Activity = caller prompts (including interim
+    # fragments), interrupts, playback receipts, and finished replies — so
+    # the clock only runs when both sides are truly quiet. Kevin nudges once,
+    # then says goodbye, then the hard stop covers a failed goodbye.
+    SILENCE_CHECK_INTERVAL_SECONDS = 2.0
+    CALLER_SILENCE_PROMPT_SECONDS = 15.0
+    CALLER_SILENCE_HANGUP_SECONDS = 15.0
+    SILENCE_FORCED_END_SECONDS = 30.0
+
     def __init__(
         self,
         *,
@@ -151,6 +169,11 @@ class RelayPipeline:
         self._playback_receipts = 0
         self._played_chars_sum = 0
         self._played_chars_max = 0
+        self._hold_task: Optional[asyncio.Task] = None
+        self._silence_task: Optional[asyncio.Task] = None
+        self._last_activity = time.monotonic()
+        self._silence_nudged = False
+        self._nudged_monotonic = 0.0
         self._command_task: Optional[asyncio.Task] = None
         self._tools = self._build_tools()
 
@@ -165,14 +188,15 @@ class RelayPipeline:
     def start_background_tasks(self) -> None:
         if self._call_sid and (self._command_task is None or self._command_task.done()):
             self._command_task = asyncio.create_task(self._command_check_loop())
+        if self._silence_task is None or self._silence_task.done():
+            self._silence_task = asyncio.create_task(self._silence_watchdog_loop())
 
     async def stop(self) -> None:
         self._active = False
         self._turn_epoch += 1
-        if self._generate_task and not self._generate_task.done():
-            self._generate_task.cancel()
-        if self._command_task and not self._command_task.done():
-            self._command_task.cancel()
+        for task in (self._generate_task, self._command_task, self._hold_task, self._silence_task):
+            if task and not task.done():
+                task.cancel()
 
     async def wait_idle(self) -> None:
         """Await the in-flight generation, if any (tests and shutdown)."""
@@ -197,9 +221,14 @@ class RelayPipeline:
         to stay responsive. Generation runs as a task (_start_generation).
         """
         msg_type = message.get("type", "")
+        # Any inbound traffic — caller speech (even interim fragments),
+        # barge-ins, playback receipts — means the call is alive.
+        self._last_activity = time.monotonic()
         if msg_type == "prompt":
+            self._silence_nudged = False  # the caller is talking
             await self._handle_prompt(message)
         elif msg_type == "interrupt":
+            self._silence_nudged = False
             await self._handle_interrupt(message)
         elif msg_type == "error":
             logger.warning(
@@ -388,8 +417,10 @@ class RelayPipeline:
                     {"role": "model", "parts": [{"text": reply_text}]}
                 )
                 self._streamed_text = ""
+                self._last_activity = time.monotonic()
                 if self._on_transcript:
                     await self._on_transcript("Kevin", reply_text)
+                self._maybe_start_owner_hold(reply_text)
                 await self._maybe_end_on_goodbye(epoch, reply_text)
         except asyncio.CancelledError:
             # Superseded by newer caller speech or a barge-in. The successor
@@ -554,6 +585,129 @@ class RelayPipeline:
                 type(error).__name__,
             )
             return {"error": "The tool is unavailable right now."}
+
+    # --- owner-availability hold -----------------------------------------
+
+    def _maybe_start_owner_hold(self, reply_text: str) -> None:
+        """Arm the 30s unavailability return when Kevin puts the caller on hold.
+
+        The prompt tells Kevin to say "let me see if <owner> is available"
+        and then stay silent. Both older engines detect that phrase and come
+        back after 30s; this engine didn't, so on CAa5e0de the caller sat in
+        dead air until Twilio killed the session 4m40s later.
+        """
+        if self._ending or self._unavailable_said:
+            return
+        if not is_owner_availability_hold(reply_text):
+            return
+        if self._hold_task and not self._hold_task.done():
+            self._hold_task.cancel()
+        self._hold_task = asyncio.create_task(self._owner_hold_timer())
+        logger.info(
+            "relay_event event=owner_hold_started call=%s",
+            _call_label(self._call_sid),
+        )
+
+    async def _owner_hold_timer(self) -> None:
+        await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
+        if not self._active or self._ending or self._unavailable_said:
+            return
+        # Owner pickup redirects the call and stops the pipeline, so reaching
+        # this point means they did not take it.
+        self._unavailable_said = True
+        owner_name = self._contractor_config.get("owner_name", settings.user_name)
+        pronoun = self._contractor_config.get("pronoun", "he")
+        logger.info(
+            "relay_event event=owner_hold_timeout call=%s",
+            _call_label(self._call_sid),
+        )
+        await self._supersede_in_flight()
+        self._start_generation(
+            extra_instruction=(
+                f"SYSTEM INSTRUCTION: {owner_name} has not picked up. Tell the "
+                f"caller {owner_name} is not available right now, apologize "
+                f"warmly, and offer to take a message and make sure {pronoun} "
+                "gets it."
+            )
+        )
+
+    # --- caller-silence watchdog ------------------------------------------
+
+    async def _silence_watchdog_loop(self) -> None:
+        """Never let the line dangle in silence.
+
+        Nudge once when both sides have been quiet, say goodbye if the
+        silence continues, and force the hangup if even the goodbye reply
+        fails to end the call. Suspended while an owner-availability hold is
+        open — the caller was told to wait, so that silence is expected and
+        belongs to the hold timer.
+        """
+        goodbye_injected = False
+        goodbye_monotonic = 0.0
+        try:
+            while self._active and not self._ending:
+                await asyncio.sleep(self.SILENCE_CHECK_INTERVAL_SECONDS)
+                if not self._active or self._ending:
+                    return
+                if self._hold_task and not self._hold_task.done():
+                    continue
+                if self._generate_task and not self._generate_task.done():
+                    continue
+                idle = time.monotonic() - self._last_activity
+                if idle < self.CALLER_SILENCE_PROMPT_SECONDS:
+                    # _silence_nudged clears only on caller speech, so fresh
+                    # Kevin-side activity (the nudge itself playing out) does
+                    # not restart the escalation from scratch.
+                    if not self._silence_nudged:
+                        goodbye_injected = False
+                    continue
+                if not self._silence_nudged:
+                    self._silence_nudged = True
+                    self._nudged_monotonic = time.monotonic()
+                    logger.info(
+                        "relay_event event=silence_nudge call=%s",
+                        _call_label(self._call_sid),
+                    )
+                    self._start_generation(
+                        extra_instruction=(
+                            "SYSTEM INSTRUCTION: The caller has said nothing "
+                            "for a while. Gently ask if they are still there. "
+                            "One short sentence."
+                        )
+                    )
+                elif not goodbye_injected:
+                    if (
+                        time.monotonic() - self._nudged_monotonic
+                        >= self.CALLER_SILENCE_HANGUP_SECONDS
+                    ):
+                        goodbye_injected = True
+                        goodbye_monotonic = time.monotonic()
+                        logger.info(
+                            "relay_event event=silence_goodbye call=%s",
+                            _call_label(self._call_sid),
+                        )
+                        self._start_generation(
+                            extra_instruction=(
+                                "SYSTEM INSTRUCTION: The caller appears to "
+                                "have left. Say one short, warm goodbye and "
+                                "include the word 'goodbye'."
+                            )
+                        )
+                elif (
+                    time.monotonic() - goodbye_monotonic
+                    >= self.SILENCE_FORCED_END_SECONDS
+                ):
+                    # The goodbye reply should have triggered the normal
+                    # teardown; if it didn't, close the line anyway.
+                    logger.warning(
+                        "relay_event event=silence_forced_end call=%s",
+                        _call_label(self._call_sid),
+                    )
+                    self._ending = True
+                    await self.end_call()
+                    return
+        except asyncio.CancelledError:
+            pass
 
     # --- goodbye / end ---------------------------------------------------
 

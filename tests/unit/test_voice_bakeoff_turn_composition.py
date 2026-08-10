@@ -106,8 +106,10 @@ _BASELINE_HASHES = {
     # it only alongside a reviewed change to main.py, never to silence a diff.
     "app/main.py":
         "057a810dd5eb2e08651fd965f9264c48681e5bb17ce87bad4fafb4260c6e0334",
+    # Re-pinned 2026-08-10: media_stream.py gained LiveTranscriptPusher (the
+    # trailing-flush fix for the live-view transcript drop seen on CAa5e0de).
     "app/webhooks/media_stream.py":
-        "2739ebc8df9a9c7c82001607d23d19dbe1f4ca92262499ffb5e52b1d3d5c0d6a",
+        "50d9870c1eae020a832a2c350e3efa948cb6700297589fa01d54c7a30740a970",
 }
 
 

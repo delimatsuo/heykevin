@@ -654,3 +654,156 @@ async def test_playout_falls_back_when_the_receipt_carries_no_text(monkeypatch):
 
     assert {"type": "end"} in recorder.sent
     assert polls["n"] <= pipeline.PLAYBACK_MAX_POLLS
+
+
+# --- owner-availability hold (personal mode's "let me see if Deli is free") --
+#
+# CAa5e0de: Kevin said "Let me see if Deli is available, one moment" and then
+# nothing, ever — the 30s unavailability return exists in both old engines but
+# was never ported to relay. The caller sat in dead air until Twilio killed
+# the session 4m40s later.
+
+
+@pytest.mark.asyncio
+async def test_hold_reply_arms_the_unavailability_timer_and_returns():
+    recorder = _Recorder()
+    pipeline = _pipeline(
+        recorder,
+        [
+            [{"text": "Got it. Let me see if Deli is available, one moment."}],
+            [{"text": "Deli isn't available right now. Can I take a message?"}],
+        ],
+    )
+    pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS = 0
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Is Deli there?", "last": True})
+    assert pipeline._hold_task is not None
+    await pipeline._hold_task
+    await pipeline.wait_idle()
+
+    tokens = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert "Deli isn't available right now. Can I take a message?" in tokens
+    assert pipeline._unavailable_said is True
+
+
+@pytest.mark.asyncio
+async def test_ordinary_replies_do_not_arm_the_hold_timer():
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "We open at nine tomorrow."}]])
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "When do you open?", "last": True})
+
+    assert pipeline._hold_task is None
+
+
+@pytest.mark.asyncio
+async def test_hold_timer_defers_to_an_earlier_take_message():
+    """If the owner already declined via the app, the timer must not speak again."""
+    recorder = _Recorder()
+    pipeline = _pipeline(
+        recorder,
+        [
+            [{"text": "Let me see if Deli is available, one moment."}],
+            [{"text": "should never stream"}],
+        ],
+    )
+    pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS = 0.05
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Is Deli there?", "last": True})
+    pipeline._unavailable_said = True  # take_message command got there first
+    await pipeline._hold_task
+    await pipeline.wait_idle()
+
+    tokens = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert "should never stream" not in tokens
+
+
+# --- caller-silence watchdog ----------------------------------------------
+#
+# Relay had no idle guard at all: after the hold bug ate the conversation,
+# the session sat for 4m40s until Twilio's own timeout closed it.
+
+
+@pytest.mark.asyncio
+async def test_idle_session_gets_a_nudge_then_a_goodbye():
+    recorder = _Recorder()
+    pipeline = _pipeline(
+        recorder,
+        [
+            [{"text": "Hi Jonathan, what do you need?"}],
+            [{"text": "Are you still there?"}],
+            [{"text": "I'll let Deli know you called. Goodbye!"}],
+        ],
+    )
+    pipeline.SILENCE_CHECK_INTERVAL_SECONDS = 0.01
+    pipeline.CALLER_SILENCE_PROMPT_SECONDS = 0.05
+    pipeline.CALLER_SILENCE_HANGUP_SECONDS = 0.05
+    pipeline.PLAYBACK_POLL_SECONDS = 0  # instant teardown polls
+    pipeline.PLAYBACK_FALLBACK_POLLS = 1
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "hi", "last": True})
+    pipeline.start_background_tasks()
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if recorder.completed:
+                break
+    finally:
+        await pipeline.stop()
+
+    tokens = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert "Are you still there?" in tokens
+    assert {"type": "end"} in recorder.sent
+    assert recorder.completed
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stays_quiet_while_the_hold_window_is_open():
+    """The caller was told to wait — 'are you still there' would be nonsense."""
+    recorder = _Recorder()
+    pipeline = _pipeline(
+        recorder,
+        [[{"text": "Let me see if Deli is available, one moment."}]],
+    )
+    pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS = 10  # far away; window stays open
+    pipeline.SILENCE_CHECK_INTERVAL_SECONDS = 0.01
+    pipeline.CALLER_SILENCE_PROMPT_SECONDS = 0.05
+    pipeline.CALLER_SILENCE_HANGUP_SECONDS = 0.05
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Is Deli in?", "last": True})
+    pipeline.start_background_tasks()
+    try:
+        await asyncio.sleep(0.3)
+    finally:
+        await pipeline.stop()
+
+    tokens = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert len(tokens) == 1  # only the hold reply; no nudge, no goodbye
+    assert {"type": "end"} not in recorder.sent
+
+
+@pytest.mark.asyncio
+async def test_playback_receipts_count_as_activity_for_the_watchdog():
+    """Kevin speaking a long reply must not read as caller silence."""
+    recorder = _Recorder()
+    pipeline = _pipeline(recorder, [[{"text": "A long explanation of pricing."}]])
+    pipeline.SILENCE_CHECK_INTERVAL_SECONDS = 0.01
+    pipeline.CALLER_SILENCE_PROMPT_SECONDS = 0.06
+    pipeline.CALLER_SILENCE_HANGUP_SECONDS = 5
+
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Pricing?", "last": True})
+    pipeline.start_background_tasks()
+    try:
+        # Receipts keep arriving (Kevin still talking) past the prompt window.
+        for _ in range(6):
+            await asyncio.sleep(0.03)
+            await pipeline.handle_message(
+                {"type": "info", "name": "tokensPlayed", "value": "..."}
+            )
+        nudged_early = any(
+            m for m in recorder.sent[2:] if m["type"] == "text" and m["token"]
+        )
+    finally:
+        await pipeline.stop()
+
+    assert not nudged_early

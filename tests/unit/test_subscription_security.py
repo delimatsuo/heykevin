@@ -17,12 +17,12 @@ from typing import Any, Dict, Optional
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
-from app.services import subscription as sub_service
 from app.api import subscription as sub_api
 from app.db import apple_transactions as apple_tx_db
 from app.db import rate_limits as rl_db
-
+from app.services import subscription as sub_service
 
 # ---------------------------------------------------------------------------
 # Helpers / fakes
@@ -124,6 +124,11 @@ def _install_fake_firestore(monkeypatch) -> _InMemoryFirestore:
 # F-05: verify_transaction_strict / /api/subscription/verify fail closed
 # ---------------------------------------------------------------------------
 
+
+def test_verify_request_rejects_transaction_path_injection():
+    with pytest.raises(ValidationError):
+        sub_api.VerifyRequest(transaction_id="../other/document", contractor_id="c1")
+
 class _FakeResponse:
     def __init__(self, status_code: int, body: dict):
         self.status_code = status_code
@@ -214,8 +219,8 @@ async def test_verify_endpoint_fails_closed_when_apple_unreachable(monkeypatch):
     """End-to-end: /api/subscription/verify must return 502 (not 200/ok) when
     Apple cannot be reached, so the iOS client never confuses it with success."""
 
-    async def fake_is_seen(_cid, _tx):
-        return False
+    async def fake_get_processed(_cid, _tx):
+        return None
 
     async def fake_get_binding(_tx):
         return None
@@ -223,7 +228,7 @@ async def test_verify_endpoint_fails_closed_when_apple_unreachable(monkeypatch):
     async def fake_strict(_tx):
         return sub_service.VerificationResult(ok=False, unreachable=True, reason="server_error")
 
-    monkeypatch.setattr(sub_service, "is_transaction_seen", fake_is_seen)
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
     monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
     monkeypatch.setattr(sub_service, "verify_transaction_strict", fake_strict)
 
@@ -243,8 +248,8 @@ async def test_verify_endpoint_fails_closed_when_apple_unreachable(monkeypatch):
 async def test_verify_endpoint_duplicate_transaction_bypasses_rate_limit(monkeypatch):
     """Idempotent StoreKit retries must not be rejected by the verify limiter."""
 
-    async def fake_is_seen(_cid, _tx):
-        return True
+    async def fake_get_processed(_cid, _tx):
+        return {"outcome": "active"}
 
     async def fail_get_binding(_tx):
         raise AssertionError("duplicate transaction should not check global binding")
@@ -252,21 +257,53 @@ async def test_verify_endpoint_duplicate_transaction_bypasses_rate_limit(monkeyp
     async def fail_strict(_tx):
         raise AssertionError("duplicate transaction should not call Apple")
 
-    monkeypatch.setattr(sub_service, "is_transaction_seen", fake_is_seen)
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
     monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fail_get_binding)
     monkeypatch.setattr(sub_service, "verify_transaction_strict", fail_strict)
-    monkeypatch.setattr(sub_api, "_check_rate_limit", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        sub_api,
+        "_check_rate_limit_with_retry",
+        lambda *_args, **_kwargs: (False, 60),
+    )
 
     body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
     response = await sub_api.verify_subscription(body, _FakeRequest("c1"))
 
-    assert response == {"status": "ok", "message": "already_processed"}
+    assert response == {
+        "status": "ok",
+        "message": "already_processed",
+        "outcome": "active",
+        "entitlement_active": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_unknown_processed_outcome_fails_closed(monkeypatch):
+    """Corrupt/manual records must never become an inactive acknowledgement."""
+
+    async def fake_get_processed(_cid, _tx):
+        return {"outcome": "future_or_corrupt"}
+
+    async def boom(*_args, **_kwargs):
+        raise AssertionError("invalid processed outcome must fail before downstream work")
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", boom)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", boom)
+    monkeypatch.setattr(sub_api, "_check_rate_limit_with_retry", boom)
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    with pytest.raises(HTTPException) as exc:
+        await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "invalid_processed_transaction_outcome"
 
 
 @pytest.mark.asyncio
 async def test_verify_endpoint_returns_400_when_apple_authoritatively_invalid(monkeypatch):
-    async def fake_is_seen(*_):
-        return False
+    async def fake_get_processed(*_):
+        return None
 
     async def fake_get_binding(_tx):
         return None
@@ -274,7 +311,7 @@ async def test_verify_endpoint_returns_400_when_apple_authoritatively_invalid(mo
     async def fake_strict(_tx):
         return sub_service.VerificationResult(ok=False, unreachable=False, reason="not_found")
 
-    monkeypatch.setattr(sub_service, "is_transaction_seen", fake_is_seen)
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
     monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
     monkeypatch.setattr(sub_service, "verify_transaction_strict", fake_strict)
 
@@ -282,6 +319,220 @@ async def test_verify_endpoint_returns_400_when_apple_authoritatively_invalid(mo
     with pytest.raises(HTTPException) as exc:
         await sub_api.verify_subscription(body, _FakeRequest("c1"))
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_acknowledges_and_records_inactive_transaction(monkeypatch):
+    """A verified owned-but-expired transaction is safe to drain, not activate."""
+
+    async def fake_get_processed(*_):
+        return None
+
+    async def fake_get_binding(_tx):
+        return None
+
+    async def fake_strict(_tx):
+        return sub_service.VerificationResult(ok=True, transaction={"transactionId": "tx-1"})
+
+    async def fake_update(*_):
+        return sub_service.SubscriptionUpdateResult(
+            sub_service.SubscriptionUpdateOutcome.INACTIVE,
+            reason="expired",
+        )
+
+    marked = []
+
+    async def fake_mark(contractor_id, transaction_id, outcome):
+        marked.append((contractor_id, transaction_id, outcome))
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", fake_strict)
+    monkeypatch.setattr(sub_service, "update_subscription_from_transaction", fake_update)
+    monkeypatch.setattr(sub_service, "mark_transaction_seen", fake_mark)
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    response = await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert response == {
+        "status": "ok",
+        "message": "terminal_processed",
+        "outcome": "inactive",
+        "entitlement_active": False,
+    }
+    assert marked == [
+        ("c1", "tx-1", sub_service.SubscriptionUpdateOutcome.INACTIVE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_duplicate_inactive_bypasses_apple_and_limiter(monkeypatch):
+    async def fake_get_processed(*_):
+        return {"outcome": "inactive", "processed_at": 123}
+
+    async def boom(*_args, **_kwargs):
+        raise AssertionError("processed inactive transaction must bypass downstream work")
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", boom)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", boom)
+    monkeypatch.setattr(sub_api, "_check_rate_limit_with_retry", boom)
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    response = await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert response == {
+        "status": "ok",
+        "message": "already_processed",
+        "outcome": "inactive",
+        "entitlement_active": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_ownership_mismatch_is_409_and_not_recorded(monkeypatch):
+    async def fake_get_processed(*_):
+        return None
+
+    async def fake_get_binding(_tx):
+        return None
+
+    async def fake_strict(_tx):
+        return sub_service.VerificationResult(ok=True, transaction={"transactionId": "tx-1"})
+
+    async def fake_update(*_):
+        return sub_service.SubscriptionUpdateResult(
+            sub_service.SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH,
+            reason="app_account_token_mismatch",
+        )
+
+    async def boom_mark(*_):
+        raise AssertionError("ownership mismatch must not be marked processed")
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", fake_strict)
+    monkeypatch.setattr(sub_service, "update_subscription_from_transaction", fake_update)
+    monkeypatch.setattr(sub_service, "mark_transaction_seen", boom_mark)
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    with pytest.raises(HTTPException) as exc:
+        await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "app_account_token_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        (sub_service.SubscriptionUpdateOutcome.UNKNOWN_PRODUCT, "unknown_product"),
+        (
+            sub_service.SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+            "missing_or_invalid_expiry",
+        ),
+    ],
+)
+async def test_verify_endpoint_rejects_unsupported_or_malformed_as_422(
+    monkeypatch, outcome, reason
+):
+    async def fake_get_processed(*_):
+        return None
+
+    async def fake_get_binding(_tx):
+        return None
+
+    async def fake_strict(_tx):
+        return sub_service.VerificationResult(ok=True, transaction={"transactionId": "tx-1"})
+
+    async def fake_update(*_):
+        return sub_service.SubscriptionUpdateResult(outcome, reason=reason)
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", fake_strict)
+    monkeypatch.setattr(sub_service, "update_subscription_from_transaction", fake_update)
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    with pytest.raises(HTTPException) as exc:
+        await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == reason
+
+
+@pytest.mark.asyncio
+async def test_processed_transaction_preserves_outcome_and_legacy_defaults(monkeypatch):
+    fake = _install_fake_firestore(monkeypatch)
+
+    await sub_service.mark_transaction_seen(
+        "c1", "tx-inactive", sub_service.SubscriptionUpdateOutcome.INACTIVE
+    )
+    inactive = await sub_service.get_processed_transaction("c1", "tx-inactive")
+    assert inactive is not None
+    assert inactive["outcome"] == "inactive"
+
+    fake._docs["contractors/c1/transactions/tx-legacy"] = {"processed_at": 1}
+    legacy = await sub_service.get_processed_transaction("c1", "tx-legacy")
+    assert legacy is not None
+    assert legacy["outcome"] == "active"
+
+
+def test_verify_rate_limit_default_and_backlog_headroom(monkeypatch):
+    assert sub_api.VERIFY_RATE_LIMIT == 30
+    sub_api._rate_limits.clear()
+    monkeypatch.setattr(sub_api.time, "time", lambda: 1_000.0)
+
+    for _ in range(15):
+        allowed, retry_after = sub_api._check_rate_limit_with_retry(
+            "c1", sub_api.VERIFY_RATE_LIMIT, ":verify", 60
+        )
+        assert allowed is True
+        assert retry_after == 0
+
+
+def test_verify_rate_limit_computes_retry_after(monkeypatch):
+    sub_api._rate_limits.clear()
+    monkeypatch.setattr(sub_api.time, "time", lambda: 1_000.0)
+    for _ in range(sub_api.VERIFY_RATE_LIMIT):
+        assert sub_api._check_rate_limit_with_retry(
+            "c1", sub_api.VERIFY_RATE_LIMIT, ":verify", 60
+        ) == (True, 0)
+
+    assert sub_api._check_rate_limit_with_retry(
+        "c1", sub_api.VERIFY_RATE_LIMIT, ":verify", 60
+    ) == (False, 60)
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_rate_limit_has_retry_after(monkeypatch):
+    async def fake_get_processed(*_):
+        return None
+
+    async def fake_get_binding(_tx):
+        return None
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
+    monkeypatch.setattr(
+        sub_api,
+        "_check_rate_limit_with_retry",
+        lambda *_args, **_kwargs: (False, 42),
+    )
+
+    body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")
+    response = await sub_api.verify_subscription(body, _FakeRequest("c1"))
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "42"
+    import json as _json
+    payload = _json.loads(bytes(response.body).decode())
+    assert payload == {
+        "status": "retryable",
+        "reason": "rate_limited",
+        "retry_after_seconds": 42,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -374,13 +625,13 @@ async def test_update_subscription_rejects_receipt_bound_to_other_contractor(mon
 
 @pytest.mark.asyncio
 async def test_verify_endpoint_returns_409_on_pre_bound_receipt(monkeypatch):
-    async def fake_is_seen(*_):
-        return False
+    async def fake_get_processed(*_):
+        return None
 
     async def fake_get_binding(_tx):
         return {"contractor_id": "other", "original_transaction_id": _tx}
 
-    monkeypatch.setattr(sub_service, "is_transaction_seen", fake_is_seen)
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
     monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
 
     body = sub_api.VerifyRequest(transaction_id="tx-1", contractor_id="c1")

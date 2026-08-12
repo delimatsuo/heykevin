@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from app.db import apple_transactions as apple_transactions_db
 from app.db import contractors as contractors_db
 from app.services import subscription
 
@@ -130,8 +131,12 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
         updates["body"] = body
         return True
 
+    async def fake_claim_transaction(**_kwargs):
+        return True, "contractor-1"
+
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
     monkeypatch.setattr(contractors_db, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
     updated = await subscription.update_subscription_from_transaction(
@@ -140,10 +145,12 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
             "productId": "com.kevin.callscreen.businesspro.monthly",
             "appAccountToken": "subscription-uuid",
             "expiresDate": 1770000000000,
+            "transactionId": "tx-1",
+            "originalTransactionId": "orig-1",
         },
     )
 
-    assert updated is True
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.ACTIVE
     assert updates == {
         "contractor_id": "contractor-1",
         "body": {
@@ -165,8 +172,12 @@ async def test_update_subscription_rejects_expired_transaction(monkeypatch):
     async def fail_update(*args, **kwargs):
         raise AssertionError("expired transaction must not activate subscription")
 
+    async def fake_claim_transaction(**_kwargs):
+        return True, "contractor-1"
+
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
     monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
     updated = await subscription.update_subscription_from_transaction(
@@ -175,10 +186,13 @@ async def test_update_subscription_rejects_expired_transaction(monkeypatch):
             "productId": "com.kevin.callscreen.businesspro.monthly",
             "appAccountToken": "subscription-uuid",
             "expiresDate": 1600000000000,
+            "transactionId": "tx-expired",
+            "originalTransactionId": "orig-1",
         },
     )
 
-    assert updated is False
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.INACTIVE
+    assert updated.reason == "expired"
 
 
 @pytest.mark.asyncio
@@ -192,8 +206,12 @@ async def test_update_subscription_rejects_revoked_transaction(monkeypatch):
     async def fail_update(*args, **kwargs):
         raise AssertionError("revoked transaction must not activate subscription")
 
+    async def fake_claim_transaction(**_kwargs):
+        return True, "contractor-1"
+
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
     monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
     updated = await subscription.update_subscription_from_transaction(
@@ -203,10 +221,13 @@ async def test_update_subscription_rejects_revoked_transaction(monkeypatch):
             "appAccountToken": "subscription-uuid",
             "expiresDate": 1770000000000,
             "revocationDate": 1705000000000,
+            "transactionId": "tx-revoked",
+            "originalTransactionId": "orig-1",
         },
     )
 
-    assert updated is False
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.INACTIVE
+    assert updated.reason == "revoked"
 
 
 @pytest.mark.asyncio
@@ -220,8 +241,12 @@ async def test_update_subscription_rejects_missing_expiry(monkeypatch):
     async def fail_update(*args, **kwargs):
         raise AssertionError("transaction without expiry must not activate subscription")
 
+    async def fail_claim(**_kwargs):
+        raise AssertionError("transaction without expiry must not claim a receipt")
+
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
     monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", fail_claim)
 
     updated = await subscription.update_subscription_from_transaction(
         "contractor-1",
@@ -231,7 +256,7 @@ async def test_update_subscription_rejects_missing_expiry(monkeypatch):
         },
     )
 
-    assert updated is False
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.MALFORMED_TRANSACTION
 
 
 @pytest.mark.asyncio
@@ -253,11 +278,60 @@ async def test_update_subscription_rejects_app_account_token_mismatch(monkeypatc
         {
             "productId": "com.kevin.callscreen.businesspro.monthly",
             "appAccountToken": "other-uuid",
+            # Ownership must be classified before inactivity, even for an old
+            # transaction that would otherwise be safe to acknowledge.
+            "expiresDate": 1600000000000,
+        },
+    )
+
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_update_subscription_rejects_unknown_product_without_claim(monkeypatch):
+    async def boom_claim(**_kwargs):
+        raise AssertionError("unknown product must not claim a receipt")
+
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", boom_claim)
+
+    updated = await subscription.update_subscription_from_transaction(
+        "contractor-1",
+        {
+            "productId": "com.example.unknown",
+            "appAccountToken": "subscription-uuid",
+            "expiresDate": 1770000000000,
+            "transactionId": "tx-unknown",
+        },
+    )
+
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.UNKNOWN_PRODUCT
+
+
+@pytest.mark.asyncio
+async def test_update_subscription_rejects_missing_transaction_identity_without_claim(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "subscription_uuid": "subscription-uuid",
+        }
+
+    async def boom_claim(**_kwargs):
+        raise AssertionError("malformed transaction must not claim a receipt")
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", boom_claim)
+
+    updated = await subscription.update_subscription_from_transaction(
+        "contractor-1",
+        {
+            "productId": "com.kevin.callscreen.personal.monthly",
+            "appAccountToken": "subscription-uuid",
             "expiresDate": 1770000000000,
         },
     )
 
-    assert updated is False
+    assert updated.outcome is subscription.SubscriptionUpdateOutcome.MALFORMED_TRANSACTION
+    assert updated.reason == "missing_transaction_id"
 
 
 class _FakeResponse:

@@ -7,7 +7,7 @@ Supports two modes:
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 import logging
 import re
 import time
@@ -339,6 +339,14 @@ async def _process_personal(
         call_sid,
     )
     _record_effect(tracker, "caller_contact", contact_saved)
+    await _update_customer_memory(
+        job_data,
+        contractor_id=(contractor or {}).get("contractor_id", ""),
+        call_sid=call_sid,
+        transcript_text=transcript_text,
+        caller_language=user_language,
+        capture_enabled=(contractor or {}).get("customer_memory_capture_enabled") is True,
+    )
 
     # Send simple SMS to owner (in their language)
     owner_phone = contractor_phone
@@ -451,6 +459,14 @@ async def _process_business(
         call_sid,
     )
     _record_effect(tracker, "caller_contact", contact_saved)
+    await _update_customer_memory(
+        job_data,
+        contractor_id=contractor_id,
+        call_sid=call_sid,
+        transcript_text=transcript_text,
+        caller_language=caller_language,
+        capture_enabled=contractor.get("customer_memory_capture_enabled") is True,
+    )
 
     # 2. Save to Firestore (with idempotency check on call_sid)
     job_data["transcript"] = transcript_text
@@ -699,6 +715,87 @@ async def _update_caller_contact(
         return saved
     except Exception as error:
         _log_post_call_exception("caller_contact_error", error, call_sid)
+        return False
+
+
+def _caller_spoke_name(transcript_text: str, caller_name: str) -> bool:
+    """Require a positive self-identification before creating confirmed memory."""
+    normalized_name = " ".join(
+        token.casefold()
+        for token in re.findall(r"[^\W\d_]+", caller_name, flags=re.UNICODE)
+        if len(token) >= 2
+    )
+    if not normalized_name:
+        return False
+    caller_turns = [
+        " ".join(
+            re.findall(
+                r"[^\W\d_]+(?:['’\-][^\W\d_]+)?",
+                line.split(":", 1)[1].casefold(),
+                flags=re.UNICODE,
+            )
+        )
+        for line in transcript_text.splitlines()
+        if line.casefold().startswith("caller:") and ":" in line
+    ]
+    introductions = ("this is ", "i am ", "i'm ", "im ", "my name is ")
+    return any(
+        turn == normalized_name
+        or any(
+            f" {prefix}{normalized_name} " in f" {turn} "
+            for prefix in introductions
+        )
+        for turn in caller_turns
+    )
+
+
+async def _update_customer_memory(
+    job_data: dict,
+    *,
+    contractor_id: str,
+    call_sid: str,
+    transcript_text: str,
+    caller_language: str = "",
+    capture_enabled: bool = False,
+) -> bool | None:
+    """Persist a caller-confirmed name into the real product memory store."""
+    caller_phone = str(job_data.get("caller_phone") or "")
+    caller_name = str(job_data.get("caller_name") or "").strip()
+    if (
+        capture_enabled is not True
+        or not contractor_id
+        or not caller_phone
+        or not caller_name
+        or not _caller_spoke_name(transcript_text, caller_name)
+    ):
+        return None
+
+    from app.db.customer_memory import FirestoreCustomerMemoryRepository
+    from app.services.customer_memory import (
+        IdentitySource,
+        IdentityState,
+    )
+
+    repository = FirestoreCustomerMemoryRepository()
+    try:
+        now = datetime.now(UTC)
+        existing = await repository.lookup(contractor_id, caller_phone, now)
+        await repository.remember(
+            contractor_id,
+            caller_phone,
+            display_name=caller_name,
+            identity_state=IdentityState.CONFIRMED,
+            identity_source=IdentitySource.CALLER_CONFIRMED,
+            confidence=0.95,
+            language=(caller_language or "")[:16],
+            expected_revision=existing.revision if existing else 0,
+            command_id=f"{call_sid}:caller_name",
+            occurred_at=now,
+        )
+        _log_post_call_event("customer_memory_saved", call_sid)
+        return True
+    except Exception as error:
+        _log_post_call_exception("customer_memory_save_failed", error, call_sid)
         return False
 
 

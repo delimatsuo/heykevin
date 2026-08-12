@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # Google Calendar (fallback scheduling for non-Jobber contractors)
     google_calendar_client_id: str = ""
     google_calendar_client_secret: str = ""
+    # Global readiness gate for the durable provider-operation reconciler.
+    # Keep closed until the Firestore index/TTL policies and recovery runtime
+    # have been qualified. Per-contractor flags cannot bypass this gate.
+    service_request_recovery_enabled: bool = False
 
     # App Store Server API (for subscription verification and offer signing)
     appstore_key_id: str = ""         # Key ID from App Store Connect

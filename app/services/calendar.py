@@ -37,8 +37,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import time
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -61,6 +64,14 @@ MAX_SLOTS_PER_DAY = 3
 DEFAULT_TIMEZONE = "UTC"
 DEFAULT_BUSINESS_HOURS_START = "09:00"
 DEFAULT_BUSINESS_HOURS_END = "17:00"
+
+# Google Calendar private extended-property limits are intentionally enforced
+# here as bytes, not Python characters.  The key is owned by Hey Kevin and the
+# value is a versioned, bounded JSON payload assembled by the provider adapter.
+HEY_KEVIN_SERVICES_PRIVATE_KEY = "hey_kevin_services_v1"
+HEY_KEVIN_OPERATION_PRIVATE_KEY = "hey_kevin_operation_id"
+MAX_PRIVATE_PROPERTY_VALUE_BYTES = 1_024
+MAX_SERVICE_METADATA_ATTEMPTS = 2
 
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -481,19 +492,455 @@ async def book_appointment(
 
     if resp.status_code in (200, 201):
         created_id = resp.json().get("id", "")
-        logger.info(f"Google Calendar event created: {created_id}")
+        logger.info("Google Calendar event created")
         return created_id
 
     if _is_duplicate_conflict(resp):
         # Our own earlier insert already created this appointment. Reporting
         # failure here would have Kevin apologise for a booking that is in
         # fact on the calendar.
-        logger.info(
-            f"Google Calendar event already exists, treating as booked: {event_id}"
-        )
+        logger.info("Google Calendar event already exists, treating as booked")
         return event_id
 
     logger.error(
         f"Google Calendar create event error: operation=create_event status_code={resp.status_code}"
     )
     return None
+
+
+async def create_managed_appointment(
+    contractor: dict,
+    *,
+    event_id: str,
+    title: str,
+    start_time: str,
+    end_time: str,
+    description: str,
+    logical_operation_id: str,
+) -> bool:
+    """Create, or verify, one provider-saga-owned calendar event.
+
+    The caller supplies the deterministic Google event ID that was durably
+    persisted before this function runs. A duplicate is success only when a
+    follow-up GET proves it carries our exact logical operation marker and
+    schedule; an unrelated 409 never becomes a false booking confirmation.
+    """
+    event_url = _event_resource_url(event_id)
+    if not event_url or not _valid_managed_operation_id(logical_operation_id):
+        logger.error("Google Calendar managed create error: invalid operation")
+        return False
+    if not all(isinstance(value, str) for value in (title, start_time, end_time, description)):
+        logger.error("Google Calendar managed create error: invalid event fields")
+        return False
+
+    body = {
+        "id": event_id,
+        "summary": title,
+        "description": description,
+        "start": {"dateTime": start_time},
+        "end": {"dateTime": end_time},
+        "extendedProperties": {
+            "private": {HEY_KEVIN_OPERATION_PRIVATE_KEY: logical_operation_id}
+        },
+    }
+
+    async def _insert(token: str):
+        async with httpx.AsyncClient() as client:
+            return await client.post(
+                EVENTS_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=8.0,
+            )
+
+    try:
+        response = await _with_token_refresh(contractor, _insert)
+    except Exception as error:  # noqa: BLE001 - private provider data stays out of logs
+        logger.error(
+            "Google Calendar managed create error: operation=insert_event "
+            f"exception_type={type(error).__name__}"
+        )
+        return False
+    if response is None:
+        logger.error(
+            "Google Calendar managed create error: operation=insert_event "
+            "reason=no_valid_access_token"
+        )
+        return False
+    if 200 <= response.status_code < 300:
+        try:
+            returned_id = response.json().get("id")
+        except Exception:  # noqa: BLE001 - response body is intentionally never logged
+            returned_id = None
+        if returned_id != event_id:
+            logger.error(
+                "Google Calendar managed create error: operation=insert_event "
+                "reason=unexpected_resource"
+            )
+            return False
+        logger.info("Google Calendar managed event created")
+        return True
+    if not _is_duplicate_conflict(response):
+        logger.error(
+            "Google Calendar managed create error: operation=insert_event "
+            f"status_code={response.status_code}"
+        )
+        return False
+
+    return await _verify_managed_appointment(
+        contractor,
+        event_url=event_url,
+        logical_operation_id=logical_operation_id,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+def _valid_managed_operation_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+async def _verify_managed_appointment(
+    contractor: dict,
+    *,
+    event_url: str,
+    logical_operation_id: str,
+    start_time: str,
+    end_time: str,
+) -> bool:
+    async def _get(token: str):
+        async with httpx.AsyncClient() as client:
+            return await client.get(
+                event_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8.0,
+            )
+
+    try:
+        response = await _with_token_refresh(contractor, _get)
+    except Exception as error:  # noqa: BLE001
+        logger.error(
+            "Google Calendar managed create error: operation=verify_event "
+            f"exception_type={type(error).__name__}"
+        )
+        return False
+    if response is None or not 200 <= response.status_code < 300:
+        status = getattr(response, "status_code", "unavailable")
+        logger.error(
+            "Google Calendar managed create error: operation=verify_event "
+            f"status_code={status}"
+        )
+        return False
+    try:
+        event = response.json()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    private = _event_private_properties(event)
+    start = event.get("start") if isinstance(event, dict) else None
+    end = event.get("end") if isinstance(event, dict) else None
+    verified = (
+        private is not None
+        and private.get(HEY_KEVIN_OPERATION_PRIVATE_KEY) == logical_operation_id
+        and isinstance(start, dict)
+        and start.get("dateTime") == start_time
+        and isinstance(end, dict)
+        and end.get("dateTime") == end_time
+    )
+    if verified:
+        logger.info("Google Calendar managed event already exists and was verified")
+    else:
+        logger.error(
+            "Google Calendar managed create error: operation=verify_event "
+            "reason=identity_mismatch"
+        )
+    return verified
+
+
+def _event_resource_url(event_id: str) -> str:
+    """Return the primary-calendar URL for one opaque Google event ID."""
+    if not isinstance(event_id, str) or not event_id:
+        return ""
+    return f"{EVENTS_URL}/{quote(event_id, safe='')}"
+
+
+async def update_appointment(
+    contractor: dict,
+    event_id: str,
+    start_time: str,
+    end_time: str,
+    title: str | None = None,
+    description: str | None = None,
+) -> bool:
+    """Update an existing Google Calendar appointment.
+
+    Returns True only after Google accepts the PATCH. Optional title and
+    description values are omitted when None, allowing callers to change the
+    time without erasing existing event metadata. Empty strings are sent
+    deliberately so a caller can clear either field.
+    """
+    event_url = _event_resource_url(event_id)
+    if not event_url:
+        logger.error("Google Calendar update event error: invalid event id")
+        return False
+
+    body = {
+        "start": {"dateTime": start_time},
+        "end": {"dateTime": end_time},
+    }
+    if title is not None:
+        body["summary"] = title
+    if description is not None:
+        body["description"] = description
+
+    async def _call(token: str):
+        async with httpx.AsyncClient() as client:
+            return await client.patch(
+                event_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=8.0,
+            )
+
+    try:
+        resp = await _with_token_refresh(contractor, _call)
+    except Exception as error:  # noqa: BLE001
+        logger.error(
+            "Google Calendar update event error: operation=update_event "
+            f"exception_type={type(error).__name__}"
+        )
+        return False
+
+    if resp is None:
+        logger.error(
+            "Google Calendar update event error: operation=update_event "
+            "reason=no_valid_access_token"
+        )
+        return False
+    if 200 <= resp.status_code < 300:
+        logger.info("Google Calendar event updated")
+        return True
+
+    # Status only: provider bodies can contain private event details.
+    logger.error(
+        "Google Calendar update event error: operation=update_event "
+        f"status_code={resp.status_code}"
+    )
+    return False
+
+
+def _event_private_properties(event: object) -> dict[str, str] | None:
+    """Return a copy of an event's private properties without coercing data."""
+    if not isinstance(event, dict):
+        return None
+    extended_properties = event.get("extendedProperties", {})
+    if not isinstance(extended_properties, dict):
+        return None
+    private_properties = extended_properties.get("private", {})
+    if not isinstance(private_properties, dict):
+        return None
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in private_properties.items()
+    ):
+        return None
+    return dict(private_properties)
+
+
+def _event_etag(event: object) -> str | None:
+    if not isinstance(event, dict):
+        return None
+    etag = event.get("etag")
+    if (
+        not isinstance(etag, str)
+        or not etag
+        or len(etag) > 1_024
+        or any(ord(character) < 32 or ord(character) == 127 for character in etag)
+    ):
+        return None
+    return etag
+
+
+async def set_appointment_service_metadata(
+    contractor: dict,
+    event_id: str,
+    metadata_value: str,
+) -> bool:
+    """Merge Hey Kevin's owned service metadata into an existing event.
+
+    The current event is fetched before every conditional PATCH. Existing
+    private properties are copied into the PATCH body so Kevin cannot erase
+    another integration's metadata. No schedule, title, description, or other
+    event field is sent. A concurrent edit (HTTP 412) gets one bounded
+    refetch/merge retry. An exact semantic replay succeeds after the GET
+    without another write.
+    """
+    event_url = _event_resource_url(event_id)
+    if not event_url:
+        logger.error("Google Calendar service metadata error: invalid event id")
+        return False
+    if (
+        not isinstance(metadata_value, str)
+        or not metadata_value
+        or len(metadata_value.encode("utf-8")) > MAX_PRIVATE_PROPERTY_VALUE_BYTES
+        or any(ord(character) < 32 for character in metadata_value)
+    ):
+        logger.error("Google Calendar service metadata error: invalid metadata value")
+        return False
+
+    async def _get(token: str):
+        async with httpx.AsyncClient() as client:
+            return await client.get(
+                event_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8.0,
+            )
+
+    for attempt in range(MAX_SERVICE_METADATA_ATTEMPTS):
+        try:
+            get_response = await _with_token_refresh(contractor, _get)
+        except Exception as error:  # noqa: BLE001
+            logger.error(
+                "Google Calendar service metadata error: operation=get_event "
+                f"exception_type={type(error).__name__}"
+            )
+            return False
+
+        if get_response is None:
+            logger.error(
+                "Google Calendar service metadata error: operation=get_event "
+                "reason=no_valid_access_token"
+            )
+            return False
+        if not 200 <= get_response.status_code < 300:
+            logger.error(
+                "Google Calendar service metadata error: operation=get_event "
+                f"status_code={get_response.status_code}"
+            )
+            return False
+
+        try:
+            event = get_response.json()
+        except Exception:  # noqa: BLE001 - response body is intentionally never logged
+            logger.error(
+                "Google Calendar service metadata error: operation=get_event "
+                "reason=invalid_response"
+            )
+            return False
+        private_properties = _event_private_properties(event)
+        etag = _event_etag(event)
+        if private_properties is None or etag is None:
+            logger.error(
+                "Google Calendar service metadata error: operation=get_event "
+                "reason=invalid_response"
+            )
+            return False
+
+        if private_properties.get(HEY_KEVIN_SERVICES_PRIVATE_KEY) == metadata_value:
+            logger.info("Google Calendar service metadata already current")
+            return True
+
+        private_properties[HEY_KEVIN_SERVICES_PRIVATE_KEY] = metadata_value
+        body = {"extendedProperties": {"private": private_properties}}
+
+        async def _patch(token: str):
+            async with httpx.AsyncClient() as client:
+                return await client.patch(
+                    event_url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "If-Match": etag,
+                    },
+                    json=body,
+                    timeout=8.0,
+                )
+
+        try:
+            patch_response = await _with_token_refresh(contractor, _patch)
+        except Exception as error:  # noqa: BLE001
+            logger.error(
+                "Google Calendar service metadata error: operation=patch_event "
+                f"exception_type={type(error).__name__}"
+            )
+            return False
+        if patch_response is None:
+            logger.error(
+                "Google Calendar service metadata error: operation=patch_event "
+                "reason=no_valid_access_token"
+            )
+            return False
+        if 200 <= patch_response.status_code < 300:
+            logger.info("Google Calendar service metadata updated")
+            return True
+        if patch_response.status_code == 412 and attempt + 1 < MAX_SERVICE_METADATA_ATTEMPTS:
+            continue
+
+        logger.error(
+            "Google Calendar service metadata error: operation=patch_event "
+            f"status_code={patch_response.status_code}"
+        )
+        return False
+
+    return False
+
+
+async def cancel_appointment(contractor: dict, event_id: str) -> bool:
+    """Delete an existing Google Calendar appointment.
+
+    Returns True only after Google confirms the deletion with a successful
+    response. The opaque event ID is URL-encoded and never written to logs.
+    """
+    event_url = _event_resource_url(event_id)
+    if not event_url:
+        logger.error("Google Calendar cancel event error: invalid event id")
+        return False
+
+    async def _call(token: str):
+        async with httpx.AsyncClient() as client:
+            return await client.delete(
+                event_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8.0,
+            )
+
+    try:
+        resp = await _with_token_refresh(contractor, _call)
+    except Exception as error:  # noqa: BLE001
+        logger.error(
+            "Google Calendar cancel event error: operation=cancel_event "
+            f"exception_type={type(error).__name__}"
+        )
+        return False
+
+    if resp is None:
+        logger.error(
+            "Google Calendar cancel event error: operation=cancel_event "
+            "reason=no_valid_access_token"
+        )
+        return False
+    if 200 <= resp.status_code < 300:
+        logger.info("Google Calendar event cancelled")
+        return True
+    if resp.status_code == 410:
+        # Google documents 410/deleted for an event that has already been
+        # deleted. Treat that as an idempotent success so a retry after a lost
+        # response can complete our pending canonical operation.
+        logger.info("Google Calendar event was already cancelled")
+        return True
+
+    # Status only: provider bodies can contain private event details.
+    logger.error(
+        "Google Calendar cancel event error: operation=cancel_event "
+        f"status_code={resp.status_code}"
+    )
+    return False

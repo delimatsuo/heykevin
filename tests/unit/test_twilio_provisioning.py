@@ -186,3 +186,6 @@ async def test_contractor_patch_cannot_enable_jobber_lead_capture(monkeypatch):
 
 def test_jobber_lead_capture_flag_is_server_protected():
     assert "jobber_lead_capture_enabled" in contractors_db.PROTECTED_FIELDS
+    assert "service_request_mutations_enabled" in contractors_db.PROTECTED_FIELDS
+    assert "customer_memory_capture_enabled" in contractors_db.PROTECTED_FIELDS
+    assert "customer_memory_personalization_enabled" in contractors_db.PROTECTED_FIELDS

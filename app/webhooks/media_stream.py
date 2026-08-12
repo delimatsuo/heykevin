@@ -725,6 +725,56 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                     contractor_config_loaded = with_entitlement_flags(contractor_data)
             if active_call.caller_name:
                 contractor_config_loaded["known_caller_name"] = active_call.caller_name
+                contractor_config_loaded["known_caller_name_trusted"] = (
+                    getattr(active_call, "caller_name_trusted", False) is True
+                )
+            if _contractor_id and active_call.caller_phone:
+                from app.services.receptionist_context import load_customer_memory_context
+
+                contractor_config_loaded.update(
+                    await load_customer_memory_context(
+                        _contractor_id,
+                        active_call.caller_phone,
+                        personalization_enabled=contractor_config_loaded.get(
+                            "customer_memory_personalization_enabled"
+                        )
+                        is True,
+                        mutations_enabled=(
+                            settings.service_request_recovery_enabled is True
+                            and
+                            contractor_config_loaded.get(
+                                "service_request_mutations_enabled"
+                            )
+                            is True
+                            and contractor_config_loaded.get(
+                                "integration_write_status"
+                            )
+                            == "approved"
+                        ),
+                    )
+                )
+            if contractor_config_loaded.get("customer_memory") or contractor_config_loaded.get(
+                "google_calendar_access_token"
+            ):
+                from app.db.service_requests import FirestoreServiceRequestRepository
+                from app.services.google_calendar_request_provider import (
+                    GoogleCalendarRequestProvider,
+                )
+                from app.services.service_request_repository import (
+                    ServiceRequestCommandService,
+                )
+
+                provider_adapter = (
+                    GoogleCalendarRequestProvider(contractor_config_loaded)
+                    if contractor_config_loaded.get("google_calendar_access_token")
+                    else None
+                )
+                contractor_config_loaded["service_request_command_service"] = (
+                    ServiceRequestCommandService(
+                        FirestoreServiceRequestRepository(),
+                        provider_adapter=provider_adapter,
+                    )
+                )
     except Exception as error:
         _log_safe_exception("stream_setup_error", error, call_sid)
         await _cancel_task(ingress_task)

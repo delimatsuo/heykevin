@@ -30,6 +30,7 @@ from app.services.voice_pipeline import (
     build_system_prompt,
     is_owner_availability_hold,
 )
+from app.services.receptionist_context import build_greeting_text
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
 
@@ -305,30 +306,7 @@ class GeminiPipeline:
 
     def _build_greeting_text(self) -> str:
         """Return the bounded default greeting and caller disclosure."""
-        business_name = self._contractor_config.get(
-            "business_name",
-            f"{self._contractor_config.get('owner_name', settings.user_name)}'s office",
-        )
-        business_name = " ".join(
-            str(business_name).split()[: self.MAX_GREETING_BUSINESS_NAME_WORDS]
-        ) or "the office"
-        owner_name = self._contractor_config.get("owner_name", settings.user_name)
-        owner_parts = owner_name.split()
-        owner_first = owner_parts[0] if owner_parts else "the owner"
-        mode = self._contractor_config.get("effective_mode") or effective_mode(
-            self._contractor_config
-        )
-
-        if mode == "personal":
-            return f"Hi, this is Kevin, {owner_first}'s assistant. How can I help?"
-        if self._after_hours:
-            return (
-                f"{business_name} is currently closed. My name is Kevin. How can I help?"
-            )
-        return (
-            f"Hi, thank you for calling {business_name}. My name is Kevin. "
-            "How can I help you?"
-        )
+        return build_greeting_text(self._contractor_config, self._after_hours)
 
     def _build_text_instruction_payload(self, text: str) -> dict:
         """Build the model-version-specific payload for an instruction turn."""
@@ -1481,9 +1459,6 @@ class GeminiPipeline:
         has_jobber = bool(self._contractor_config.get("jobber_access_token"))
         has_gcal = bool(self._contractor_config.get("google_calendar_access_token"))
 
-        if not has_jobber and not has_gcal:
-            return []
-
         declarations = []
 
         if has_jobber:
@@ -1528,7 +1503,21 @@ class GeminiPipeline:
                 },
             ])
 
-        return [{"function_declarations": declarations}]
+        request_context = self._contractor_config.get("service_request_context")
+        if (
+            isinstance(request_context, dict)
+            and request_context.get("customer_key")
+            and request_context.get("open_service_requests")
+            and settings.service_request_recovery_enabled is True
+            and self._contractor_config.get("service_request_mutations_enabled") is True
+            and self._contractor_config.get("integration_write_status") == "approved"
+            and bool(self._contractor_config.get("google_calendar_access_token"))
+        ):
+            from app.services.receptionist_tools import gemini_tool_declarations
+
+            declarations.extend(gemini_tool_declarations())
+
+        return [{"function_declarations": declarations}] if declarations else []
 
     async def _handle_tool_calls(
         self,
@@ -1564,6 +1553,9 @@ class GeminiPipeline:
         temp_pipeline = VoicePipeline.__new__(VoicePipeline)
         temp_pipeline._contractor_config = self._contractor_config
         temp_pipeline._call_sid = self._call_sid
+        temp_pipeline._caller_phone = self._caller_phone
+        if hasattr(self, "_receptionist_tool_executor"):
+            temp_pipeline._receptionist_tool_executor = self._receptionist_tool_executor
 
         responses = []
         for fc in function_calls:
@@ -1578,8 +1570,19 @@ class GeminiPipeline:
             )
 
             try:
+                from app.services.receptionist_tools import RECEPTIONIST_TOOL_NAMES
+
+                execution_kwargs = (
+                    {"operation_id": call_id}
+                    if tool_name in RECEPTIONIST_TOOL_NAMES
+                    else {}
+                )
                 result_str = await asyncio.wait_for(
-                    temp_pipeline._execute_tool(tool_name, tool_args),
+                    temp_pipeline._execute_tool(
+                        tool_name,
+                        tool_args,
+                        **execution_kwargs,
+                    ),
                     timeout=self.TOOL_DISPATCH_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:

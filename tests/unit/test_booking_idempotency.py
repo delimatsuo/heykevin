@@ -215,57 +215,30 @@ async def test_booking_without_a_call_sid_still_succeeds(monkeypatch):
     assert "id" not in calls[0][1]["json"], "let Google assign an id when we cannot derive one"
 
 
-@pytest.mark.asyncio
-async def test_voice_pipeline_passes_call_sid_so_protection_is_not_inert(monkeypatch):
-    """The dedup only works if the live tool path actually supplies a call sid.
+def test_managed_booking_identity_is_stable_across_calls_and_phone_formatting():
+    """Provider identity is semantic product state, never a call/tool ID."""
+    from app.services.voice_pipeline import _managed_booking_identity
 
-    Without this, `book_appointment` falls back to letting Google assign an
-    id and every duplicate-protection test above still passes while the
-    running system is unprotected.
-    """
-    import json as _json
-
-    from app.services.gated_actions import ActionKey
-    from app.services.voice_pipeline import VoicePipeline
-
-    seen = {}
-
-    async def fake_book(contractor, **kwargs):
-        seen.update(kwargs)
-        return "event-1"
-
-    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book)
-
-    async def _noop(*_args, **_kwargs):
-        return None
-
-    pipeline = VoicePipeline(
-        on_audio_out=_noop,
-        on_transcript=_noop,
-        on_call_complete=_noop,
-        call_sid="CA_LIVE_CALL",
-        contractor_config={
-            "contractor_id": "contractor-1",
-            "google_calendar_access_token": "access-token",
-            "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
-            "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
-            "integration_write_status": "approved",
-        },
+    first = _managed_booking_identity(
+        "contractor-1",
+        "+16175550123",
+        "Estimate",
+        "2026-08-06T09:00:00Z",
+        "2026-08-06T10:00:00Z",
+    )
+    later_call = _managed_booking_identity(
+        "contractor-1",
+        "617-555-0123",
+        "  Estimate  ",
+        "2026-08-06T05:00:00-04:00",
+        "2026-08-06T06:00:00-04:00",
     )
 
-    result = _json.loads(
-        await pipeline._execute_tool(
-            "book_appointment",
-            {
-                "title": "Estimate",
-                "start_time": "2026-08-06T09:00:00Z",
-                "end_time": "2026-08-06T10:00:00Z",
-            },
-        )
-    )
-
-    assert result["success"] is True
-    assert seen.get("call_sid") == "CA_LIVE_CALL"
+    assert later_call == first
+    request_id, event_id, _title, _start, _end = first
+    assert request_id.startswith("sr_")
+    assert len(event_id) == 32
+    assert set(event_id) <= BASE32HEX_ALPHABET
 
 
 @pytest.mark.asyncio

@@ -143,6 +143,29 @@ COMMON FICTIONAL FAQS:
   appropriate utility from a safe location; this demo cannot diagnose or dispatch.
 """
 
+_PUBLIC_DEMO_CONVERSATION_KNOWLEDGE = """SERVICE AREA AND HOURS:
+- Serve Boston and the nearby communities of Brookline, Cambridge, Chelsea, Everett,
+  Medford, Newton, Quincy, Revere, Somerville, and Watertown.
+- Answer area questions with a direct yes or no. Boston includes all neighborhoods.
+- Office hours are daily from 8:00 AM to 6:00 PM Eastern.
+- Do not offer after-hours or emergency dispatch.
+
+RESIDENTIAL SERVICE SCOPE:
+- Handle common residential faucets, toilets, accessible interior drains, garbage
+  disposals, hose bibs, and standard tank water heaters.
+- Do not handle commercial work, gas lines, main-sewer excavation, septic systems,
+  mold, electrical work, HVAC, appliance repair, or biohazards.
+- Give the configured price range when asked, explain the basic workflow briefly, and
+  say that unusual access, fit, damage, or code conditions can change the scope.
+- Do not automatically add the $89 diagnostic visit to a repair or replacement range.
+
+CALL STYLE:
+- Treat each caller question as a real customer question and answer it directly.
+- Use plain language, contractions, and one relevant follow-up question at most.
+- Do not repeat the opening disclosure during ordinary service, price, area, hours,
+  process, or availability questions.
+"""
+
 
 def build_public_demo_profile() -> dict[str, Any]:
     """Return a fresh, code-owned fictional business profile for prompt construction.
@@ -215,6 +238,7 @@ def build_public_demo_profile() -> dict[str, Any]:
         "business_name": "Hey Kevin Boston Plumbing Demo - FICTIONAL",
         "conversation_business_name": "Hey Kevin Boston Plumbing",
         "service_type": "fictional residential plumbing demonstration",
+        "conversation_service_type": "residential plumbing",
         "service_fee_cents": 8900,
         "timezone": "America/New_York",
         "business_hours_start": "08:00",
@@ -229,6 +253,7 @@ def build_public_demo_profile() -> dict[str, Any]:
         "services": services,
         "faqs": faqs,
         "knowledge": _PUBLIC_DEMO_KNOWLEDGE,
+        "conversation_knowledge": _PUBLIC_DEMO_CONVERSATION_KNOWLEDGE,
         "demo_disclosure": PUBLIC_DEMO_DISCLOSURE,
         "public_demo_policy": {
             "real_services": False,
@@ -283,10 +308,13 @@ def build_public_demo_system_prompt(config: object) -> str:
         max_length=200,
     )
     service_type = _bounded_demo_prompt_value(
-        config.get("service_type", "residential services"),
+        config.get("conversation_service_type", "residential services"),
         max_length=120,
     )
-    knowledge = _bounded_demo_prompt_value(config.get("knowledge", ""), max_length=10_000)
+    knowledge = _bounded_demo_prompt_value(
+        config.get("conversation_knowledge", ""),
+        max_length=5_000,
+    )
     services = _format_demo_services(config.get("services", []))
 
     return f"""You are Kevin, the AI receptionist for {conversation_business_name}.
@@ -352,7 +380,7 @@ BUSINESS CATEGORY:
 SERVICE PRICE RANGES:
 {services or "No demo price ranges are configured."}
 
-INTERNAL BUSINESS KNOWLEDGE:
+BUSINESS KNOWLEDGE:
 {knowledge or "No additional demo facts are configured."}
 
 CONVERSATION ENDING:

@@ -67,6 +67,10 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
     """Gemini transport with a fixed, no-side-effect public-demo policy."""
 
     MAX_RECONNECT_ATTEMPTS = 0
+    # The public PSTN demo must reliably detect repeated caller turns. Keep the
+    # longer prefix padding that rejects brief line noise, but do not inherit
+    # the tenant pipeline's conservative speech-start threshold.
+    REALTIME_START_OF_SPEECH_SENSITIVITY = "START_SENSITIVITY_HIGH"
 
     def __init__(self, *args, **kwargs):
         if args:

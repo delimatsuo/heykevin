@@ -72,6 +72,10 @@ class GeminiPipeline:
     """
 
     URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
+    REALTIME_START_OF_SPEECH_SENSITIVITY = "START_SENSITIVITY_LOW"
+    REALTIME_END_OF_SPEECH_SENSITIVITY = "END_SENSITIVITY_HIGH"
+    REALTIME_PREFIX_PADDING_MS = 300
+    REALTIME_SILENCE_DURATION_MS = 500
     CALLER_SILENCE_PROMPT_SECONDS = 10
     CALLER_SILENCE_HANGUP_SECONDS = 10
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
@@ -256,6 +260,22 @@ class GeminiPipeline:
 
         return config
 
+    def _build_realtime_input_config(self) -> dict:
+        """Return overridable Live VAD controls for the current call surface."""
+
+        return {
+            "automatic_activity_detection": {
+                "start_of_speech_sensitivity": (
+                    self.REALTIME_START_OF_SPEECH_SENSITIVITY
+                ),
+                "end_of_speech_sensitivity": self.REALTIME_END_OF_SPEECH_SENSITIVITY,
+                "prefix_padding_ms": self.REALTIME_PREFIX_PADDING_MS,
+                "silence_duration_ms": self.REALTIME_SILENCE_DURATION_MS,
+            },
+            "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+        }
+
     def _call_label(self) -> str:
         """Return a short non-PII call label for operational logs."""
         return self._call_sid[:8] or "unknown"
@@ -375,16 +395,7 @@ class GeminiPipeline:
                     # syllable. A genuine barge-in now registers marginally later,
                     # which is the right side to err on: being cut off mid-sentence
                     # reads as broken, a barge-in 200ms later reads as normal.
-                    "realtime_input_config": {
-                        "automatic_activity_detection": {
-                            "start_of_speech_sensitivity": "START_SENSITIVITY_LOW",
-                            "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 500,
-                        },
-                        "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
-                        "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
-                    },
+                    "realtime_input_config": self._build_realtime_input_config(),
                 }
             }
 

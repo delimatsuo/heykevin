@@ -213,6 +213,19 @@ def test_demo_pipeline_uses_friendly_male_voice_and_conversational_greeting(monk
     assert "booking a visit" in greeting
 
 
+def test_demo_pipeline_uses_high_speech_detection_with_noise_padding():
+    pipeline = PublicDemoGeminiPipeline.__new__(PublicDemoGeminiPipeline)
+
+    config = pipeline._build_realtime_input_config()
+    activity = config["automatic_activity_detection"]
+
+    assert activity["start_of_speech_sensitivity"] == "START_SENSITIVITY_HIGH"
+    assert activity["prefix_padding_ms"] >= 300
+    assert activity["end_of_speech_sensitivity"] == "END_SENSITIVITY_HIGH"
+    assert config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
+    assert config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
+
+
 @pytest.mark.asyncio
 async def test_rate_limited_call_never_acquires_provider_lease(monkeypatch):
     _configure(monkeypatch)

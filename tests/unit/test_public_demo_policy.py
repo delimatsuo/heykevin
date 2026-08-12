@@ -117,7 +117,9 @@ def test_profile_has_explicit_no_real_world_and_no_pii_rules_and_builds_prompt()
     assert profile["business_name"] in prompt
     assert "Hey Kevin Boston Plumbing Demo" in prompt
     assert "Faucet repair labor: $165-$325" in prompt
-    assert "PUBLIC DEMO SAFETY AND PRIVACY RULES" in prompt
+    assert "RESIDENTIAL SERVICE SCOPE" in prompt
+    assert "Answer area questions with a direct yes or no" in prompt
+    assert "fictional residential plumbing demonstration" not in prompt
     assert "The opening disclosure happens once" in prompt
     assert 'Never preface an ordinary answer with "as part of our demo,"' in prompt
     assert 'Caller: "Do you do toilet replacement?"' in prompt

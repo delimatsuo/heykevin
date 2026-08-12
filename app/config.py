@@ -3,14 +3,14 @@
 import base64 as _base64
 import binascii as _binascii
 import json as _json
-from typing import Optional as _Optional
+import re as _re
 
 from pydantic_settings import BaseSettings
-
 
 PRODUCTION_GCP_PROJECT_ID = "kevin-491315"
 PRODUCTION_CLOUD_RUN_URL = "https://kevin-api-752910912062.us-central1.run.app"
 PRODUCTION_FIREBASE_DATABASE_URL = "https://kevin-491315-rtdb.firebaseio.com"
+_E164_RE = _re.compile(r"\+[1-9]\d{7,14}\Z")
 
 
 class Settings(BaseSettings):
@@ -56,6 +56,22 @@ class Settings(BaseSettings):
     # patterns (e.g. PSTN re-dials) without weakening the lockout.
     pin_rate_limit: int = 10
     pin_rate_window_seconds: int = 3600
+
+    # Public try-it-yourself phone demo. This is intentionally disabled unless
+    # every value is set explicitly. The demo has its own fail-closed webhook
+    # and never falls through to the ordinary contractor/owner call path.
+    public_demo_enabled: bool = False
+    public_demo_number: str = ""
+    public_demo_hmac_secret: str = ""
+    public_demo_per_caller_limit: int = 3
+    public_demo_per_caller_window_seconds: int = 3600
+    public_demo_daily_call_limit: int = 100
+    public_demo_concurrency_limit: int = 3
+    public_demo_max_call_duration_seconds: int = 180
+    public_demo_lease_ttl_seconds: int = 300
+    # Operator assertion set only after the required Firestore TTL policies have
+    # been inspected in the isolated demo project and deletion has been proven.
+    public_demo_ttl_policies_verified: bool = False
 
     # Gemini
     gemini_api_key: str = ""
@@ -154,19 +170,78 @@ def decode_transcript_encryption_key(raw: str) -> bytes | None:
     return key if len(key) == 32 else None
 
 
-def validate_runtime_safety() -> None:
+def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
     """Fail fast when an environment is pointed at the wrong runtime resources."""
     env = (settings.environment or "").strip().lower()
     errors: list[str] = []
 
-    if env not in {"development", "staging", "production", "test"}:
-        errors.append("ENVIRONMENT must be one of development, staging, production, or test")
+    if env not in {"development", "staging", "production", "demo", "test"}:
+        errors.append(
+            "ENVIRONMENT must be one of development, staging, production, demo, or test"
+        )
 
-    if env in {"staging", "production"} and decode_transcript_encryption_key(
+    if env == "demo" and not public_demo_entrypoint:
+        errors.append("ENVIRONMENT=demo requires the dedicated public demo entry point")
+    if env != "demo" and public_demo_entrypoint:
+        errors.append("The dedicated public demo entry point requires ENVIRONMENT=demo")
+
+    if settings.public_demo_enabled:
+        demo_number = settings.public_demo_number.strip()
+        if env != "demo":
+            errors.append("PUBLIC_DEMO_ENABLED=true requires ENVIRONMENT=demo")
+        if not _E164_RE.fullmatch(demo_number):
+            errors.append(
+                "PUBLIC_DEMO_NUMBER must be an exact E.164 number when "
+                "PUBLIC_DEMO_ENABLED=true"
+            )
+        if not settings.cloud_run_url.startswith("https://"):
+            errors.append("CLOUD_RUN_URL must use HTTPS when PUBLIC_DEMO_ENABLED=true")
+        if len(settings.public_demo_hmac_secret.strip()) < 32:
+            errors.append(
+                "PUBLIC_DEMO_HMAC_SECRET must be at least 32 characters when "
+                "PUBLIC_DEMO_ENABLED=true"
+            )
+        if not settings.public_demo_ttl_policies_verified:
+            errors.append(
+                "PUBLIC_DEMO_TTL_POLICIES_VERIFIED=true is required after verified "
+                "Firestore TTL configuration when PUBLIC_DEMO_ENABLED=true"
+            )
+        if settings.public_demo_per_caller_limit <= 0:
+            errors.append("PUBLIC_DEMO_PER_CALLER_LIMIT must be positive")
+        if settings.public_demo_per_caller_window_seconds <= 0:
+            errors.append("PUBLIC_DEMO_PER_CALLER_WINDOW_SECONDS must be positive")
+        if settings.public_demo_daily_call_limit <= 0:
+            errors.append("PUBLIC_DEMO_DAILY_CALL_LIMIT must be positive")
+        if settings.public_demo_concurrency_limit <= 0:
+            errors.append("PUBLIC_DEMO_CONCURRENCY_LIMIT must be positive")
+        if not 30 <= settings.public_demo_max_call_duration_seconds <= 300:
+            errors.append(
+                "PUBLIC_DEMO_MAX_CALL_DURATION_SECONDS must be between 30 and 300"
+            )
+        if (
+            settings.public_demo_lease_ttl_seconds
+            < settings.public_demo_max_call_duration_seconds + 60
+        ):
+            errors.append(
+                "PUBLIC_DEMO_LEASE_TTL_SECONDS must be at least the max call duration plus 60"
+            )
+
+    if env == "demo" and settings.allow_production_resources_in_non_production:
+        errors.append(
+            "ALLOW_PRODUCTION_RESOURCES_IN_NON_PRODUCTION must be false when ENVIRONMENT=demo"
+        )
+    if env == "demo" and (settings.log_level or "").strip().upper() == "DEBUG":
+        errors.append(
+            "LOG_LEVEL=DEBUG is forbidden when ENVIRONMENT=demo because provider "
+            "transport logs may contain credentials or caller media"
+        )
+
+    if env in {"staging", "production", "demo"} and decode_transcript_encryption_key(
         settings.transcript_encryption_key
     ) is None:
         errors.append(
-            "TRANSCRIPT_ENCRYPTION_KEY must be valid 32-byte base64 in staging and production"
+            "TRANSCRIPT_ENCRYPTION_KEY must be valid 32-byte base64 in staging, "
+            "production, and demo"
         )
 
     if env == "production":
@@ -183,7 +258,7 @@ def validate_runtime_safety() -> None:
         elif settings.twilio_account_sid != settings.production_twilio_account_sid:
             errors.append("TWILIO_ACCOUNT_SID must be the production account when ENVIRONMENT=production")
 
-    if env in {"development", "staging"} and not settings.allow_production_resources_in_non_production:
+    if env in {"development", "staging", "demo"} and not settings.allow_production_resources_in_non_production:
         if settings.appstore_environment == "production":
             errors.append("APPSTORE_ENVIRONMENT must not be production outside ENVIRONMENT=production")
         if not settings.apns_sandbox:
@@ -204,7 +279,7 @@ def validate_runtime_safety() -> None:
     if errors:
         raise RuntimeError("Unsafe runtime configuration: " + "; ".join(errors))
 
-_dial_in_cache: _Optional[dict] = None
+_dial_in_cache: dict | None = None
 
 
 def get_dial_in_number(country_code: str = "US") -> str:

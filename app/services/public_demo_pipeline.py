@@ -57,6 +57,10 @@ PUBLIC_DEMO_GEMINI_TOOLS = [
     }
 ]
 
+# The public demo has its own spoken identity.  Keep this choice local to the
+# demo so product users retain their configured language/persona voices.
+PUBLIC_DEMO_WARM_VOICE = "Sulafat"
+
 
 class PublicDemoGeminiPipeline(GeminiPipeline):
     """Gemini transport with a fixed, no-side-effect public-demo policy."""
@@ -77,12 +81,14 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
             caller_phone="",
             call_sid="",
         )
+        self._voice = PUBLIC_DEMO_WARM_VOICE
         self._system_prompt = build_public_demo_system_prompt(profile)
 
     def _build_greeting_text(self) -> str:
         return (
-            "Hi, thank you for trying Kevin with the Hey Kevin Boston Plumbing Demo, "
-            "a fictional business profile. What would you like to test?"
+            "Thanks for calling Hey Kevin's Boston Plumbing demo. I'm Kevin, the AI "
+            "receptionist. You can ask about services, the areas we cover, example "
+            "pricing, or try booking a visit. What can I help with today?"
         )
 
     def _build_gemini_tools(self) -> list:

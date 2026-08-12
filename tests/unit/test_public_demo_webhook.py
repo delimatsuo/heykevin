@@ -25,7 +25,10 @@ os.environ.setdefault("USER_PHONE", "+15555550123")
 from app import config as app_config
 from app.db.contractors import PROTECTED_FIELDS
 from app.services.public_demo import build_public_demo_profile, build_public_demo_system_prompt
-from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
+from app.services.public_demo_pipeline import (
+    PUBLIC_DEMO_WARM_VOICE,
+    PublicDemoGeminiPipeline,
+)
 from app.webhooks import public_demo
 
 
@@ -157,7 +160,7 @@ async def test_wrong_number_fails_closed_without_forwarding(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admitted_call_discloses_demo_and_never_embeds_caller_phone(monkeypatch):
+async def test_admitted_call_connects_directly_to_warm_demo_voice_and_never_embeds_caller_phone(monkeypatch):
     _configure(monkeypatch)
     rate_keys = []
     rate_ttls = []
@@ -181,9 +184,8 @@ async def test_admitted_call_discloses_demo_and_never_embeds_caller_phone(monkey
     response = await public_demo.handle_public_demo_incoming(_incoming(), None)
     body = response.body.decode()
 
-    assert "fictional" in body.lower()
-    assert "AI" in body
-    assert "no real appointments" in body.lower()
+    assert "<Say" not in body
+    assert "Polly.Matthew" not in body
     assert 'url="wss://demo.example.test/public-demo-stream"' in body
     assert "signed-demo-token" in body
     assert "CA11111111111111111111111111111111" not in body
@@ -192,6 +194,18 @@ async def test_admitted_call_discloses_demo_and_never_embeds_caller_phone(monkey
     assert rate_keys[0] != "+12025550147"
     assert "12025550147" not in rate_keys[0]
     assert rate_ttls == [3600, 86_400]
+
+
+def test_demo_pipeline_uses_warm_voice_and_conversational_greeting():
+    pipeline = PublicDemoGeminiPipeline.__new__(PublicDemoGeminiPipeline)
+
+    greeting = pipeline._build_greeting_text()
+
+    assert PUBLIC_DEMO_WARM_VOICE == "Sulafat"
+    assert "AI receptionist" in greeting
+    assert "fictional" not in greeting.lower()
+    assert "services" in greeting
+    assert "booking a visit" in greeting
 
 
 @pytest.mark.asyncio

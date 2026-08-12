@@ -24,7 +24,6 @@ from app.config import settings
 from app.db.rate_limits import check_and_increment
 from app.middleware.twilio_verify import verify_twilio_signature
 from app.services.public_demo import (
-    PUBLIC_DEMO_DISCLOSURE,
     acquire_public_demo_lease,
     claim_public_demo_stream,
     claim_public_demo_usage_trigger,
@@ -149,7 +148,6 @@ def _public_demo_limit_twiml() -> str:
 def _public_demo_stream_twiml(stream_token: str) -> str:
     ws_url = settings.cloud_run_url.replace("https://", "wss://")
     response = VoiceResponse()
-    response.say(PUBLIC_DEMO_DISCLOSURE, voice="Polly.Matthew")
     connect = Connect()
     stream = connect.stream(url=f"{ws_url}/public-demo-stream")
     stream.parameter(name="demo_token", value=stream_token)

@@ -34,6 +34,7 @@ PUBLIC_DEMO_STREAM_TOKEN_MAX_TTL_SECONDS = 360
 PUBLIC_DEMO_LEASE_COLLECTION = "public_demo_control"
 PUBLIC_DEMO_LEASE_DOCUMENT = "concurrency_v1"
 PUBLIC_DEMO_STREAM_CLAIM_COLLECTION = "public_demo_stream_claims"
+PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TTL_SECONDS = 172_800
 
 PUBLIC_DEMO_DISCLOSURE = (
     "This is Kevin, an AI receptionist demo for a fictional Boston-area plumbing "
@@ -48,6 +49,7 @@ _STREAM_TOKEN_PREFIX = b"hey-kevin-public-demo-stream-v1\x00"
 _IDENTIFIER_PREFIX = b"hey-kevin-public-demo-identifier-v1\x00"
 _LEASE_NAMESPACE = "concurrency-lease-v1"
 _STREAM_CLAIM_NAMESPACE = "stream-claim-v1"
+_USAGE_TRIGGER_CLAIM_NAMESPACE = "usage-trigger-claim-v1"
 _LEASE_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 _BASE64URL_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 
@@ -694,6 +696,133 @@ async def claim_public_demo_stream(
         )
         return False
 
+
+async def claim_public_demo_usage_trigger(
+    idempotency_token: str,
+    secret: str | bytes | bytearray,
+    *,
+    now: datetime | float | None = None,
+) -> str:
+    """Atomically create/read an HMAC-keyed usage-trigger replay seal.
+
+    Returns ``new``, ``pending``, or ``completed``. Storage uncertainty raises so
+    the webhook can return 503 and preserve Twilio's retries. A pending claim is
+    intentionally retryable: suspension is idempotent, while silently consuming a
+    callback before the provider mutation succeeds would leave spending unbounded.
+    """
+
+    token = str(idempotency_token or "")
+    if not 8 <= len(token) <= 512 or any(not 33 <= ord(char) <= 126 for char in token):
+        raise ValueError("usage trigger idempotency token is malformed")
+    claim_id = hash_public_demo_identifier(
+        secret,
+        _USAGE_TRIGGER_CLAIM_NAMESPACE,
+        token,
+    )
+    current_time = _lease_now(now)
+    expires_epoch = current_time + PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TTL_SECONDS
+    expires_at = datetime.fromtimestamp(expires_epoch, tz=UTC)
+
+    def _claim() -> str:
+        from google.cloud import firestore
+
+        from app.db.firestore_client import get_firestore_client
+
+        db = get_firestore_client()
+        doc_ref = db.collection(PUBLIC_DEMO_STREAM_CLAIM_COLLECTION).document(claim_id)
+
+        @firestore.transactional
+        def _transactional_claim(transaction) -> str:
+            snapshot = doc_ref.get(transaction=transaction)
+            if snapshot.exists:
+                data = snapshot.to_dict()
+                if not isinstance(data, dict) or set(data) != {
+                    "expires_at",
+                    "expires_epoch",
+                    "status",
+                }:
+                    raise ValueError("public demo usage-trigger claim is malformed")
+                prior_epoch = data["expires_epoch"]
+                status = data["status"]
+                if (
+                    isinstance(prior_epoch, bool)
+                    or not isinstance(prior_epoch, (int, float))
+                    or not math.isfinite(float(prior_epoch))
+                    or status not in {"pending", "completed"}
+                ):
+                    raise ValueError("public demo usage-trigger claim state is malformed")
+                if float(prior_epoch) > current_time:
+                    return str(status)
+
+            transaction.set(
+                doc_ref,
+                {
+                    "expires_at": expires_at,
+                    "expires_epoch": expires_epoch,
+                    "status": "pending",
+                },
+                merge=False,
+            )
+            return "new"
+
+        return _transactional_claim(db.transaction())
+
+    return await asyncio.get_running_loop().run_in_executor(None, _claim)
+
+
+async def complete_public_demo_usage_trigger(
+    idempotency_token: str,
+    secret: str | bytes | bytearray,
+) -> bool:
+    """Seal a successfully tripped usage callback against delayed replay."""
+
+    token = str(idempotency_token or "")
+    if not 8 <= len(token) <= 512 or any(not 33 <= ord(char) <= 126 for char in token):
+        return False
+    try:
+        claim_id = hash_public_demo_identifier(
+            secret,
+            _USAGE_TRIGGER_CLAIM_NAMESPACE,
+            token,
+        )
+    except (TypeError, ValueError):
+        return False
+
+    def _complete() -> bool:
+        from google.cloud import firestore
+
+        from app.db.firestore_client import get_firestore_client
+
+        db = get_firestore_client()
+        doc_ref = db.collection(PUBLIC_DEMO_STREAM_CLAIM_COLLECTION).document(claim_id)
+
+        @firestore.transactional
+        def _transactional_complete(transaction) -> bool:
+            snapshot = doc_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict()
+            if not isinstance(data, dict) or set(data) != {
+                "expires_at",
+                "expires_epoch",
+                "status",
+            }:
+                raise ValueError("public demo usage-trigger claim is malformed")
+            if data["status"] not in {"pending", "completed"}:
+                raise ValueError("public demo usage-trigger claim status is malformed")
+            transaction.set(doc_ref, {**data, "status": "completed"}, merge=False)
+            return True
+
+        return _transactional_complete(db.transaction())
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, _complete)
+    except Exception as error:  # noqa: BLE001 - an uncertain seal must cause retry
+        logger.error(
+            "public demo usage-trigger completion failed: exception_type=%s",
+            type(error).__name__,
+        )
+        return False
 
 def _lease_now(now: datetime | float | None) -> float:
     value = float(_new_york_now(now).timestamp())

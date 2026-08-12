@@ -28,6 +28,8 @@ from app.services.public_demo import (
     build_public_demo_profile,
     build_public_demo_system_prompt,
     claim_public_demo_stream,
+    claim_public_demo_usage_trigger,
+    complete_public_demo_usage_trigger,
     execute_public_demo_tool,
     hash_public_demo_identifier,
     is_public_demo_profile,
@@ -462,6 +464,23 @@ async def test_stream_claim_is_one_time_hmac_keyed_and_ttl_bounded(monkeypatch):
     # been deleted yet, the atomic transition permits a newly authorized claim.
     assert await claim_public_demo_stream(raw_sid, SECRET, ttl_seconds=30, now=131)
     assert fake.docs[path]["expires_epoch"] == 161
+
+
+@pytest.mark.asyncio
+async def test_usage_trigger_claim_is_hmac_keyed_pending_then_completed(monkeypatch):
+    fake = _install_fake_firestore(monkeypatch)
+    raw_token = "ACtest-FIRES-UTtest-2026-08-11"
+
+    assert await claim_public_demo_usage_trigger(raw_token, SECRET, now=100) == "new"
+    assert await claim_public_demo_usage_trigger(raw_token, SECRET, now=101) == "pending"
+    assert await complete_public_demo_usage_trigger(raw_token, SECRET)
+    assert await claim_public_demo_usage_trigger(raw_token, SECRET, now=102) == "completed"
+
+    path, persisted = next(iter(fake.docs.items()))
+    assert path.startswith(f"{PUBLIC_DEMO_STREAM_CLAIM_COLLECTION}/")
+    assert raw_token not in json.dumps(fake.docs, default=str)
+    assert persisted["status"] == "completed"
+    assert persisted["expires_at"] == datetime.fromtimestamp(172_900, tz=UTC)
 
 
 @pytest.mark.asyncio

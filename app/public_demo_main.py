@@ -87,6 +87,10 @@ async def global_exception_handler(request: Request, exc: Exception) -> Response
         request.url.path,
         type(exc).__name__,
     )
+    if request.url.path == "/webhooks/twilio/public-demo/usage-limit":
+        # Usage Triggers retry on 5xx. Never disguise a circuit-breaker failure as
+        # successful TwiML merely because it shares the Twilio webhook namespace.
+        return JSONResponse(status_code=503, content={"detail": "Retry later"})
     if request.url.path.startswith("/webhooks/twilio/public-demo/"):
         return twiml_response(_public_demo_unavailable_twiml())
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})

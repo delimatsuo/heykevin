@@ -125,6 +125,14 @@ Expected behavior:
 - Twilio and WebSocket transport loggers are forced to `WARNING`; `LOG_LEVEL=DEBUG`
   is rejected in the demo environment because provider URLs and frames can contain
   credentials, identifiers, or speech.
+- A signed, exact-trigger-bound daily `totalprice` usage callback self-suspends
+  the isolated Twilio child first, then best-effort ends its known active calls.
+  Only after a successful trip does the callback attempt a bounded HMAC replay
+  seal; a stalled database can cause a retry but cannot delay suspension. The
+  runtime never holds the production parent credential. A call racing the final
+  active-call list is still stopped by the hard media cutoff. The callback also
+  rejects `DateFired` values older than 15 minutes, and recovery waits out that
+  window before the parent restores the child.
 
 ## Activation gate
 
@@ -153,6 +161,13 @@ security/privacy review:
    non-production Firestore, RTDB, Twilio, and Gemini resources. Runtime safety
    rejects production data-plane or Twilio reuse. Apply a provider-side spend or
    usage alert/ceiling to the isolated Twilio and Gemini resources before publishing.
+   Create a recurring daily Twilio `totalprice` trigger at no more than $5, point
+   it to `/webhooks/twilio/public-demo/usage-limit`, and bind its exact SID and
+   amount through `PUBLIC_DEMO_TWILIO_USAGE_TRIGGER_SID` and
+   `PUBLIC_DEMO_TWILIO_DAILY_SPEND_LIMIT_USD`. Runtime validation refuses to enable
+   without that exact circuit-breaker binding. Usage evaluation and callback delivery
+   are delayed and can overshoot the threshold; this is a tested emergency stop, not
+   an instantaneous or absolute provider spend cap.
 4. Enable and verify Firestore TTL policies on the `expires_at` field for the
    `rate_limits`, `public_demo_stream_claims`, and `public_demo_control` collection
    groups. Prove with isolated test documents that the TTL configuration is active;
@@ -185,3 +200,19 @@ termination is required, explicitly end active calls in the isolated Twilio
 account and scale the demo service to zero. Then remove the public listing and
 disconnect the Twilio number. Release the number only after confirming it is not
 published or referenced by any forwarding configuration.
+
+For a provider-cost emergency, invoke the tested circuit breaker or suspend the
+isolated Twilio child from the parent account. The breaker suspends first, then
+best-effort ends calls it can observe; after suspension, verify the child has zero
+active calls and explicitly terminate any race through the parent account. Never
+close the child as routine rollback because closing it releases the Boston number.
+
+Recovery is deliberately fail-closed. Keep `PUBLIC_DEMO_ENABLED=false` and scale the
+demo service to zero before restoring the child. Resolve the cost cause, wait at least
+15 minutes for callback freshness to expire, verify all callback retries and active
+calls have finished, then delete/recreate the daily usage
+trigger so it is armed for the current GMT interval and update the exact bound trigger
+SID on the disabled service. Restore the Twilio child only after those checks, verify
+the unavailable call path, scale the service back up, and deliberately re-enable last.
+Never restore a suspended child while a prior enabled demo revision can still admit
+calls or while that day's one-shot usage trigger has already fired.

@@ -13,8 +13,11 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 
-from fastapi import APIRouter, Depends, Request, WebSocket
+from fastapi import APIRouter, Depends, Request, Response, WebSocket
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.config import settings
@@ -24,6 +27,8 @@ from app.services.public_demo import (
     PUBLIC_DEMO_DISCLOSURE,
     acquire_public_demo_lease,
     claim_public_demo_stream,
+    claim_public_demo_usage_trigger,
+    complete_public_demo_usage_trigger,
     hash_public_demo_identifier,
     release_public_demo_lease,
     sign_public_demo_stream_token,
@@ -54,6 +59,9 @@ PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS = 2.0
 PUBLIC_DEMO_COMPLETION_TIMEOUT_SECONDS = 3.0
 PUBLIC_DEMO_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 0.25
 PUBLIC_DEMO_RATE_DOCUMENT_TTL_SECONDS = 86_400
+PUBLIC_DEMO_CIRCUIT_BREAKER_TIMEOUT_SECONDS = 15.0
+PUBLIC_DEMO_USAGE_TRIGGER_MAX_AGE_SECONDS = 900
+PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TIMEOUT_SECONDS = 2.0
 
 
 def suppress_public_demo_sensitive_transport_logs() -> None:
@@ -226,6 +234,73 @@ async def _release_lease_safely(call_sid: str) -> None:
         _log_safe_exception("public_demo_lease_release_error", error, safe_label)
 
 
+async def _trip_public_demo_twilio_circuit_breaker() -> bool:
+    """Suspend the isolated child first, then best-effort end observed calls."""
+
+    from twilio.http.async_http_client import AsyncTwilioHttpClient
+    from twilio.rest import Client
+
+    suppress_public_demo_sensitive_transport_logs()
+    http_client = AsyncTwilioHttpClient(
+        timeout=PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS,
+        logger=logging.getLogger("twilio.async_http_client"),
+    )
+    client = Client(
+        settings.twilio_account_sid,
+        settings.twilio_auth_token,
+        http_client=http_client,
+    )
+    try:
+        account = await asyncio.wait_for(
+            client.api.accounts(settings.twilio_account_sid).update_async(
+                status="suspended"
+            ),
+            timeout=PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS + 1,
+        )
+        if str(getattr(account, "status", "")).strip().lower() != "suspended":
+            return False
+
+        async def _end_calls(status: str) -> None:
+            try:
+                calls = await client.calls.list_async(status=status, limit=5)
+                await asyncio.gather(
+                    *(
+                        client.calls(call.sid).update_async(
+                            status="canceled" if status == "queued" else "completed"
+                        )
+                        for call in calls
+                    ),
+                    return_exceptions=True,
+                )
+            except Exception as error:  # noqa: BLE001 - child is already suspended
+                _log_safe_exception("public_demo_breaker_call_cleanup_error", error)
+
+        cleanup = asyncio.gather(
+            *(_end_calls(status) for status in ("queued", "ringing", "in-progress")),
+            return_exceptions=True,
+        )
+        try:
+            await asyncio.wait_for(
+                cleanup,
+                timeout=PUBLIC_DEMO_CIRCUIT_BREAKER_TIMEOUT_SECONDS
+                - PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS
+                - 2,
+            )
+        except TimeoutError:
+            cleanup.cancel()
+            await asyncio.gather(cleanup, return_exceptions=True)
+            logger.warning("public_demo event=usage_breaker_cleanup_timeout")
+        return True
+    except Exception as error:  # noqa: BLE001 - trigger retries on a 5xx response
+        _log_safe_exception("public_demo_breaker_error", error)
+        return False
+    finally:
+        try:
+            await asyncio.wait_for(http_client.close(), timeout=0.5)
+        except Exception as error:  # noqa: BLE001 - provider mutation is already bounded
+            _log_safe_exception("public_demo_breaker_http_close_error", error)
+
+
 @router.post("/webhooks/twilio/public-demo/incoming")
 async def handle_public_demo_incoming(
     request: Request,
@@ -364,6 +439,87 @@ async def discard_public_demo_message(
     await request.form()
     logger.info("public_demo event=inbound_message_discarded")
     return twiml_response("<Response></Response>")
+
+
+@router.post("/webhooks/twilio/public-demo/usage-limit")
+async def handle_public_demo_usage_limit(
+    request: Request,
+    _=_TWILIO_SIGNATURE_REQUIRED,
+):
+    """Suspend the isolated Twilio child when its exact daily trigger fires."""
+
+    try:
+        form_data = await request.form()
+        configured_limit = Decimal(
+            str(settings.public_demo_twilio_daily_spend_limit_usd)
+        )
+        trigger_value = Decimal(str(form_data.get("TriggerValue", "")))
+        current_value = Decimal(str(form_data.get("CurrentValue", "")))
+        date_fired = parsedate_to_datetime(str(form_data.get("DateFired", "")))
+        if date_fired.tzinfo is None:
+            date_fired = date_fired.replace(tzinfo=UTC)
+        callback_age = (datetime.now(UTC) - date_fired.astimezone(UTC)).total_seconds()
+    except (InvalidOperation, TypeError, ValueError):
+        logger.warning("public_demo event=usage_breaker_rejected reason=invalid_amount")
+        return Response(status_code=403)
+    except Exception as error:  # noqa: BLE001 - preserve provider callback retries
+        _log_safe_exception("public_demo_usage_breaker_form_error", error)
+        return Response(status_code=503)
+
+    idempotency_token = str(form_data.get("IdempotencyToken", ""))
+    bound = (
+        str(form_data.get("AccountSid", "")) == settings.twilio_account_sid
+        and str(form_data.get("UsageTriggerSid", ""))
+        == settings.public_demo_twilio_usage_trigger_sid
+        and str(form_data.get("UsageCategory", "")).strip().lower() == "totalprice"
+        and str(form_data.get("TriggerBy", "")).strip().lower() == "price"
+        and str(form_data.get("Recurring", "")).strip().lower() == "daily"
+        and trigger_value == configured_limit
+        and current_value >= configured_limit
+        and 8 <= len(idempotency_token) <= 512
+        and all(33 <= ord(char) <= 126 for char in idempotency_token)
+        and -60 <= callback_age <= PUBLIC_DEMO_USAGE_TRIGGER_MAX_AGE_SECONDS
+    )
+    if not bound:
+        logger.warning("public_demo event=usage_breaker_rejected reason=misbound")
+        return Response(status_code=403)
+
+    # The provider stop comes before Firestore. A stalled replay seal must never
+    # delay suspension; DateFired freshness plus the fail-closed recovery procedure
+    # prevents an old callback from affecting a deliberately restored child.
+    if not await _trip_public_demo_twilio_circuit_breaker():
+        return Response(status_code=503)
+
+    secret = (settings.public_demo_hmac_secret or "").strip()
+    try:
+        claim_state = await asyncio.wait_for(
+            claim_public_demo_usage_trigger(
+                idempotency_token,
+                secret,
+            ),
+            timeout=PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TIMEOUT_SECONDS,
+        )
+    except Exception as error:  # noqa: BLE001 - preserve provider callback retries
+        _log_safe_exception("public_demo_usage_breaker_claim_error", error)
+        return Response(status_code=503)
+    if claim_state == "completed":
+        return {"status": "already_suspended"}
+    if claim_state not in {"new", "pending"}:
+        return Response(status_code=503)
+
+    try:
+        completed = await asyncio.wait_for(
+            complete_public_demo_usage_trigger(idempotency_token, secret),
+            timeout=PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TIMEOUT_SECONDS,
+        )
+    except Exception as error:  # noqa: BLE001 - preserve provider callback retries
+        _log_safe_exception("public_demo_usage_breaker_completion_error", error)
+        return Response(status_code=503)
+    if not completed:
+        return Response(status_code=503)
+
+    logger.critical("public_demo event=usage_breaker_tripped account=suspended")
+    return {"status": "suspended"}
 
 
 @router.websocket("/public-demo-stream")

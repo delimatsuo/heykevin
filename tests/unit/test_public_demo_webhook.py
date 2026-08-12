@@ -9,8 +9,10 @@ import logging
 import os
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
@@ -68,6 +70,17 @@ def _configure(monkeypatch):
     monkeypatch.setattr(public_demo.settings, "public_demo_concurrency_limit", 3)
     monkeypatch.setattr(public_demo.settings, "public_demo_max_call_duration_seconds", 180)
     monkeypatch.setattr(public_demo.settings, "public_demo_lease_ttl_seconds", 300)
+    monkeypatch.setattr(public_demo.settings, "twilio_account_sid", "AC" + "1" * 32)
+    monkeypatch.setattr(
+        public_demo.settings,
+        "public_demo_twilio_usage_trigger_sid",
+        "UT" + "2" * 32,
+    )
+    monkeypatch.setattr(
+        public_demo.settings,
+        "public_demo_twilio_daily_spend_limit_usd",
+        5.0,
+    )
     monkeypatch.setattr(public_demo.settings, "cloud_run_url", "https://demo.example.test")
 
 
@@ -79,6 +92,16 @@ def _incoming(**overrides):
     }
     values.update(overrides)
     return _Request(values)
+
+
+def _fresh_usage_trigger_date() -> str:
+    return datetime.now(UTC).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+
+def _stale_usage_trigger_date() -> str:
+    return (datetime.now(UTC) - timedelta(hours=1)).strftime(
+        "%a, %d %b %Y %H:%M:%S +0000"
+    )
 
 
 @pytest.mark.asyncio
@@ -538,6 +561,407 @@ async def test_status_callback_only_releases_ephemeral_lease(monkeypatch):
     assert released == ["CA11111111111111111111111111111111"]
 
 
+@pytest.mark.asyncio
+async def test_exact_usage_trigger_trips_isolated_twilio_breaker(monkeypatch):
+    _configure(monkeypatch)
+    tripped = []
+
+    async def trip():
+        tripped.append(True)
+        return True
+
+    async def claim(*_args, **_kwargs):
+        return "new"
+
+    async def complete(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", trip)
+    monkeypatch.setattr(public_demo, "claim_public_demo_usage_trigger", claim)
+    monkeypatch.setattr(public_demo, "complete_public_demo_usage_trigger", complete)
+    result = await public_demo.handle_public_demo_usage_limit(
+        _Request({
+            "AccountSid": "AC" + "1" * 32,
+            "UsageTriggerSid": "UT" + "2" * 32,
+            "UsageCategory": "totalprice",
+            "TriggerBy": "price",
+            "Recurring": "daily",
+            "TriggerValue": "5.00",
+            "CurrentValue": "5.01",
+            "IdempotencyToken": "synthetic-test-token",
+            "DateFired": _fresh_usage_trigger_date(),
+        }),
+        None,
+    )
+
+    assert result == {"status": "suspended"}
+    assert tripped == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("AccountSid", "AC" + "9" * 32),
+        ("UsageTriggerSid", "UT" + "9" * 32),
+        ("UsageCategory", "calls"),
+        ("TriggerBy", "usage"),
+        ("Recurring", "monthly"),
+        ("TriggerValue", "6"),
+        ("CurrentValue", "4.99"),
+        ("DateFired", _stale_usage_trigger_date()),
+    ],
+)
+async def test_misbound_usage_trigger_never_mutates_twilio(monkeypatch, field, value):
+    _configure(monkeypatch)
+
+    async def unexpected():
+        raise AssertionError("misbound usage trigger must not mutate Twilio")
+
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", unexpected)
+    values = {
+        "AccountSid": "AC" + "1" * 32,
+        "UsageTriggerSid": "UT" + "2" * 32,
+        "UsageCategory": "totalprice",
+        "TriggerBy": "price",
+        "Recurring": "daily",
+        "TriggerValue": "5",
+        "CurrentValue": "5",
+        "IdempotencyToken": "synthetic-bound-token",
+        "DateFired": _fresh_usage_trigger_date(),
+    }
+    values[field] = value
+    response = await public_demo.handle_public_demo_usage_limit(_Request(values), None)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_completed_usage_trigger_replay_is_idempotent_after_suspension(monkeypatch):
+    _configure(monkeypatch)
+
+    async def claim(*_args, **_kwargs):
+        return "completed"
+
+    tripped = []
+
+    async def trip():
+        tripped.append(True)
+        return True
+
+    monkeypatch.setattr(public_demo, "claim_public_demo_usage_trigger", claim)
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", trip)
+    result = await public_demo.handle_public_demo_usage_limit(
+        _Request({
+            "AccountSid": "AC" + "1" * 32,
+            "UsageTriggerSid": "UT" + "2" * 32,
+            "UsageCategory": "totalprice",
+            "TriggerBy": "price",
+            "Recurring": "daily",
+            "TriggerValue": "5.000000",
+            "CurrentValue": "5.010000",
+            "IdempotencyToken": "synthetic-replay-token",
+            "DateFired": _fresh_usage_trigger_date(),
+        }),
+        None,
+    )
+
+    assert result == {"status": "already_suspended"}
+    assert tripped == [True]
+
+
+@pytest.mark.asyncio
+async def test_usage_breaker_failure_returns_retryable_503(monkeypatch):
+    _configure(monkeypatch)
+
+    async def claim(*_args, **_kwargs):
+        return "pending"
+
+    async def fail_trip():
+        return False
+
+    monkeypatch.setattr(public_demo, "claim_public_demo_usage_trigger", claim)
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", fail_trip)
+    response = await public_demo.handle_public_demo_usage_limit(
+        _Request({
+            "AccountSid": "AC" + "1" * 32,
+            "UsageTriggerSid": "UT" + "2" * 32,
+            "UsageCategory": "totalprice",
+            "TriggerBy": "price",
+            "Recurring": "daily",
+            "TriggerValue": "5",
+            "CurrentValue": "6",
+            "IdempotencyToken": "synthetic-retry-token",
+            "DateFired": _fresh_usage_trigger_date(),
+        }),
+        None,
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_hanging_replay_claim_cannot_delay_provider_suspension(monkeypatch):
+    _configure(monkeypatch)
+    events = []
+
+    async def trip():
+        events.append("suspended")
+        return True
+
+    async def hanging_claim(*_args, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("claim-cancelled")
+            raise
+
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", trip)
+    monkeypatch.setattr(public_demo, "claim_public_demo_usage_trigger", hanging_claim)
+    monkeypatch.setattr(
+        public_demo,
+        "PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TIMEOUT_SECONDS",
+        0.05,
+    )
+    started = time.monotonic()
+    response = await public_demo.handle_public_demo_usage_limit(
+        _Request({
+            "AccountSid": "AC" + "1" * 32,
+            "UsageTriggerSid": "UT" + "2" * 32,
+            "UsageCategory": "totalprice",
+            "TriggerBy": "price",
+            "Recurring": "daily",
+            "TriggerValue": "5",
+            "CurrentValue": "6",
+            "IdempotencyToken": "synthetic-hanging-claim-token",
+            "DateFired": _fresh_usage_trigger_date(),
+        }),
+        None,
+    )
+
+    assert response.status_code == 503
+    assert events == ["suspended", "claim-cancelled"]
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.asyncio
+async def test_hanging_replay_completion_returns_retryable_503_after_suspension(monkeypatch):
+    _configure(monkeypatch)
+    events = []
+
+    async def trip():
+        events.append("suspended")
+        return True
+
+    async def claim(*_args, **_kwargs):
+        return "new"
+
+    async def hanging_completion(*_args, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("completion-cancelled")
+            raise
+
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", trip)
+    monkeypatch.setattr(public_demo, "claim_public_demo_usage_trigger", claim)
+    monkeypatch.setattr(
+        public_demo,
+        "complete_public_demo_usage_trigger",
+        hanging_completion,
+    )
+    monkeypatch.setattr(
+        public_demo,
+        "PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TIMEOUT_SECONDS",
+        0.05,
+    )
+    started = time.monotonic()
+    response = await public_demo.handle_public_demo_usage_limit(
+        _Request({
+            "AccountSid": "AC" + "1" * 32,
+            "UsageTriggerSid": "UT" + "2" * 32,
+            "UsageCategory": "totalprice",
+            "TriggerBy": "price",
+            "Recurring": "daily",
+            "TriggerValue": "5",
+            "CurrentValue": "6",
+            "IdempotencyToken": "synthetic-hanging-completion-token",
+            "DateFired": _fresh_usage_trigger_date(),
+        }),
+        None,
+    )
+
+    assert response.status_code == 503
+    assert events == ["suspended", "completion-cancelled"]
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.asyncio
+async def test_usage_breaker_suspends_before_bounded_parallel_cleanup(monkeypatch):
+    _configure(monkeypatch)
+    events = []
+
+    class Calls:
+        async def list_async(self, *, status, limit):
+            events.append(("list", status, limit))
+            return [SimpleNamespace(sid=f"CA-{status}")]
+
+        def __call__(self, sid):
+            events.append(("select-call", sid))
+            return self
+
+        async def update_async(self, **kwargs):
+            events.append(("end-call", kwargs["status"]))
+            return SimpleNamespace(status=kwargs["status"])
+
+    class Accounts:
+        def __call__(self, sid):
+            events.append(("select-account", sid))
+            return self
+
+        async def update_async(self, *, status):
+            events.append(("account", status))
+            return SimpleNamespace(status=status)
+
+    fake_client = SimpleNamespace(
+        calls=Calls(),
+        api=SimpleNamespace(accounts=Accounts()),
+    )
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: fake_client)
+
+    assert await public_demo._trip_public_demo_twilio_circuit_breaker() is True
+    assert events[0][0] == "select-account"
+    assert events[1] == ("account", "suspended")
+    assert [(event[0], event[-1]) for event in events if event[0] == "end-call"] == [
+        ("end-call", "canceled"),
+        ("end-call", "completed"),
+        ("end-call", "completed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usage_breaker_async_http_client_does_not_enable_sdk_retries(monkeypatch):
+    _configure(monkeypatch)
+    observed = []
+
+    class HttpClient:
+        def __init__(self, **kwargs):
+            observed.append(kwargs)
+
+        async def close(self):
+            return None
+
+    class Accounts:
+        def __call__(self, _sid):
+            return self
+
+        async def update_async(self, *, status):
+            return SimpleNamespace(status=status)
+
+    class Calls:
+        async def list_async(self, *, status, limit):
+            return []
+
+    fake_client = SimpleNamespace(
+        calls=Calls(),
+        api=SimpleNamespace(accounts=Accounts()),
+    )
+    monkeypatch.setattr("twilio.http.async_http_client.AsyncTwilioHttpClient", HttpClient)
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: fake_client)
+
+    assert await public_demo._trip_public_demo_twilio_circuit_breaker() is True
+    assert len(observed) == 1
+    assert "max_retries" not in observed[0]
+
+
+@pytest.mark.asyncio
+async def test_usage_breaker_cancels_slow_cleanup_before_return(monkeypatch):
+    _configure(monkeypatch)
+    events = []
+
+    class Calls:
+        async def list_async(self, *, status, limit):
+            events.append(("list", status, limit))
+            return [SimpleNamespace(sid=f"CA-{status}")]
+
+        def __call__(self, sid):
+            return self
+
+        async def update_async(self, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append(("cleanup-cancelled", kwargs["status"]))
+                raise
+            events.append(("late-mutation", kwargs["status"]))
+
+    class Accounts:
+        def __call__(self, _sid):
+            return self
+
+        async def update_async(self, *, status):
+            events.append(("account", status))
+            return SimpleNamespace(status=status)
+
+    fake_client = SimpleNamespace(
+        calls=Calls(),
+        api=SimpleNamespace(accounts=Accounts()),
+    )
+    monkeypatch.setattr("twilio.rest.Client", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(
+        public_demo,
+        "PUBLIC_DEMO_CIRCUIT_BREAKER_TIMEOUT_SECONDS",
+        4.05,
+    )
+
+    assert await public_demo._trip_public_demo_twilio_circuit_breaker() is True
+    snapshot = list(events)
+    await asyncio.sleep(0.05)
+
+    assert events == snapshot
+    assert not any(event[0] == "late-mutation" for event in events)
+    assert len([event for event in events if event[0] == "cleanup-cancelled"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_usage_breaker_signature_is_required_at_asgi_boundary(monkeypatch):
+    from app.public_demo_main import app
+
+    async def unexpected():
+        raise AssertionError("unsigned callback must not mutate Twilio")
+
+    monkeypatch.setattr(public_demo, "_trip_public_demo_twilio_circuit_breaker", unexpected)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        missing = await client.post(
+            "/webhooks/twilio/public-demo/usage-limit",
+            data={"AccountSid": "AC" + "1" * 32},
+        )
+        invalid = await client.post(
+            "/webhooks/twilio/public-demo/usage-limit",
+            data={"AccountSid": "AC" + "1" * 32},
+            headers={"X-Twilio-Signature": "invalid"},
+        )
+
+    assert missing.status_code == 403
+    assert invalid.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_usage_breaker_global_exception_preserves_retryable_503():
+    from app.public_demo_main import app
+
+    class ExplodingRequest:
+        url = SimpleNamespace(path="/webhooks/twilio/public-demo/usage-limit")
+
+    response = await app.exception_handlers[Exception](
+        ExplodingRequest(),
+        RuntimeError("synthetic failure"),
+    )
+
+    assert response.status_code == 503
+
+
 def test_demo_prompt_has_no_real_world_commitment_or_pii_intake():
     prompt = build_public_demo_system_prompt(build_public_demo_profile())
 
@@ -613,6 +1037,7 @@ def test_dedicated_demo_app_exposes_no_tenant_or_admin_routes():
     assert "/webhooks/twilio/public-demo/fallback" in paths
     assert "/webhooks/twilio/public-demo/status" in paths
     assert "/webhooks/twilio/public-demo/message" in paths
+    assert "/webhooks/twilio/public-demo/usage-limit" in paths
     assert "/public-demo-stream" in paths
     assert "/admin" not in paths
     assert "/webhooks/twilio/incoming" not in paths

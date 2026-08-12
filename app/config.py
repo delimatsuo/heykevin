@@ -11,6 +11,7 @@ PRODUCTION_GCP_PROJECT_ID = "kevin-491315"
 PRODUCTION_CLOUD_RUN_URL = "https://kevin-api-752910912062.us-central1.run.app"
 PRODUCTION_FIREBASE_DATABASE_URL = "https://kevin-491315-rtdb.firebaseio.com"
 _E164_RE = _re.compile(r"\+[1-9]\d{7,14}\Z")
+_TWILIO_USAGE_TRIGGER_SID_RE = _re.compile(r"UT[0-9a-fA-F]{32}\Z")
 
 
 class Settings(BaseSettings):
@@ -69,6 +70,8 @@ class Settings(BaseSettings):
     public_demo_concurrency_limit: int = 3
     public_demo_max_call_duration_seconds: int = 180
     public_demo_lease_ttl_seconds: int = 300
+    public_demo_twilio_daily_spend_limit_usd: float = 5.0
+    public_demo_twilio_usage_trigger_sid: str = ""
     # Operator assertion set only after the required Firestore TTL policies have
     # been inspected in the isolated demo project and deletion has been proven.
     public_demo_ttl_policies_verified: bool = False
@@ -205,6 +208,18 @@ def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
             errors.append(
                 "PUBLIC_DEMO_TTL_POLICIES_VERIFIED=true is required after verified "
                 "Firestore TTL configuration when PUBLIC_DEMO_ENABLED=true"
+            )
+        if not _TWILIO_USAGE_TRIGGER_SID_RE.fullmatch(
+            settings.public_demo_twilio_usage_trigger_sid.strip()
+        ):
+            errors.append(
+                "PUBLIC_DEMO_TWILIO_USAGE_TRIGGER_SID must bind the enabled demo "
+                "to its exact daily spend trigger"
+            )
+        if not 0 < settings.public_demo_twilio_daily_spend_limit_usd <= 25:
+            errors.append(
+                "PUBLIC_DEMO_TWILIO_DAILY_SPEND_LIMIT_USD must be greater than 0 "
+                "and no more than 25"
             )
         if settings.public_demo_per_caller_limit <= 0:
             errors.append("PUBLIC_DEMO_PER_CALLER_LIMIT must be positive")

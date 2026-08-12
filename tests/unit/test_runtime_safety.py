@@ -64,6 +64,11 @@ def test_enabled_public_demo_accepts_only_isolated_demo_runtime(monkeypatch):
     monkeypatch.setattr(config.settings, "public_demo_number", "+12025550199")
     monkeypatch.setattr(config.settings, "public_demo_hmac_secret", "x" * 32)
     monkeypatch.setattr(config.settings, "public_demo_ttl_policies_verified", True)
+    monkeypatch.setattr(
+        config.settings,
+        "public_demo_twilio_usage_trigger_sid",
+        "UT" + "1" * 32,
+    )
 
     with pytest.raises(RuntimeError, match="dedicated public demo entry point"):
         config.validate_runtime_safety()
@@ -117,6 +122,35 @@ def test_enabled_demo_rejects_unverified_ttl_policies(monkeypatch):
     monkeypatch.setattr(config.settings, "public_demo_ttl_policies_verified", False)
 
     with pytest.raises(RuntimeError, match="PUBLIC_DEMO_TTL_POLICIES_VERIFIED"):
+        config.validate_runtime_safety(public_demo_entrypoint=True)
+
+
+def test_enabled_demo_rejects_missing_or_oversized_spend_breaker(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setattr(config.settings, "environment", "demo")
+    monkeypatch.setattr(config.settings, "cloud_run_url", "https://kevin-demo.example.run.app")
+    monkeypatch.setattr(config.settings, "firestore_project_id", "kevin-public-demo")
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        "https://kevin-public-demo-rtdb.firebaseio.com",
+    )
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_DEMO")
+    monkeypatch.setattr(config.settings, "public_demo_enabled", True)
+    monkeypatch.setattr(config.settings, "public_demo_number", "+12025550199")
+    monkeypatch.setattr(config.settings, "public_demo_hmac_secret", "x" * 32)
+    monkeypatch.setattr(config.settings, "public_demo_ttl_policies_verified", True)
+    monkeypatch.setattr(config.settings, "public_demo_twilio_usage_trigger_sid", "")
+    monkeypatch.setattr(config.settings, "public_demo_twilio_daily_spend_limit_usd", 26)
+
+    with pytest.raises(RuntimeError, match="PUBLIC_DEMO_TWILIO_USAGE_TRIGGER_SID"):
+        config.validate_runtime_safety(public_demo_entrypoint=True)
+    monkeypatch.setattr(
+        config.settings,
+        "public_demo_twilio_usage_trigger_sid",
+        "UT" + "1" * 32,
+    )
+    with pytest.raises(RuntimeError, match="PUBLIC_DEMO_TWILIO_DAILY_SPEND_LIMIT_USD"):
         config.validate_runtime_safety(public_demo_entrypoint=True)
 
 

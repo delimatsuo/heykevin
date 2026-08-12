@@ -103,6 +103,7 @@ class GeminiPipeline:
     # Tenant calls keep backend speaking state close to caller playout. A
     # transport that provides its own ordered audio buffer can override this.
     PACE_AUDIO_OUTPUT = True
+    AUDIO_START_BUFFER_SECONDS = 0.0
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
     # Runaway guard only — NOT a length control. Native-audio output measures
     # ~26 tokens/second (verified across 20+ production turns on 2026-08-06),
@@ -1081,6 +1082,11 @@ class GeminiPipeline:
                 )
                 sent = False
                 try:
+                    if (
+                        self.AUDIO_START_BUFFER_SECONDS > 0
+                        and response_turn > self._last_response_first_media_sent_turn
+                    ):
+                        await asyncio.sleep(self.AUDIO_START_BUFFER_SECONDS)
                     async with self._audio_output_lock:
                         if (
                             self._interrupt_speaking

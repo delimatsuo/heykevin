@@ -229,6 +229,7 @@ def test_demo_pipeline_uses_high_speech_detection_with_noise_padding():
     assert config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
     assert pipeline.CALLER_SILENCE_PROMPT_SECONDS == 20
     assert pipeline.PACE_AUDIO_OUTPUT is False
+    assert pipeline.AUDIO_START_BUFFER_SECONDS == 0.8
 
 
 def test_demo_pipeline_uses_realtime_text_instructions_for_gemini_3():

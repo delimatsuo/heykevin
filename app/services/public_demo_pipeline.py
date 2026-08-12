@@ -72,6 +72,10 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
     # marks. Sending Gemini chunks as they arrive lets that jitter buffer absorb
     # provider timing variation instead of reproducing it on the phone line.
     PACE_AUDIO_OUTPUT = False
+    # Hold only the beginning of each response so Gemini can build an audio
+    # cushion before Twilio starts playback. This smooths sub-second provider
+    # chunk gaps without restoring the old multi-second local pacing delay.
+    AUDIO_START_BUFFER_SECONDS = 0.8
     # The public PSTN demo must reliably detect repeated caller turns. Keep the
     # longer prefix padding that rejects brief line noise, but do not inherit
     # the tenant pipeline's conservative speech-start threshold.

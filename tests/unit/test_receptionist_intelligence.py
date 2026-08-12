@@ -966,6 +966,54 @@ async def test_gemini_audio_playout_is_paced_and_tracks_speaking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gemini_audio_playout_can_buffer_response_start(monkeypatch):
+    sent_chunks = []
+    prebuffer_started = asyncio.Event()
+    release_prebuffer = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(delay: float):
+        if delay == 0.8:
+            prebuffer_started.set()
+            await release_prebuffer.wait()
+            return
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.services.gemini_pipeline.asyncio.sleep", controlled_sleep)
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append(chunk)
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=record_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline.PACE_AUDIO_OUTPUT = False
+    pipeline.AUDIO_START_BUFFER_SECONDS = 0.8
+    pipeline._response_turn_number = 1
+    pipeline._response_first_audio_at = time.monotonic()
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+
+    half_second_pcm_24k = b"\0\0" * 12_000
+    await pipeline._enqueue_model_audio(half_second_pcm_24k)
+    await asyncio.wait_for(prebuffer_started.wait(), timeout=1)
+
+    assert sent_chunks == []
+
+    release_prebuffer.set()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    assert sent_chunks
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
 async def test_gemini_audio_backlog_is_bounded_and_requests_one_short_retry(
     monkeypatch,
     caplog,

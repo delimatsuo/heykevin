@@ -47,6 +47,15 @@ enum SubscriptionVerificationResponseParser {
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
 
         if response.statusCode == 200 {
+            // The previously deployed endpoint used this exact non-terminal
+            // envelope when Apple verified a transaction but the server could
+            // not apply it. Preserve retry behavior during a server-first
+            // rolling rollout; no other 200 error shape is accepted.
+            if json?["status"] as? String == "error",
+               json?["message"] as? String == "update_failed" {
+                return .retryable(after: retryAfter(from: response, json: json))
+            }
+
             guard json?["status"] as? String == "ok" else {
                 return .rejected(reason: "invalid_success_response")
             }
@@ -93,10 +102,13 @@ enum SubscriptionVerificationResponseParser {
     ) -> TimeInterval {
         if let header = response.value(forHTTPHeaderField: "Retry-After"),
            let seconds = TimeInterval(header),
+           seconds.isFinite,
            seconds > 0 {
             return seconds
         }
-        if let seconds = json?["retry_after_seconds"] as? Double, seconds > 0 {
+        if let seconds = json?["retry_after_seconds"] as? Double,
+           seconds.isFinite,
+           seconds > 0 {
             return seconds
         }
         if let seconds = json?["retry_after_seconds"] as? Int, seconds > 0 {
@@ -185,7 +197,7 @@ actor SubscriptionVerificationCoordinator {
 
 enum SubscriptionVerificationRetryPolicy {
     static let maximumAttempts = 3
-    static let maximumDelay: TimeInterval = 15 * 60
+    static let maximumPolicyDelay: TimeInterval = 15 * 60
 
     /// Positive-only jitter avoids a synchronized retry wave without ever
     /// retrying before the server's Retry-After deadline.
@@ -194,12 +206,14 @@ enum SubscriptionVerificationRetryPolicy {
         attempt: Int,
         jitterUnit: Double
     ) -> TimeInterval {
-        let serverFloor = min(max(requested, 1), maximumDelay)
+        // Retry-After is a lower bound owned by the server. Never shorten it;
+        // only the client-generated exponential policy is capped.
+        let serverFloor = requested.isFinite ? max(requested, 1) : 30
         let policyFloor = min(30 * pow(2, Double(max(attempt, 0))), 120)
-        let backedOff = min(max(serverFloor, policyFloor), maximumDelay)
+        let backedOff = max(serverFloor, min(policyFloor, maximumPolicyDelay))
         let boundedJitterUnit = min(max(jitterUnit, 0), 1)
         let jitterCap = min(backedOff * 0.1, 5)
-        return min(backedOff + jitterCap * boundedJitterUnit, maximumDelay)
+        return backedOff + jitterCap * boundedJitterUnit
     }
 }
 

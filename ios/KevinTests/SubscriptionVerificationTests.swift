@@ -88,6 +88,22 @@ final class SubscriptionVerificationTests: XCTestCase {
         }
     }
 
+    func testLegacyUpdateFailedRemainsRetryable() throws {
+        let response = try httpResponse(
+            status: 200,
+            headers: ["Retry-After": "45"]
+        )
+        let data = try JSONSerialization.data(withJSONObject: [
+            "status": "error",
+            "message": "update_failed",
+        ])
+
+        XCTAssertEqual(
+            SubscriptionVerificationResponseParser.parse(data: data, response: response),
+            .retryable(after: 45)
+        )
+    }
+
     func testRetryableResponseHonorsRetryAfterHeader() throws {
         let response = try httpResponse(
             status: 429,
@@ -260,6 +276,25 @@ final class SubscriptionVerificationTests: XCTestCase {
         XCTAssertEqual(rejected, .rejected(reason: "ownership_mismatch"))
         XCTAssertEqual(counter.value, 1)
         XCTAssertFalse(rejected?.shouldFinishTransaction ?? true)
+    }
+
+    func testRetryPolicyNeverShortensLongServerRetryAfter() {
+        XCTAssertEqual(
+            SubscriptionVerificationRetryPolicy.delay(
+                requested: 3_600,
+                attempt: 2,
+                jitterUnit: 0
+            ),
+            3_600
+        )
+        XCTAssertGreaterThanOrEqual(
+            SubscriptionVerificationRetryPolicy.delay(
+                requested: 3_600,
+                attempt: 2,
+                jitterUnit: 1
+            ),
+            3_600
+        )
     }
 
     func testVerificationContextRejectsAccountOrTokenSwitch() {

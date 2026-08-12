@@ -181,6 +181,7 @@ class GeminiPipeline:
         # Buffers for streaming transcript fragments (Gemini sends word-by-word)
         self._kevin_transcript_buf: list[str] = []
         self._caller_transcript_buf: list[str] = []
+        self._caller_turn_number = 0
         self._last_caller_transcript_flushed_at = 0.0
         self._last_caller_transcript_fragment_at = 0.0
         self._last_caller_transcript_fragment_monotonic = 0.0
@@ -1249,10 +1250,19 @@ class GeminiPipeline:
 
     async def _flush_caller_transcript(self):
         """Flush buffered caller transcript fragments as one message."""
+        fragment_count = len(self._caller_transcript_buf)
         full_text = "".join(self._caller_transcript_buf)
         self._caller_transcript_buf.clear()
         if not full_text.strip():
             return
+        self._caller_turn_number += 1
+        self._log_voice_timing(
+            "caller_turn_complete",
+            turn=self._caller_turn_number,
+            fragments=fragment_count,
+            chars=len(full_text),
+            words=len(full_text.split()),
+        )
         self._transcript_lines.append(f"Caller: {full_text}")
         await self.on_transcript("Caller", full_text)
         self._last_caller_transcript_flushed_at = time.time()

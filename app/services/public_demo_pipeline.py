@@ -71,6 +71,11 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
     # longer prefix padding that rejects brief line noise, but do not inherit
     # the tenant pipeline's conservative speech-start threshold.
     REALTIME_START_OF_SPEECH_SENSITIVITY = "START_SENSITIVITY_HIGH"
+    # A real caller paused for just over ten seconds after Kevin's answer. The
+    # generic watchdog injected "Are you still there?" immediately before the
+    # caller resumed, making the two turns compete in Gemini. Give demo callers
+    # enough time to think or read a price before nudging them.
+    CALLER_SILENCE_PROMPT_SECONDS = 20
 
     def __init__(self, *args, **kwargs):
         if args:

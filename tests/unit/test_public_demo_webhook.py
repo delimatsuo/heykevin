@@ -224,6 +224,7 @@ def test_demo_pipeline_uses_high_speech_detection_with_noise_padding():
     assert activity["end_of_speech_sensitivity"] == "END_SENSITIVITY_HIGH"
     assert config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
     assert config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
+    assert pipeline.CALLER_SILENCE_PROMPT_SECONDS == 20
 
 
 @pytest.mark.asyncio

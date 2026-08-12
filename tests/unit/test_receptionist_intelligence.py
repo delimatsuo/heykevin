@@ -1540,6 +1540,7 @@ async def test_gemini_transcript_flush_records_response_timing():
     await pipeline._flush_caller_transcript()
 
     assert pipeline._last_caller_transcript_flushed_at > 0
+    assert pipeline._caller_turn_number == 1
 
     pipeline._kevin_transcript_buf = ["Yes, we do."]
 
@@ -1879,6 +1880,7 @@ async def test_gemini_urgency_log_does_not_include_transcript_text(caplog):
     await asyncio.sleep(0)
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=caller_turn_complete" in messages
     assert "voice_timing event=urgency_detected" in messages
     assert "keyword=fire" not in messages
     assert "100 Market Street" not in messages

@@ -68,6 +68,12 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
     """Gemini transport with a fixed, no-side-effect public-demo policy."""
 
     MAX_RECONNECT_ATTEMPTS = 0
+    # Gemini 3.1 can split raw PCM on very small provider message boundaries.
+    # Twilio accepts arbitrary payload sizes, but sending one- and two-byte
+    # mu-law messages made a real PSTN call effectively silent. Reframe the raw
+    # 24 kHz PCM into canonical 20 ms blocks before the inherited converter
+    # emits 160-byte mu-law/8 kHz media messages.
+    OUTPUT_PCM_FRAME_BYTES = 24_000 * 2 * 20 // 1_000
     # Twilio buffers outbound media in order and reports actual playback with
     # marks. Sending Gemini chunks as they arrive lets that jitter buffer absorb
     # provider timing variation instead of reproducing it on the phone line.
@@ -103,6 +109,23 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
         self._model = PUBLIC_DEMO_GEMINI_MODEL
         self._voice = PUBLIC_DEMO_FRIENDLY_MALE_VOICE
         self._system_prompt = build_public_demo_system_prompt(profile)
+        self._output_pcm_buffer = bytearray()
+        self._output_pcm_turn = 0
+
+    async def _enqueue_model_audio(self, pcm_24k: bytes) -> None:
+        """Reframe arbitrarily fragmented Gemini PCM before Twilio conversion."""
+        if self._output_pcm_turn != self._response_turn_number:
+            # Never join the tail of an interrupted/finished response to the
+            # beginning of the next one. At most 19.9 ms is discarded.
+            self._output_pcm_buffer.clear()
+            self._output_pcm_turn = self._response_turn_number
+
+        self._output_pcm_buffer.extend(pcm_24k)
+        frame_bytes = self.OUTPUT_PCM_FRAME_BYTES
+        while len(self._output_pcm_buffer) >= frame_bytes:
+            frame = bytes(self._output_pcm_buffer[:frame_bytes])
+            del self._output_pcm_buffer[:frame_bytes]
+            await super()._enqueue_model_audio(frame)
 
     def _build_greeting_text(self) -> str:
         return (
@@ -180,6 +203,9 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
         """Synchronously disable further provider/media work before async teardown."""
 
         self._connected = False
+        output_pcm_buffer = getattr(self, "_output_pcm_buffer", None)
+        if output_pcm_buffer is not None:
+            output_pcm_buffer.clear()
         self._audio_input_ready.set()
         self._interrupt_speaking = True
         self._invalidate_tool_task("public_demo_deadline")
@@ -214,6 +240,8 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
         try:
             await super().stop()
         finally:
+            self._output_pcm_buffer.clear()
+            self._output_pcm_turn = 0
             self._transcript_lines.clear()
             self._caller_transcript_buf.clear()
             self._kevin_transcript_buf.clear()

@@ -24,6 +24,7 @@ os.environ.setdefault("USER_PHONE", "+15555550123")
 
 from app import config as app_config
 from app.db.contractors import PROTECTED_FIELDS
+from app.services.gemini_pipeline import GeminiPipeline
 from app.services.public_demo import build_public_demo_profile, build_public_demo_system_prompt
 from app.services.public_demo_pipeline import (
     PUBLIC_DEMO_FRIENDLY_MALE_VOICE,
@@ -239,6 +240,77 @@ def test_demo_pipeline_uses_realtime_text_instructions_for_gemini_3():
     assert pipeline._build_text_instruction_payload("Answer briefly.") == {
         "realtime_input": {"text": "Answer briefly."}
     }
+
+
+@pytest.mark.asyncio
+async def test_demo_pipeline_reframes_tiny_gemini_chunks_before_twilio(monkeypatch):
+    converted_frames = []
+
+    async def capture_frame(_self, frame: bytes):
+        converted_frames.append(frame)
+
+    monkeypatch.setattr(GeminiPipeline, "_enqueue_model_audio", capture_frame)
+
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = PublicDemoGeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+    )
+    pipeline._response_turn_number = 1
+    source = bytes(range(256)) * 8
+    offsets = (1, 3, 8, 21, 55, 144, 377, 987, len(source))
+    start = 0
+    for end in offsets:
+        await pipeline._enqueue_model_audio(source[start:end])
+        start = end
+
+    assert [len(frame) for frame in converted_frames] == [960, 960]
+    assert b"".join(converted_frames) == source[:1920]
+    assert bytes(pipeline._output_pcm_buffer) == source[1920:]
+
+    # A new response cannot inherit an incomplete PCM sample/frame tail.
+    pipeline._response_turn_number = 2
+    next_turn = b"\x5a" * pipeline.OUTPUT_PCM_FRAME_BYTES
+    await pipeline._enqueue_model_audio(next_turn)
+
+    assert converted_frames[-1] == next_turn
+    assert pipeline._output_pcm_buffer == bytearray()
+
+
+@pytest.mark.asyncio
+async def test_demo_pipeline_emits_canonical_twilio_audio_frames(monkeypatch):
+    async def noop_audio(_chunk: bytes):
+        return None
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = PublicDemoGeminiPipeline(
+        on_audio_out=noop_audio,
+        on_transcript=noop_transcript,
+    )
+    monkeypatch.setattr(pipeline, "_ensure_audio_playout_task", lambda: None)
+    pipeline._response_turn_number = 1
+
+    # The provider may split PCM in the middle of a 16-bit sample. Nothing is
+    # converted until one complete 20 ms frame has been reconstructed.
+    await pipeline._enqueue_model_audio(b"\x00")
+    assert pipeline._audio_queue.empty()
+    await pipeline._enqueue_model_audio(
+        b"\x00" * (pipeline.OUTPUT_PCM_FRAME_BYTES - 1)
+    )
+
+    queued = pipeline._audio_queue.get_nowait()
+    mulaw_chunk = queued[0]
+    pipeline._audio_queue.task_done()
+
+    assert len(mulaw_chunk) == 160
+    assert pipeline._queued_audio_bytes == 160
 
 
 @pytest.mark.asyncio

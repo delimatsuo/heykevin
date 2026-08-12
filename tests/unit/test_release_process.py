@@ -44,6 +44,14 @@ def _staging_health_check_script(workflow: str) -> str:
     )
 
 
+def _rollback_promo_containment_script(workflow: str) -> str:
+    return next(
+        block
+        for block in _workflow_run_blocks(workflow)
+        if "TARGET_PROMO_FLAG=$(gcloud run revisions describe" in block
+    )
+
+
 def test_deploy_workflow_passes_commit_sha_to_cloud_run():
     workflow = Path(".github/workflows/deploy.yml").read_text()
 
@@ -195,6 +203,104 @@ def test_deploy_workflow_defaults_observation_shadow_off_and_removes_key():
     assert disabled in production_job
     assert remove_key in staging_job
     assert remove_key in production_job
+
+
+def test_release_paths_keep_subscription_promotions_disabled():
+    deploy_workflow = Path(".github/workflows/deploy.yml").read_text()
+    rollback_workflow = Path(".github/workflows/rollback.yml").read_text()
+    disabled = "SUBSCRIPTION_PROMOTIONAL_OFFERS_ENABLED=false"
+
+    assert deploy_workflow.count(disabled) == 2
+    assert rollback_workflow.count(disabled) == 2
+    assert "Verify rollback preserves subscription promo containment" in rollback_workflow
+    assert "TARGET_PROMO_FLAG" in rollback_workflow
+    assert "subscription_promotional_offers_enabled: bool = False" in rollback_workflow
+    assert "if not settings.subscription_promotional_offers_enabled:" in rollback_workflow
+    assert rollback_workflow.index(
+        "Verify rollback preserves subscription promo containment"
+    ) < rollback_workflow.index("Rollback via traffic split")
+
+
+def test_traffic_split_rollback_refuses_revision_without_disabled_promo_flag(
+    tmp_path: Path, monkeypatch
+):
+    workflow = Path(".github/workflows/rollback.yml").read_text()
+    script = _rollback_promo_containment_script(workflow)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gcloud = fake_bin / "gcloud"
+    gcloud.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '{\"spec\":{\"containers\":[{\"env\":["
+        "{\"name\":\"DEPLOY_SHA\",\"value\":\"0000000000000000000000000000000000000000\"}"
+        "]}]}}'\n"
+    )
+    gcloud.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("ROLLBACK_METHOD", "traffic-split")
+    monkeypatch.setenv("REVISION_OR_TAG", "kevin-api-00001-old")
+    monkeypatch.setenv("GCP_PROJECT_ID", "project")
+    monkeypatch.setenv("GCP_REGION", "region")
+
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Rollback revision does not keep promotional offers disabled" in result.stdout
+
+
+def test_redeploy_tag_rollback_refuses_source_without_promo_guards(tmp_path: Path):
+    workflow = Path(".github/workflows/rollback.yml").read_text()
+    script = _rollback_promo_containment_script(workflow)
+    repository = tmp_path / "repository"
+    (repository / "app" / "api").mkdir(parents=True)
+    (repository / "app" / "config.py").write_text("class Settings:\n    pass\n")
+    (repository / "app" / "api" / "subscription.py").write_text(
+        "async def get_promo_eligible():\n    return {'eligible': True}\n"
+    )
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(["git", "add", "app"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "pre-fix",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    target = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    env = os.environ.copy()
+    env.update(
+        {
+            "ROLLBACK_METHOD": "redeploy-tag",
+            "ROLLBACK_COMMIT_SHA": target,
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        cwd=repository,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Rollback target lacks the promotional-offer default-off guard" in result.stdout
 
 
 def test_staging_release_paths_require_sandbox_apns_before_gcp_auth():

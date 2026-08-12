@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     appstore_private_key: str = ""    # .p8 key content (PEM, | as newline separator)
     appstore_bundle_id: str = "com.kevin.callscreen"  # App bundle ID
     appstore_environment: str = "sandbox"  # "sandbox" or "production"
+    # Emergency kill switch for StoreKit promotional offers. Keep disabled
+    # until eligibility is derived from verified Apple subscription history.
+    subscription_promotional_offers_enabled: bool = False
 
     # Cloud Run URL (for WebSocket URL generation)
     cloud_run_url: str = PRODUCTION_CLOUD_RUN_URL

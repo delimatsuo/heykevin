@@ -25,14 +25,13 @@ struct PaywallView: View {
     @State private var restoreMessage: String?
     @State private var selectedProductID: String?
 
-    /// The founding-member 75% off promo is only shown to users who have already
-    /// completed an Apple introductory offer (i.e. trial ended / subscription expired).
-    /// Per Apple rules, promotional offers are not available to users who are still
-    /// in their introductory offer period, and advertising them alongside the free
-    /// trial was the source of the 2.1(b) rejection.
+    /// Promotional offers are intentionally disabled. A server-side expired trial
+    /// does not prove that this Apple ID is a current or former subscriber, which is
+    /// required for an Apple promotional offer. The backend kill switch protects
+    /// already-installed builds; this client-side guard makes the next build safe
+    /// even if stale server configuration is re-enabled accidentally.
     private var canShowFoundingMemberPromo: Bool {
-        guard isPromoEligible, !isCheckingPromo else { return false }
-        return appState.subscriptionStatus == "expired" || appState.subscriptionStatus == "cancelled"
+        false
     }
 
     var body: some View {
@@ -393,15 +392,10 @@ struct PaywallView: View {
         selectedProductID = subscriptionManager.products.first(where: { $0.id == preferredProductID })?.id
             ?? subscriptionManager.products.first?.id
 
-        // Check promo eligibility in parallel with product fetch result
-        if !appState.contractorId.isEmpty {
-            isCheckingPromo = true
-            let eligible = await APIClient.shared.checkPromoEligibility(contractorId: appState.contractorId)
-            isPromoEligible = eligible
-            isCheckingPromo = false
-        } else {
-            isCheckingPromo = false
-        }
+        // Promotional offers remain fail-closed until eligibility comes from
+        // verified Apple subscription history rather than server trial state.
+        isPromoEligible = false
+        isCheckingPromo = false
     }
 }
 

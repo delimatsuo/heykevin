@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.middleware.auth import verify_api_token, require_contractor_access
+from app.config import settings
+from app.middleware.auth import require_contractor_access, verify_api_token
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -82,14 +83,14 @@ async def verify_subscription(body: VerifyRequest, request: Request):
     """
     require_contractor_access(request, body.contractor_id)
 
+    from app.db.apple_transactions import get_transaction_binding
     from app.services.subscription import (
-        verify_transaction_strict,
+        CrossContractorReceiptError,
         is_transaction_seen,
         mark_transaction_seen,
         update_subscription_from_transaction,
-        CrossContractorReceiptError,
+        verify_transaction_strict,
     )
-    from app.db.apple_transactions import get_transaction_binding
 
     # Per-contractor dedup (cheap idempotency for retries from this same client).
     # This must happen before the rate limit so legitimate StoreKit retries do
@@ -165,6 +166,15 @@ async def get_promo_eligible(contractor_id: str, request: Request):
     """Check if promo offer is available (boolean only — no count exposed)."""
     require_contractor_access(request, contractor_id)
 
+    # Existing iOS builds attach a promotional offer whenever this endpoint
+    # returns true for an expired server-side trial. A server trial is not
+    # evidence that the Apple ID has ever subscribed, but Apple only permits
+    # promotional offers for current or former App Store subscribers. Fail
+    # closed so already-installed builds immediately use the regular StoreKit
+    # purchase path instead of presenting an offer Apple will reject.
+    if not settings.subscription_promotional_offers_enabled:
+        return {"eligible": False}
+
     if not _check_rate_limit(contractor_id, PROMO_RATE_LIMIT, ":promo"):
         raise HTTPException(status_code=429, detail="Too many requests")
 
@@ -183,6 +193,12 @@ async def sign_offer(body: SignOfferRequest, request: Request):
     SIGN_OFFER_RATE_WINDOW_SECONDS environment variables.
     """
     require_contractor_access(request, body.contractor_id)
+
+    # Deliberately do not apply the eligibility kill switch here. Released
+    # clients silently fall back to a regular-price purchase when signing does
+    # not return a signature, even if their already-open paywall still displays
+    # the promotional price. Returning false from /promo-eligible is the safe
+    # compatibility boundary; it takes effect when the paywall is reloaded.
 
     from app.db.rate_limits import check_and_increment
 

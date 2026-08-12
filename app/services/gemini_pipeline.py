@@ -100,6 +100,9 @@ class GeminiPipeline:
     # Secondary object bound; the byte budget is the effective limit for normal frames.
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
+    # Tenant calls keep backend speaking state close to caller playout. A
+    # transport that provides its own ordered audio buffer can override this.
+    PACE_AUDIO_OUTPUT = True
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
     # Runaway guard only — NOT a length control. Native-audio output measures
     # ~26 tokens/second (verified across 20+ production turns on 2026-08-06),
@@ -318,18 +321,22 @@ class GeminiPipeline:
             "How can I help you?"
         )
 
+    def _build_text_instruction_payload(self, text: str) -> dict:
+        """Build the model-version-specific payload for an instruction turn."""
+        if self._model.startswith("gemini-3"):
+            return {"realtime_input": {"text": text}}
+        return {
+            "client_content": {
+                "turns": [{"role": "user", "parts": [{"text": text}]}],
+                "turn_complete": True,
+            }
+        }
+
     async def _send_greeting(self) -> None:
         """Ask Gemini to speak the deterministic greeting and nothing else."""
         greeting_text = self._build_greeting_text()
         prompt = f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
-        await self._ws.send(json.dumps({
-            "client_content": {
-                "turns": [
-                    {"role": "user", "parts": [{"text": prompt}]}
-                ],
-                "turn_complete": True,
-            }
-        }))
+        await self._ws.send(json.dumps(self._build_text_instruction_payload(prompt)))
         self._log_voice_timing(
             "greeting_instruction_sent",
             chars=len(greeting_text),
@@ -1052,11 +1059,13 @@ class GeminiPipeline:
         )
 
     async def _audio_playout_loop(self):
-        """Send Gemini audio to Twilio paced to playback duration.
+        """Send Gemini audio to the configured transport.
 
         Gemini server content may arrive faster than realtime. Twilio then buffers
         media events, while the backend can mistakenly think Kevin is done talking.
-        Pacing keeps backend speaking state aligned with what the caller hears.
+        Tenant calls pace locally to keep backend speaking state aligned with what
+        the caller hears. Dedicated transports may instead rely on their own
+        ordered playback buffer and marks to absorb provider chunk jitter.
         """
         try:
             while self._connected:
@@ -1119,7 +1128,7 @@ class GeminiPipeline:
                                         exception_type=type(error).__name__,
                                     )
                         sent = True
-                    if duration_seconds > 0:
+                    if self.PACE_AUDIO_OUTPUT and duration_seconds > 0:
                         await asyncio.sleep(duration_seconds * 0.9)
                 finally:
                     self._audio_queue.task_done()
@@ -1630,12 +1639,9 @@ class GeminiPipeline:
             return
         self._assistant_instruction_pending = True
         try:
-            await self._ws.send(json.dumps({
-                "client_content": {
-                    "turns": [{"role": "user", "parts": [{"text": text}]}],
-                    "turn_complete": True,
-                }
-            }))
+            await self._ws.send(
+                json.dumps(self._build_text_instruction_payload(text))
+            )
         except Exception:
             self._assistant_instruction_pending = False
             raise

@@ -61,12 +61,17 @@ PUBLIC_DEMO_GEMINI_TOOLS = [
 # demo so product users retain their configured language/persona voices.
 # Google's voice catalogue identifies Achird as male and friendly.
 PUBLIC_DEMO_FRIENDLY_MALE_VOICE = "Achird"
+PUBLIC_DEMO_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 
 
 class PublicDemoGeminiPipeline(GeminiPipeline):
     """Gemini transport with a fixed, no-side-effect public-demo policy."""
 
     MAX_RECONNECT_ATTEMPTS = 0
+    # Twilio buffers outbound media in order and reports actual playback with
+    # marks. Sending Gemini chunks as they arrive lets that jitter buffer absorb
+    # provider timing variation instead of reproducing it on the phone line.
+    PACE_AUDIO_OUTPUT = False
     # The public PSTN demo must reliably detect repeated caller turns. Keep the
     # longer prefix padding that rejects brief line noise, but do not inherit
     # the tenant pipeline's conservative speech-start threshold.
@@ -91,6 +96,7 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
             caller_phone="",
             call_sid="",
         )
+        self._model = PUBLIC_DEMO_GEMINI_MODEL
         self._voice = PUBLIC_DEMO_FRIENDLY_MALE_VOICE
         self._system_prompt = build_public_demo_system_prompt(profile)
 

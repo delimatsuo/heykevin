@@ -27,6 +27,7 @@ from app.db.contractors import PROTECTED_FIELDS
 from app.services.public_demo import build_public_demo_profile, build_public_demo_system_prompt
 from app.services.public_demo_pipeline import (
     PUBLIC_DEMO_FRIENDLY_MALE_VOICE,
+    PUBLIC_DEMO_GEMINI_MODEL,
     PublicDemoGeminiPipeline,
 )
 from app.webhooks import public_demo
@@ -206,6 +207,8 @@ def test_demo_pipeline_uses_friendly_male_voice_and_conversational_greeting(monk
     greeting = pipeline._build_greeting_text()
 
     assert PUBLIC_DEMO_FRIENDLY_MALE_VOICE == "Achird"
+    assert PUBLIC_DEMO_GEMINI_MODEL == "gemini-3.1-flash-live-preview"
+    assert pipeline._model == PUBLIC_DEMO_GEMINI_MODEL
     assert pipeline._voice == "Achird"
     assert "AI receptionist" in greeting
     assert "fictional" not in greeting.lower()
@@ -225,6 +228,16 @@ def test_demo_pipeline_uses_high_speech_detection_with_noise_padding():
     assert config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
     assert config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
     assert pipeline.CALLER_SILENCE_PROMPT_SECONDS == 20
+    assert pipeline.PACE_AUDIO_OUTPUT is False
+
+
+def test_demo_pipeline_uses_realtime_text_instructions_for_gemini_3():
+    pipeline = PublicDemoGeminiPipeline.__new__(PublicDemoGeminiPipeline)
+    pipeline._model = PUBLIC_DEMO_GEMINI_MODEL
+
+    assert pipeline._build_text_instruction_payload("Answer briefly.") == {
+        "realtime_input": {"text": "Answer briefly."}
+    }
 
 
 @pytest.mark.asyncio

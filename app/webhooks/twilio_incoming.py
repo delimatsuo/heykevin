@@ -412,10 +412,14 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
 
         contact = None
         history = {}
-        try:
-            contact = await asyncio.wait_for(get_contact(caller_phone, contractor_id=contractor_id), timeout=2.0)
-        except Exception:
-            pass
+        if contractor_id:
+            try:
+                contact = await asyncio.wait_for(
+                    get_contact(caller_phone, contractor_id=contractor_id),
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
 
         try:
             calls = await asyncio.wait_for(
@@ -459,8 +463,8 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         # Check if we know this caller from previous calls (per-contractor
         # caller_contacts subcollection — F-14: was a global collection that leaked
         # caller names across contractors). The new helper reads from
-        # contractors/{contractor_id}/caller_contacts/{phone_key} and transparently
-        # falls back to the legacy global doc until the migration script runs.
+        # contractors/{contractor_id}/caller_contacts/{phone_key}. Legacy global
+        # records are quarantined and never read into a tenant call.
         if not caller_name and contractor_id:
             try:
                 from app.db.contacts import get_caller_contact as _get_caller_contact

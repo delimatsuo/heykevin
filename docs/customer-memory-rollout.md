@@ -124,6 +124,14 @@ Customer memory is stored only under
 service requests live under the same contractor. Full customer-memory cards and
 service details must not be copied into RTDB active-call state.
 
+Top-level legacy `contacts` and `caller_contacts` records are quarantined and are
+never read by tenant runtime paths. Tenant `caller_contacts` records without an
+exact provenance schema, `tenant_post_call` source, and matching contractor ID are
+also ignored because an older migration could not prove which tenant supplied their
+contents. A fresh tenant-bound post-call write replaces the quarantined record and
+stamps that provenance. `scripts/migrate_caller_contacts.py` is inventory-only and
+must never copy phone-matched legacy data into tenant subcollections.
+
 The existing account-delete endpoint deactivates the contractor but does not yet
 recursively erase all historical contractor data. Do not claim complete account
 erasure for this feature until that broader product deletion path is implemented

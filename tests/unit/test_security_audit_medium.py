@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, Dict, Optional
 
@@ -197,8 +196,42 @@ def test_vcard_signature_rejects_expired(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_caller_contact_isolation_between_contractors(monkeypatch):
+async def test_tenant_contact_lookup_never_reads_legacy_global_contact(monkeypatch):
     fake = _install_fake_firestore(monkeypatch)
+    from app.db import contacts as contacts_db
+    from app.utils.phone import phone_hash
+
+    phone = "+15551234567"
+    fake._docs[f"contacts/{phone_hash(phone)}"] = {
+        "name": "Legacy Carol",
+        "is_whitelisted": True,
+    }
+
+    assert await contacts_db.get_contact(phone, contractor_id="ctrB") is None
+    assert await contacts_db.get_contact(phone) is None
+
+
+@pytest.mark.asyncio
+async def test_tenant_contact_lookup_preserves_scoped_owner_contact(monkeypatch):
+    fake = _install_fake_firestore(monkeypatch)
+    from app.db import contacts as contacts_db
+    from app.utils.phone import phone_hash
+
+    phone = "+15551234567"
+    fake._docs[f"contractors/ctrB/contacts/{phone_hash(phone)}"] = {
+        "name": "Alice Tenant",
+        "is_whitelisted": True,
+    }
+
+    assert await contacts_db.get_contact(phone, contractor_id="ctrB") == {
+        "name": "Alice Tenant",
+        "is_whitelisted": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_caller_contact_isolation_between_contractors(monkeypatch):
+    _install_fake_firestore(monkeypatch)
     from app.db import contacts as contacts_db
 
     ok = await contacts_db.upsert_caller_contact(
@@ -231,7 +264,7 @@ async def test_caller_contact_writes_under_contractor_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_caller_contact_legacy_read_through(monkeypatch):
+async def test_tenant_caller_contact_lookup_never_reads_legacy_global_record(monkeypatch):
     fake = _install_fake_firestore(monkeypatch)
     from app.db import contacts as contacts_db
 
@@ -239,8 +272,49 @@ async def test_caller_contact_legacy_read_through(monkeypatch):
     fake._docs["caller_contacts/15551234567"] = {"caller_name": "Legacy Carol"}
 
     seen = await contacts_db.get_caller_contact("ctr-1", "+15551234567")
+    assert seen is None
+
+
+@pytest.mark.asyncio
+async def test_unproven_tenant_caller_contact_is_quarantined_until_rewritten(monkeypatch):
+    fake = _install_fake_firestore(monkeypatch)
+    from app.db import contacts as contacts_db
+
+    fake._docs["contractors/ctr-1/caller_contacts/15551234567"] = {
+        "caller_name": "Possibly Migrated Carol",
+        "foreign_history": ["must not survive"],
+    }
+
+    assert await contacts_db.get_caller_contact("ctr-1", "+15551234567") is None
+
+    assert await contacts_db.upsert_caller_contact(
+        "ctr-1",
+        "+15551234567",
+        {"caller_name": "Fresh Tenant Observation"},
+        merge=True,
+    )
+    seen = await contacts_db.get_caller_contact("ctr-1", "+15551234567")
     assert seen is not None
-    assert seen["caller_name"] == "Legacy Carol"
+    assert seen["caller_name"] == "Fresh Tenant Observation"
+    assert seen["provenance_schema"] == 1
+    assert seen["provenance_source"] == "tenant_post_call"
+    assert seen["provenance_contractor_id"] == "ctr-1"
+    assert "foreign_history" not in seen
+
+
+@pytest.mark.asyncio
+async def test_mismatched_caller_contact_provenance_is_rejected(monkeypatch):
+    fake = _install_fake_firestore(monkeypatch)
+    from app.db import contacts as contacts_db
+
+    fake._docs["contractors/ctr-1/caller_contacts/15551234567"] = {
+        "caller_name": "Wrong Tenant Carol",
+        "provenance_schema": 1,
+        "provenance_source": "tenant_post_call",
+        "provenance_contractor_id": "ctr-other",
+    }
+
+    assert await contacts_db.get_caller_contact("ctr-1", "+15551234567") is None
 
 
 @pytest.mark.asyncio

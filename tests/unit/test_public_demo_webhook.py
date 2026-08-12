@@ -874,13 +874,15 @@ async def test_usage_breaker_global_exception_preserves_retryable_503():
 def test_demo_prompt_has_no_real_world_commitment_or_pii_intake():
     prompt = build_public_demo_system_prompt(build_public_demo_profile())
 
-    assert "public, fictional product demo" in prompt
+    assert "opening greeting has already told the caller" in prompt
     assert "not a real company" in prompt
     assert "Do not ask for or confirm the caller's real name" in prompt
     assert "no appointment was created" in prompt
     assert "Never try to reach an owner" in prompt
     assert "contact local emergency services" in prompt
-    assert "FICTIONAL SERVICE PRICE RANGES" in prompt
+    assert "SERVICE PRICE RANGES" in prompt
+    assert "handle the conversation exactly like a capable receptionist" in prompt
+    assert 'Never preface an ordinary answer with "as part of our demo,"' in prompt
 
 
 def test_dedicated_demo_pipeline_exposes_only_synthetic_tools():

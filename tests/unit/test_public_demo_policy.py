@@ -56,7 +56,7 @@ def test_profile_is_fresh_fictional_business_prompt_input_without_destinations()
     first["services"][0]["name"] = "mutated"
     first["faqs"][0]["answer"] = "mutated"
     first["public_demo_policy"]["external_writes"] = True
-    assert second["services"][0]["name"] == "Diagnostic visit scenario"
+    assert second["services"][0]["name"] == "Diagnostic visit"
     assert second["faqs"][0]["answer"].startswith("No. This is a fictional demo")
     assert second["public_demo_policy"]["external_writes"] is False
 
@@ -116,8 +116,15 @@ def test_profile_has_explicit_no_real_world_and_no_pii_rules_and_builds_prompt()
     prompt = build_public_demo_system_prompt(profile)
     assert profile["business_name"] in prompt
     assert "Hey Kevin Boston Plumbing Demo" in prompt
-    assert "Faucet repair labor scenario: $165-$325" in prompt
+    assert "Faucet repair labor: $165-$325" in prompt
     assert "PUBLIC DEMO SAFETY AND PRIVACY RULES" in prompt
+    assert "The opening disclosure happens once" in prompt
+    assert 'Never preface an ordinary answer with "as part of our demo,"' in prompt
+    assert 'Caller: "Do you do toilet replacement?"' in prompt
+    assert "replacement labor runs $425 to $850" in prompt
+    assert "Is yours an existing" in prompt
+    assert "floor-mounted toilet?" in prompt
+    assert 'ask "Is there anything else I can help with?"' in prompt
 
 
 def test_synthetic_availability_is_deterministic_and_eastern_relative_to_tomorrow():

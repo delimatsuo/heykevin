@@ -474,3 +474,24 @@ async def test_sign_offer_endpoint_returns_429_when_rate_limited(monkeypatch):
     response = await sub_api.sign_offer(body, _FakeRequest("c1"))
     assert getattr(response, "status_code", None) == 429
     assert response.headers.get("Retry-After") == "42"
+
+
+@pytest.mark.asyncio
+async def test_promo_eligible_fails_closed_when_offers_disabled(monkeypatch):
+    """Expired server trials must use the regular StoreKit purchase path."""
+    monkeypatch.setattr(sub_api.settings, "subscription_promotional_offers_enabled", False)
+
+    async def should_not_check_counter():
+        raise AssertionError("disabled offers must not consult or expose the promo budget")
+
+    monkeypatch.setattr(sub_service, "check_promo_eligible", should_not_check_counter)
+
+    result = await sub_api.get_promo_eligible("c1", _FakeRequest("c1"))
+    assert result == {"eligible": False}
+
+
+def test_promotional_offers_default_to_disabled():
+    field = sub_api.settings.__class__.model_fields[
+        "subscription_promotional_offers_enabled"
+    ]
+    assert field.default is False

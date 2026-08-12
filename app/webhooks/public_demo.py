@@ -34,6 +34,7 @@ from app.services.public_demo import (
     sign_public_demo_stream_token,
     verify_public_demo_stream_token,
 )
+from app.services.public_demo_breaker_client import trip_public_demo_breaker
 from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
 from app.utils.error_handlers import twiml_response
 from app.utils.logging import get_logger
@@ -59,9 +60,14 @@ PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS = 2.0
 PUBLIC_DEMO_COMPLETION_TIMEOUT_SECONDS = 3.0
 PUBLIC_DEMO_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 0.25
 PUBLIC_DEMO_RATE_DOCUMENT_TTL_SECONDS = 86_400
-PUBLIC_DEMO_CIRCUIT_BREAKER_TIMEOUT_SECONDS = 15.0
 PUBLIC_DEMO_USAGE_TRIGGER_MAX_AGE_SECONDS = 900
 PUBLIC_DEMO_USAGE_TRIGGER_CLAIM_TIMEOUT_SECONDS = 2.0
+
+
+def _public_demo_usage_callback_age_is_fresh(callback_age: float) -> bool:
+    """Allow limited clock skew but reject the exact 15-minute replay boundary."""
+
+    return -60 <= callback_age < PUBLIC_DEMO_USAGE_TRIGGER_MAX_AGE_SECONDS
 
 
 def suppress_public_demo_sensitive_transport_logs() -> None:
@@ -232,73 +238,6 @@ async def _release_lease_safely(call_sid: str) -> None:
     except Exception as error:  # noqa: BLE001 - release helper itself fails closed
         safe_label = hash_public_demo_identifier(secret, "log-call", call_sid)
         _log_safe_exception("public_demo_lease_release_error", error, safe_label)
-
-
-async def _trip_public_demo_twilio_circuit_breaker() -> bool:
-    """Suspend the isolated child first, then best-effort end observed calls."""
-
-    from twilio.http.async_http_client import AsyncTwilioHttpClient
-    from twilio.rest import Client
-
-    suppress_public_demo_sensitive_transport_logs()
-    http_client = AsyncTwilioHttpClient(
-        timeout=PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS,
-        logger=logging.getLogger("twilio.async_http_client"),
-    )
-    client = Client(
-        settings.twilio_account_sid,
-        settings.twilio_auth_token,
-        http_client=http_client,
-    )
-    try:
-        account = await asyncio.wait_for(
-            client.api.accounts(settings.twilio_account_sid).update_async(
-                status="suspended"
-            ),
-            timeout=PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS + 1,
-        )
-        if str(getattr(account, "status", "")).strip().lower() != "suspended":
-            return False
-
-        async def _end_calls(status: str) -> None:
-            try:
-                calls = await client.calls.list_async(status=status, limit=5)
-                await asyncio.gather(
-                    *(
-                        client.calls(call.sid).update_async(
-                            status="canceled" if status == "queued" else "completed"
-                        )
-                        for call in calls
-                    ),
-                    return_exceptions=True,
-                )
-            except Exception as error:  # noqa: BLE001 - child is already suspended
-                _log_safe_exception("public_demo_breaker_call_cleanup_error", error)
-
-        cleanup = asyncio.gather(
-            *(_end_calls(status) for status in ("queued", "ringing", "in-progress")),
-            return_exceptions=True,
-        )
-        try:
-            await asyncio.wait_for(
-                cleanup,
-                timeout=PUBLIC_DEMO_CIRCUIT_BREAKER_TIMEOUT_SECONDS
-                - PUBLIC_DEMO_TWILIO_HTTP_TIMEOUT_SECONDS
-                - 2,
-            )
-        except TimeoutError:
-            cleanup.cancel()
-            await asyncio.gather(cleanup, return_exceptions=True)
-            logger.warning("public_demo event=usage_breaker_cleanup_timeout")
-        return True
-    except Exception as error:  # noqa: BLE001 - trigger retries on a 5xx response
-        _log_safe_exception("public_demo_breaker_error", error)
-        return False
-    finally:
-        try:
-            await asyncio.wait_for(http_client.close(), timeout=0.5)
-        except Exception as error:  # noqa: BLE001 - provider mutation is already bounded
-            _log_safe_exception("public_demo_breaker_http_close_error", error)
 
 
 @router.post("/webhooks/twilio/public-demo/incoming")
@@ -478,7 +417,7 @@ async def handle_public_demo_usage_limit(
         and current_value >= configured_limit
         and 8 <= len(idempotency_token) <= 512
         and all(33 <= ord(char) <= 126 for char in idempotency_token)
-        and -60 <= callback_age <= PUBLIC_DEMO_USAGE_TRIGGER_MAX_AGE_SECONDS
+        and _public_demo_usage_callback_age_is_fresh(callback_age)
     )
     if not bound:
         logger.warning("public_demo event=usage_breaker_rejected reason=misbound")
@@ -487,7 +426,14 @@ async def handle_public_demo_usage_limit(
     # The provider stop comes before Firestore. A stalled replay seal must never
     # delay suspension; DateFired freshness plus the fail-closed recovery procedure
     # prevents an old callback from affecting a deliberately restored child.
-    if not await _trip_public_demo_twilio_circuit_breaker():
+    if not await trip_public_demo_breaker(
+        child_account_sid=settings.twilio_account_sid,
+        usage_trigger_sid=settings.public_demo_twilio_usage_trigger_sid,
+        trigger_value=trigger_value,
+        current_value=current_value,
+        date_fired=date_fired,
+        idempotency_token=idempotency_token,
+    ):
         return Response(status_code=503)
 
     secret = (settings.public_demo_hmac_secret or "").strip()
@@ -575,7 +521,7 @@ async def public_demo_stream_ws(websocket: WebSocket):
         secret,
         ttl_seconds=max(
             30,
-            min(int(settings.public_demo_max_call_duration_seconds), 300),
+            min(int(settings.public_demo_max_call_duration_seconds), 180),
         )
         + 60,
     )
@@ -667,7 +613,7 @@ async def public_demo_stream_ws(websocket: WebSocket):
 
     max_duration = max(
         30,
-        min(int(settings.public_demo_max_call_duration_seconds), 300),
+        min(int(settings.public_demo_max_call_duration_seconds), 180),
     )
 
     duration_task = asyncio.create_task(

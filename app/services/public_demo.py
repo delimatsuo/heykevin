@@ -27,10 +27,9 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_DEMO_TIMEZONE = ZoneInfo("America/New_York")
 PUBLIC_DEMO_STREAM_TOKEN_TTL_SECONDS = 120
-# The route permits a 300-second demo and signs the stream for that duration plus
-# a 60-second setup margin. Six minutes remains tightly bounded while covering the
-# full validated configuration range.
-PUBLIC_DEMO_STREAM_TOKEN_MAX_TTL_SECONDS = 360
+# The route permits at most a 180-second demo and signs the stream for that
+# duration plus a 60-second setup margin.
+PUBLIC_DEMO_STREAM_TOKEN_MAX_TTL_SECONDS = 240
 PUBLIC_DEMO_LEASE_COLLECTION = "public_demo_control"
 PUBLIC_DEMO_LEASE_DOCUMENT = "concurrency_v1"
 PUBLIC_DEMO_STREAM_CLAIM_COLLECTION = "public_demo_stream_claims"

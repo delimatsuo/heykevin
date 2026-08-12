@@ -21,6 +21,22 @@ def _set_common(monkeypatch):
     monkeypatch.setattr(config.settings, "production_twilio_account_sid", "AC_PROD")
     monkeypatch.setattr(
         config.settings,
+        "public_demo_breaker_url",
+        "https://kevin-demo-breaker.example.run.app",
+    )
+    monkeypatch.setattr(
+        config.settings,
+        "public_demo_breaker_audience",
+        "https://kevin-demo-breaker.example.run.app",
+    )
+    monkeypatch.setattr(config.settings, "public_demo_breaker_hmac_secret", "b" * 32)
+    monkeypatch.setattr(
+        config.settings,
+        "public_demo_breaker_caller_service_account",
+        "public-demo@example.iam.gserviceaccount.com",
+    )
+    monkeypatch.setattr(
+        config.settings,
         "transcript_encryption_key",
         base64.b64encode(b"k" * 32).decode("ascii"),
     )
@@ -47,6 +63,27 @@ def test_staging_accepts_isolated_resources(monkeypatch):
     monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_STAGING")
 
     config.validate_runtime_safety()
+
+
+def test_generic_runtime_rejects_private_breaker_authority(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setattr(config.settings, "environment", "staging")
+    monkeypatch.setattr(config.settings, "cloud_run_url", "https://kevin-staging.example.run.app")
+    monkeypatch.setattr(config.settings, "firestore_project_id", "kevin-staging")
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        "https://kevin-staging-rtdb.firebaseio.com",
+    )
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_STAGING")
+    monkeypatch.setattr(
+        config.settings,
+        "public_demo_breaker_twilio_parent_main_api_key_secret",
+        "parent-secret-must-never-be-generic",
+    )
+
+    with pytest.raises(RuntimeError, match="forbidden outside the private"):
+        config.validate_runtime_safety()
 
 
 def test_enabled_public_demo_accepts_only_isolated_demo_runtime(monkeypatch):
@@ -152,6 +189,52 @@ def test_enabled_demo_rejects_missing_or_oversized_spend_breaker(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="PUBLIC_DEMO_TWILIO_DAILY_SPEND_LIMIT_USD"):
         config.validate_runtime_safety(public_demo_entrypoint=True)
+
+
+def _set_enabled_bounded_demo(monkeypatch) -> None:
+    _set_common(monkeypatch)
+    monkeypatch.setattr(config.settings, "environment", "demo")
+    monkeypatch.setattr(config.settings, "cloud_run_url", "https://kevin-demo.example.run.app")
+    monkeypatch.setattr(config.settings, "firestore_project_id", "kevin-public-demo")
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        "https://kevin-public-demo-rtdb.firebaseio.com",
+    )
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_DEMO")
+    monkeypatch.setattr(config.settings, "public_demo_enabled", True)
+    monkeypatch.setattr(config.settings, "public_demo_number", "+12025550199")
+    monkeypatch.setattr(config.settings, "public_demo_hmac_secret", "x" * 32)
+    monkeypatch.setattr(config.settings, "public_demo_ttl_policies_verified", True)
+    monkeypatch.setattr(
+        config.settings,
+        "public_demo_twilio_usage_trigger_sid",
+        "UT" + "1" * 32,
+    )
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "duration", "expected_error"),
+    [
+        (3, 180, "PUBLIC_DEMO_CONCURRENCY_LIMIT"),
+        (2, 181, "PUBLIC_DEMO_MAX_CALL_DURATION_SECONDS"),
+    ],
+)
+def test_enabled_demo_rejects_unbounded_drain(monkeypatch, concurrency, duration, expected_error):
+    _set_enabled_bounded_demo(monkeypatch)
+    monkeypatch.setattr(config.settings, "public_demo_concurrency_limit", concurrency)
+    monkeypatch.setattr(config.settings, "public_demo_max_call_duration_seconds", duration)
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        config.validate_runtime_safety(public_demo_entrypoint=True)
+
+
+def test_enabled_demo_accepts_exact_bounded_drain(monkeypatch):
+    _set_enabled_bounded_demo(monkeypatch)
+    monkeypatch.setattr(config.settings, "public_demo_concurrency_limit", 2)
+    monkeypatch.setattr(config.settings, "public_demo_max_call_duration_seconds", 180)
+
+    config.validate_runtime_safety(public_demo_entrypoint=True)
 
 
 def test_staging_rejects_production_apns_endpoint(monkeypatch):

@@ -2,9 +2,18 @@
 
 ## Current status
 
-The repository contains a source-only, disabled-by-default public demo boundary.
-No phone number, cloud service, provider account, tenant, deployment, or public
-listing is created by this change.
+The public demo is disabled by default and remains unavailable until every
+activation gate below has been proven. The isolated provisioning record created
+on August 11, 2026 is:
+
+- Boston local number: **+1 (857) 810-6804**
+- GCP project: `hk-public-demo-bos-260811`
+- Public Cloud Run service: `kevin-public-demo` in `us-east4`
+- Dedicated Twilio child: `Hey Kevin Boston Public Demo`
+
+The number must not be publicly listed while `PUBLIC_DEMO_ENABLED=false` or any
+retention, breaker, provider, or controlled-call qualification remains open.
+This fixture is code-owned and intentionally has no contractor/tenant record.
 
 The demo must use its dedicated routes. Never point a public demo number at the
 ordinary `/webhooks/twilio/incoming` route.
@@ -27,7 +36,7 @@ Twilio speaks this disclosure before the AI stream connects.
 
 > **Try Kevin for yourself**
 >
-> Call **[DEMO NUMBER]** and talk to Kevin as if you were a customer. Ask about
+> Call **(857) 810-6804** and talk to Kevin as if you were a customer. Ask about
 > services in the fictional Boston-metro area, example prices, business hours,
 > or available demo
 > times. You can also simulate an appointment request.
@@ -125,14 +134,28 @@ Expected behavior:
 - Twilio and WebSocket transport loggers are forced to `WARNING`; `LOG_LEVEL=DEBUG`
   is rejected in the demo environment because provider URLs and frames can contain
   credentials, identifiers, or speech.
-- A signed, exact-trigger-bound daily `totalprice` usage callback self-suspends
-  the isolated Twilio child first, then best-effort ends its known active calls.
-  Only after a successful trip does the callback attempt a bounded HMAC replay
-  seal; a stalled database can cause a retry but cannot delay suspension. The
-  runtime never holds the production parent credential. A call racing the final
-  active-call list is still stopped by the hard media cutoff. The callback also
-  rejects `DateFired` values older than 15 minutes, and recovery waits out that
-  window before the parent restores the child.
+- A signed, exact-trigger-bound daily `totalprice` callback asks a separate,
+  IAM-private Cloud Run breaker to suspend the exact Twilio child. Only the
+  public demo service account can invoke it, and the request is independently
+  authenticated with a dedicated HMAC over a fixed suspend-only payload. The
+  private breaker alone holds a revocable Twilio Main API key, binds one parent
+  and one child account, and uses that key only to suspend the child. It cannot
+  activate or close an account and accepts no target or desired status from the
+  request. The public runtime is forbidden from containing the
+  parent credential. Only after a successful provider stop does the public
+  callback attempt a bounded HMAC replay seal; a stalled database cannot delay
+  suspension. Both services reject callbacks at the 15-minute age boundary, and
+  recovery waits more than 16 minutes after the last callback delivery before an
+  operator restores the child, covering the accepted 60-second future clock skew.
+- Provider handling is separate from app storage. Twilio Call resources contain
+  caller/called-number PII; recordings are disabled, and provider call records
+  require a separate retention/deletion procedure. Gemini paid-service content
+  is not used to improve Google products, but abuse-monitoring retention can
+  still apply unless the project is approved for zero data retention. Verify the
+  current provider policies before each publication. See the
+  [Twilio Call resource retention notes](https://www.twilio.com/docs/voice/api/call-resource),
+  [Gemini zero-data-retention guide](https://ai.google.dev/gemini-api/docs/zdr),
+  and [Gemini usage policies](https://ai.google.dev/gemini-api/docs/usage-policies).
 
 ## Activation gate
 
@@ -149,12 +172,13 @@ security/privacy review:
    the reserved inert placeholder `+12025550100` and `TELEGRAM_BOT_TOKEN` to
    `public-demo-disabled`. The demo entry point rejects any other values, preventing
    accidental owner or Telegram destinations.
-2. Configure a dedicated voice-only number:
+2. Configure the dedicated number for inbound voice only in this application:
    - voice POST: `/webhooks/twilio/public-demo/incoming`
    - voice fallback POST: `/webhooks/twilio/public-demo/fallback`
    - status POST: `/webhooks/twilio/public-demo/status`
-   - messaging disabled at the provider; `/webhooks/twilio/public-demo/message`
-     exists only as a defensive accept-and-discard endpoint
+   - no messaging application or active SMS workflow; the Boston local number's
+     provider capability cannot be removed, so `/webhooks/twilio/public-demo/message`
+     is the defensive accept-and-discard endpoint
 3. Configure a unique `PUBLIC_DEMO_HMAC_SECRET`, the exact E.164
    `PUBLIC_DEMO_NUMBER`, quotas, and a maximum duration of 180 seconds. Keep
    `ALLOW_PRODUCTION_RESOURCES_IN_NON_PRODUCTION=false`, and bind the service to
@@ -168,7 +192,21 @@ security/privacy review:
    without that exact circuit-breaker binding. Usage evaluation and callback delivery
    are delayed and can overshoot the threshold; this is a tested emergency stop, not
    an instantaneous or absolute provider spend cap.
-4. Enable and verify Firestore TTL policies on the `expires_at` field for the
+4. Deploy `app.public_demo_breaker_main:app` as a second Cloud Run service with
+   no public invoker. Grant `roles/run.invoker` only to the exact public-demo
+   runtime service account and bind the service URL as both
+   `PUBLIC_DEMO_BREAKER_URL` and `PUBLIC_DEMO_BREAKER_AUDIENCE`. Use a separate
+   HMAC secret shared only by those two runtimes. Give the private breaker a
+   dedicated revocable Twilio Main API key and the fixed parent/child SIDs. Use
+   the Main key only for the parent-owned account suspension. Never give the
+   public service the Main key or parent Auth Token, and never copy the parent
+   Auth Token into the isolated demo project. Grant both runtimes per-secret
+   access only. Prove anonymous and wrong-principal requests are
+   denied, an exact signed request suspends only the configured child, and
+   failure is bounded and retryable. Twilio suspension blocks new admissions but
+   does not terminate calls already in progress. Prove that at most the configured
+   two admitted calls drain and that each reaches the 180-second app cutoff.
+5. Enable and verify Firestore TTL policies on the `expires_at` field for the
    `rate_limits`, `public_demo_stream_claims`, and `public_demo_control` collection
    groups. Prove with isolated test documents that the TTL configuration is active;
    do not treat the expiry field alone as deletion. Set
@@ -177,14 +215,18 @@ security/privacy review:
    Review and minimize the isolated Twilio and Gemini accounts' provider-side
    recording, logging, abuse-monitoring, and retention/deletion settings as a
    separate activation condition; app-side controls cannot erase provider records.
-5. Verify the deployed SHA, log levels, and provider/data-plane identities, then set
+6. Verify the deployed SHA, log levels, and provider/data-plane identities, then set
    `PUBLIC_DEMO_ENABLED=true` last.
-6. Place controlled calls and prove disclosure order, simulated scheduling,
+7. Place controlled calls and prove disclosure order, Boston/Somerville in-area
+   handling, Worcester out-of-area handling, simulated scheduling,
    cutoff behavior (including a deliberately stalled Twilio completion request),
    replay rejection, no real-world side effects, no raw caller/transcript retention,
    expiry of pseudonymous admission records, and
    provider usage within the configured ceiling.
-7. Publish the number only beside the same fictional-demo, AI-processing,
+8. Disable the public service, prove new-call denial and zero active calls,
+   recreate and rebind the one-shot daily Twilio trigger, restore the isolated
+   child manually, and repeat the unavailable-path check before final enablement.
+9. Publish the number only beside the same fictional-demo, AI-processing,
    no-sensitive-data, no-real-booking, and no-emergency-dispatch notice.
 
 ## Rollback
@@ -193,7 +235,7 @@ Set `PUBLIC_DEMO_ENABLED=false` first and verify the number speaks the
 unavailable message and hangs up. This blocks new admissions; it is not an
 instantaneous kill switch for a stream already admitted on an older Cloud Run
 instance. Existing calls must drain no later than the configured cutoff (180
-seconds by default, never more than the validated 300-second ceiling), where the
+seconds by default and by the validated safety ceiling), where the
 pipeline synchronously aborts Gemini before bounded Twilio/ASGI cleanup. Verify
 the isolated provider has zero active calls after that window; if immediate
 termination is required, explicitly end active calls in the isolated Twilio
@@ -201,16 +243,22 @@ account and scale the demo service to zero. Then remove the public listing and
 disconnect the Twilio number. Release the number only after confirming it is not
 published or referenced by any forwarding configuration.
 
-For a provider-cost emergency, invoke the tested circuit breaker or suspend the
-isolated Twilio child from the parent account. The breaker suspends first, then
-best-effort ends calls it can observe; after suspension, verify the child has zero
-active calls and explicitly terminate any race through the parent account. Never
-close the child as routine rollback because closing it releases the Boston number.
+For a provider-cost emergency, rely on the signed usage callback or invoke the
+private suspend-only breaker through the exact public service identity; an operator
+can also suspend the isolated child from the parent account. The breaker uses a
+revocable parent Main key to suspend the exact child and stop new admissions. Twilio
+does not terminate calls already in progress when a child is suspended, so allow at
+most the configured two calls to drain through the app's 180-second hard cutoff,
+then independently confirm no queued, ringing, or in-progress calls remain. If an
+exceptional immediate termination is required, an operator must do it from the
+parent account; the production parent Auth Token is never stored in this project.
+Never close the child as routine rollback because closing it releases the Boston
+number.
 
 Recovery is deliberately fail-closed. Keep `PUBLIC_DEMO_ENABLED=false` and scale the
-demo service to zero before restoring the child. Resolve the cost cause, wait at least
-15 minutes for callback freshness to expire, verify all callback retries and active
-calls have finished, then delete/recreate the daily usage
+demo service to zero before restoring the child. Resolve the cost cause, wait more
+than 16 minutes after the last callback delivery, verify all callback retries and
+active calls have finished, then delete/recreate the daily usage
 trigger so it is armed for the current GMT interval and update the exact bound trigger
 SID on the disabled service. Restore the Twilio child only after those checks, verify
 the unavailable call path, scale the service back up, and deliberately re-enable last.

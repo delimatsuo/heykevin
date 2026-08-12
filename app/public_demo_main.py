@@ -30,6 +30,17 @@ def _validate_public_demo_runtime() -> None:
     if (settings.environment or "").strip().lower() != "demo":
         raise RuntimeError("The public demo app requires ENVIRONMENT=demo")
 
+    parent_breaker_fields = (
+        "public_demo_breaker_twilio_parent_account_sid",
+        "public_demo_breaker_twilio_parent_main_api_key_sid",
+        "public_demo_breaker_twilio_parent_main_api_key_secret",
+        "public_demo_breaker_twilio_child_account_sid",
+    )
+    if any(str(getattr(settings, name, "") or "").strip() for name in parent_breaker_fields):
+        raise RuntimeError(
+            "Parent Twilio breaker configuration is forbidden on the public demo service"
+        )
+
     required = ["twilio_account_sid", "twilio_auth_token"]
     if settings.public_demo_enabled:
         required.append("gemini_api_key")

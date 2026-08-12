@@ -27,7 +27,7 @@ from app.db.contractors import PROTECTED_FIELDS
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.public_demo import build_public_demo_profile, build_public_demo_system_prompt
 from app.services.public_demo_pipeline import (
-    PUBLIC_DEMO_FRIENDLY_MALE_VOICE,
+    PUBLIC_DEMO_CALM_MALE_VOICE,
     PUBLIC_DEMO_GEMINI_MODEL,
     PublicDemoGeminiPipeline,
 )
@@ -170,7 +170,7 @@ async def test_admitted_call_connects_directly_to_native_demo_voice_and_never_em
     async def allow_rate(**kwargs):
         rate_keys.append(kwargs["key"])
         rate_ttls.append(kwargs["document_ttl_seconds"])
-        return SimpleNamespace(allowed=True)
+        return SimpleNamespace(allowed=True, count_in_window=1)
 
     async def allow_lease(*_args, **_kwargs):
         return True
@@ -190,6 +190,7 @@ async def test_admitted_call_connects_directly_to_native_demo_voice_and_never_em
     assert "Polly.Matthew" not in body
     assert 'url="wss://demo.example.test/public-demo-stream"' in body
     assert "signed-demo-token" in body
+    assert "returning_caller" not in body
     assert "CA11111111111111111111111111111111" not in body
     assert "+12025550147" not in body
     assert rate_keys[1] == "all"
@@ -198,7 +199,36 @@ async def test_admitted_call_connects_directly_to_native_demo_voice_and_never_em
     assert rate_ttls == [3600, 86_400]
 
 
-def test_demo_pipeline_uses_friendly_male_voice_and_conversational_greeting(monkeypatch):
+@pytest.mark.asyncio
+async def test_repeat_call_gets_hmac_derived_returning_marker_without_raw_phone(
+    monkeypatch,
+):
+    _configure(monkeypatch)
+
+    async def allow_rate(**kwargs):
+        count = 2 if kwargs["scope"] == "public_demo_per_caller" else 1
+        return SimpleNamespace(allowed=True, count_in_window=count)
+
+    async def allow_lease(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(public_demo, "check_and_increment", allow_rate)
+    monkeypatch.setattr(public_demo, "acquire_public_demo_lease", allow_lease)
+    monkeypatch.setattr(
+        public_demo,
+        "sign_public_demo_stream_token",
+        lambda *_args, **_kwargs: "signed-demo-token",
+    )
+
+    response = await public_demo.handle_public_demo_incoming(_incoming(), None)
+    body = response.body.decode()
+
+    assert 'name="returning_caller" value="1"' in body
+    assert "+12025550147" not in body
+    assert "12025550147" not in body
+
+
+def test_demo_pipeline_uses_calm_male_voice_and_conversational_greeting(monkeypatch):
     def fake_base_init(self, **_kwargs):
         self._voice = "Puck"
 
@@ -207,14 +237,29 @@ def test_demo_pipeline_uses_friendly_male_voice_and_conversational_greeting(monk
 
     greeting = pipeline._build_greeting_text()
 
-    assert PUBLIC_DEMO_FRIENDLY_MALE_VOICE == "Achird"
+    assert PUBLIC_DEMO_CALM_MALE_VOICE == "Charon"
     assert PUBLIC_DEMO_GEMINI_MODEL == "gemini-3.1-flash-live-preview"
     assert pipeline._model == PUBLIC_DEMO_GEMINI_MODEL
-    assert pipeline._voice == "Achird"
+    assert pipeline._voice == "Charon"
     assert "AI receptionist" in greeting
     assert "fictional" not in greeting.lower()
     assert "services" in greeting
     assert "booking a visit" in greeting
+
+
+def test_demo_pipeline_recognizes_a_returning_caller_without_identity(monkeypatch):
+    def fake_base_init(self, **_kwargs):
+        self._voice = "Puck"
+
+    monkeypatch.setattr(PublicDemoGeminiPipeline.__mro__[1], "__init__", fake_base_init)
+    pipeline = PublicDemoGeminiPipeline(returning_caller=True)
+
+    greeting = pipeline._build_greeting_text()
+
+    assert "calling back" in greeting
+    assert "this time" in greeting
+    assert "AI receptionist" in greeting
+    assert "+" not in greeting
 
 
 def test_demo_pipeline_uses_high_speech_detection_with_noise_padding():
@@ -560,7 +605,10 @@ async def test_stream_extracts_raw_sid_only_in_memory_and_uses_hmac_transport_la
             "streamSid": "MZ111",
             "start": {
                 "callSid": raw_sid,
-                "customParameters": {"demo_token": "signed-token"},
+                "customParameters": {
+                    "demo_token": "signed-token",
+                    "returning_caller": "1",
+                },
             },
         }
     )
@@ -574,6 +622,7 @@ async def test_stream_extracts_raw_sid_only_in_memory_and_uses_hmac_transport_la
     assert "call_sid" not in captured["pipeline_kwargs"]
     assert "caller_phone" not in captured["pipeline_kwargs"]
     assert "contractor_config" not in captured["pipeline_kwargs"]
+    assert captured["pipeline_kwargs"]["returning_caller"] is True
     assert released == [raw_sid]
 
 
@@ -983,6 +1032,8 @@ def test_demo_prompt_has_no_real_world_commitment_or_pii_intake():
     assert "SERVICE PRICE RANGES" in prompt
     assert "handle the conversation exactly like a capable receptionist" in prompt
     assert 'Never preface an ordinary answer with "as part of our demo,"' in prompt
+    assert "quietly friendly" in prompt
+    assert "Never sound excited" in prompt
 
 
 def test_dedicated_demo_pipeline_exposes_only_synthetic_tools():
@@ -998,6 +1049,9 @@ def test_dedicated_demo_pipeline_exposes_only_synthetic_tools():
 def test_demo_pipeline_constructor_rejects_injected_identity():
     with pytest.raises(TypeError, match="code-owned"):
         PublicDemoGeminiPipeline(contractor_config={"public_demo": True})
+
+    with pytest.raises(TypeError, match="returning_caller must be a boolean"):
+        PublicDemoGeminiPipeline(returning_caller="yes")
 
 
 @pytest.mark.asyncio

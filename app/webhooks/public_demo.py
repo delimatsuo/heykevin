@@ -145,12 +145,18 @@ def _public_demo_limit_twiml() -> str:
     return str(response)
 
 
-def _public_demo_stream_twiml(stream_token: str) -> str:
+def _public_demo_stream_twiml(
+    stream_token: str,
+    *,
+    returning_caller: bool = False,
+) -> str:
     ws_url = settings.cloud_run_url.replace("https://", "wss://")
     response = VoiceResponse()
     connect = Connect()
     stream = connect.stream(url=f"{ws_url}/public-demo-stream")
     stream.parameter(name="demo_token", value=stream_token)
+    if returning_caller:
+        stream.parameter(name="returning_caller", value="1")
     response.append(connect)
     return str(response)
 
@@ -266,7 +272,12 @@ async def handle_public_demo_incoming(
         return twiml_response(_public_demo_unavailable_twiml())
 
     caller_value = str(form_data.get("From", "") or "anonymous").strip() or "anonymous"
-    caller_key = hash_public_demo_identifier(secret, "caller", caller_value)
+    normalized_caller = normalize_phone(caller_value)
+    caller_key = hash_public_demo_identifier(
+        secret,
+        "caller",
+        normalized_caller or caller_value.lower(),
+    )
 
     try:
         per_caller = await check_and_increment(
@@ -286,6 +297,10 @@ async def handle_public_demo_incoming(
     if not per_caller.allowed:
         logger.info("public_demo event=admission_denied reason=caller_limit")
         return twiml_response(_public_demo_unavailable_twiml(busy=True))
+    returning_caller = bool(
+        normalized_caller
+        and getattr(per_caller, "count_in_window", 1) > 1
+    )
 
     try:
         admitted = await acquire_public_demo_lease(
@@ -338,7 +353,12 @@ async def handle_public_demo_incoming(
         return twiml_response(_public_demo_unavailable_twiml())
 
     logger.info("public_demo event=admission_allowed")
-    return twiml_response(_public_demo_stream_twiml(token))
+    return twiml_response(
+        _public_demo_stream_twiml(
+            token,
+            returning_caller=returning_caller,
+        )
+    )
 
 
 @router.post("/webhooks/twilio/public-demo/fallback")
@@ -473,6 +493,7 @@ async def public_demo_stream_ws(websocket: WebSocket):
     call_sid = ""
     stream_sid = ""
     demo_token = ""
+    returning_caller = False
     deadline_started_at = time.monotonic()
     call_started_at = time.time()
 
@@ -488,11 +509,11 @@ async def public_demo_stream_ws(websocket: WebSocket):
                 call_started_at = time.time()
                 stream_sid = str(message.get("streamSid", "") or "")
                 call_sid = str(start_payload.get("callSid", "") or "")
-                demo_token = str(
-                    start_payload.get("customParameters", {})
-                    .get("demo_token", "")
-                    or ""
-                )
+                custom_parameters = start_payload.get("customParameters", {})
+                if not isinstance(custom_parameters, dict):
+                    break
+                demo_token = str(custom_parameters.get("demo_token", "") or "")
+                returning_caller = custom_parameters.get("returning_caller") == "1"
                 break
     except Exception as error:  # noqa: BLE001 - malformed streams fail closed
         _log_safe_exception("public_demo_start_error", error)
@@ -631,6 +652,7 @@ async def public_demo_stream_ws(websocket: WebSocket):
             return
 
         pipeline = PublicDemoGeminiPipeline(
+            returning_caller=returning_caller,
             on_audio_out=on_audio_out,
             on_transcript=on_transcript,
             on_clear_audio=on_clear_audio,

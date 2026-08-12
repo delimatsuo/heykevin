@@ -59,8 +59,9 @@ PUBLIC_DEMO_GEMINI_TOOLS = [
 
 # The public demo has its own spoken identity. Keep this choice local to the
 # demo so product users retain their configured language/persona voices.
-# Google's voice catalogue identifies Achird as male and friendly.
-PUBLIC_DEMO_FRIENDLY_MALE_VOICE = "Achird"
+# Charon's informative delivery is calmer and more restrained than Achird's
+# friendly delivery on the public phone surface.
+PUBLIC_DEMO_CALM_MALE_VOICE = "Charon"
 PUBLIC_DEMO_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 
 
@@ -95,6 +96,9 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
     def __init__(self, *args, **kwargs):
         if args:
             raise TypeError("public demo callbacks must be passed by name")
+        returning_caller = kwargs.pop("returning_caller", False)
+        if not isinstance(returning_caller, bool):
+            raise TypeError("returning_caller must be a boolean")
         forbidden = {"contractor_config", "caller_phone", "call_sid"} & set(kwargs)
         if forbidden:
             raise TypeError("public demo identity and profile are code-owned")
@@ -107,8 +111,9 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
             call_sid="",
         )
         self._model = PUBLIC_DEMO_GEMINI_MODEL
-        self._voice = PUBLIC_DEMO_FRIENDLY_MALE_VOICE
+        self._voice = PUBLIC_DEMO_CALM_MALE_VOICE
         self._system_prompt = build_public_demo_system_prompt(profile)
+        self._returning_caller = returning_caller
         self._output_pcm_buffer = bytearray()
         self._output_pcm_turn = 0
 
@@ -128,6 +133,11 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
             await super()._enqueue_model_audio(frame)
 
     def _build_greeting_text(self) -> str:
+        if self._returning_caller:
+            return (
+                "Thanks for calling back to Hey Kevin's Boston Plumbing demo. "
+                "I'm Kevin, the AI receptionist. What can I help with this time?"
+            )
         return (
             "Thanks for calling Hey Kevin's Boston Plumbing demo. I'm Kevin, the AI "
             "receptionist. You can ask about services, the areas we cover, example "

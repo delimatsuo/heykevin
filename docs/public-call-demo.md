@@ -40,6 +40,9 @@ Twilio speaks this disclosure before the AI stream connects.
 > services in the fictional Boston-metro area, example prices, business hours,
 > or available demo
 > times. You can also simulate an appointment request.
+> Call back from the same number within one hour to hear Kevin recognize a
+> returning caller. The demo uses only a short-lived HMAC identifier for this;
+> it does not retain the raw phone number or transcript.
 >
 > This is a fictional AI demo. Speech is processed during the call. Do not share
 > sensitive or personal information. No real service, appointment, dispatch,
@@ -118,6 +121,9 @@ Expected behavior:
   concurrency lease, one-time stream claims, and a hard three-minute media cutoff
   before paid AI use can grow unbounded. Twilio completion has both client and
   coroutine timeouts; the media WebSocket closes at the deadline even if it stalls.
+- The count in the existing short-lived HMAC-keyed per-caller rate record supplies
+  a returning-caller greeting for repeat calls within the configured one-hour window.
+  No raw caller number, name, or transcript is added to app storage.
 - No contractor lookup, subscription fallback, contacts, caller history, owner
   forwarding, conference pickup, push, SMS/MMS delivery, Jobber, Google
   Calendar, estimate links, jobs, caller contacts, call records, post-call

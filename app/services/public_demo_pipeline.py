@@ -57,9 +57,10 @@ PUBLIC_DEMO_GEMINI_TOOLS = [
     }
 ]
 
-# The public demo has its own spoken identity.  Keep this choice local to the
+# The public demo has its own spoken identity. Keep this choice local to the
 # demo so product users retain their configured language/persona voices.
-PUBLIC_DEMO_WARM_VOICE = "Sulafat"
+# Google's voice catalogue identifies Achird as male and friendly.
+PUBLIC_DEMO_FRIENDLY_MALE_VOICE = "Achird"
 
 
 class PublicDemoGeminiPipeline(GeminiPipeline):
@@ -81,7 +82,7 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
             caller_phone="",
             call_sid="",
         )
-        self._voice = PUBLIC_DEMO_WARM_VOICE
+        self._voice = PUBLIC_DEMO_FRIENDLY_MALE_VOICE
         self._system_prompt = build_public_demo_system_prompt(profile)
 
     def _build_greeting_text(self) -> str:

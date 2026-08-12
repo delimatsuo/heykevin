@@ -26,7 +26,7 @@ from app import config as app_config
 from app.db.contractors import PROTECTED_FIELDS
 from app.services.public_demo import build_public_demo_profile, build_public_demo_system_prompt
 from app.services.public_demo_pipeline import (
-    PUBLIC_DEMO_WARM_VOICE,
+    PUBLIC_DEMO_FRIENDLY_MALE_VOICE,
     PublicDemoGeminiPipeline,
 )
 from app.webhooks import public_demo
@@ -160,7 +160,7 @@ async def test_wrong_number_fails_closed_without_forwarding(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admitted_call_connects_directly_to_warm_demo_voice_and_never_embeds_caller_phone(monkeypatch):
+async def test_admitted_call_connects_directly_to_native_demo_voice_and_never_embeds_caller_phone(monkeypatch):
     _configure(monkeypatch)
     rate_keys = []
     rate_ttls = []
@@ -196,12 +196,17 @@ async def test_admitted_call_connects_directly_to_warm_demo_voice_and_never_embe
     assert rate_ttls == [3600, 86_400]
 
 
-def test_demo_pipeline_uses_warm_voice_and_conversational_greeting():
-    pipeline = PublicDemoGeminiPipeline.__new__(PublicDemoGeminiPipeline)
+def test_demo_pipeline_uses_friendly_male_voice_and_conversational_greeting(monkeypatch):
+    def fake_base_init(self, **_kwargs):
+        self._voice = "Puck"
+
+    monkeypatch.setattr(PublicDemoGeminiPipeline.__mro__[1], "__init__", fake_base_init)
+    pipeline = PublicDemoGeminiPipeline()
 
     greeting = pipeline._build_greeting_text()
 
-    assert PUBLIC_DEMO_WARM_VOICE == "Sulafat"
+    assert PUBLIC_DEMO_FRIENDLY_MALE_VOICE == "Achird"
+    assert pipeline._voice == "Achird"
     assert "AI receptionist" in greeting
     assert "fictional" not in greeting.lower()
     assert "services" in greeting

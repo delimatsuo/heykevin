@@ -430,6 +430,36 @@ def test_case_creation_rejects_malformed_payload_before_mutation(modules):
     assert sm.current_revision == 0 and sm.case is None
 
 
+def test_case_created_rejects_scenarios_the_model_would_also_reject(modules):
+    # _case_created's local scenario shape check must be at least as strict
+    # as VisualTriageCase.validate_scenario's CODE_PATTERN, or a payload can
+    # be accepted (revision advances, accepted=True) yet permanently poison
+    # the aggregate: every subsequent snapshot()/.case access raises once the
+    # model refuses to construct. str.isalnum() accepts non-ASCII Unicode
+    # letters and has no length bound, unlike CODE_PATTERN.
+    c, state = modules
+    non_ascii = state.VisualTriageStateMachine()
+    result = non_ascii.apply(event(c, c.EventKind.CASE_CREATED, 0, "create-non-ascii", {"scenario": "hvac.café"}))
+    assert not result.accepted and result.decision_code == "invalid_case_payload"
+    assert non_ascii.current_revision == 0 and non_ascii.case is None
+
+    overlong = state.VisualTriageStateMachine()
+    long_scenario = "hvac." + ("a" * 100)
+    assert len(long_scenario) > 64
+    result = overlong.apply(event(c, c.EventKind.CASE_CREATED, 0, "create-long", {"scenario": long_scenario}))
+    assert not result.accepted and result.decision_code == "invalid_case_payload"
+    assert overlong.current_revision == 0 and overlong.case is None
+
+
+def test_case_created_accepts_the_scenarios_used_elsewhere_in_this_suite(modules):
+    c, state = modules
+    for scenario in ("hvac.demo", "hvac.not_cooling_with_outdoor_unit_noise"):
+        sm = state.VisualTriageStateMachine()
+        result = accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, f"create-{scenario}", {"scenario": scenario}))
+        assert result.decision_code == "case_created"
+        assert sm.case is not None and sm.case.supported_scenario == scenario
+
+
 def test_terminal_projection_has_no_action(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()
@@ -602,6 +632,43 @@ def test_rejected_initial_media_reaches_one_recapture_and_fulfillment(modules):
         "request_id": "recapture-2", "action_kind": "targeted_recapture", "budget_bucket": "recapture", "receipt_ref": "recapture-second",
     }))
     assert not second.accepted and second.decision_code == "recapture_not_reachable"
+
+
+def test_customer_action_resolved_after_rejected_media_does_not_advertise_start_analysis(modules):
+    # If initial symptom media is rejected and never replaced, analysis lands
+    # on ABSTAINED (not READY). A diagnostic question can still be issued
+    # from ABSTAINED, so resolving that question must not unconditionally
+    # flip analysis to READY -- _analysis_started also requires validated
+    # symptom evidence, so an unconditional READY here would advertise
+    # next_action="start_analysis" for a transition that is always rejected.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(sm, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
+    upload = {
+        "asset_id": "bad-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "b" * 64,
+    }
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 3, "upload", upload))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, 4, "final", {"asset_id": "bad-video"}))
+    rejected = accepted(sm, event(c, c.EventKind.MEDIA_VALIDATED, 5, "reject", {"asset_id": "bad-video", "validation": "rejected"}))
+    assert rejected.projection.analysis_status is c.AnalysisStatus.ABSTAINED
+    accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, sm.current_revision, "question", {
+        "request_id": "question-request", "action_kind": "diagnostic_question", "budget_bucket": "question",
+        "receipt_ref": "question", "locale": "und", "copy_ref": "question-copy", "response_option_codes": ["yes"],
+    }))
+    resolved = accepted(sm, event(c, c.EventKind.CUSTOMER_ACTION_RESOLVED, sm.current_revision, "answer", {
+        "request_id": "question-request", "action_kind": "diagnostic_question", "locale": "und",
+        "response_option_code": "yes", "status": "answered",
+    }))
+    assert resolved.projection.analysis_status is c.AnalysisStatus.ABSTAINED
+    assert resolved.projection.next_action is None
+    # Regression guard: submitting the (never-advertised) action was always
+    # going to be rejected, before and after the fix -- only the misleading
+    # advertisement changes.
+    blocked = sm.apply(event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start-after-rejected-media"))
+    assert not blocked.accepted and blocked.decision_code == "analysis_not_ready"
 
 
 def test_successful_rating_plate_fulfillment_restart_and_replay(modules):
@@ -986,6 +1053,49 @@ def test_analysis_retry_budget_and_fourth_attempt_rejection(modules):
     assert not fourth.accepted and fourth.decision_code == "retry_attempt_invalid"
 
 
+def test_analysis_retry_recorded_rejects_boolean_attempt(modules):
+    # bool is a subclass of int in Python, so isinstance(True, int) is True
+    # and True == 1 is also True -- a JSON boolean payload can pass every
+    # numeric guard here and get stored as the literal Python object True,
+    # corrupting the retry-count aggregate's type invariant.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start-1"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_FAILED, sm.current_revision, "fail-1", {"failure_state": "failed_retriable"}))
+    boolean_attempt = sm.apply(event(c, c.EventKind.ANALYSIS_RETRY_RECORDED, sm.current_revision, "retry-bool", {"attempt": True}, retry_stage="analysis", retry_attempt=1))
+    assert not boolean_attempt.accepted
+    assert boolean_attempt.decision_code == "retry_attempt_invalid"
+    assert sm._analysis_retry_count == 0
+    # Regression guard: a genuine int attempt at the same position still works.
+    real_attempt = accepted(sm, event(c, c.EventKind.ANALYSIS_RETRY_RECORDED, sm.current_revision, "retry-1", {"attempt": 1}, retry_stage="analysis", retry_attempt=1))
+    assert real_attempt.decision_code == "analysis_retry_recorded"
+    assert sm._analysis_retry_count == 1
+
+
+def test_deletion_retry_recorded_rejects_boolean_attempt(modules):
+    # Same defect as the analysis retry counter, but here the corrupted
+    # value (a bare Python True) is fed straight into
+    # VisualTriageCase.deletion_retry_count, an int field under pydantic
+    # strict mode -- so an accepted boolean attempt permanently poisons the
+    # aggregate: every later snapshot()/.case access raises
+    # StructuralValidationError, confirmed empirically against pydantic
+    # 2.12.5 (bool is not coerced to int in strict mode).
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete"))
+    boolean_attempt = sm.apply(event(c, c.EventKind.DELETION_RETRY_RECORDED, sm.current_revision, "retry-bool", {"attempt": True}, retry_stage="deletion", retry_attempt=1))
+    assert not boolean_attempt.accepted
+    assert boolean_attempt.decision_code == "deletion_retry_invalid"
+    assert sm._deletion_retry_count == 0
+    # Regression guard: a genuine int attempt at the same position still works.
+    real_attempt = accepted(sm, event(c, c.EventKind.DELETION_RETRY_RECORDED, sm.current_revision, "retry-1", {"attempt": 1}, retry_stage="deletion", retry_attempt=1))
+    assert real_attempt.decision_code == "deletion_retry_recorded"
+    assert sm._deletion_retry_count == 1
+    assert sm.case is not None and sm.case.deletion_retry_count == 1
+
+
 def test_ordinary_lane_saturation_does_not_block_control_lane(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()
@@ -1148,8 +1258,12 @@ def test_interrupted_media_upload_can_be_cancelled_without_case_termination(modu
     }))
     cancelled = accepted(sm, event(c, c.EventKind.MEDIA_ACTION_RESOLVED, sm.current_revision, "plate-cancel", {
         "request_id": "plate-request", "action_kind": "rating_plate", "media_role": "rating_plate", "status": "cancelled",
+        "asset_id": "plate-asset",
     }))
     assert cancelled.projection.analysis_status is c.AnalysisStatus.READY
+    # The aborted-upload asset must not linger as a phantom PENDING record.
+    aborted_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert aborted_asset.validation is c.MediaValidation.UNAVAILABLE
     accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "restart-after-cancel"))
     accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "restart-complete", {"outcome": "complete"}))
     assert sm.case.pending_customer_action is None
@@ -1170,10 +1284,62 @@ def test_interrupted_media_upload_can_expire_and_replay(modules):
     }))
     expired = event(c, c.EventKind.MEDIA_ACTION_RESOLVED, sm.current_revision, "plate-expired", {
         "request_id": "plate-request", "action_kind": "rating_plate", "media_role": "rating_plate", "status": "expired",
+        "asset_id": "plate-asset",
     }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc))
     result = accepted(sm, expired)
     assert result.projection.analysis_status is c.AnalysisStatus.READY
+    # The aborted-upload asset must not linger as a phantom PENDING record.
+    aborted_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert aborted_asset.validation is c.MediaValidation.UNAVAILABLE
     assert sm.apply(expired).replayed
+
+
+def test_aborted_media_upload_finalizes_phantom_asset_as_unavailable(modules):
+    # If UPLOAD_STARTED already ran, the pending action's asset exists in
+    # _media_assets with validation=PENDING. Aborting (cancel/expire) while
+    # still UPLOADING must finalize that asset rather than silently
+    # abandoning it -- otherwise every future snapshot()/.case.media_assets
+    # keeps reporting an asset "still awaiting validation" forever, even
+    # after the case reaches case_closed. This is the dedicated proving test
+    # for that defect; the two sibling tests above also assert the fixed
+    # behavior inline for the cancel and expire paths respectively.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate", "budget_bucket": "rating_plate",
+        "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, sm.current_revision, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100, "digest": "f" * 64,
+    }))
+    before = sm.case.media_assets
+    pending_asset_before = next(a for a in before if a.asset_id == "plate-asset")
+    assert pending_asset_before.validation is c.MediaValidation.PENDING
+    cancelled = accepted(sm, event(c, c.EventKind.MEDIA_ACTION_RESOLVED, sm.current_revision, "plate-cancel", {
+        "request_id": "plate-request", "action_kind": "rating_plate", "media_role": "rating_plate",
+        "status": "cancelled", "asset_id": "plate-asset",
+    }))
+    assert cancelled.projection.analysis_status is c.AnalysisStatus.READY
+    asset_after = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert asset_after.validation is c.MediaValidation.UNAVAILABLE
+    # The case can still reach case_closed afterward -- the asset must not
+    # keep the case perpetually non-quiescent, and the snapshot must never
+    # regress back to reporting it PENDING.
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "restart"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "restart-complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.CONTRACTOR_PACKET_READY_RECORDED, sm.current_revision, "packet-ready"))
+    accepted(sm, event(c, c.EventKind.CONTRACTOR_PACKET_DELIVERY_STARTED, sm.current_revision, "packet-start"))
+    accepted(sm, event(c, c.EventKind.CONTRACTOR_PACKET_DELIVERY_RECEIPT_RECORDED, sm.current_revision, "packet-receipt", {"status": "delivered"}))
+    accepted(sm, event(c, c.EventKind.DELIVERY_POLICY_RECEIPT_RECORDED, sm.current_revision, "policy", {"receipt_ref": "policy"}))
+    accepted(sm, event(c, c.EventKind.CUSTOMER_DELIVERY_STARTED, sm.current_revision, "customer-start", {"receipt_ref": "policy"}))
+    accepted(sm, event(c, c.EventKind.CUSTOMER_DELIVERY_RECEIPT_RECORDED, sm.current_revision, "customer-receipt", {"status": "delivered"}))
+    closed = accepted(sm, event(c, c.EventKind.CASE_CLOSED, sm.current_revision, "close"))
+    assert closed.projection.case_status is c.CaseStatus.CLOSED
+    final_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert final_asset.validation is c.MediaValidation.UNAVAILABLE
 
 
 def test_action_expiry_must_follow_issue_time(modules):

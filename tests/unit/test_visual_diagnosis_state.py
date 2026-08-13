@@ -40,7 +40,7 @@ EXPECTED_PATHS = {
     "app/services/visual_diagnosis_state.py",
     "tests/unit/test_visual_diagnosis_contracts.py",
     "tests/unit/test_visual_diagnosis_state.py",
-    "tests/unit/conftest.py",
+    "tests/conftest.py",
 }
 LIVE_ROOT_HASHES = {
     "Dockerfile": "a8b96ae525dcd94a3e839a1980b14710c8e98663d42b812f4a1754878ddc4a2b",

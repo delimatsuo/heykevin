@@ -1585,7 +1585,10 @@ def test_deletion_verified_before_creation_time_is_rejected(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()
     accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
-    accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete"))
+    accepted(sm, event(
+        c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete",
+        at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc),
+    ))
     revision_before = sm.current_revision
     time_traveling = sm.apply(event(
         c, c.EventKind.DELETION_VERIFIED, revision_before, "verify",

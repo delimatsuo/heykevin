@@ -211,6 +211,22 @@ class VisualTriageStateMachine:
         backup = self._backup()
         try:
             decision_code = self._dispatch(event)
+            # event_id itself is neither re-validated by assert_integrity()
+            # nor included in the semantic fingerprint, so a caller-
+            # constructed event (e.g. via model_copy(update={"event_id":
+            # ...})) can carry a malformed one that only Receipt's own
+            # field validator catches. Construct it here, still inside the
+            # rollback-protected block and still before the revision
+            # increment below, so a failure restores cleanly instead of
+            # leaving the aggregate revision incremented with no
+            # corresponding ledger entry.
+            receipt = Receipt(
+                event_id=event.event_id,
+                kind=event.kind,
+                semantic_envelope_fingerprint=event.semantic_envelope_fingerprint,
+                historical_decision_code=decision_code,
+                resulting_revision=self._revision + 1,
+            )
         except TransitionRejected as error:
             self._restore(backup)
             return self._reject(error.code)
@@ -228,13 +244,6 @@ class VisualTriageStateMachine:
             return self._reject("invalid_structural_payload")
 
         self._revision += 1
-        receipt = Receipt(
-            event_id=event.event_id,
-            kind=event.kind,
-            semantic_envelope_fingerprint=event.semantic_envelope_fingerprint,
-            historical_decision_code=decision_code,
-            resulting_revision=self._revision,
-        )
         self._ledger[event.event_id] = receipt
         if event.kind in _CONTROL_KINDS:
             self._control_receipts.append(receipt)
@@ -1113,6 +1122,11 @@ class VisualTriageStateMachine:
         if self._state.contractor_packet is PacketStatus.DELIVERY_PENDING or self._state.customer_delivery is DeliveryStatus.DELIVERY_PENDING:
             raise TransitionRejected("case_not_quiescent")
         if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
+        if any(
+            action.resolved_at is not None and event.event_time < action.resolved_at
+            for action in self._resolved_customer_actions
+        ):
             raise TransitionRejected("terminal_event_predates_case")
         self._completed_at = event.event_time
         self._with_state(case=CaseStatus.CLOSED)

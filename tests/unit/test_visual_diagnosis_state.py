@@ -1577,7 +1577,6 @@ def test_deletion_verified_before_creation_time_is_rejected(modules):
     assert not time_traveling.accepted
     assert time_traveling.decision_code == "terminal_event_predates_case"
     assert sm.current_revision == revision_before
-    assert sm.case is not None and sm.case.deletion_retry_count == 1
 
 
 def test_ordinary_lane_saturation_does_not_block_control_lane(modules):

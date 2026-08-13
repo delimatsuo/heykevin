@@ -552,6 +552,7 @@ class VisualTriageStateMachine:
             raise TransitionRejected("consent_decline_not_allowed")
         self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.DECLINED)
         self._pending = None
+        self._completed_at = event.event_time
         return "consent_declined"
 
     def _consent_withdrawn(self, event: VisualTriageEvent) -> str:
@@ -561,6 +562,7 @@ class VisualTriageStateMachine:
             raise TransitionRejected("consent_withdrawal_not_allowed")
         self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.WITHDRAWN)
         self._pending = None
+        self._completed_at = event.event_time
         return "consent_withdrawn"
 
     def _media_action_issued(self, event: VisualTriageEvent) -> str:
@@ -587,6 +589,11 @@ class VisualTriageStateMachine:
                 or not self._has_validated_role(MediaRole.SYMPTOM_VIDEO)
             ):
                 raise TransitionRejected("rating_plate_budget_exhausted")
+            if (
+                self._state.contractor_packet is not PacketStatus.NOT_READY
+                or self._state.customer_delivery is not DeliveryStatus.NOT_EVALUATED
+            ):
+                raise TransitionRejected("output_already_prepared")
             self._rating_plate_count += 1
         else:
             if self._recapture_count >= 1 or self._state.media is not MediaStatus.REJECTED:
@@ -603,6 +610,11 @@ class VisualTriageStateMachine:
         self._require_no_pending()
         if self._state.analysis not in {AnalysisStatus.COMPLETE, AnalysisStatus.ABSTAINED}:
             raise TransitionRejected("analysis_not_question_ready")
+        if (
+            self._state.contractor_packet is not PacketStatus.NOT_READY
+            or self._state.customer_delivery is not DeliveryStatus.NOT_EVALUATED
+        ):
+            raise TransitionRejected("output_already_prepared")
         if any(
             action.kind is ActionKind.DIAGNOSTIC_QUESTION
             and action.status in {
@@ -1094,10 +1106,20 @@ class VisualTriageStateMachine:
         if self._state.case not in {CaseStatus.CREATED, CaseStatus.ACTIVE}:
             raise TransitionRejected("case_terminal_not_allowed")
         self._pending = None
+        media = self._state.media
+        if media in {MediaStatus.UPLOAD_PENDING, MediaStatus.UPLOADED_QUARANTINED}:
+            # An in-flight upload/validation can never resolve once the case
+            # is terminal (every finalize/validate transition requires an
+            # active case) -- finalize the abandoned asset now rather than
+            # leave a permanently PENDING record in the terminal snapshot.
+            for asset_id, asset in list(self._media_assets.items()):
+                if asset.validation is MediaValidation.PENDING:
+                    self._media_assets[asset_id] = asset.model_copy(update={"validation": MediaValidation.UNAVAILABLE})
+            media = MediaStatus.UNAVAILABLE
         self._completed_at = event.event_time
         if status is CaseStatus.EXPIRED:
             self._expires_at = event.event_time
-        self._with_state(case=status)
+        self._with_state(case=status, media=media)
         return code
 
     def _deletion_requested(self, event: VisualTriageEvent) -> str:

@@ -785,6 +785,11 @@ class VisualTriageStateMachine:
         else:
             if self._pending.kind not in _MEDIA_ACTION_KINDS or self._pending.status is not ActionStatus.ISSUED:
                 raise TransitionRejected("upload_not_allowed")
+            if (
+                self._pending.expires_at is not None
+                and event.event_time >= self._pending.expires_at
+            ):
+                raise TransitionRejected("action_expired")
             role = self._role_for_action(self._pending.kind)
         self._media_assets[asset_id] = self._asset_from_payload(event.payload, role)
         if self._pending is not None:

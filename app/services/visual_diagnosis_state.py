@@ -589,11 +589,7 @@ class VisualTriageStateMachine:
             raise TransitionRejected("consent_withdrawal_not_allowed")
         if event.event_time < self._created_at:
             raise TransitionRejected("terminal_event_predates_case")
-        if any(
-            action.resolved_at is not None and event.event_time < action.resolved_at
-            for action in self._resolved_customer_actions
-        ):
-            raise TransitionRejected("terminal_event_predates_case")
+        self._reject_if_predates_recorded_activity(event)
         self._pending = None
         media = self._finalized_media_after_termination()
         self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.WITHDRAWN, media=media)
@@ -1143,14 +1139,26 @@ class VisualTriageStateMachine:
             raise TransitionRejected("case_not_quiescent")
         if event.event_time < self._created_at:
             raise TransitionRejected("terminal_event_predates_case")
+        self._reject_if_predates_recorded_activity(event)
+        self._completed_at = event.event_time
+        self._with_state(case=CaseStatus.CLOSED)
+        return "case_closed"
+
+    def _reject_if_predates_recorded_activity(self, event: VisualTriageEvent) -> None:
+        """A terminal/closing event must not predate the case's own recorded
+        activity -- neither a still-open pending action's issuance (it is
+        about to be silently discarded by the caller) nor any already-
+        resolved action's resolution -- or the resulting audit chronology
+        would show work happening after the case supposedly completed.
+        """
+
+        if self._pending is not None and event.event_time < self._pending.issued_at:
+            raise TransitionRejected("terminal_event_predates_case")
         if any(
             action.resolved_at is not None and event.event_time < action.resolved_at
             for action in self._resolved_customer_actions
         ):
             raise TransitionRejected("terminal_event_predates_case")
-        self._completed_at = event.event_time
-        self._with_state(case=CaseStatus.CLOSED)
-        return "case_closed"
 
     def _case_cancelled(self, event: VisualTriageEvent) -> str:
         return self._terminal_case(event, CaseStatus.CANCELLED, "case_cancelled")
@@ -1192,11 +1200,7 @@ class VisualTriageStateMachine:
             raise TransitionRejected("case_terminal_not_allowed")
         if event.event_time < self._created_at:
             raise TransitionRejected("terminal_event_predates_case")
-        if any(
-            action.resolved_at is not None and event.event_time < action.resolved_at
-            for action in self._resolved_customer_actions
-        ):
-            raise TransitionRejected("terminal_event_predates_case")
+        self._reject_if_predates_recorded_activity(event)
         self._pending = None
         media = self._finalized_media_after_termination()
         self._completed_at = event.event_time
@@ -1239,11 +1243,7 @@ class VisualTriageStateMachine:
             raise TransitionRejected("deletion_not_pending")
         if event.event_time < self._created_at:
             raise TransitionRejected("terminal_event_predates_case")
-        if any(
-            action.resolved_at is not None and event.event_time < action.resolved_at
-            for action in self._resolved_customer_actions
-        ):
-            raise TransitionRejected("terminal_event_predates_case")
+        self._reject_if_predates_recorded_activity(event)
         self._deleted_at = event.event_time
         self._with_state(deletion=DeletionStatus.VERIFIED)
         return "deletion_verified"

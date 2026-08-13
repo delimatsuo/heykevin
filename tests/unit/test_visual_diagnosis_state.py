@@ -1579,6 +1579,65 @@ def test_deletion_verified_before_creation_time_is_rejected(modules):
     assert sm.current_revision == revision_before
 
 
+def test_actions_issued_before_case_created_are_rejected(modules):
+    c, state = modules
+    created_at = datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)
+    before_creation = datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc)
+
+    question_sm = state.VisualTriageStateMachine()
+    accepted(question_sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}, at=created_at))
+    accepted(question_sm, event(c, c.EventKind.CONSENT_REQUESTED, question_sm.current_revision, "request"))
+    accepted(question_sm, event(c, c.EventKind.CONSENT_GRANTED, question_sm.current_revision, "grant"))
+    accepted(question_sm, event(c, c.EventKind.UPLOAD_STARTED, question_sm.current_revision, "upload", {
+        "asset_id": "asset-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "a" * 64,
+    }))
+    accepted(question_sm, event(c, c.EventKind.UPLOAD_FINALIZED, question_sm.current_revision, "final", {"asset_id": "asset-video"}))
+    accepted(question_sm, event(c, c.EventKind.MEDIA_VALIDATED, question_sm.current_revision, "validate", {
+        "asset_id": "asset-video", "validation": "validated",
+    }))
+    accepted(question_sm, event(c, c.EventKind.ANALYSIS_STARTED, question_sm.current_revision, "start"))
+    accepted(question_sm, event(c, c.EventKind.ANALYSIS_COMPLETED, question_sm.current_revision, "complete", {"outcome": "complete"}))
+    revision_before = question_sm.current_revision
+    early_question = question_sm.apply(event(
+        c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, revision_before, "question", {
+            "request_id": "question-request", "action_kind": "diagnostic_question",
+            "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+            "copy_ref": "question-copy", "response_option_codes": ["yes"],
+        },
+        at=before_creation,
+    ))
+    assert not early_question.accepted
+    assert early_question.decision_code == "action_issued_before_case_created"
+    assert question_sm.current_revision == revision_before
+
+    plate_sm = state.VisualTriageStateMachine()
+    accepted(plate_sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}, at=created_at))
+    accepted(plate_sm, event(c, c.EventKind.CONSENT_REQUESTED, plate_sm.current_revision, "request"))
+    accepted(plate_sm, event(c, c.EventKind.CONSENT_GRANTED, plate_sm.current_revision, "grant"))
+    accepted(plate_sm, event(c, c.EventKind.UPLOAD_STARTED, plate_sm.current_revision, "upload", {
+        "asset_id": "asset-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "a" * 64,
+    }))
+    accepted(plate_sm, event(c, c.EventKind.UPLOAD_FINALIZED, plate_sm.current_revision, "final", {"asset_id": "asset-video"}))
+    accepted(plate_sm, event(c, c.EventKind.MEDIA_VALIDATED, plate_sm.current_revision, "validate", {
+        "asset_id": "asset-video", "validation": "validated",
+    }))
+    accepted(plate_sm, event(c, c.EventKind.ANALYSIS_STARTED, plate_sm.current_revision, "start"))
+    accepted(plate_sm, event(c, c.EventKind.ANALYSIS_COMPLETED, plate_sm.current_revision, "complete", {"outcome": "complete"}))
+    revision_before = plate_sm.current_revision
+    early_plate = plate_sm.apply(event(
+        c, c.EventKind.MEDIA_ACTION_ISSUED, revision_before, "plate-issue", {
+            "request_id": "plate-request", "action_kind": "rating_plate",
+            "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+        },
+        at=before_creation,
+    ))
+    assert not early_plate.accepted
+    assert early_plate.decision_code == "action_issued_before_case_created"
+    assert plate_sm.current_revision == revision_before
+
+
 def test_ordinary_lane_saturation_does_not_block_control_lane(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

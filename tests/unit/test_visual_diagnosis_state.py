@@ -1161,6 +1161,32 @@ def test_case_cancelled_finalizes_an_in_flight_upload(modules):
     assert asset.validation.value == "unavailable"
 
 
+def test_terminal_cleanup_preserves_validated_symptom_evidence(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)  # validates the symptom video at asset_id "asset-video"
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, sm.current_revision, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100,
+        "digest": "c" * 64,
+    }))
+    # The rating-plate upload is in flight (PENDING) when the case is
+    # cancelled -- but the symptom video was separately already validated,
+    # so the case still has genuine evidence.
+    cancelled = accepted(sm, event(c, c.EventKind.CASE_CANCELLED, sm.current_revision, "cancel"))
+    assert cancelled.projection.media_status.value == "validated"
+    plate_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert plate_asset.validation.value == "unavailable"
+    video_asset = next(a for a in sm.case.media_assets if a.asset_id == "asset-video")
+    assert video_asset.validation.value == "validated"
+
+
+
 def test_consent_declined_and_withdrawn_set_completed_at(modules):
     c, state = modules
     declined = state.VisualTriageStateMachine()
@@ -1221,6 +1247,32 @@ def test_terminal_case_events_before_creation_time_are_rejected(modules):
         ))
         assert not time_traveling.accepted, kind
         assert time_traveling.decision_code == "terminal_event_predates_case", (kind, time_traveling.decision_code)
+
+
+def test_case_closed_before_creation_time_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}, at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+    accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, sm.current_revision, "request"))
+    accepted(sm, event(c, c.EventKind.CONSENT_GRANTED, sm.current_revision, "grant"))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, sm.current_revision, "upload", {
+        "asset_id": "asset-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "a" * 64,
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, sm.current_revision, "final", {"asset_id": "asset-video"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_VALIDATED, sm.current_revision, "validate", {
+        "asset_id": "asset-video", "validation": "validated",
+    }))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    revision_before = sm.current_revision
+    time_traveling = sm.apply(event(
+        c, c.EventKind.CASE_CLOSED, revision_before, "close",
+        at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc),  # before created_at
+    ))
+    assert not time_traveling.accepted
+    assert time_traveling.decision_code == "terminal_event_predates_case"
+    assert sm.current_revision == revision_before
         assert sm.current_revision == revision_before
 
 
@@ -1903,6 +1955,28 @@ def test_foreign_enum_kind_with_matching_value_never_raises(modules):
     genuine = event(c, c.EventKind.CONSENT_REQUESTED, 1, "request")
     foreign = genuine.model_copy(update={"kind": ForeignKind.CONSENT_REQUESTED})
     result = sm.apply(foreign)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+
+
+def test_foreign_enum_kind_with_unrecognized_value_never_raises(modules):
+    # A foreign Enum member whose .value doesn't match ANY real EventKind
+    # string fails even earlier than the matching-value case above:
+    # assert_integrity()'s own _EVENT_PAYLOAD_KEYS[self.kind.value] lookup
+    # raises KeyError before the fingerprint is ever checked, inside the
+    # first try/except in apply() (around event.assert_integrity()), not
+    # the second one around _dispatch. apply() must still not throw.
+    import enum
+
+    class ForeignKind(enum.Enum):
+        BOGUS = "not_a_real_event_kind"
+
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    original = event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"})
+    accepted(sm, original)
+    malformed = original.model_copy(update={"kind": ForeignKind.BOGUS})
+    result = sm.apply(malformed)  # must not raise
     assert not result.accepted
     assert result.decision_code == "event_integrity_mismatch"
 

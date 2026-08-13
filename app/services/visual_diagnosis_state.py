@@ -972,6 +972,7 @@ class VisualTriageStateMachine:
         if (
             not isinstance(attempt, int)
             or isinstance(attempt, bool)
+            or isinstance(event.retry_attempt, bool)
             or event.retry_attempt != attempt
             or attempt != self._analysis_retry_count + 1
             or attempt > 3
@@ -1182,6 +1183,7 @@ class VisualTriageStateMachine:
         if (
             not isinstance(attempt, int)
             or isinstance(attempt, bool)
+            or isinstance(event.retry_attempt, bool)
             or event.retry_attempt != attempt
             or attempt != self._deletion_retry_count + 1
             or attempt > 3
@@ -1194,6 +1196,8 @@ class VisualTriageStateMachine:
         self._require_case()
         if self._state.deletion is not DeletionStatus.PENDING:
             raise TransitionRejected("deletion_not_pending")
+        if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
         self._deleted_at = event.event_time
         self._with_state(deletion=DeletionStatus.VERIFIED)
         return "deletion_verified"

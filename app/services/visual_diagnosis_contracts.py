@@ -324,6 +324,32 @@ class StructuralModel(BaseModel):
         except ValidationError:
             raise StructuralValidationError("invalid structural contract") from None
 
+    @classmethod
+    def model_validate(cls, *args: Any, **kwargs: Any) -> "StructuralModel":
+        # Pydantic's model_validate()/model_validate_json()/
+        # model_validate_strings() are separate entry points that do not
+        # route through __init__ above -- each needs its own sanitization,
+        # or a caller using any of them gets a raw pydantic ValidationError
+        # whose message embeds the offending input value verbatim.
+        try:
+            return super().model_validate(*args, **kwargs)
+        except ValidationError:
+            raise StructuralValidationError("invalid structural contract") from None
+
+    @classmethod
+    def model_validate_json(cls, *args: Any, **kwargs: Any) -> "StructuralModel":
+        try:
+            return super().model_validate_json(*args, **kwargs)
+        except ValidationError:
+            raise StructuralValidationError("invalid structural contract") from None
+
+    @classmethod
+    def model_validate_strings(cls, *args: Any, **kwargs: Any) -> "StructuralModel":
+        try:
+            return super().model_validate_strings(*args, **kwargs)
+        except ValidationError:
+            raise StructuralValidationError("invalid structural contract") from None
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(structural)"
 

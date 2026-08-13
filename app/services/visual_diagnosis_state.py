@@ -564,6 +564,8 @@ class VisualTriageStateMachine:
         self._require_not_deleting()
         if self._state.case is not CaseStatus.CREATED or self._state.consent is not ConsentStatus.AWAITING_DECISION:
             raise TransitionRejected("consent_decline_not_allowed")
+        if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
         self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.DECLINED)
         self._pending = None
         self._completed_at = event.event_time
@@ -574,6 +576,8 @@ class VisualTriageStateMachine:
         self._require_not_deleting()
         if self._state.case is not CaseStatus.ACTIVE or self._state.consent is not ConsentStatus.GRANTED:
             raise TransitionRejected("consent_withdrawal_not_allowed")
+        if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
         self._pending = None
         media = self._finalized_media_after_termination()
         self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.WITHDRAWN, media=media)

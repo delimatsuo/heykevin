@@ -1165,8 +1165,10 @@ def test_analysis_retry_budget_and_fourth_attempt_rejection(modules):
     assert not exhausted.accepted and exhausted.decision_code == "analysis_retry_exhausted"
     assert sm.current_revision == revision_before
 
+    # Analysis is still PROCESSING (the exhausted claim above was rejected,
+    # not accepted), so a retry can't be recorded against it either.
     fourth = sm.apply(event(c, c.EventKind.ANALYSIS_RETRY_RECORDED, revision_before, "retry-4", {"attempt": 4}, retry_stage="analysis", retry_attempt=3))
-    assert not fourth.accepted and fourth.decision_code == "retry_attempt_invalid"
+    assert not fourth.accepted and fourth.decision_code == "analysis_retry_not_allowed"
 
     # The caller correctly reports failed_terminal instead, and the case can
     # still reach closure -- the exhausted retry budget doesn't strand it.

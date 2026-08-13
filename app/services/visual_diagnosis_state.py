@@ -18,6 +18,7 @@ from app.services.visual_diagnosis_contracts import (
     AnalysisStatus,
     ArtifactReference,
     CaseStatus,
+    CODE_PATTERN,
     ConsentStatus,
     CONTROL_RECEIPT_CAP,
     DeletionStatus,
@@ -504,9 +505,7 @@ class VisualTriageStateMachine:
         scenario = event.payload.get("scenario", self._supported_scenario)
         if not isinstance(scenario, str) or not scenario or "." not in scenario:
             raise TransitionRejected("invalid_case_payload")
-        if scenario != scenario.casefold() or not all(
-            part and part.replace("_", "").isalnum() for part in scenario.split(".")
-        ):
+        if not CODE_PATTERN.fullmatch(scenario.replace(".", ":")):
             raise TransitionRejected("invalid_case_payload")
         source_ref = event.payload.get("source_ref")
         if source_ref is not None:
@@ -680,6 +679,7 @@ class VisualTriageStateMachine:
         self._with_state(
             analysis=AnalysisStatus.READY
             if status in {ActionStatus.ANSWERED, ActionStatus.NOT_SURE}
+            and self._has_validated_symptom_evidence()
             else AnalysisStatus.ABSTAINED
         )
         return "customer_action_resolved"
@@ -847,7 +847,10 @@ class VisualTriageStateMachine:
             if asset.role is not expected_role:
                 raise TransitionRejected("media_resolution_binding_mismatch")
         elif status in {ActionStatus.EXPIRED, ActionStatus.CANCELLED} and self._pending.status is ActionStatus.UPLOADING:
-            pass
+            asset = self._matching_asset(event.payload)
+            if asset.role is not expected_role:
+                raise TransitionRejected("media_resolution_binding_mismatch")
+            self._media_assets[asset.asset_id] = asset.model_copy(update={"validation": MediaValidation.UNAVAILABLE})
         else:
             raise TransitionRejected("media_action_not_resolvable")
         resolved = self._pending.model_copy(
@@ -905,6 +908,7 @@ class VisualTriageStateMachine:
         attempt = self._value(event.payload, "attempt")
         if (
             not isinstance(attempt, int)
+            or isinstance(attempt, bool)
             or event.retry_attempt != attempt
             or attempt != self._analysis_retry_count + 1
             or attempt > 3
@@ -1079,6 +1083,7 @@ class VisualTriageStateMachine:
         attempt = self._value(event.payload, "attempt")
         if (
             not isinstance(attempt, int)
+            or isinstance(attempt, bool)
             or event.retry_attempt != attempt
             or attempt != self._deletion_retry_count + 1
             or attempt > 3

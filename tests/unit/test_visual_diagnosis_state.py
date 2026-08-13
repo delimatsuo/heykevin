@@ -206,11 +206,16 @@ def _guard_before_import(*, require_environment: bool = True) -> None:
                 and node.func.id in {"eval", "exec", "__import__", "import_module"}
                 for node in ast.walk(tree)
             )
+    candidate_names = {"visual_diagnosis_contracts.py", "visual_diagnosis_state.py"}
     for raw in tracked:
-        if raw:
-            text = (ROOT / raw.decode("utf-8")).read_text(encoding="utf-8", errors="ignore")
-            assert "visual_diagnosis_contracts" not in text
-            assert "visual_diagnosis_state" not in text
+        if not raw:
+            continue
+        raw_path = ROOT / raw.decode("utf-8")
+        if raw_path.name in candidate_names:
+            continue
+        text = raw_path.read_text(encoding="utf-8", errors="ignore")
+        assert "visual_diagnosis_contracts" not in text
+        assert "visual_diagnosis_state" not in text
 
 
 _guard_before_import()

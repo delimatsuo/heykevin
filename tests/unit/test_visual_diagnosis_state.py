@@ -1661,6 +1661,27 @@ def test_case_cancelled_and_expired_before_last_resolved_action_time_are_rejecte
         assert sm.current_revision == revision_before
 
 
+def test_upload_started_after_action_expiry_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate", "budget_bucket": "rating_plate",
+        "receipt_ref": "plate-issue", "copy_ref": "plate-copy", "expires_at": "2026-08-12T00:10:00+00:00",
+    }))
+    revision_before = sm.current_revision
+    late_upload = sm.apply(event(
+        c, c.EventKind.UPLOAD_STARTED, revision_before, "plate-upload",
+        {"asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100, "digest": "f" * 64},
+        at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc),  # at the deadline, not before it
+    ))
+    assert not late_upload.accepted
+    assert late_upload.decision_code == "action_expired", late_upload.decision_code
+    assert sm.current_revision == revision_before
+
+
 def test_recapture_blocked_after_outputs_are_prepared(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

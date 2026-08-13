@@ -1154,9 +1154,25 @@ def test_analysis_retry_budget_and_fourth_attempt_rejection(modules):
     accepted(sm, event(c, c.EventKind.ANALYSIS_FAILED, sm.current_revision, "fail-3", {"failure_state": "failed_retriable"}))
     accepted(sm, event(c, c.EventKind.ANALYSIS_RETRY_RECORDED, sm.current_revision, "retry-3", {"attempt": 3}, retry_stage="analysis", retry_attempt=3))
     accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start-4"))
-    accepted(sm, event(c, c.EventKind.ANALYSIS_FAILED, sm.current_revision, "fail-4", {"failure_state": "failed_retriable"}))
-    fourth = sm.apply(event(c, c.EventKind.ANALYSIS_RETRY_RECORDED, sm.current_revision, "retry-4", {"attempt": 4}, retry_stage="analysis", retry_attempt=3))
+
+    # A 4th "still retriable" report is rejected once the 3-attempt retry
+    # budget is spent -- accepting it would leave analysis in
+    # FAILED_RETRIABLE with a 4th retry itself also rejected below and no
+    # route left to a terminal analysis state (case_closed requires the
+    # analysis out of FAILED_RETRIABLE).
+    revision_before = sm.current_revision
+    exhausted = sm.apply(event(c, c.EventKind.ANALYSIS_FAILED, revision_before, "fail-4", {"failure_state": "failed_retriable"}))
+    assert not exhausted.accepted and exhausted.decision_code == "analysis_retry_exhausted"
+    assert sm.current_revision == revision_before
+
+    fourth = sm.apply(event(c, c.EventKind.ANALYSIS_RETRY_RECORDED, revision_before, "retry-4", {"attempt": 4}, retry_stage="analysis", retry_attempt=3))
     assert not fourth.accepted and fourth.decision_code == "retry_attempt_invalid"
+
+    # The caller correctly reports failed_terminal instead, and the case can
+    # still reach closure -- the exhausted retry budget doesn't strand it.
+    accepted(sm, event(c, c.EventKind.ANALYSIS_FAILED, revision_before, "fail-4-terminal", {"failure_state": "failed_terminal"}))
+    closed = accepted(sm, event(c, c.EventKind.CASE_CLOSED, sm.current_revision, "close"))
+    assert closed.projection.case_status.value == "closed"
 
 
 def test_analysis_retry_recorded_rejects_boolean_attempt(modules):
@@ -1657,6 +1673,24 @@ def test_each_event_envelope_field_is_fingerprint_bound(modules):
         field = next(iter(updates))
         assert not result.accepted, field
         assert result.decision_code == expected_codes[field], (field, result.decision_code)
+
+
+def test_non_enum_kind_or_source_from_bypassed_validation_never_raises(modules):
+    # Pydantic's model_copy(update=...) does not revalidate the updated
+    # fields, so a caller can produce a VisualTriageEvent whose kind/
+    # source_kind is a raw string rather than the real enum member.
+    # assert_integrity() accesses .value on both, which raises AttributeError
+    # for a plain str -- apply() promises to never throw, so this must still
+    # resolve to a clean rejection instead of an unhandled crash.
+    c, state = modules
+    for field in ("kind", "source_kind"):
+        sm = state.VisualTriageStateMachine()
+        original = event(c, c.EventKind.CASE_CREATED, 0, f"create-{field}", {"scenario": "hvac.demo"})
+        accepted(sm, original)
+        malformed = original.model_copy(update={field: "not-a-real-enum-member"})
+        result = sm.apply(malformed)  # must not raise
+        assert not result.accepted, field
+        assert result.decision_code == "event_integrity_mismatch", (field, result.decision_code)
 
 
 def test_deletion_pending_rejects_late_non_deletion_events(modules):

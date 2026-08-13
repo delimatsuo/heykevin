@@ -1681,6 +1681,36 @@ def test_case_cancelled_and_expired_before_last_resolved_action_time_are_rejecte
         assert sm.current_revision == revision_before
 
 
+def test_terminal_transitions_reject_time_before_pending_action_issuance(modules):
+    # The resolved-action-timestamp guards only ever look at
+    # _resolved_customer_actions (actions that already finished); they never
+    # check a still-open self._pending action's issued_at before it gets
+    # silently discarded by the same transition. A terminal event can then
+    # be timestamped before an action the case history shows was issued but
+    # never resolved, corrupting the audit chronology the resolved-action
+    # check exists to protect.
+    c, state = modules
+    for kind in (c.EventKind.CONSENT_WITHDRAWN, c.EventKind.CASE_CANCELLED, c.EventKind.CASE_EXPIRED):
+        sm = state.VisualTriageStateMachine()
+        bootstrap_valid(sm, c)
+        accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+        accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+        issued_at = datetime(2026, 8, 12, 2, 0, tzinfo=timezone.utc)
+        accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, sm.current_revision, "question", {
+            "request_id": "question-request", "action_kind": "diagnostic_question",
+            "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+            "copy_ref": "question-copy", "response_option_codes": ["yes"],
+        }, at=issued_at))
+        revision_before = sm.current_revision
+        early_terminal = sm.apply(event(
+            c, kind, revision_before, "terminal",
+            at=datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc),  # after created_at, before the pending question's issued_at
+        ))
+        assert not early_terminal.accepted, kind
+        assert early_terminal.decision_code == "terminal_event_predates_case", (kind, early_terminal.decision_code)
+        assert sm.current_revision == revision_before
+
+
 def test_naive_event_time_via_model_construct_is_rejected(modules):
     # .build() itself rejects a naive event_time outright (strict field
     # validator), but model_construct() bypasses that; with a correctly

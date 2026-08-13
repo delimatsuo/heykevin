@@ -1193,6 +1193,22 @@ def test_consent_withdrawn_finalizes_an_in_flight_upload(modules):
     assert asset.validation.value == "unavailable"
 
 
+def test_deletion_requested_finalizes_an_in_flight_upload(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(sm, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 3, "upload", {
+        "asset_id": "asset-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "a" * 64,
+    }))
+    deletion = accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete"))
+    assert deletion.projection.media_status.value == "unavailable"
+    asset = next(a for a in sm.case.media_assets if a.asset_id == "asset-video")
+    assert asset.validation.value == "unavailable"
+
+
 def test_terminal_case_events_before_creation_time_are_rejected(modules):
     c, state = modules
     for kind in (c.EventKind.CASE_CANCELLED, c.EventKind.CASE_EXPIRED):

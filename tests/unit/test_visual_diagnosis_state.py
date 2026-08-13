@@ -1681,6 +1681,47 @@ def test_case_cancelled_and_expired_before_last_resolved_action_time_are_rejecte
         assert sm.current_revision == revision_before
 
 
+def test_non_dict_payload_via_model_construct_is_rejected(modules):
+    # _validate_structural_value() accepts a list as a valid nested payload
+    # VALUE (payloads legitimately contain list-typed fields), so calling it
+    # on self.payload itself doesn't reject a non-dict top-level payload.
+    # With a correctly hand-recomputed matching digest and fingerprint, a
+    # list payload is fully self-consistent and must still be caught by
+    # assert_integrity() before it reaches a handler that calls .get() on it.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    payload = []
+    payload_digest = c._sha256(payload)
+    event_time = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    envelope = {
+        "schema_version": c.SCHEMA_VERSION,
+        "case_id": "case-1",
+        "contractor_id": "contractor-1",
+        "event_kind": c.EventKind.CASE_CREATED.value,
+        "canonical_payload_digest": payload_digest,
+        "expected_revision": 0,
+        "source_kind": c.EventSource.SYNTHETIC.value,
+        "event_time": event_time.isoformat(),
+        "retry_stage": None,
+        "retry_attempt": None,
+        "evidence_scope": c.EVIDENCE_SCOPE,
+    }
+    malformed = c.VisualTriageEvent.model_construct(
+        case_id="case-1", contractor_id="contractor-1", event_id="create",
+        kind=c.EventKind.CASE_CREATED, payload=payload,
+        canonical_payload_digest=payload_digest,
+        semantic_envelope_fingerprint=c._sha256(envelope),
+        expected_revision=0, source_kind=c.EventSource.SYNTHETIC,
+        event_time=event_time, retry_stage=None, retry_attempt=None,
+        schema_version=c.SCHEMA_VERSION, evidence_scope=c.EVIDENCE_SCOPE,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == 0
+    assert sm.case is None
+
+
 def test_terminal_transitions_reject_time_before_pending_action_issuance(modules):
     # The resolved-action-timestamp guards only ever look at
     # _resolved_customer_actions (actions that already finished); they never
@@ -1709,6 +1750,51 @@ def test_terminal_transitions_reject_time_before_pending_action_issuance(modules
         assert not early_terminal.accepted, kind
         assert early_terminal.decision_code == "terminal_event_predates_case", (kind, early_terminal.decision_code)
         assert sm.current_revision == revision_before
+
+
+def test_malformed_case_identity_on_creation_via_model_construct_is_rejected(modules):
+    # assert_integrity() validates event_id's format but, before this fix,
+    # not case_id/contractor_id's -- it only checks that they're internally
+    # consistent with the recomputed fingerprint, which a caller can always
+    # satisfy by hand-recomputing that fingerprint over the malformed value.
+    # The pre-dispatch binding check in apply() is skipped for the very
+    # first event (no aggregate exists yet to bind against), so a malformed
+    # case_id could previously be committed by _case_created. Every later
+    # event with the real, valid case_id would then fail to match
+    # self._case_id, and snapshot() would only fail much later trying to
+    # construct VisualTriageCase with the malformed id.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    payload = {"scenario": "hvac.demo", "source_ref": "call-ref"}
+    payload_digest = c._sha256(payload)
+    event_time = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    envelope = {
+        "schema_version": c.SCHEMA_VERSION,
+        "case_id": "bad id with spaces",
+        "contractor_id": "contractor-1",
+        "event_kind": c.EventKind.CASE_CREATED.value,
+        "canonical_payload_digest": payload_digest,
+        "expected_revision": 0,
+        "source_kind": c.EventSource.SYNTHETIC.value,
+        "event_time": event_time.isoformat(),
+        "retry_stage": None,
+        "retry_attempt": None,
+        "evidence_scope": c.EVIDENCE_SCOPE,
+    }
+    malformed = c.VisualTriageEvent.model_construct(
+        case_id="bad id with spaces", contractor_id="contractor-1", event_id="create",
+        kind=c.EventKind.CASE_CREATED, payload=payload,
+        canonical_payload_digest=payload_digest,
+        semantic_envelope_fingerprint=c._sha256(envelope),
+        expected_revision=0, source_kind=c.EventSource.SYNTHETIC,
+        event_time=event_time, retry_stage=None, retry_attempt=None,
+        schema_version=c.SCHEMA_VERSION, evidence_scope=c.EVIDENCE_SCOPE,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == 0
+    assert sm.case is None
 
 
 def test_naive_event_time_via_model_construct_is_rejected(modules):

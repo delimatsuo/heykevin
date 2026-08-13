@@ -25,7 +25,7 @@ RUFF_PATH = Path("/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin/ruff")
 RUFF_DIGEST = "1edd2e6e57286bdddedb1fb55493a91dc17f42838f3d6be488ded7cfe2a4f3a1"
 CANDIDATE_HASHES = {
     "app/services/visual_diagnosis_contracts.py": "d66994f0063474c05558a8d0f0f71c3317337d5ede88860b4ab9a99e60be1c13",
-    "app/services/visual_diagnosis_state.py": "e1474535b29b9cdc9a2d208ad17f00a7a174c7adf789ab31ed2e5fbe8b98e2f8",
+    "app/services/visual_diagnosis_state.py": "2b43f5a52dac499ac42bf9b826692c1e4809e0d724788d1a998c9c153c07d9a8",
 }
 IMPORT_CLOSURE = {
     "app/services/visual_diagnosis_contracts.py",

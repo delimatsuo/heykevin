@@ -1147,7 +1147,8 @@ class VisualTriageStateMachine:
         if self._state.deletion is not DeletionStatus.NOT_REQUESTED:
             raise TransitionRejected("deletion_already_requested")
         self._pending = None
-        self._with_state(deletion=DeletionStatus.PENDING)
+        media = self._finalized_media_after_termination()
+        self._with_state(deletion=DeletionStatus.PENDING, media=media)
         return "deletion_requested"
 
     def _deletion_retry_recorded(self, event: VisualTriageEvent) -> str:

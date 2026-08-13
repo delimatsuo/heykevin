@@ -40,6 +40,7 @@ EXPECTED_PATHS = {
     "app/services/visual_diagnosis_state.py",
     "tests/unit/test_visual_diagnosis_contracts.py",
     "tests/unit/test_visual_diagnosis_state.py",
+    "tests/unit/conftest.py",
 }
 LIVE_ROOT_HASHES = {
     "Dockerfile": "a8b96ae525dcd94a3e839a1980b14710c8e98663d42b812f4a1754878ddc4a2b",
@@ -206,7 +207,12 @@ def _assert_candidate_isolated(*, require_environment: bool = True) -> None:
         _assert_network_denied()
         assert os.environ.get("VISUAL_DIAG_EGRESS_DENIED") == "sandbox-exec"
     if require_environment:
-        env_names = {name.casefold() for name in os.environ}
+        # Check the pristine pre-collection snapshot (see conftest.py), not
+        # live os.environ: several sibling test files set dummy provider-
+        # credential env vars at their own module level, which would
+        # otherwise look identical to a real secret leak to this scan.
+        pristine = os.environ.get("_VISUAL_DIAG_PRISTINE_ENVIRON_NAMES", "").split("\x1f")
+        env_names = {name.casefold() for name in pristine if name}
         forbidden = {name.casefold() for name in FORBIDDEN_ENV_NAMES}
         assert env_names.isdisjoint(forbidden)
         assert not any(

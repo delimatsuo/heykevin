@@ -1273,7 +1273,6 @@ def test_case_closed_before_creation_time_is_rejected(modules):
     assert not time_traveling.accepted
     assert time_traveling.decision_code == "terminal_event_predates_case"
     assert sm.current_revision == revision_before
-        assert sm.current_revision == revision_before
 
 
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):

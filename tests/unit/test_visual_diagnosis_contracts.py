@@ -42,12 +42,6 @@ EXPECTED_PATHS = {
     "tests/unit/test_visual_diagnosis_state.py",
     "tests/conftest.py",
 }
-LIVE_ROOT_HASHES = {
-    "Dockerfile": "a8b96ae525dcd94a3e839a1980b14710c8e98663d42b812f4a1754878ddc4a2b",
-    "app/main.py": "057a810dd5eb2e08651fd965f9264c48681e5bb17ce87bad4fafb4260c6e0334",
-    ".github/workflows/deploy.yml": "672555b73c92478a3d92bdabd7233b964fa1bdcc52ebf1a7cb2e9d17cc37ede7",
-    ".github/workflows/rollback.yml": "3be7f5a8863f623a280abab7dd7b350ae270eb2ae4178f419e50a0d2c74dfae0",
-}
 FORBIDDEN_ENV_NAMES = {
     "ANTHROPIC_API_KEY",
     "ADMIN_API_TOKEN",
@@ -224,16 +218,18 @@ def _assert_candidate_isolated(*, require_environment: bool = True) -> None:
         assert hashlib.sha256(RUFF_PATH.read_bytes()).hexdigest() == RUFF_DIGEST
     pydantic = importlib.import_module("pydantic")
     assert pydantic.__version__ == "2.12.5"
-    pyproject_digest = hashlib.sha256((ROOT / "pyproject.toml").read_bytes()).hexdigest()
-    assert pyproject_digest == "9fea68c27dbe4e24cd31fb6c6af4d77a8caa3796a2298d3a52cce2d40fd1764a"
-    for relative_path, expected in LIVE_ROOT_HASHES.items():
-        result = subprocess.run(
-            ["git", "show", f"origin/main:{relative_path}"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        )
-        assert hashlib.sha256(result.stdout).hexdigest() == expected
+    # pyproject.toml and the live-root files (app/main.py, Dockerfile, the
+    # deploy workflows) are NOT hash-pinned here, deliberately: like the
+    # diff-scope check removed above, pinning their exact bytes was only
+    # ever a point-in-time proof for this feature's own pre-merge review.
+    # Once merged, these test files are collected on every future pytest
+    # run, including unrelated PRs -- a routine dependency bump in
+    # pyproject.toml, or any legitimate future change to those live-root
+    # files, would fail every subsequent PR's collection until someone
+    # remembered to update these hardcoded digests here. The permanent,
+    # ongoing guarantee that actually matters (no live route reaches the
+    # candidate modules) is enforced below by scanning for the module names
+    # themselves, which stays valid regardless of those files' content.
 
     candidate_paths = {
         ROOT / "app/services/visual_diagnosis_contracts.py",

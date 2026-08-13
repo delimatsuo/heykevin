@@ -42,12 +42,6 @@ EXPECTED_PATHS = {
     "tests/unit/test_visual_diagnosis_state.py",
     "tests/conftest.py",
 }
-LIVE_ROOT_HASHES = {
-    "Dockerfile": "a8b96ae525dcd94a3e839a1980b14710c8e98663d42b812f4a1754878ddc4a2b",
-    "app/main.py": "057a810dd5eb2e08651fd965f9264c48681e5bb17ce87bad4fafb4260c6e0334",
-    ".github/workflows/deploy.yml": "672555b73c92478a3d92bdabd7233b964fa1bdcc52ebf1a7cb2e9d17cc37ede7",
-    ".github/workflows/rollback.yml": "3be7f5a8863f623a280abab7dd7b350ae270eb2ae4178f419e50a0d2c74dfae0",
-}
 FORBIDDEN_ENV_NAMES = {
     "ANTHROPIC_API_KEY", "ADMIN_API_TOKEN", "APNS_KEY_CONTENT", "APNS_KEY_ID",
     "APNS_TEAM_ID", "API_BEARER_TOKEN", "APPSTORE_ISSUER_ID", "APPSTORE_KEY_ID",
@@ -155,14 +149,18 @@ def _guard_before_import(*, require_environment: bool = True) -> None:
         assert hashlib.sha256(RUFF_PATH.read_bytes()).hexdigest() == RUFF_DIGEST
     pydantic = importlib.import_module("pydantic")
     assert pydantic.__version__ == "2.12.5"
-    assert hashlib.sha256((ROOT / "pyproject.toml").read_bytes()).hexdigest() == (
-        "9fea68c27dbe4e24cd31fb6c6af4d77a8caa3796a2298d3a52cce2d40fd1764a"
-    )
-    for relative, expected in LIVE_ROOT_HASHES.items():
-        shown = subprocess.run(
-            ["git", "show", f"origin/main:{relative}"], cwd=ROOT, check=True, capture_output=True
-        ).stdout
-        assert hashlib.sha256(shown).hexdigest() == expected
+    # pyproject.toml and the live-root files (app/main.py, Dockerfile, the
+    # deploy workflows) are NOT hash-pinned here, deliberately: like the
+    # diff-scope check removed above, pinning their exact bytes was only
+    # ever a point-in-time proof for this feature's own pre-merge review.
+    # Once merged, these test files are collected on every future pytest
+    # run, including unrelated PRs -- a routine dependency bump in
+    # pyproject.toml, or any legitimate future change to those live-root
+    # files, would fail every subsequent PR's collection until someone
+    # remembered to update these hardcoded digests here. The permanent,
+    # ongoing guarantee that actually matters (no live route reaches the
+    # candidate modules) is enforced below by scanning for the module names
+    # themselves, which stays valid regardless of those files' content.
     for path in (
         ROOT / "app/services/visual_diagnosis_contracts.py",
         ROOT / "app/services/visual_diagnosis_state.py",
@@ -1177,6 +1175,37 @@ def test_consent_declined_and_withdrawn_set_completed_at(modules):
     accepted(withdrawn, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
     accepted(withdrawn, event(c, c.EventKind.CONSENT_WITHDRAWN, 3, "withdraw"))
     assert withdrawn.case.completed_at is not None
+
+
+def test_consent_withdrawn_finalizes_an_in_flight_upload(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(sm, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 3, "upload", {
+        "asset_id": "asset-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "a" * 64,
+    }))
+    withdrawn = accepted(sm, event(c, c.EventKind.CONSENT_WITHDRAWN, sm.current_revision, "withdraw"))
+    assert withdrawn.projection.media_status.value == "unavailable"
+    asset = next(a for a in sm.case.media_assets if a.asset_id == "asset-video")
+    assert asset.validation.value == "unavailable"
+
+
+def test_terminal_case_events_before_creation_time_are_rejected(modules):
+    c, state = modules
+    for kind in (c.EventKind.CASE_CANCELLED, c.EventKind.CASE_EXPIRED):
+        sm = state.VisualTriageStateMachine()
+        accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+        revision_before = sm.current_revision
+        time_traveling = sm.apply(event(
+            c, kind, revision_before, "terminal",
+            at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc),  # before created_at
+        ))
+        assert not time_traveling.accepted, kind
+        assert time_traveling.decision_code == "terminal_event_predates_case", (kind, time_traveling.decision_code)
+        assert sm.current_revision == revision_before
 
 
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):

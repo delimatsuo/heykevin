@@ -495,6 +495,11 @@ class VisualTriageStateMachine:
     ) -> PendingCustomerAction:
         if event_time < self._created_at:
             raise TransitionRejected("action_issued_before_case_created")
+        if any(
+            action.resolved_at is not None and event_time < action.resolved_at
+            for action in self._resolved_customer_actions
+        ):
+            raise TransitionRejected("action_issued_before_case_created")
         options = self._value(payload, "response_option_codes") if "response_option_codes" in payload else ()
         if isinstance(options, list):
             options = tuple(options)
@@ -821,6 +826,8 @@ class VisualTriageStateMachine:
                 raise TransitionRejected("upload_not_pending")
             if asset.role.value != self._role_for_action(self._pending.kind).value:
                 raise TransitionRejected("action_binding_mismatch")
+            if event.event_time < self._pending.issued_at:
+                raise TransitionRejected("action_resolved_before_issuance")
             if (
                 self._pending.expires_at is not None
                 and event.event_time >= self._pending.expires_at

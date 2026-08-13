@@ -1062,6 +1062,14 @@ def test_cancelling_a_submitted_media_action_with_a_stalled_validator_finalizes_
     assert cancelled.projection.pending_action_status is None
     plate_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
     assert plate_asset.validation.value == "unavailable"
+    # The media dimension itself must leave UPLOADED_QUARANTINED too --
+    # otherwise the case is stranded (analysis_started requires VALIDATED,
+    # case_closed rejects quarantine, and the now-unavailable asset can
+    # never be validated).
+    assert sm.case.state_vector.media.value != "uploaded_quarantined"
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "restart"))
+    closed = accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "restart-complete", {"outcome": "complete"}))
+    assert closed.accepted
 
 
 def test_question_resolution_dated_before_issuance_is_rejected(modules):
@@ -1828,6 +1836,30 @@ def test_non_enum_kind_or_source_from_bypassed_validation_never_raises(modules):
         result = sm.apply(malformed)  # must not raise
         assert not result.accepted, field
         assert result.decision_code == "event_integrity_mismatch", (field, result.decision_code)
+
+
+def test_foreign_enum_kind_with_matching_value_never_raises(modules):
+    # A plain (non-str-mixed) Enum member whose .value equals a real
+    # EventKind string passes assert_integrity() unchanged (the envelope
+    # fingerprint is recomputed from .value alone, so a same-valued foreign
+    # member reproduces the identical hash and the check can't tell the
+    # difference), but the member itself is not EventKind.CONSENT_REQUESTED
+    # -- the handler-map lookup in _dispatch (keyed by real EventKind
+    # members) then raises KeyError, a different bypass than the raw-string
+    # case above and not covered by that fix. apply() must still not throw.
+    import enum
+
+    class ForeignKind(enum.Enum):
+        CONSENT_REQUESTED = "consent_requested"
+
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}))
+    genuine = event(c, c.EventKind.CONSENT_REQUESTED, 1, "request")
+    foreign = genuine.model_copy(update={"kind": ForeignKind.CONSENT_REQUESTED})
+    result = sm.apply(foreign)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
 
 
 def test_deletion_pending_rejects_late_non_deletion_events(modules):

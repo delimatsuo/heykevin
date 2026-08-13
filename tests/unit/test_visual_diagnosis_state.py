@@ -282,6 +282,43 @@ def accepted(sm, event_obj):
     return decision
 
 
+def event_with_raw_retry_attempt(c, kind, revision, event_id, payload, retry_stage, retry_attempt, at=None):
+    """Build a fully self-consistent event whose envelope-level
+    retry_attempt is exactly the raw value given (e.g. a bool), bypassing
+    VisualTriageEvent.build()'s strict-mode field validation via
+    model_construct(). .build() itself rejects retry_attempt=True outright
+    (strict mode), so this reproduces what a caller could still do via
+    Pydantic's public model_construct() -- a real bypass distinct from
+    model_copy(update=...), which the existing fingerprint-tamper tests
+    already cover.
+    """
+
+    event_time = at or datetime(2026, 8, 12, tzinfo=timezone.utc)
+    payload_digest = c._sha256(payload)
+    envelope = {
+        "schema_version": c.SCHEMA_VERSION,
+        "case_id": "case-1",
+        "contractor_id": "contractor-1",
+        "event_kind": kind.value,
+        "canonical_payload_digest": payload_digest,
+        "expected_revision": revision,
+        "source_kind": c.EventSource.SYNTHETIC.value,
+        "event_time": event_time.isoformat(),
+        "retry_stage": retry_stage,
+        "retry_attempt": retry_attempt,
+        "evidence_scope": c.EVIDENCE_SCOPE,
+    }
+    return c.VisualTriageEvent.model_construct(
+        case_id="case-1", contractor_id="contractor-1", event_id=event_id,
+        kind=kind, payload=payload,
+        canonical_payload_digest=payload_digest,
+        semantic_envelope_fingerprint=c._sha256(envelope),
+        expected_revision=revision, source_kind=c.EventSource.SYNTHETIC,
+        event_time=event_time, retry_stage=retry_stage, retry_attempt=retry_attempt,
+        schema_version=c.SCHEMA_VERSION, evidence_scope=c.EVIDENCE_SCOPE,
+    )
+
+
 def bootstrap_valid(sm, c, *, source_ref="call-ref"):
     accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo", "source_ref": source_ref}))
     accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, 1, "consent-request"))
@@ -1465,6 +1502,29 @@ def test_analysis_retry_recorded_rejects_boolean_attempt(modules):
     assert sm._analysis_retry_count == 1
 
 
+def test_analysis_retry_recorded_rejects_boolean_envelope_retry_attempt(modules):
+    # .build() itself rejects retry_attempt=True outright (strict mode), so
+    # this uses model_construct() to reproduce a fully self-consistent event
+    # (matching fingerprint) whose *envelope* retry_attempt is a bool while
+    # the payload's "attempt" is a genuine int -- True == 1, so the
+    # cross-check between them doesn't catch it on its own.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start-1"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_FAILED, sm.current_revision, "fail-1", {"failure_state": "failed_retriable"}))
+    revision_before = sm.current_revision
+    malformed = event_with_raw_retry_attempt(
+        c, c.EventKind.ANALYSIS_RETRY_RECORDED, revision_before, "retry-bool-envelope",
+        {"attempt": 1}, "analysis", True,
+    )
+    result = sm.apply(malformed)
+    assert not result.accepted
+    assert result.decision_code == "retry_attempt_invalid"
+    assert sm._analysis_retry_count == 0
+    assert sm.current_revision == revision_before
+
+
 def test_deletion_retry_recorded_rejects_boolean_attempt(modules):
     # Same defect as the analysis retry counter, but here the corrupted
     # value (a bare Python True) is fed straight into
@@ -1485,6 +1545,38 @@ def test_deletion_retry_recorded_rejects_boolean_attempt(modules):
     real_attempt = accepted(sm, event(c, c.EventKind.DELETION_RETRY_RECORDED, sm.current_revision, "retry-1", {"attempt": 1}, retry_stage="deletion", retry_attempt=1))
     assert real_attempt.decision_code == "deletion_retry_recorded"
     assert sm._deletion_retry_count == 1
+
+
+def test_deletion_retry_recorded_rejects_boolean_envelope_retry_attempt(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete"))
+    revision_before = sm.current_revision
+    malformed = event_with_raw_retry_attempt(
+        c, c.EventKind.DELETION_RETRY_RECORDED, revision_before, "retry-bool-envelope",
+        {"attempt": 1}, "deletion", True,
+    )
+    result = sm.apply(malformed)
+    assert not result.accepted
+    assert result.decision_code == "deletion_retry_invalid"
+    assert sm._deletion_retry_count == 0
+    assert sm.current_revision == revision_before
+
+
+def test_deletion_verified_before_creation_time_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+    accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete"))
+    revision_before = sm.current_revision
+    time_traveling = sm.apply(event(
+        c, c.EventKind.DELETION_VERIFIED, revision_before, "verify",
+        at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc),  # before created_at
+    ))
+    assert not time_traveling.accepted
+    assert time_traveling.decision_code == "terminal_event_predates_case"
+    assert sm.current_revision == revision_before
     assert sm.case is not None and sm.case.deletion_retry_count == 1
 
 

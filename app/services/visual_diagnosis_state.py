@@ -569,8 +569,9 @@ class VisualTriageStateMachine:
         self._require_not_deleting()
         if self._state.case is not CaseStatus.ACTIVE or self._state.consent is not ConsentStatus.GRANTED:
             raise TransitionRejected("consent_withdrawal_not_allowed")
-        self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.WITHDRAWN)
         self._pending = None
+        media = self._finalized_media_after_termination()
+        self._with_state(case=CaseStatus.CANCELLED, consent=ConsentStatus.WITHDRAWN, media=media)
         self._completed_at = event.event_time
         return "consent_withdrawn"
 
@@ -1109,22 +1110,32 @@ class VisualTriageStateMachine:
     def _case_expired(self, event: VisualTriageEvent) -> str:
         return self._terminal_case(event, CaseStatus.EXPIRED, "case_expired")
 
+    def _finalized_media_after_termination(self) -> MediaStatus:
+        """Finalize any PENDING asset and return the media status to use
+        when ending a case (any terminal transition, not only cancel/expire)
+        with an in-flight upload/validation -- nothing can ever finalize or
+        validate it once the case is no longer active, so it would
+        otherwise be stuck at PENDING/UPLOAD_PENDING/UPLOADED_QUARANTINED
+        forever in the terminal snapshot.
+        """
+
+        media = self._state.media
+        if media in {MediaStatus.UPLOAD_PENDING, MediaStatus.UPLOADED_QUARANTINED}:
+            for asset_id, asset in list(self._media_assets.items()):
+                if asset.validation is MediaValidation.PENDING:
+                    self._media_assets[asset_id] = asset.model_copy(update={"validation": MediaValidation.UNAVAILABLE})
+            return MediaStatus.UNAVAILABLE
+        return media
+
     def _terminal_case(self, event: VisualTriageEvent, status: CaseStatus, code: str) -> str:
         self._require_case()
         self._require_not_deleting()
         if self._state.case not in {CaseStatus.CREATED, CaseStatus.ACTIVE}:
             raise TransitionRejected("case_terminal_not_allowed")
+        if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
         self._pending = None
-        media = self._state.media
-        if media in {MediaStatus.UPLOAD_PENDING, MediaStatus.UPLOADED_QUARANTINED}:
-            # An in-flight upload/validation can never resolve once the case
-            # is terminal (every finalize/validate transition requires an
-            # active case) -- finalize the abandoned asset now rather than
-            # leave a permanently PENDING record in the terminal snapshot.
-            for asset_id, asset in list(self._media_assets.items()):
-                if asset.validation is MediaValidation.PENDING:
-                    self._media_assets[asset_id] = asset.model_copy(update={"validation": MediaValidation.UNAVAILABLE})
-            media = MediaStatus.UNAVAILABLE
+        media = self._finalized_media_after_termination()
         self._completed_at = event.event_time
         if status is CaseStatus.EXPIRED:
             self._expires_at = event.event_time

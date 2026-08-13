@@ -151,13 +151,18 @@ class VisualTriageStateMachine:
             return self._reject("binding_mismatch", reveal=False)
         try:
             event.assert_integrity()
-        except (TypeError, ValueError, AttributeError):
+        except (TypeError, ValueError, AttributeError, KeyError):
             # AttributeError: a caller-constructed event bypassed field
             # validation (e.g. Pydantic's model_copy(update=...), which does
             # not revalidate) and replaced an enum field with a raw value
             # that assert_integrity()'s own .value access can't tolerate.
-            # apply() promises to never throw, so this must still resolve to
-            # a clean rejection rather than escape as an unhandled crash.
+            # KeyError: a foreign enum member whose .value isn't a
+            # recognized event kind at all makes assert_integrity()'s own
+            # _EVENT_PAYLOAD_KEYS[self.kind.value] lookup fail, before the
+            # _dispatch handler-map lookup (which handles the case of a
+            # foreign member whose .value DOES match a real kind) is ever
+            # reached. apply() promises to never throw, so both must still
+            # resolve to a clean rejection rather than escape as a crash.
             return self._reject("event_integrity_mismatch", reveal=False)
         if self._case_id is None:
             if event.kind is not EventKind.CASE_CREATED:
@@ -1100,6 +1105,8 @@ class VisualTriageStateMachine:
             raise TransitionRejected("case_not_quiescent")
         if self._state.contractor_packet is PacketStatus.DELIVERY_PENDING or self._state.customer_delivery is DeliveryStatus.DELIVERY_PENDING:
             raise TransitionRejected("case_not_quiescent")
+        if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
         self._completed_at = event.event_time
         self._with_state(case=CaseStatus.CLOSED)
         return "case_closed"
@@ -1124,7 +1131,17 @@ class VisualTriageStateMachine:
             for asset_id, asset in list(self._media_assets.items()):
                 if asset.validation is MediaValidation.PENDING:
                     self._media_assets[asset_id] = asset.model_copy(update={"validation": MediaValidation.UNAVAILABLE})
-            return MediaStatus.UNAVAILABLE
+            # The in-flight asset that never resolved might not be the
+            # symptom video itself (e.g. an abandoned rating-plate) -- if
+            # the symptom video was separately already validated, the case
+            # still has genuine evidence and should report VALIDATED, not
+            # UNAVAILABLE, matching the pattern already used in
+            # _media_action_resolved's own abort path.
+            return (
+                MediaStatus.VALIDATED
+                if self._has_validated_symptom_evidence()
+                else MediaStatus.UNAVAILABLE
+            )
         return media
 
     def _terminal_case(self, event: VisualTriageEvent, status: CaseStatus, code: str) -> str:

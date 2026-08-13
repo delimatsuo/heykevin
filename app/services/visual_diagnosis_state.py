@@ -209,6 +209,15 @@ class VisualTriageStateMachine:
         except TransitionRejected as error:
             self._restore(backup)
             return self._reject(error.code)
+        except KeyError:
+            # A caller-constructed event (e.g. via model_copy(update=...))
+            # can carry a `kind` that is a member of some other Enum whose
+            # .value happens to match a real EventKind string -- it passes
+            # assert_integrity() (only .value is checked there) but isn't a
+            # real EventKind, so the handler-map lookup above finds no
+            # match. Still an integrity problem, just caught one step later.
+            self._restore(backup)
+            return self._reject("event_integrity_mismatch")
         except (TypeError, ValueError):
             self._restore(backup)
             return self._reject("invalid_structural_payload")
@@ -911,7 +920,7 @@ class VisualTriageStateMachine:
         self._with_state(
             media=media_after_abort
             if status in {ActionStatus.EXPIRED, ActionStatus.CANCELLED}
-            and self._state.media is MediaStatus.UPLOAD_PENDING
+            and self._state.media in {MediaStatus.UPLOAD_PENDING, MediaStatus.UPLOADED_QUARANTINED}
             else self._state.media,
             analysis=AnalysisStatus.READY
             if status is ActionStatus.FULFILLED

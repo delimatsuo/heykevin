@@ -1106,6 +1106,71 @@ def test_media_action_resolution_dated_before_issuance_is_rejected(modules):
     assert sm.current_revision == revision_before
 
 
+def test_followup_question_blocked_once_contractor_packet_is_ready(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.CONTRACTOR_PACKET_READY_RECORDED, sm.current_revision, "packet-ready"))
+    late_question = sm.apply(event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, sm.current_revision, "question", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+        "copy_ref": "question-copy", "response_option_codes": ["yes"],
+    }))
+    assert not late_question.accepted
+    assert late_question.decision_code == "output_already_prepared"
+
+
+def test_followup_rating_plate_blocked_once_contractor_packet_is_ready(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.CONTRACTOR_PACKET_READY_RECORDED, sm.current_revision, "packet-ready"))
+    late_plate = sm.apply(event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }))
+    assert not late_plate.accepted
+    assert late_plate.decision_code == "output_already_prepared"
+
+
+def test_case_cancelled_finalizes_an_in_flight_upload(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(sm, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 3, "upload", {
+        "asset_id": "asset-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "a" * 64,
+    }))
+    # The upload is still in flight (UPLOAD_PENDING, asset PENDING) when the
+    # case is cancelled -- nothing can ever finalize/validate it afterward.
+    cancelled = accepted(sm, event(c, c.EventKind.CASE_CANCELLED, sm.current_revision, "cancel"))
+    assert cancelled.projection.media_status.value == "unavailable"
+    asset = next(a for a in sm.case.media_assets if a.asset_id == "asset-video")
+    assert asset.validation.value == "unavailable"
+
+
+def test_consent_declined_and_withdrawn_set_completed_at(modules):
+    c, state = modules
+    declined = state.VisualTriageStateMachine()
+    accepted(declined, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(declined, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(declined, event(c, c.EventKind.CONSENT_DECLINED, 2, "decline"))
+    assert declined.case.completed_at is not None
+
+    withdrawn = state.VisualTriageStateMachine()
+    accepted(withdrawn, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(withdrawn, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(withdrawn, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
+    accepted(withdrawn, event(c, c.EventKind.CONSENT_WITHDRAWN, 3, "withdraw"))
+    assert withdrawn.case.completed_at is not None
+
+
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

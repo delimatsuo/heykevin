@@ -391,6 +391,23 @@ def test_validation_errors_and_model_strings_are_payload_safe(contracts_module):
     assert "hvac.demo" not in str(event)
 
 
+def test_model_validate_entry_points_are_also_payload_safe(contracts_module):
+    # __init__ (the plain keyword-argument constructor) sanitizes
+    # ValidationError, but model_validate()/model_validate_json() are
+    # separate Pydantic-public entry points that don't route through
+    # __init__ -- each needs its own sanitization or a caller using one of
+    # them gets a raw pydantic ValidationError with the offending input
+    # value embedded verbatim in its message.
+    c = contracts_module
+    canary = "raw phone 555"
+    with pytest.raises(c.StructuralValidationError) as error:
+        c.ArtifactReference.model_validate({"artifact_id": canary, "readiness": "ready"})
+    assert canary not in str(error.value)
+    with pytest.raises(c.StructuralValidationError) as error:
+        c.ArtifactReference.model_validate_json(f'{{"artifact_id": "{canary}", "readiness": "ready"}}')
+    assert canary not in str(error.value)
+
+
 def test_privacy_canary_categories_are_rejected_without_sink_leakage(contracts_module):
     c = contracts_module
     canaries = (

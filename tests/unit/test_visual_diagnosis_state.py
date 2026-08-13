@@ -1275,6 +1275,35 @@ def test_case_closed_before_creation_time_is_rejected(modules):
     assert sm.current_revision == revision_before
 
 
+def test_consent_declined_and_withdrawn_before_creation_time_are_rejected(modules):
+    c, state = modules
+
+    declined = state.VisualTriageStateMachine()
+    accepted(declined, event(c, c.EventKind.CASE_CREATED, 0, "create", at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+    accepted(declined, event(c, c.EventKind.CONSENT_REQUESTED, declined.current_revision, "request"))
+    revision_before = declined.current_revision
+    early_decline = declined.apply(event(
+        c, c.EventKind.CONSENT_DECLINED, revision_before, "decline",
+        at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc),  # before created_at
+    ))
+    assert not early_decline.accepted
+    assert early_decline.decision_code == "terminal_event_predates_case"
+    assert declined.current_revision == revision_before
+
+    withdrawn = state.VisualTriageStateMachine()
+    accepted(withdrawn, event(c, c.EventKind.CASE_CREATED, 0, "create", at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+    accepted(withdrawn, event(c, c.EventKind.CONSENT_REQUESTED, withdrawn.current_revision, "request"))
+    accepted(withdrawn, event(c, c.EventKind.CONSENT_GRANTED, withdrawn.current_revision, "grant"))
+    revision_before = withdrawn.current_revision
+    early_withdraw = withdrawn.apply(event(
+        c, c.EventKind.CONSENT_WITHDRAWN, revision_before, "withdraw",
+        at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc),  # before created_at
+    ))
+    assert not early_withdraw.accepted
+    assert early_withdraw.decision_code == "terminal_event_predates_case"
+    assert withdrawn.current_revision == revision_before
+
+
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

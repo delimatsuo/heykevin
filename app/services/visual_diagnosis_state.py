@@ -211,14 +211,13 @@ class VisualTriageStateMachine:
         backup = self._backup()
         try:
             decision_code = self._dispatch(event)
-            # event_id itself is neither re-validated by assert_integrity()
-            # nor included in the semantic fingerprint, so a caller-
-            # constructed event (e.g. via model_copy(update={"event_id":
-            # ...})) can carry a malformed one that only Receipt's own
-            # field validator catches. Construct it here, still inside the
-            # rollback-protected block and still before the revision
-            # increment below, so a failure restores cleanly instead of
-            # leaving the aggregate revision incremented with no
+            # event_id is not included in the semantic fingerprint, so even
+            # though assert_integrity() now rejects a non-opaque/unhashable
+            # event_id up front, Receipt's own field validator (the same
+            # OPAQUE_REF_PATTERN check) remains the authoritative gate here.
+            # Construct it inside the rollback-protected block and before
+            # the revision increment below, so a failure restores cleanly
+            # instead of leaving the aggregate revision incremented with no
             # corresponding ledger entry.
             receipt = Receipt(
                 event_id=event.event_id,
@@ -620,20 +619,17 @@ class VisualTriageStateMachine:
                 or not self._has_validated_role(MediaRole.SYMPTOM_VIDEO)
             ):
                 raise TransitionRejected("rating_plate_budget_exhausted")
-            if (
-                self._state.contractor_packet is not PacketStatus.NOT_READY
-                or self._state.customer_delivery is not DeliveryStatus.NOT_EVALUATED
-            ):
-                raise TransitionRejected("output_already_prepared")
-            self._rating_plate_count += 1
         else:
             if self._recapture_count >= 1 or self._state.media is not MediaStatus.REJECTED:
                 raise TransitionRejected("recapture_not_reachable")
-            if (
-                self._state.contractor_packet is not PacketStatus.NOT_READY
-                or self._state.customer_delivery is not DeliveryStatus.NOT_EVALUATED
-            ):
-                raise TransitionRejected("output_already_prepared")
+        if (
+            self._state.contractor_packet is not PacketStatus.NOT_READY
+            or self._state.customer_delivery is not DeliveryStatus.NOT_EVALUATED
+        ):
+            raise TransitionRejected("output_already_prepared")
+        if kind is ActionKind.RATING_PLATE:
+            self._rating_plate_count += 1
+        else:
             self._recapture_count += 1
         self._pending = self._action_from_payload(event.payload, kind, event.event_time)
         self._with_state(analysis=AnalysisStatus.AWAITING_CUSTOMER_ACTION)

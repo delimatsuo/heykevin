@@ -824,6 +824,11 @@ class VisualTriageStateMachine:
                 raise TransitionRejected("upload_not_pending")
             if asset.role.value != self._role_for_action(self._pending.kind).value:
                 raise TransitionRejected("action_binding_mismatch")
+            if (
+                self._pending.expires_at is not None
+                and event.event_time >= self._pending.expires_at
+            ):
+                raise TransitionRejected("action_expired")
             self._pending = self._pending.model_copy(update={"status": ActionStatus.SUBMITTED})
         self._with_state(media=MediaStatus.UPLOADED_QUARANTINED)
         return "upload_finalized"

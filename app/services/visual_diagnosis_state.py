@@ -482,6 +482,8 @@ class VisualTriageStateMachine:
     def _action_from_payload(
         self, payload: dict[str, Any], kind: ActionKind, event_time: datetime
     ) -> PendingCustomerAction:
+        if event_time < self._created_at:
+            raise TransitionRejected("action_issued_before_case_created")
         options = self._value(payload, "response_option_codes") if "response_option_codes" in payload else ()
         if isinstance(options, list):
             options = tuple(options)

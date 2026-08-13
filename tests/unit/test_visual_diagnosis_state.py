@@ -1579,6 +1579,52 @@ def test_deletion_verified_before_creation_time_is_rejected(modules):
     assert sm.current_revision == revision_before
 
 
+def test_malformed_event_id_via_model_copy_does_not_partially_commit(modules):
+    # event_id is neither re-validated by assert_integrity() nor part of the
+    # semantic fingerprint, so model_copy(update={"event_id": ...}) can
+    # smuggle a malformed one past dispatch -- only Receipt's own field
+    # validator catches it. apply() must not raise, and must not leave the
+    # aggregate revision incremented with no corresponding ledger entry.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}))
+    revision_before = sm.current_revision
+    genuine = event(c, c.EventKind.CONSENT_REQUESTED, revision_before, "request")
+    malformed = genuine.model_copy(update={"event_id": "bad id with spaces"})
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert sm.current_revision == revision_before
+    assert sm.case.state_vector.consent.value == "not_requested"
+
+
+def test_case_closed_before_last_resolved_action_time_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, sm.current_revision, "question", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+        "copy_ref": "question-copy", "response_option_codes": ["yes"],
+    }))
+    resolved_at = datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc)
+    accepted(sm, event(c, c.EventKind.CUSTOMER_ACTION_RESOLVED, sm.current_revision, "answer", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "locale": "und", "status": "answered", "response_option_code": "yes",
+    }, at=resolved_at))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "restart", at=resolved_at))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "restart-complete", {"outcome": "complete"}, at=resolved_at))
+    revision_before = sm.current_revision
+    early_close = sm.apply(event(
+        c, c.EventKind.CASE_CLOSED, revision_before, "close",
+        at=datetime(2026, 8, 12, 0, 30, tzinfo=timezone.utc),  # after created_at, before resolved_at
+    ))
+    assert not early_close.accepted
+    assert early_close.decision_code == "terminal_event_predates_case"
+    assert sm.current_revision == revision_before
+
+
 def test_actions_issued_before_case_created_are_rejected(modules):
     c, state = modules
     created_at = datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)

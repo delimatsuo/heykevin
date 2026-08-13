@@ -705,6 +705,45 @@ def test_successful_rating_plate_fulfillment_restart_and_replay(modules):
     assert not second.accepted and second.decision_code == "rating_plate_budget_exhausted"
 
 
+def test_media_validated_rejects_an_asset_that_is_not_the_pending_one(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)  # validates the symptom video at asset_id "asset-video"
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, 6, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, 7, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, 8, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 9, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100,
+        "digest": "c" * 64,
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, 10, "plate-final", {"asset_id": "plate-asset"}))
+
+    # The plate is now quarantined (pending validation). Submitting
+    # MEDIA_VALIDATED against the *already-validated* symptom video instead
+    # of the pending plate must not be accepted -- it must not silently
+    # re-resolve an unrelated asset and move global media state out of
+    # quarantine while the actual pending asset is left stranded.
+    revision_before = sm.current_revision
+    wrong_asset = sm.apply(event(c, c.EventKind.MEDIA_VALIDATED, revision_before, "wrong-asset-valid", {
+        "asset_id": "asset-video", "validation": "validated",
+    }))
+    assert not wrong_asset.accepted
+    assert wrong_asset.decision_code == "asset_not_pending_validation"
+    assert sm.current_revision == revision_before
+    plate_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert plate_asset.validation.value == "pending"
+
+    # The actual pending asset can still be validated normally afterward.
+    accepted(sm, event(c, c.EventKind.MEDIA_VALIDATED, revision_before, "plate-valid", {
+        "asset_id": "plate-asset", "validation": "validated",
+    }))
+    plate_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert plate_asset.validation.value == "validated"
+
+
 def test_recapture_unavailability_abstains_and_exhausts_budget(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

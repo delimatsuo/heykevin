@@ -633,6 +633,11 @@ class VisualTriageStateMachine:
         else:
             if self._recapture_count >= 1 or self._state.media is not MediaStatus.REJECTED:
                 raise TransitionRejected("recapture_not_reachable")
+            if (
+                self._state.contractor_packet is not PacketStatus.NOT_READY
+                or self._state.customer_delivery is not DeliveryStatus.NOT_EVALUATED
+            ):
+                raise TransitionRejected("output_already_prepared")
             self._recapture_count += 1
         self._pending = self._action_from_payload(event.payload, kind, event.event_time)
         self._with_state(analysis=AnalysisStatus.AWAITING_CUSTOMER_ACTION)

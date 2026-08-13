@@ -610,6 +610,8 @@ class VisualTriageEvent(StructuralModel):
     def assert_integrity(self) -> None:
         """Recheck the canonical envelope after callers may mutate nested input."""
 
+        if self.event_time.tzinfo is None:
+            raise ValueError("event_time must be timezone-aware")
         _validate_structural_value(self.payload)
         allowed_keys = _EVENT_PAYLOAD_KEYS[self.kind.value]
         if set(self.payload) - allowed_keys:

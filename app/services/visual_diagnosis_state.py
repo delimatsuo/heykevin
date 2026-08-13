@@ -151,7 +151,13 @@ class VisualTriageStateMachine:
             return self._reject("binding_mismatch", reveal=False)
         try:
             event.assert_integrity()
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, AttributeError):
+            # AttributeError: a caller-constructed event bypassed field
+            # validation (e.g. Pydantic's model_copy(update=...), which does
+            # not revalidate) and replaced an enum field with a raw value
+            # that assert_integrity()'s own .value access can't tolerate.
+            # apply() promises to never throw, so this must still resolve to
+            # a clean rejection rather than escape as an unhandled crash.
             return self._reject("event_integrity_mismatch", reveal=False)
         if self._case_id is None:
             if event.kind is not EventKind.CASE_CREATED:
@@ -953,6 +959,8 @@ class VisualTriageStateMachine:
         failure_state = self._text(event.payload, "failure_state")
         if failure_state not in {"failed_retriable", "failed_terminal"}:
             raise TransitionRejected("invalid_analysis_failure")
+        if failure_state == "failed_retriable" and self._analysis_retry_count >= 3:
+            raise TransitionRejected("analysis_retry_exhausted")
         self._with_state(analysis=AnalysisStatus(failure_state))
         return "analysis_failed"
 

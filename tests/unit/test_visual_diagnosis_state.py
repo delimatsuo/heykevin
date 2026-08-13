@@ -1661,6 +1661,46 @@ def test_case_cancelled_and_expired_before_last_resolved_action_time_are_rejecte
         assert sm.current_revision == revision_before
 
 
+def test_naive_event_time_via_model_construct_is_rejected(modules):
+    # .build() itself rejects a naive event_time outright (strict field
+    # validator), but model_construct() bypasses that; with a correctly
+    # hand-recomputed matching fingerprint (isoformat() works fine on a
+    # naive datetime, it just omits the offset), the resulting event is
+    # fully self-consistent and must still be caught by assert_integrity().
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    payload = {"scenario": "hvac.demo", "source_ref": "call-ref"}
+    payload_digest = c._sha256(payload)
+    naive_time = datetime(2026, 8, 12)
+    envelope = {
+        "schema_version": c.SCHEMA_VERSION,
+        "case_id": "case-1",
+        "contractor_id": "contractor-1",
+        "event_kind": c.EventKind.CASE_CREATED.value,
+        "canonical_payload_digest": payload_digest,
+        "expected_revision": 0,
+        "source_kind": c.EventSource.SYNTHETIC.value,
+        "event_time": naive_time.isoformat(),
+        "retry_stage": None,
+        "retry_attempt": None,
+        "evidence_scope": c.EVIDENCE_SCOPE,
+    }
+    malformed = c.VisualTriageEvent.model_construct(
+        case_id="case-1", contractor_id="contractor-1", event_id="create",
+        kind=c.EventKind.CASE_CREATED, payload=payload,
+        canonical_payload_digest=payload_digest,
+        semantic_envelope_fingerprint=c._sha256(envelope),
+        expected_revision=0, source_kind=c.EventSource.SYNTHETIC,
+        event_time=naive_time, retry_stage=None, retry_attempt=None,
+        schema_version=c.SCHEMA_VERSION, evidence_scope=c.EVIDENCE_SCOPE,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == 0
+    assert sm.case is None  # snapshot() must not raise either
+
+
 def test_deletion_verified_before_last_resolved_action_time_is_rejected(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

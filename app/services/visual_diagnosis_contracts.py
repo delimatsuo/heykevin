@@ -598,7 +598,7 @@ class VisualTriageEvent(StructuralModel):
     @field_validator("event_time")
     @classmethod
     def validate_event_time(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
+        if value.utcoffset() is None:
             raise ValueError("event_time must be timezone-aware")
         return value
 
@@ -610,13 +610,15 @@ class VisualTriageEvent(StructuralModel):
     def assert_integrity(self) -> None:
         """Recheck the canonical envelope after callers may mutate nested input."""
 
-        if self.event_time.tzinfo is None:
+        if self.event_time.utcoffset() is None:
             raise ValueError("event_time must be timezone-aware")
         for identity in (self.event_id, self.case_id, self.contractor_id):
             if not isinstance(identity, str) or not OPAQUE_REF_PATTERN.fullmatch(identity):
                 raise ValueError("identity fields must be opaque identifiers")
         if not isinstance(self.payload, dict):
             raise ValueError("payload must be a mapping")
+        if isinstance(self.expected_revision, bool) or not isinstance(self.expected_revision, int):
+            raise ValueError("expected_revision must be an integer")
         _validate_structural_value(self.payload)
         allowed_keys = _EVENT_PAYLOAD_KEYS[self.kind.value]
         if set(self.payload) - allowed_keys:

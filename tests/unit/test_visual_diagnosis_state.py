@@ -11,7 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ PYTHON_DIGEST = "261a3951c895427210dfb7780693600b820f70841c078ab2554ee6fbeba7f37
 RUFF_PATH = Path("/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin/ruff")
 RUFF_DIGEST = "1edd2e6e57286bdddedb1fb55493a91dc17f42838f3d6be488ded7cfe2a4f3a1"
 CANDIDATE_HASHES = {
-    "app/services/visual_diagnosis_contracts.py": "0e8150ca5e5efb25c3bea8730dda62c123d0307117989a4c41736ac27f41aaca",
+    "app/services/visual_diagnosis_contracts.py": "26389adf86716b5a57a19344f822dc1bf459a1f5fe9bb11fd49b49391ae534a1",
     "app/services/visual_diagnosis_state.py": "90142bac689428956386b63f9814ef277b057c85d4879815c6169a5e61089ec8",
 }
 IMPORT_CLOSURE = {
@@ -94,14 +94,22 @@ def _guard_before_import(*, require_environment: bool = True) -> None:
     # is an ancestor check rather than an exact HEAD pin, because CI checks
     # out an ephemeral merge commit for pull_request events, not the branch
     # tip itself.
-    status = subprocess.run(
-        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    dirty = {entry[3:].decode("utf-8") for entry in status.split(b"\0") if entry}
-    assert not dirty, f"unexpected working-tree changes: {sorted(dirty)}"
+    if _local_isolation_check_enabled():
+        # The repo-wide dirty-tree scan below is a point-in-time proof for
+        # this feature's own pre-merge review, not a permanent collection
+        # gate: it inspects the ENTIRE repo's git status, not just this
+        # feature's paths, so leaving it unconditional would fail collection
+        # for any developer with an unrelated uncommitted or untracked file
+        # anywhere in the repo -- the ordinary mid-edit state of active
+        # development. Opt in explicitly on this workstation instead.
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        dirty = {entry[3:].decode("utf-8") for entry in status.split(b"\0") if entry}
+        assert not dirty, f"unexpected working-tree changes: {sorted(dirty)}"
     is_ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", BOUND_BASELINE, "HEAD"],
         cwd=ROOT,
@@ -1795,6 +1803,93 @@ def test_malformed_case_identity_on_creation_via_model_construct_is_rejected(mod
     assert result.decision_code == "event_integrity_mismatch"
     assert sm.current_revision == 0
     assert sm.case is None
+
+
+class _NoOffsetTzinfo(tzinfo):
+    """A tzinfo that is not None but whose utcoffset() is still None --
+    Python treats such a datetime as naive for arithmetic/comparison
+    purposes even though `value.tzinfo is None` is False."""
+
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+    def tzname(self, dt):
+        return None
+
+
+def test_effectively_naive_event_time_via_custom_tzinfo_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    payload = {"scenario": "hvac.demo", "source_ref": "call-ref"}
+    payload_digest = c._sha256(payload)
+    event_time = datetime(2026, 8, 12, tzinfo=_NoOffsetTzinfo())
+    assert event_time.tzinfo is not None and event_time.utcoffset() is None
+    envelope = {
+        "schema_version": c.SCHEMA_VERSION,
+        "case_id": "case-1",
+        "contractor_id": "contractor-1",
+        "event_kind": c.EventKind.CASE_CREATED.value,
+        "canonical_payload_digest": payload_digest,
+        "expected_revision": 0,
+        "source_kind": c.EventSource.SYNTHETIC.value,
+        "event_time": event_time.isoformat(),
+        "retry_stage": None,
+        "retry_attempt": None,
+        "evidence_scope": c.EVIDENCE_SCOPE,
+    }
+    malformed = c.VisualTriageEvent.model_construct(
+        case_id="case-1", contractor_id="contractor-1", event_id="create",
+        kind=c.EventKind.CASE_CREATED, payload=payload,
+        canonical_payload_digest=payload_digest,
+        semantic_envelope_fingerprint=c._sha256(envelope),
+        expected_revision=0, source_kind=c.EventSource.SYNTHETIC,
+        event_time=event_time, retry_stage=None, retry_attempt=None,
+        schema_version=c.SCHEMA_VERSION, evidence_scope=c.EVIDENCE_SCOPE,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == 0
+    assert sm.case is None
+
+
+def test_boolean_expected_revision_via_model_construct_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}))
+    revision_before = sm.current_revision  # 1
+    payload = {}
+    payload_digest = c._sha256(payload)
+    event_time = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    envelope = {
+        "schema_version": c.SCHEMA_VERSION,
+        "case_id": "case-1",
+        "contractor_id": "contractor-1",
+        "event_kind": c.EventKind.CONSENT_REQUESTED.value,
+        "canonical_payload_digest": payload_digest,
+        "expected_revision": True,
+        "source_kind": c.EventSource.SYNTHETIC.value,
+        "event_time": event_time.isoformat(),
+        "retry_stage": None,
+        "retry_attempt": None,
+        "evidence_scope": c.EVIDENCE_SCOPE,
+    }
+    malformed = c.VisualTriageEvent.model_construct(
+        case_id="case-1", contractor_id="contractor-1", event_id="request",
+        kind=c.EventKind.CONSENT_REQUESTED, payload=payload,
+        canonical_payload_digest=payload_digest,
+        semantic_envelope_fingerprint=c._sha256(envelope),
+        expected_revision=True, source_kind=c.EventSource.SYNTHETIC,
+        event_time=event_time, retry_stage=None, retry_attempt=None,
+        schema_version=c.SCHEMA_VERSION, evidence_scope=c.EVIDENCE_SCOPE,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == revision_before
 
 
 def test_naive_event_time_via_model_construct_is_rejected(modules):

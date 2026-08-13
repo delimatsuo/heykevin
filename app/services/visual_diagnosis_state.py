@@ -669,6 +669,8 @@ class VisualTriageStateMachine:
                 raise TransitionRejected("response_binding_mismatch")
         elif option_code is not None:
             raise TransitionRejected("response_binding_mismatch")
+        if event.event_time < self._pending.issued_at:
+            raise TransitionRejected("action_resolved_before_issuance")
         if status in {ActionStatus.EXPIRED, ActionStatus.CANCELLED}:
             if self._pending.status is not ActionStatus.ISSUED:
                 raise TransitionRejected("action_not_expirable")
@@ -832,6 +834,8 @@ class VisualTriageStateMachine:
             ActionStatus.CANCELLED,
         }:
             raise TransitionRejected("invalid_media_resolution")
+        if event.event_time < self._pending.issued_at:
+            raise TransitionRejected("action_resolved_before_issuance")
         if status is ActionStatus.EXPIRED:
             if self._pending.expires_at is None or event.event_time < self._pending.expires_at:
                 raise TransitionRejected("action_not_expired")
@@ -859,11 +863,21 @@ class VisualTriageStateMachine:
             pass
         elif self._pending.status is ActionStatus.SUBMITTED:
             asset = self._matching_asset(event.payload)
-            validation = self._enum(event.payload, "validation", MediaValidation)
-            if validation is MediaValidation.PENDING or asset.validation is not validation:
-                raise TransitionRejected("media_resolution_binding_mismatch")
             if asset.role is not expected_role:
                 raise TransitionRejected("media_resolution_binding_mismatch")
+            if (
+                status in {ActionStatus.EXPIRED, ActionStatus.CANCELLED}
+                and asset.validation is MediaValidation.PENDING
+            ):
+                # The validator never responded -- finalize the stalled
+                # asset as unavailable instead of demanding a resolved
+                # validation value that can never legitimately arrive,
+                # matching the UPLOADING-abort path below.
+                self._media_assets[asset.asset_id] = asset.model_copy(update={"validation": MediaValidation.UNAVAILABLE})
+            else:
+                validation = self._enum(event.payload, "validation", MediaValidation)
+                if validation is MediaValidation.PENDING or asset.validation is not validation:
+                    raise TransitionRejected("media_resolution_binding_mismatch")
         elif status in {ActionStatus.EXPIRED, ActionStatus.CANCELLED} and self._pending.status is ActionStatus.UPLOADING:
             asset = self._matching_asset(event.payload)
             if asset.role is not expected_role:

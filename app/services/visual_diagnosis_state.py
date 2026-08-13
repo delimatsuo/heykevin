@@ -670,6 +670,11 @@ class VisualTriageStateMachine:
                 self._pending.expires_at is None or event.event_time < self._pending.expires_at
             ):
                 raise TransitionRejected("action_not_expired")
+        elif (
+            self._pending.expires_at is not None
+            and event.event_time >= self._pending.expires_at
+        ):
+            raise TransitionRejected("action_expired")
         resolved = self._pending.model_copy(
             update={"status": status, "resolved_at": event.event_time, "response_option_code": option_code}
         )
@@ -824,6 +829,11 @@ class VisualTriageStateMachine:
         if status is ActionStatus.EXPIRED:
             if self._pending.expires_at is None or event.event_time < self._pending.expires_at:
                 raise TransitionRejected("action_not_expired")
+        elif status is not ActionStatus.CANCELLED and (
+            self._pending.expires_at is not None
+            and event.event_time >= self._pending.expires_at
+        ):
+            raise TransitionRejected("action_expired")
         if status in {ActionStatus.EXPIRED, ActionStatus.CANCELLED} and self._pending.status not in {
             ActionStatus.ISSUED,
             ActionStatus.UPLOADING,

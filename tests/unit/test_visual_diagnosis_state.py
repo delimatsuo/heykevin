@@ -25,7 +25,7 @@ RUFF_PATH = Path("/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin/ruff")
 RUFF_DIGEST = "1edd2e6e57286bdddedb1fb55493a91dc17f42838f3d6be488ded7cfe2a4f3a1"
 CANDIDATE_HASHES = {
     "app/services/visual_diagnosis_contracts.py": "d66994f0063474c05558a8d0f0f71c3317337d5ede88860b4ab9a99e60be1c13",
-    "app/services/visual_diagnosis_state.py": "9f9a5ef5fb1a96d471faedfdb78d699f28fa6559b9d48efddb208167abdd6c7e",
+    "app/services/visual_diagnosis_state.py": "253da2e6ffafe05ae93d9e1dd71c3a3ecf69688d52fcd4c3776c1652f35f7db3",
 }
 IMPORT_CLOSURE = {
     "app/services/visual_diagnosis_contracts.py",
@@ -967,6 +967,73 @@ def test_expired_question_requires_elapsed_bound(modules):
     expired = accepted(sm, expired_event)
     assert expired.projection.analysis_status is c.AnalysisStatus.ABSTAINED
     assert sm.apply(expired_event).replayed
+
+
+def test_answering_a_question_after_its_deadline_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, 6, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, 7, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, 8, "question", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+        "copy_ref": "question-copy", "response_option_codes": ["yes"],
+        "expires_at": "2026-08-12T00:10:00+00:00",
+    }))
+    revision_before = sm.current_revision
+    late_answer = sm.apply(event(c, c.EventKind.CUSTOMER_ACTION_RESOLVED, revision_before, "late-answer", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "locale": "und", "status": "answered", "response_option_code": "yes",
+    }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc)))
+    assert not late_answer.accepted and late_answer.decision_code == "action_expired"
+    assert sm.current_revision == revision_before
+    assert sm.case.pending_customer_action is not None  # still pending, not silently resolved
+
+    # The same deadline-passed action can still be resolved as expired.
+    expired = accepted(sm, event(c, c.EventKind.CUSTOMER_ACTION_RESOLVED, revision_before, "actually-expired", {
+        "request_id": "question-request", "action_kind": "diagnostic_question", "locale": "und", "status": "expired",
+    }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc)))
+    assert expired.projection.analysis_status is c.AnalysisStatus.ABSTAINED
+
+
+def test_fulfilling_a_media_action_after_its_deadline_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, 6, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, 7, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, 8, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+        "expires_at": "2026-08-12T00:10:00+00:00",
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 9, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100,
+        "digest": "c" * 64,
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, 10, "plate-final", {"asset_id": "plate-asset"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_VALIDATED, 11, "plate-valid", {
+        "asset_id": "plate-asset", "validation": "validated",
+    }))
+    revision_before = sm.current_revision
+    late_fulfillment = sm.apply(event(c, c.EventKind.MEDIA_ACTION_RESOLVED, revision_before, "late-fulfill", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "media_role": "rating_plate", "status": "fulfilled",
+        "asset_id": "plate-asset", "validation": "validated",
+    }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc)))
+    assert not late_fulfillment.accepted and late_fulfillment.decision_code == "action_expired"
+    assert sm.current_revision == revision_before
+    assert sm.case.pending_customer_action is not None
+
+    # Cancelling the same deadline-passed action is still allowed (a customer
+    # withdrawal isn't governed by the response deadline).
+    cancelled = sm.apply(event(c, c.EventKind.MEDIA_ACTION_RESOLVED, revision_before, "late-cancel", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "media_role": "rating_plate", "status": "cancelled",
+        "asset_id": "plate-asset",
+    }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc)))
+    assert cancelled.accepted
 
 
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):

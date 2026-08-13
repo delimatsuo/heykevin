@@ -765,6 +765,8 @@ class VisualTriageStateMachine:
         asset = self._matching_asset(event.payload)
         if self._state.media is not MediaStatus.UPLOADED_QUARANTINED:
             raise TransitionRejected("media_not_quarantined")
+        if asset.validation is not MediaValidation.PENDING:
+            raise TransitionRejected("asset_not_pending_validation")
         validation = self._enum(event.payload, "validation", MediaValidation)
         if validation is MediaValidation.PENDING:
             raise TransitionRejected("validation_not_final")

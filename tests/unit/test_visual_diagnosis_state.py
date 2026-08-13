@@ -24,7 +24,7 @@ PYTHON_DIGEST = "261a3951c895427210dfb7780693600b820f70841c078ab2554ee6fbeba7f37
 RUFF_PATH = Path("/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin/ruff")
 RUFF_DIGEST = "1edd2e6e57286bdddedb1fb55493a91dc17f42838f3d6be488ded7cfe2a4f3a1"
 CANDIDATE_HASHES = {
-    "app/services/visual_diagnosis_contracts.py": "c921c9c2ce9ba3a3492ca125a9172b4757a4b48fd1ddba244b4c8e3988ba99d3",
+    "app/services/visual_diagnosis_contracts.py": "c650538e48e0353e516b45d89f94a215bcb381eed179fa073a418b0db7ee21c8",
     "app/services/visual_diagnosis_state.py": "b2a268134c8a7b1fe9ad0498eb6acde01e2390a8ff2354b510c596208099d93f",
 }
 IMPORT_CLOSURE = {
@@ -2788,6 +2788,32 @@ def test_foreign_enum_kind_on_replay_path_is_rejected(modules):
     assert not result.accepted
     assert not result.replayed
     assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == revision_before
+
+
+def test_foreign_enum_source_kind_on_replay_path_is_rejected(modules):
+    # Sibling gap to the kind check above: the pre-dispatch `event.source_kind
+    # is not EventSource.SYNTHETIC` identity check in apply() never runs on
+    # the replay path (it sits after the ledger-replay branch), so a
+    # same-valued foreign source_kind on a replayed copy was previously
+    # unchecked entirely.
+    import enum
+
+    class ForeignSource(enum.Enum):
+        SYNTHETIC = "synthetic_structural"
+
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}))
+    genuine = event(c, c.EventKind.CONSENT_REQUESTED, sm.current_revision, "request")
+    accepted(sm, genuine)
+    revision_before = sm.current_revision
+    foreign_replay = genuine.model_copy(update={"source_kind": ForeignSource.SYNTHETIC})
+    result = sm.apply(foreign_replay)  # must not raise
+    assert not result.accepted
+    assert not result.replayed
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == revision_before
     assert sm.current_revision == revision_before
 
 

@@ -621,6 +621,8 @@ class VisualTriageEvent(StructuralModel):
             raise ValueError("expected_revision must be an integer")
         if type(self.kind) is not EventKind:
             raise ValueError("kind must be a genuine EventKind member")
+        if type(self.source_kind) is not EventSource:
+            raise ValueError("source_kind must be a genuine EventSource member")
         _validate_structural_value(self.payload)
         allowed_keys = _EVENT_PAYLOAD_KEYS[self.kind.value]
         if set(self.payload) - allowed_keys:

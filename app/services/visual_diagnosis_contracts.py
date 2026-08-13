@@ -612,6 +612,8 @@ class VisualTriageEvent(StructuralModel):
 
         if self.event_time.tzinfo is None:
             raise ValueError("event_time must be timezone-aware")
+        if not isinstance(self.event_id, str) or not OPAQUE_REF_PATTERN.fullmatch(self.event_id):
+            raise ValueError("event_id must be an opaque identifier")
         _validate_structural_value(self.payload)
         allowed_keys = _EVENT_PAYLOAD_KEYS[self.kind.value]
         if set(self.payload) - allowed_keys:

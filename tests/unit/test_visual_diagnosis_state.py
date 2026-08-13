@@ -77,13 +77,20 @@ def _running_in_ci() -> bool:
 
 
 def _guard_before_import(*, require_environment: bool = True) -> None:
-    # Clean-tree + diff-scope check: works whether the candidate files are
-    # still uncommitted (local dev, pre-PR) or already committed on a
-    # feature branch (CI, PR review), and does not regress once merged (the
-    # diff-vs-origin/main then becomes empty, a trivial subset of the
-    # allowlist). Baseline provenance is a monotonic ancestor check rather
-    # than an exact HEAD pin, because CI checks out an ephemeral merge
-    # commit for pull_request events, not the branch tip itself.
+    # Clean-tree + reviewed-ancestry check: works whether the candidate
+    # files are still uncommitted (local dev, pre-PR) or already committed
+    # on a feature branch (CI, PR review). Ancestry is a monotonic check
+    # (never un-true once satisfied), so it stays valid forever after this
+    # branch merges -- unlike a diff comparison against origin/main: these
+    # test files are collected on every future pytest run once merged,
+    # including unrelated PRs, whose origin/main..HEAD diff would never be a
+    # subset of this feature's own file allowlist. A diff-scope assertion
+    # here would break CI on every future PR that touches anything outside
+    # these files, so EXPECTED_PATHS stays a record of what this feature's
+    # own review covered, not a live per-run constraint. Baseline provenance
+    # is an ancestor check rather than an exact HEAD pin, because CI checks
+    # out an ephemeral merge commit for pull_request events, not the branch
+    # tip itself.
     status = subprocess.run(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
         cwd=ROOT,
@@ -98,14 +105,6 @@ def _guard_before_import(*, require_environment: bool = True) -> None:
         capture_output=True,
     )
     assert is_ancestor.returncode == 0, "reviewed baseline is not an ancestor of HEAD"
-    diff = subprocess.run(
-        ["git", "diff", "--name-only", "-z", "origin/main", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    changed = {entry.decode("utf-8") for entry in diff.split(b"\0") if entry}
-    assert changed <= EXPECTED_PATHS, f"diff vs origin/main exceeds the allowlist: {changed - EXPECTED_PATHS}"
 
     ignored = subprocess.run(
         ["git", "status", "--porcelain=v1", "--ignored", "-z", "--untracked-files=all"],
@@ -1034,6 +1033,77 @@ def test_fulfilling_a_media_action_after_its_deadline_is_rejected(modules):
         "asset_id": "plate-asset", "validation": "validated",
     }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc)))
     assert cancelled.accepted, cancelled.decision_code
+
+
+def test_cancelling_a_submitted_media_action_with_a_stalled_validator_finalizes_the_asset(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, 6, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, 7, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, 8, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 9, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100,
+        "digest": "c" * 64,
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, 10, "plate-final", {"asset_id": "plate-asset"}))
+    # The action is now SUBMITTED and quarantined, but the validator never
+    # responds -- the asset's validation stays PENDING indefinitely.
+    plate_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert plate_asset.validation.value == "pending"
+
+    cancelled = accepted(sm, event(c, c.EventKind.MEDIA_ACTION_RESOLVED, sm.current_revision, "plate-cancel", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "media_role": "rating_plate", "status": "cancelled", "asset_id": "plate-asset",
+    }))
+    assert cancelled.projection.pending_action_status is None
+    plate_asset = next(a for a in sm.case.media_assets if a.asset_id == "plate-asset")
+    assert plate_asset.validation.value == "unavailable"
+
+
+def test_question_resolution_dated_before_issuance_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, 6, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, 7, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, 8, "question", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+        "copy_ref": "question-copy", "response_option_codes": ["yes"],
+    }, at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+    revision_before = sm.current_revision
+    time_traveling_answer = sm.apply(event(c, c.EventKind.CUSTOMER_ACTION_RESOLVED, revision_before, "early-answer", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "locale": "und", "status": "answered", "response_option_code": "yes",
+    }, at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc)))  # before issued_at
+    assert not time_traveling_answer.accepted
+    assert time_traveling_answer.decision_code == "action_resolved_before_issuance"
+    assert sm.current_revision == revision_before
+    assert sm.case.pending_customer_action is not None
+
+
+def test_media_action_resolution_dated_before_issuance_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, 6, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, 7, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, 8, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "budget_bucket": "rating_plate", "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }, at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)))
+    revision_before = sm.current_revision
+    time_traveling_cancel = sm.apply(event(c, c.EventKind.MEDIA_ACTION_RESOLVED, revision_before, "early-cancel", {
+        "request_id": "plate-request", "action_kind": "rating_plate",
+        "media_role": "rating_plate", "status": "cancelled",
+    }, at=datetime(2026, 8, 12, 0, 9, tzinfo=timezone.utc)))  # before issued_at
+    assert not time_traveling_cancel.accepted
+    assert time_traveling_cancel.decision_code == "action_resolved_before_issuance"
+    assert sm.current_revision == revision_before
 
 
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):

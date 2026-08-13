@@ -134,15 +134,21 @@ def _running_in_ci() -> bool:
     return os.environ.get("GITHUB_ACTIONS") == "true"
 
 
-def _assert_clean_tree_and_diff_scope() -> None:
-    """Prove the checkout is untampered and this branch's diff vs origin/main
-    stays inside the allowlist -- works whether the candidate files are still
-    uncommitted (local dev, pre-PR) or already committed on a feature branch
-    (CI, PR review), and does not regress once this branch is merged (the
-    diff-vs-origin/main then becomes empty, a trivial subset of the
-    allowlist). Baseline provenance is a monotonic ancestor check rather than
-    an exact HEAD pin, because CI checks out an ephemeral merge commit for
-    pull_request events, not the branch tip itself.
+def _assert_clean_tree_and_reviewed_ancestry() -> None:
+    """Prove the checkout is untampered and descends from the reviewed
+    baseline -- works whether the candidate files are still uncommitted
+    (local dev, pre-PR) or already committed on a feature branch (CI, PR
+    review). Ancestry is a monotonic check (never un-true once satisfied),
+    so it stays valid forever after this branch merges, unlike a diff
+    comparison against origin/main: these test files are collected on every
+    future pytest run once merged, including unrelated PRs, whose
+    origin/main..HEAD diff would never be a subset of this feature's own
+    file allowlist -- a diff-scope assertion here would break CI on every
+    future PR that touches anything outside these files. EXPECTED_PATHS
+    stays as a record of what this feature's own review covered, not as a
+    live per-run constraint. Baseline provenance is an ancestor check rather
+    than an exact HEAD pin, because CI checks out an ephemeral merge commit
+    for pull_request events, not the branch tip itself.
     """
 
     status = subprocess.run(
@@ -160,15 +166,6 @@ def _assert_clean_tree_and_diff_scope() -> None:
         capture_output=True,
     )
     assert is_ancestor.returncode == 0, "reviewed baseline is not an ancestor of HEAD"
-
-    diff = subprocess.run(
-        ["git", "diff", "--name-only", "-z", "origin/main", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    changed = {entry.decode("utf-8") for entry in diff.split(b"\0") if entry}
-    assert changed <= EXPECTED_PATHS, f"diff vs origin/main exceeds the allowlist: {changed - EXPECTED_PATHS}"
 
     ignored = subprocess.run(
         ["git", "status", "--porcelain=v1", "--ignored", "-z", "--untracked-files=all"],
@@ -196,7 +193,7 @@ def _assert_network_denied() -> None:
 
 
 def _assert_candidate_isolated(*, require_environment: bool = True) -> None:
-    _assert_clean_tree_and_diff_scope()
+    _assert_clean_tree_and_reviewed_ancestry()
     if not _running_in_ci():
         # Denied-egress and this exact dev machine's pinned toolchain are
         # local-sandbox properties (sandbox-exec, a specific Homebrew Python

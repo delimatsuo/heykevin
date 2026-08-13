@@ -1661,6 +1661,28 @@ def test_case_cancelled_and_expired_before_last_resolved_action_time_are_rejecte
         assert sm.current_revision == revision_before
 
 
+def test_recapture_blocked_after_outputs_are_prepared(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create"))
+    accepted(sm, event(c, c.EventKind.CONSENT_REQUESTED, 1, "request"))
+    accepted(sm, event(c, c.EventKind.CONSENT_GRANTED, 2, "grant"))
+    upload = {
+        "asset_id": "bad-video", "media_type": "video/mp4", "byte_size": 100,
+        "duration_ms": 10_000, "width": 320, "height": 240, "digest": "b" * 64,
+    }
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, 3, "upload", upload))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, 4, "final", {"asset_id": "bad-video"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_VALIDATED, 5, "reject", {"asset_id": "bad-video", "validation": "rejected"}))
+    accepted(sm, event(c, c.EventKind.CONTRACTOR_PACKET_READY_RECORDED, 6, "packet-ready"))
+    blocked = sm.apply(event(c, c.EventKind.MEDIA_ACTION_ISSUED, 7, "recapture-issue", {
+        "request_id": "recapture-request", "action_kind": "targeted_recapture",
+        "budget_bucket": "recapture", "copy_ref": "recapture-copy", "receipt_ref": "recapture-issue",
+    }))
+    assert not blocked.accepted
+    assert blocked.decision_code == "output_already_prepared", blocked.decision_code
+
+
 def test_consent_withdrawn_before_last_resolved_action_time_is_rejected(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

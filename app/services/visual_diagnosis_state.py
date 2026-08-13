@@ -1172,6 +1172,11 @@ class VisualTriageStateMachine:
             raise TransitionRejected("case_terminal_not_allowed")
         if event.event_time < self._created_at:
             raise TransitionRejected("terminal_event_predates_case")
+        if any(
+            action.resolved_at is not None and event.event_time < action.resolved_at
+            for action in self._resolved_customer_actions
+        ):
+            raise TransitionRejected("terminal_event_predates_case")
         self._pending = None
         media = self._finalized_media_after_termination()
         self._completed_at = event.event_time

@@ -2003,6 +2003,88 @@ def test_upload_finalized_after_action_expiry_is_rejected(modules):
     assert sm.current_revision == revision_before
 
 
+def test_media_validated_after_action_expiry_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate", "budget_bucket": "rating_plate",
+        "receipt_ref": "plate-issue", "copy_ref": "plate-copy", "expires_at": "2026-08-12T00:10:00+00:00",
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, sm.current_revision, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100, "digest": "f" * 64,
+    }))
+    accepted(sm, event(c, c.EventKind.UPLOAD_FINALIZED, sm.current_revision, "plate-final", {"asset_id": "plate-asset"}))
+    revision_before = sm.current_revision
+    late_validate = sm.apply(event(
+        c, c.EventKind.MEDIA_VALIDATED, revision_before, "plate-validate",
+        {"asset_id": "plate-asset", "validation": "validated"},
+        at=datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc),  # at the deadline, not before it
+    ))
+    assert not late_validate.accepted
+    assert late_validate.decision_code == "action_expired", late_validate.decision_code
+    assert sm.current_revision == revision_before
+
+
+def test_analysis_retry_recorded_rejects_float_attempt(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_FAILED, sm.current_revision, "fail-1", {"failure_state": "failed_retriable"}))
+    revision_before = sm.current_revision
+    payload = {"attempt": 1}
+    malformed = event_with_raw_retry_attempt(
+        c, c.EventKind.ANALYSIS_RETRY_RECORDED, revision_before, "retry-1", payload,
+        retry_stage="analysis", retry_attempt=1.0,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "retry_attempt_invalid", result.decision_code
+    assert sm.current_revision == revision_before
+
+
+def test_deletion_retry_recorded_rejects_float_attempt(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete"))
+    revision_before = sm.current_revision
+    payload = {"attempt": 1}
+    malformed = event_with_raw_retry_attempt(
+        c, c.EventKind.DELETION_RETRY_RECORDED, revision_before, "retry-1", payload,
+        retry_stage="deletion", retry_attempt=1.0,
+    )
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "deletion_retry_invalid", result.decision_code
+    assert sm.current_revision == revision_before
+
+
+def test_deletion_requested_rejects_time_before_pending_action_issuance(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    issued_at = datetime(2026, 8, 12, 2, 0, tzinfo=timezone.utc)
+    accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, sm.current_revision, "question", {
+        "request_id": "question-request", "action_kind": "diagnostic_question",
+        "budget_bucket": "question", "receipt_ref": "question", "locale": "und",
+        "copy_ref": "question-copy", "response_option_codes": ["yes"],
+    }, at=issued_at))
+    revision_before = sm.current_revision
+    early_deletion = sm.apply(event(
+        c, c.EventKind.DELETION_REQUESTED, revision_before, "delete",
+        at=datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc),  # after created_at, before the pending question's issued_at
+    ))
+    assert not early_deletion.accepted
+    assert early_deletion.decision_code == "terminal_event_predates_case", early_deletion.decision_code
+    assert sm.current_revision == revision_before
+
+
 def test_recapture_blocked_after_outputs_are_prepared(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

@@ -100,6 +100,7 @@ class VisualTriageStateMachine:
         self._expires_at: datetime | None = None
         self._completed_at: datetime | None = None
         self._deleted_at: datetime | None = None
+        self._deletion_requested_at: datetime | None = None
         self._analysis_retry_count = 0
         self._policy_receipt_ref: str | None = None
 
@@ -385,6 +386,7 @@ class VisualTriageStateMachine:
             "expires_at": self._expires_at,
             "completed_at": self._completed_at,
             "deleted_at": self._deleted_at,
+            "deletion_requested_at": self._deletion_requested_at,
             "analysis_retry_count": self._analysis_retry_count,
             "policy_receipt_ref": self._policy_receipt_ref,
         }
@@ -409,6 +411,7 @@ class VisualTriageStateMachine:
         self._expires_at = backup["expires_at"]
         self._completed_at = backup["completed_at"]
         self._deleted_at = backup["deleted_at"]
+        self._deletion_requested_at = backup["deletion_requested_at"]
         self._analysis_retry_count = backup["analysis_retry_count"]
         self._policy_receipt_ref = backup["policy_receipt_ref"]
 
@@ -777,6 +780,8 @@ class VisualTriageStateMachine:
         else:
             if self._pending.kind not in _MEDIA_ACTION_KINDS or self._pending.status is not ActionStatus.ISSUED:
                 raise TransitionRejected("upload_not_allowed")
+            if event.event_time < self._pending.issued_at:
+                raise TransitionRejected("action_resolved_before_issuance")
             if (
                 self._pending.expires_at is not None
                 and event.event_time >= self._pending.expires_at
@@ -1220,6 +1225,7 @@ class VisualTriageStateMachine:
         self._reject_if_predates_recorded_activity(event)
         self._pending = None
         media = self._finalized_media_after_termination()
+        self._deletion_requested_at = event.event_time
         self._with_state(deletion=DeletionStatus.PENDING, media=media)
         return "deletion_requested"
 
@@ -1247,6 +1253,8 @@ class VisualTriageStateMachine:
         if self._state.deletion is not DeletionStatus.PENDING:
             raise TransitionRejected("deletion_not_pending")
         if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
+        if self._deletion_requested_at is not None and event.event_time < self._deletion_requested_at:
             raise TransitionRejected("terminal_event_predates_case")
         self._reject_if_predates_recorded_activity(event)
         self._deleted_at = event.event_time

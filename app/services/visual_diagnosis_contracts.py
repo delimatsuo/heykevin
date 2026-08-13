@@ -619,6 +619,8 @@ class VisualTriageEvent(StructuralModel):
             raise ValueError("payload must be a mapping")
         if isinstance(self.expected_revision, bool) or not isinstance(self.expected_revision, int):
             raise ValueError("expected_revision must be an integer")
+        if type(self.kind) is not EventKind:
+            raise ValueError("kind must be a genuine EventKind member")
         _validate_structural_value(self.payload)
         allowed_keys = _EVENT_PAYLOAD_KEYS[self.kind.value]
         if set(self.payload) - allowed_keys:

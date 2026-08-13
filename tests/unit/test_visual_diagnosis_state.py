@@ -24,8 +24,8 @@ PYTHON_DIGEST = "261a3951c895427210dfb7780693600b820f70841c078ab2554ee6fbeba7f37
 RUFF_PATH = Path("/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin/ruff")
 RUFF_DIGEST = "1edd2e6e57286bdddedb1fb55493a91dc17f42838f3d6be488ded7cfe2a4f3a1"
 CANDIDATE_HASHES = {
-    "app/services/visual_diagnosis_contracts.py": "26389adf86716b5a57a19344f822dc1bf459a1f5fe9bb11fd49b49391ae534a1",
-    "app/services/visual_diagnosis_state.py": "787491a3b6ea01a920d979d79a42b95bca449e330d991d0b21c23af8531400de",
+    "app/services/visual_diagnosis_contracts.py": "c921c9c2ce9ba3a3492ca125a9172b4757a4b48fd1ddba244b4c8e3988ba99d3",
+    "app/services/visual_diagnosis_state.py": "b2a268134c8a7b1fe9ad0498eb6acde01e2390a8ff2354b510c596208099d93f",
 }
 IMPORT_CLOSURE = {
     "app/services/visual_diagnosis_contracts.py",
@@ -1944,6 +1944,22 @@ def test_naive_event_time_via_model_construct_is_rejected(modules):
     assert sm.case is None  # snapshot() must not raise either
 
 
+def test_deletion_verified_before_deletion_requested_time_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    requested_at = datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)
+    accepted(sm, event(c, c.EventKind.DELETION_REQUESTED, sm.current_revision, "delete", at=requested_at))
+    revision_before = sm.current_revision
+    early_verification = sm.apply(event(
+        c, c.EventKind.DELETION_VERIFIED, revision_before, "verify",
+        at=datetime(2026, 8, 12, 0, 5, tzinfo=timezone.utc),  # after created_at, before deletion was requested
+    ))
+    assert not early_verification.accepted
+    assert early_verification.decision_code == "terminal_event_predates_case", early_verification.decision_code
+    assert sm.current_revision == revision_before
+
+
 def test_deletion_verified_before_last_resolved_action_time_is_rejected(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()
@@ -1968,6 +1984,28 @@ def test_deletion_verified_before_last_resolved_action_time_is_rejected(modules)
     ))
     assert not early_verification.accepted
     assert early_verification.decision_code == "terminal_event_predates_case", early_verification.decision_code
+    assert sm.current_revision == revision_before
+
+
+def test_upload_started_before_action_issuance_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    issued_at = datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate", "budget_bucket": "rating_plate",
+        "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }, at=issued_at))
+    revision_before = sm.current_revision
+    early_upload = sm.apply(event(
+        c, c.EventKind.UPLOAD_STARTED, revision_before, "plate-upload",
+        {"asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100, "digest": "f" * 64},
+        at=datetime(2026, 8, 12, 0, 5, tzinfo=timezone.utc),  # before the action was issued
+    ))
+    assert not early_upload.accepted
+    assert early_upload.decision_code == "action_resolved_before_issuance", early_upload.decision_code
     assert sm.current_revision == revision_before
 
 
@@ -2723,6 +2761,34 @@ def test_foreign_enum_kind_with_unrecognized_value_never_raises(modules):
     result = sm.apply(malformed)  # must not raise
     assert not result.accepted
     assert result.decision_code == "event_integrity_mismatch"
+
+
+def test_foreign_enum_kind_on_replay_path_is_rejected(modules):
+    # Unlike the first-application cases above, a caller can copy an
+    # ALREADY-COMMITTED genuine event (same event_id, so the ledger already
+    # has a Receipt for it) with kind replaced by a same-valued foreign
+    # member. model_copy() doesn't touch the fingerprint, and the fingerprint
+    # was computed from kind.value alone, so it still matches what's in the
+    # ledger -- pre-fix, apply()'s replay branch only compares fingerprints
+    # and never re-checks that kind is a genuine EventKind, so this would be
+    # reported as an accepted replay instead of rejected.
+    import enum
+
+    class ForeignKind(enum.Enum):
+        CONSENT_REQUESTED = "consent_requested"
+
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}))
+    genuine = event(c, c.EventKind.CONSENT_REQUESTED, sm.current_revision, "request")
+    accepted(sm, genuine)
+    revision_before = sm.current_revision
+    foreign_replay = genuine.model_copy(update={"kind": ForeignKind.CONSENT_REQUESTED})
+    result = sm.apply(foreign_replay)  # must not raise
+    assert not result.accepted
+    assert not result.replayed
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == revision_before
 
 
 def test_deletion_pending_rejects_late_non_deletion_events(modules):

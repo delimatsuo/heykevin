@@ -1031,9 +1031,9 @@ def test_fulfilling_a_media_action_after_its_deadline_is_rejected(modules):
     cancelled = sm.apply(event(c, c.EventKind.MEDIA_ACTION_RESOLVED, revision_before, "late-cancel", {
         "request_id": "plate-request", "action_kind": "rating_plate",
         "media_role": "rating_plate", "status": "cancelled",
-        "asset_id": "plate-asset",
+        "asset_id": "plate-asset", "validation": "validated",
     }, at=datetime(2026, 8, 12, 0, 11, tzinfo=timezone.utc)))
-    assert cancelled.accepted
+    assert cancelled.accepted, cancelled.decision_code
 
 
 def test_question_cannot_safely_complete_closes_prompt_and_answer_conflicts_are_bound(modules):

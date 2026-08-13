@@ -837,6 +837,12 @@ class VisualTriageStateMachine:
         validation = self._enum(event.payload, "validation", MediaValidation)
         if validation is MediaValidation.PENDING:
             raise TransitionRejected("validation_not_final")
+        if (
+            self._pending is not None
+            and self._pending.expires_at is not None
+            and event.event_time >= self._pending.expires_at
+        ):
+            raise TransitionRejected("action_expired")
         self._media_assets[asset.asset_id] = asset.model_copy(update={"validation": validation})
         media_state = {
             MediaValidation.VALIDATED: MediaStatus.VALIDATED,
@@ -995,7 +1001,7 @@ class VisualTriageStateMachine:
         if (
             not isinstance(attempt, int)
             or isinstance(attempt, bool)
-            or isinstance(event.retry_attempt, bool)
+            or type(event.retry_attempt) is not int
             or event.retry_attempt != attempt
             or attempt != self._analysis_retry_count + 1
             or attempt > 3
@@ -1209,6 +1215,9 @@ class VisualTriageStateMachine:
         self._require_case()
         if self._state.deletion is not DeletionStatus.NOT_REQUESTED:
             raise TransitionRejected("deletion_already_requested")
+        if event.event_time < self._created_at:
+            raise TransitionRejected("terminal_event_predates_case")
+        self._reject_if_predates_recorded_activity(event)
         self._pending = None
         media = self._finalized_media_after_termination()
         self._with_state(deletion=DeletionStatus.PENDING, media=media)
@@ -1224,7 +1233,7 @@ class VisualTriageStateMachine:
         if (
             not isinstance(attempt, int)
             or isinstance(attempt, bool)
-            or isinstance(event.retry_attempt, bool)
+            or type(event.retry_attempt) is not int
             or event.retry_attempt != attempt
             or attempt != self._deletion_retry_count + 1
             or attempt > 3

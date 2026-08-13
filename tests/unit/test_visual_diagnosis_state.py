@@ -1606,6 +1606,26 @@ def test_malformed_event_id_via_model_copy_does_not_partially_commit(modules):
     assert sm.case.state_vector.consent.value == "not_requested"
 
 
+def test_unhashable_event_id_via_model_copy_does_not_raise(modules):
+    # event_id is neither re-validated by assert_integrity() nor part of the
+    # semantic fingerprint, so model_copy(update={"event_id": ...}) can
+    # smuggle an unhashable value (e.g. a list) past dispatch. Pre-fix,
+    # self._ledger.get(event.event_id) raises TypeError outside the
+    # rollback-protected exception handler, violating apply()'s documented
+    # non-throwing contract.
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    accepted(sm, event(c, c.EventKind.CASE_CREATED, 0, "create", {"scenario": "hvac.demo"}))
+    revision_before = sm.current_revision
+    genuine = event(c, c.EventKind.CONSENT_REQUESTED, revision_before, "request")
+    malformed = genuine.model_copy(update={"event_id": []})
+    result = sm.apply(malformed)  # must not raise
+    assert not result.accepted
+    assert result.decision_code == "event_integrity_mismatch"
+    assert sm.current_revision == revision_before
+    assert sm.case.state_vector.consent.value == "not_requested"
+
+
 def test_case_closed_before_last_resolved_action_time_is_rejected(modules):
     c, state = modules
     sm = state.VisualTriageStateMachine()

@@ -25,7 +25,7 @@ RUFF_PATH = Path("/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin/ruff")
 RUFF_DIGEST = "1edd2e6e57286bdddedb1fb55493a91dc17f42838f3d6be488ded7cfe2a4f3a1"
 CANDIDATE_HASHES = {
     "app/services/visual_diagnosis_contracts.py": "c650538e48e0353e516b45d89f94a215bcb381eed179fa073a418b0db7ee21c8",
-    "app/services/visual_diagnosis_state.py": "b2a268134c8a7b1fe9ad0498eb6acde01e2390a8ff2354b510c596208099d93f",
+    "app/services/visual_diagnosis_state.py": "e693518c99b64172991b4dea70cf3ccd9da709869bcc6e7a8e8d8e76acce9d4a",
 }
 IMPORT_CLOSURE = {
     "app/services/visual_diagnosis_contracts.py",
@@ -1984,6 +1984,62 @@ def test_deletion_verified_before_last_resolved_action_time_is_rejected(modules)
     ))
     assert not early_verification.accepted
     assert early_verification.decision_code == "terminal_event_predates_case", early_verification.decision_code
+    assert sm.current_revision == revision_before
+
+
+def test_upload_finalized_before_action_issuance_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    issued_at = datetime(2026, 8, 12, 0, 10, tzinfo=timezone.utc)
+    accepted(sm, event(c, c.EventKind.MEDIA_ACTION_ISSUED, sm.current_revision, "plate-issue", {
+        "request_id": "plate-request", "action_kind": "rating_plate", "budget_bucket": "rating_plate",
+        "receipt_ref": "plate-issue", "copy_ref": "plate-copy",
+    }, at=issued_at))
+    accepted(sm, event(c, c.EventKind.UPLOAD_STARTED, sm.current_revision, "plate-upload", {
+        "asset_id": "plate-asset", "media_type": "image/jpeg", "byte_size": 100, "digest": "f" * 64,
+    }, at=issued_at))
+    revision_before = sm.current_revision
+    early_finalize = sm.apply(event(
+        c, c.EventKind.UPLOAD_FINALIZED, revision_before, "plate-final", {"asset_id": "plate-asset"},
+        at=datetime(2026, 8, 12, 0, 5, tzinfo=timezone.utc),  # before the action was issued
+    ))
+    assert not early_finalize.accepted
+    assert early_finalize.decision_code == "action_resolved_before_issuance", early_finalize.decision_code
+    assert sm.current_revision == revision_before
+
+
+def test_diagnostic_question_issued_before_last_resolved_action_time_is_rejected(modules):
+    c, state = modules
+    sm = state.VisualTriageStateMachine()
+    bootstrap_valid(sm, c)
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "start"))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "complete", {"outcome": "complete"}))
+    accepted(sm, event(c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, sm.current_revision, "question-1", {
+        "request_id": "question-request-1", "action_kind": "diagnostic_question",
+        "budget_bucket": "question", "receipt_ref": "question-1", "locale": "und",
+        "copy_ref": "question-copy-1", "response_option_codes": ["yes"],
+    }))
+    resolved_at = datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc)
+    accepted(sm, event(c, c.EventKind.CUSTOMER_ACTION_RESOLVED, sm.current_revision, "answer-1", {
+        "request_id": "question-request-1", "action_kind": "diagnostic_question",
+        "locale": "und", "status": "answered", "response_option_code": "yes",
+    }, at=resolved_at))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_STARTED, sm.current_revision, "restart", at=resolved_at))
+    accepted(sm, event(c, c.EventKind.ANALYSIS_COMPLETED, sm.current_revision, "restart-complete", {"outcome": "complete"}, at=resolved_at))
+    revision_before = sm.current_revision
+    early_second_question = sm.apply(event(
+        c, c.EventKind.DIAGNOSTIC_QUESTION_ISSUED, revision_before, "question-2", {
+            "request_id": "question-request-2", "action_kind": "diagnostic_question",
+            "budget_bucket": "question", "receipt_ref": "question-2", "locale": "und",
+            "copy_ref": "question-copy-2", "response_option_codes": ["yes"],
+        },
+        at=datetime(2026, 8, 12, 0, 30, tzinfo=timezone.utc),  # after created_at, before question-1's resolved_at
+    ))
+    assert not early_second_question.accepted
+    assert early_second_question.decision_code == "action_issued_before_case_created", early_second_question.decision_code
     assert sm.current_revision == revision_before
 
 

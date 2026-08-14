@@ -11,6 +11,7 @@
 		08404F384F8E392958CB7398 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 0D7B880F361308E971A34589 /* Localizable.xcstrings */; };
 		0D40BFF2E0A4EC9E31B9F48A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63ACE0E69E2007E754E2B30 /* ContentView.swift */; };
 		1350A5D8B974608BC1FEC2B6 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47EE37D6867D61B09BEC0482 /* APIClient.swift */; };
+		1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */; };
 		2603D9A0B3120B8CD74E39BF /* InCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CF580A4F3F56EFF7D346DB8 /* InCallView.swift */; };
 		28FA50EE1B2E526416669436 /* Products.storekit in Resources */ = {isa = PBXBuildFile; fileRef = EA4F50F9BE60CBE958B7212B /* Products.storekit */; };
 		4AB09E327BD6CE7025092BCE /* ContactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2612E9351242FAB54735AE26 /* ContactsView.swift */; };
@@ -24,6 +25,7 @@
 		913A4108C20DACCC05D861A9 /* KevinApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FDB20F68C9466D8D53A8852 /* KevinApp.swift */; };
 		92445173BA3671A68B54188A /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4249AB29D64072D037CA55 /* Call.swift */; };
 		925E51ED40B8CFE41A644C3E /* SubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */; };
+		949E492170B9C2A6AFE5A138 /* SubscriptionVerification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26F75183A354A43842B21498 /* SubscriptionVerification.swift */; };
 		982AF26603B1E7590FDF77B3 /* AppleIdentityRefresher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */; };
 		A8F7A82BCF2F0C274C54B80C /* ContactSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */; };
 		A9E3DF9DF175B27F6C282C43 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0B4D3F4353001283E75341A9 /* Assets.xcassets */; };
@@ -38,12 +40,23 @@
 		F9A91D699C206F4EA85584A3 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 5B8F3D0C955D71321170BC03 /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		6A1AEFB60B4536781B5E6077 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E52EA325B14732B2A82E82F4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A249246366E6EDB922A2E46A;
+			remoteInfo = Kevin;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		09A23D5E418687FDCFD9F90B /* CallHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallHistoryView.swift; sourceTree = "<group>"; };
 		0B4D3F4353001283E75341A9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0D7B880F361308E971A34589 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		1CE0EB11F52756367AE9E873 /* Kevin.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Kevin.entitlements; sourceTree = "<group>"; };
 		2612E9351242FAB54735AE26 /* ContactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsView.swift; sourceTree = "<group>"; };
+		26F75183A354A43842B21498 /* SubscriptionVerification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionVerification.swift; sourceTree = "<group>"; };
 		2D5785E9B2BC1B30AE3E1FBD /* CallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallManager.swift; sourceTree = "<group>"; };
 		34E49E9623A3159EBDEC4CFE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		355A811D1510B586161B0963 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -65,7 +78,9 @@
 		9789C39B3615CCF463FEBAE2 /* InfoPlist.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = InfoPlist.strings; path = es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		A88828214BCFD33CE2F29216 /* UpdateGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateGate.swift; sourceTree = "<group>"; };
 		B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersionService.swift; sourceTree = "<group>"; };
+		C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionVerificationTests.swift; sourceTree = "<group>"; };
 		D63ACE0E69E2007E754E2B30 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		E7C19B72552CD77728455C37 /* KevinTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = KevinTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA4249AB29D64072D037CA55 /* Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Call.swift; sourceTree = "<group>"; };
 		EA4F50F9BE60CBE958B7212B /* Products.storekit */ = {isa = PBXFileReference; path = Products.storekit; sourceTree = "<group>"; };
 		EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSyncManager.swift; sourceTree = "<group>"; };
@@ -88,6 +103,7 @@
 			isa = PBXGroup;
 			children = (
 				6A24199AFB16BCB3B38BF730 /* Kevin */,
+				7817B9C1269F1EDE195929E8 /* KevinTests */,
 				875369D71AB65AFA16003017 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -143,10 +159,19 @@
 			path = App;
 			sourceTree = "<group>";
 		};
+		7817B9C1269F1EDE195929E8 /* KevinTests */ = {
+			isa = PBXGroup;
+			children = (
+				C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */,
+			);
+			path = KevinTests;
+			sourceTree = "<group>";
+		};
 		875369D71AB65AFA16003017 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				52F406181EC42D36B29CFB8E /* Kevin.app */,
+				E7C19B72552CD77728455C37 /* KevinTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -169,6 +194,7 @@
 				EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */,
 				359DC411E16B65BDC5671DB2 /* KeychainManager.swift */,
 				62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */,
+				26F75183A354A43842B21498 /* SubscriptionVerification.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -216,6 +242,24 @@
 			productReference = 52F406181EC42D36B29CFB8E /* Kevin.app */;
 			productType = "com.apple.product-type.application";
 		};
+		E84EBA561B84B0B2E50548F1 /* KevinTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A198FC92282684C555269CB2 /* Build configuration list for PBXNativeTarget "KevinTests" */;
+			buildPhases = (
+				0DF0D1C9BEB98A76766FCAB6 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0027C6FEE3A353559FCD4A29 /* PBXTargetDependency */,
+			);
+			name = KevinTests;
+			packageProductDependencies = (
+			);
+			productName = KevinTests;
+			productReference = E7C19B72552CD77728455C37 /* KevinTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -251,6 +295,7 @@
 			projectRoot = "";
 			targets = (
 				A249246366E6EDB922A2E46A /* Kevin */,
+				E84EBA561B84B0B2E50548F1 /* KevinTests */,
 			);
 		};
 /* End PBXProject section */
@@ -272,6 +317,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		0DF0D1C9BEB98A76766FCAB6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		0E7F5F633722E4B2823AF884 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -296,6 +349,7 @@
 				8B6E78B156D9D3B1709602BA /* ServicesView.swift in Sources */,
 				D84086E76D3C95C468C1232A /* SettingsView.swift in Sources */,
 				925E51ED40B8CFE41A644C3E /* SubscriptionManager.swift in Sources */,
+				949E492170B9C2A6AFE5A138 /* SubscriptionVerification.swift in Sources */,
 				6B58067C9247D03F41C2016B /* Theme.swift in Sources */,
 				D941F4E2B5D75A232360FEDB /* UpdateGate.swift in Sources */,
 			);
@@ -303,7 +357,32 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		0027C6FEE3A353559FCD4A29 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A249246366E6EDB922A2E46A /* Kevin */;
+			targetProxy = 6A1AEFB60B4536781B5E6077 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		47D2F6F74D6B2B7D1B4EF9B5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kevin.app/Kevin";
+			};
+			name = Release;
+		};
 		966684C5F69D107808C9C8F1 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -369,7 +448,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -382,7 +461,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.5;
+				MARKETING_VERSION = 1.2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG STAGING";
@@ -456,7 +535,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -469,7 +548,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.5;
+				MARKETING_VERSION = 1.2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen;
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -477,6 +556,23 @@
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
+		};
+		B103D543979D3BFE04940467 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kevin.app/Kevin";
+			};
+			name = Debug;
 		};
 		C9AF081A52D01CBD2836D424 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -541,6 +637,23 @@
 			};
 			name = Debug;
 		};
+		CECB16E55497E66E4C416CAB /* Staging */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kevin.app/Kevin";
+			};
+			name = Staging;
+		};
 		D93FEE5BDE6B94B28D058B1E /* Staging */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -550,7 +663,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -563,7 +676,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.5;
+				MARKETING_VERSION = 1.2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = STAGING;
@@ -592,6 +705,16 @@
 				9EE9032852145E4274E862C6 /* Debug */,
 				A0367B10DE400304586DEC36 /* Release */,
 				D93FEE5BDE6B94B28D058B1E /* Staging */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A198FC92282684C555269CB2 /* Build configuration list for PBXNativeTarget "KevinTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B103D543979D3BFE04940467 /* Debug */,
+				47D2F6F74D6B2B7D1B4EF9B5 /* Release */,
+				CECB16E55497E66E4C416CAB /* Staging */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -1,14 +1,17 @@
 """Subscription management API endpoints."""
 
+import hashlib
+import math
 import os
 import time
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.middleware.auth import verify_api_token, require_contractor_access
+from app.config import settings
+from app.middleware.auth import require_contractor_access, verify_api_token
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -20,21 +23,43 @@ router = APIRouter(prefix="/api/subscription", dependencies=[Depends(verify_api_
 # Firestore-backed limiter — see `_persistent_rate_limit_check` below.
 _rate_limits: dict = defaultdict(list)
 
-VERIFY_RATE_LIMIT = 5    # requests per minute (per instance — best-effort)
 PROMO_RATE_LIMIT = 3     # requests per minute (per instance — best-effort)
 
 
-def _check_rate_limit(contractor_id: str, limit: int, key_suffix: str = "") -> bool:
-    """Return True if under rate limit, False if exceeded."""
+def _telemetry_hash(value: str) -> str:
+    """Stable non-reversible identifier for privacy-safe request correlation."""
+    return hashlib.sha256(value.encode()).hexdigest()[:12]
+
+
+def _telemetry_label(value: str, fallback: str = "unknown") -> str:
+    """Bound untrusted client labels before writing structured log fields."""
+    normalized = "".join(ch for ch in value if ch.isalnum() or ch in {"_", "-", "."})
+    return normalized[:32] or fallback
+
+
+def _check_rate_limit_with_retry(
+    contractor_id: str,
+    limit: int,
+    key_suffix: str = "",
+    window_seconds: int = 60,
+) -> tuple[bool, int]:
+    """Return allowance plus a computed Retry-After for a rolling window."""
     key = f"{contractor_id}{key_suffix}"
     now = time.time()
-    window_start = now - 60
+    window_start = now - window_seconds
     calls = [t for t in _rate_limits[key] if t > window_start]
     _rate_limits[key] = calls
     if len(calls) >= limit:
-        return False
+        retry_after = max(1, math.ceil(min(calls) + window_seconds - now))
+        return False, retry_after
     _rate_limits[key].append(now)
-    return True
+    return True, 0
+
+
+def _check_rate_limit(contractor_id: str, limit: int, key_suffix: str = "") -> bool:
+    """Backward-compatible boolean wrapper used by lightweight endpoints."""
+    allowed, _ = _check_rate_limit_with_retry(contractor_id, limit, key_suffix)
+    return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +80,21 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+VERIFY_RATE_LIMIT = _int_env("VERIFY_RATE_LIMIT", 30)
+VERIFY_RATE_WINDOW_SECONDS = _int_env("VERIFY_RATE_WINDOW_SECONDS", 60)
 SIGN_OFFER_LIMIT = _int_env("SIGN_OFFER_RATE_LIMIT", 5)
 SIGN_OFFER_WINDOW_SECONDS = _int_env("SIGN_OFFER_RATE_WINDOW_SECONDS", 900)
 
 
 class VerifyRequest(BaseModel):
-    transaction_id: str
+    transaction_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
     contractor_id: str
+    source: str = Field(default="unknown", max_length=32)
+    app_build: str = Field(default="", max_length=32)
 
 
 class SignOfferRequest(BaseModel):
@@ -82,21 +115,52 @@ async def verify_subscription(body: VerifyRequest, request: Request):
     """
     require_contractor_access(request, body.contractor_id)
 
+    from app.db.apple_transactions import get_transaction_binding
     from app.services.subscription import (
-        verify_transaction_strict,
-        is_transaction_seen,
+        CrossContractorReceiptError,
+        SubscriptionUpdateOutcome,
+        get_processed_transaction,
         mark_transaction_seen,
         update_subscription_from_transaction,
-        CrossContractorReceiptError,
+        verify_transaction_strict,
     )
-    from app.db.apple_transactions import get_transaction_binding
 
     # Per-contractor dedup (cheap idempotency for retries from this same client).
     # This must happen before the rate limit so legitimate StoreKit retries do
     # not turn a successful purchase into noisy 429s.
-    if await is_transaction_seen(body.contractor_id, body.transaction_id):
-        logger.info(f"Duplicate transaction ignored: {body.transaction_id}")
-        return {"status": "ok", "message": "already_processed"}
+    processed = await get_processed_transaction(body.contractor_id, body.transaction_id)
+    if processed:
+        outcome = processed.get("outcome", SubscriptionUpdateOutcome.ACTIVE.value)
+        if outcome not in {
+            SubscriptionUpdateOutcome.ACTIVE.value,
+            SubscriptionUpdateOutcome.INACTIVE.value,
+        }:
+            logger.error(
+                "subscription_verify invalid_processed_outcome=%s contractor_hash=%s "
+                "transaction_hash=%s",
+                _telemetry_label(str(outcome)),
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="invalid_processed_transaction_outcome",
+            )
+        logger.info(
+            "subscription_verify outcome=already_processed entitlement=%s contractor_hash=%s "
+            "transaction_hash=%s source=%s build=%s",
+            outcome,
+            _telemetry_hash(body.contractor_id),
+            _telemetry_hash(body.transaction_id),
+            _telemetry_label(body.source),
+            _telemetry_label(body.app_build, fallback="legacy"),
+        )
+        return {
+            "status": "ok",
+            "message": "already_processed",
+            "outcome": outcome,
+            "entitlement_active": outcome == SubscriptionUpdateOutcome.ACTIVE.value,
+        }
 
     # Global receipt-replay defense (F-06): even before calling Apple, if this
     # transaction_id is bound to a *different* contractor, reject. We also do
@@ -114,8 +178,30 @@ async def verify_subscription(body: VerifyRequest, request: Request):
             detail="receipt_already_bound",
         )
 
-    if not _check_rate_limit(body.contractor_id, VERIFY_RATE_LIMIT, ":verify"):
-        raise HTTPException(status_code=429, detail="Too many verification requests")
+    allowed, retry_after = _check_rate_limit_with_retry(
+        body.contractor_id,
+        VERIFY_RATE_LIMIT,
+        ":verify",
+        VERIFY_RATE_WINDOW_SECONDS,
+    )
+    if not allowed:
+        logger.warning(
+            "subscription_verify outcome=rate_limited contractor_hash=%s source=%s build=%s "
+            "retry_after=%s",
+            _telemetry_hash(body.contractor_id),
+            _telemetry_label(body.source),
+            _telemetry_label(body.app_build, fallback="legacy"),
+            retry_after,
+        )
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+            content={
+                "status": "retryable",
+                "reason": "rate_limited",
+                "retry_after_seconds": retry_after,
+            },
+        )
 
     result = await verify_transaction_strict(body.transaction_id)
 
@@ -148,22 +234,93 @@ async def verify_subscription(body: VerifyRequest, request: Request):
         )
 
     try:
-        updated = await update_subscription_from_transaction(body.contractor_id, result.transaction)
+        update_result = await update_subscription_from_transaction(
+            body.contractor_id, result.transaction
+        )
     except CrossContractorReceiptError as e:
         logger.error("verify_subscription cross-contractor reject (atomic): %s", e)
         raise HTTPException(status_code=409, detail="receipt_already_bound")
 
-    if updated:
-        await mark_transaction_seen(body.contractor_id, body.transaction_id)
-        return {"status": "ok", "message": "updated"}
+    if update_result.outcome is SubscriptionUpdateOutcome.ACTIVE:
+        await mark_transaction_seen(
+            body.contractor_id,
+            body.transaction_id,
+            SubscriptionUpdateOutcome.ACTIVE,
+        )
+        logger.info(
+            "subscription_verify outcome=active contractor_hash=%s transaction_hash=%s "
+            "source=%s build=%s",
+            _telemetry_hash(body.contractor_id),
+            _telemetry_hash(body.transaction_id),
+            _telemetry_label(body.source),
+            _telemetry_label(body.app_build, fallback="legacy"),
+        )
+        return {
+            "status": "ok",
+            "message": "updated",
+            "outcome": SubscriptionUpdateOutcome.ACTIVE.value,
+            "entitlement_active": True,
+        }
 
-    return {"status": "error", "message": "update_failed"}
+    if update_result.outcome is SubscriptionUpdateOutcome.INACTIVE:
+        # Apple verified the receipt and ownership. Persisting this terminal
+        # outcome lets released clients finish the StoreKit transaction without
+        # granting access or downgrading a newer contractor profile.
+        await mark_transaction_seen(
+            body.contractor_id,
+            body.transaction_id,
+            SubscriptionUpdateOutcome.INACTIVE,
+        )
+        logger.info(
+            "subscription_verify outcome=inactive reason=%s contractor_hash=%s "
+            "transaction_hash=%s source=%s build=%s",
+            _telemetry_label(update_result.reason),
+            _telemetry_hash(body.contractor_id),
+            _telemetry_hash(body.transaction_id),
+            _telemetry_label(body.source),
+            _telemetry_label(body.app_build, fallback="legacy"),
+        )
+        return {
+            "status": "ok",
+            "message": "terminal_processed",
+            "outcome": SubscriptionUpdateOutcome.INACTIVE.value,
+            "entitlement_active": False,
+        }
+
+    if update_result.outcome is SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH:
+        logger.warning(
+            "subscription_verify outcome=ownership_mismatch reason=%s contractor_hash=%s "
+            "transaction_hash=%s source=%s build=%s",
+            _telemetry_label(update_result.reason),
+            _telemetry_hash(body.contractor_id),
+            _telemetry_hash(body.transaction_id),
+            _telemetry_label(body.source),
+            _telemetry_label(body.app_build, fallback="legacy"),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=update_result.reason or "ownership_mismatch",
+        )
+
+    raise HTTPException(
+        status_code=422,
+        detail=update_result.reason or update_result.outcome.value,
+    )
 
 
 @router.get("/promo-eligible")
 async def get_promo_eligible(contractor_id: str, request: Request):
     """Check if promo offer is available (boolean only — no count exposed)."""
     require_contractor_access(request, contractor_id)
+
+    # Existing iOS builds attach a promotional offer whenever this endpoint
+    # returns true for an expired server-side trial. A server trial is not
+    # evidence that the Apple ID has ever subscribed, but Apple only permits
+    # promotional offers for current or former App Store subscribers. Fail
+    # closed so already-installed builds immediately use the regular StoreKit
+    # purchase path instead of presenting an offer Apple will reject.
+    if not settings.subscription_promotional_offers_enabled:
+        return {"eligible": False}
 
     if not _check_rate_limit(contractor_id, PROMO_RATE_LIMIT, ":promo"):
         raise HTTPException(status_code=429, detail="Too many requests")
@@ -183,6 +340,12 @@ async def sign_offer(body: SignOfferRequest, request: Request):
     SIGN_OFFER_RATE_WINDOW_SECONDS environment variables.
     """
     require_contractor_access(request, body.contractor_id)
+
+    # Deliberately do not apply the eligibility kill switch here. Released
+    # clients silently fall back to a regular-price purchase when signing does
+    # not return a signature, even if their already-open paywall still displays
+    # the promotional price. Returning false from /promo-eligible is the safe
+    # compatibility boundary; it takes effect when the paywall is reloaded.
 
     from app.db.rate_limits import check_and_increment
 

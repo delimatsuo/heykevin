@@ -4,12 +4,13 @@ Handles subscription verification, promotional offer signing, and
 Apple Server Notifications V2 webhook processing.
 """
 
+import asyncio
 import base64
 import json
 import time
 import uuid
-import asyncio
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import httpx
@@ -208,6 +209,29 @@ class VerificationResult:
     transaction: Optional[dict] = None
     unreachable: bool = False
     reason: str = ""
+
+
+class SubscriptionUpdateOutcome(str, Enum):
+    """Typed result of applying an Apple-verified transaction."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    OWNERSHIP_MISMATCH = "ownership_mismatch"
+    UNKNOWN_PRODUCT = "unknown_product"
+    MALFORMED_TRANSACTION = "malformed_transaction"
+
+
+@dataclass(frozen=True)
+class SubscriptionUpdateResult:
+    """Outcome of applying a transaction that Apple already verified."""
+
+    outcome: SubscriptionUpdateOutcome
+    reason: str = ""
+
+    @property
+    def entitlement_active(self) -> bool:
+        return self.outcome is SubscriptionUpdateOutcome.ACTIVE
+
 
 # App Store Server API endpoints
 APPSTORE_PRODUCTION_URL = "https://api.storekit.itunes.apple.com"
@@ -497,23 +521,47 @@ async def verify_transaction(transaction_id: str) -> Optional[dict]:
 
 async def is_transaction_seen(contractor_id: str, transaction_id: str) -> bool:
     """Check if we've already processed this transaction ID (deduplication)."""
+    return await get_processed_transaction(contractor_id, transaction_id) is not None
+
+
+async def get_processed_transaction(
+    contractor_id: str, transaction_id: str
+) -> Optional[dict]:
+    """Return a processed transaction record, preserving its entitlement outcome.
+
+    Records written before outcomes were introduced only exist after a successful
+    activation, so they are safely interpreted as ``active``.
+    """
     from app.db.firestore_client import get_firestore_client
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
     doc_path = f"contractors/{contractor_id}/transactions/{transaction_id}"
     doc = await loop.run_in_executor(None, lambda: db.document(doc_path).get())
-    return doc.exists
+    if not doc.exists:
+        return None
+    record = doc.to_dict() or {}
+    record.setdefault("outcome", SubscriptionUpdateOutcome.ACTIVE.value)
+    return record
 
 
-async def mark_transaction_seen(contractor_id: str, transaction_id: str):
-    """Record a processed transaction ID to prevent replay."""
+async def mark_transaction_seen(
+    contractor_id: str,
+    transaction_id: str,
+    outcome: SubscriptionUpdateOutcome = SubscriptionUpdateOutcome.ACTIVE,
+):
+    """Record a terminal transaction outcome to prevent replay."""
     from app.db.firestore_client import get_firestore_client
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
     doc_path = f"contractors/{contractor_id}/transactions/{transaction_id}"
     await loop.run_in_executor(
         None,
-        lambda: db.document(doc_path).set({"processed_at": time.time()}),
+        lambda: db.document(doc_path).set(
+            {
+                "processed_at": time.time(),
+                "outcome": outcome.value,
+            }
+        ),
     )
 
 
@@ -540,28 +588,38 @@ class CrossContractorReceiptError(Exception):
         self.owner_contractor_id = owner_contractor_id
 
 
-async def update_subscription_from_transaction(contractor_id: str, transaction_info: dict) -> bool:
+async def update_subscription_from_transaction(
+    contractor_id: str, transaction_info: dict
+) -> SubscriptionUpdateResult:
     """Update contractor subscription status from a verified Apple transaction.
 
-    Returns True if updated successfully. Raises CrossContractorReceiptError if
-    the underlying Apple receipt has already been claimed by a different
-    contractor (F-06: global receipt-replay defense).
+    Returns a typed result so callers can distinguish a safely acknowledged
+    inactive transaction from ownership and payload failures. Raises
+    CrossContractorReceiptError if the underlying Apple receipt has already
+    been claimed by a different contractor (F-06: global receipt-replay
+    defense).
     """
-    from app.db.contractors import update_contractor
     from app.db.apple_transactions import claim_transaction
+    from app.db.contractors import update_contractor
 
     product_id = transaction_info.get("productId", "")
     tier = PRODUCT_TO_TIER.get(product_id)
     if not tier:
         logger.error(f"Unknown product ID: {product_id}")
-        return False
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.UNKNOWN_PRODUCT,
+            reason="unknown_product",
+        )
 
     # Validate ownership: appAccountToken must match contractor's subscription_uuid
     from app.db.contractors import get_contractor
     app_account_token = transaction_info.get("appAccountToken", "")
     if not app_account_token:
         logger.error(f"appAccountToken missing in transaction for contractor {contractor_id}")
-        return False
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH,
+            reason="missing_app_account_token",
+        )
     contractor_profile = await get_contractor(contractor_id)
     expected_uuid = (contractor_profile or {}).get("subscription_uuid", "")
     if not expected_uuid or app_account_token != expected_uuid:
@@ -573,25 +631,67 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
             (expected_uuid[:8] if expected_uuid else "(empty)"),
             (app_account_token[:8] if app_account_token else "(empty)"),
         )
-        return False
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH,
+            reason="app_account_token_mismatch",
+        )
 
-    expires_ts = _active_subscription_expires_ts(transaction_info)
-    if not expires_ts:
-        return False
+    # Reject malformed subscription payloads before claiming their receipt.
+    # Apple auto-renewable subscription transactions always carry an expiry.
+    try:
+        expires_ms = float(transaction_info.get("expiresDate") or 0)
+    except (TypeError, ValueError):
+        expires_ms = 0
+    if expires_ms <= 0:
+        logger.warning(
+            "Rejecting App Store subscription transaction without expiresDate: product=%s",
+            product_id,
+        )
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+            reason="missing_or_invalid_expiry",
+        )
 
     # Global receipt-replay defense (F-06): bind original_transaction_id to this
     # contractor atomically. If a different contractor already claimed it, fail.
     original_id = _resolve_original_transaction_id(transaction_info)
-    if original_id:
-        ok, owner = await claim_transaction(
-            original_transaction_id=original_id,
-            contractor_id=contractor_id,
-            transaction_id=str(transaction_info.get("transactionId", "")),
-            product_id=product_id,
-            environment=str(transaction_info.get("environment", "")),
+    if not original_id:
+        logger.error("Verified App Store transaction missing transaction identity")
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+            reason="missing_transaction_id",
         )
-        if not ok:
-            raise CrossContractorReceiptError(original_id, owner or "unknown")
+
+    ok, owner = await claim_transaction(
+        original_transaction_id=original_id,
+        contractor_id=contractor_id,
+        transaction_id=str(transaction_info.get("transactionId", "")),
+        product_id=product_id,
+        environment=str(transaction_info.get("environment", "")),
+    )
+    if not ok:
+        raise CrossContractorReceiptError(original_id, owner or "unknown")
+
+    if transaction_info.get("revocationDate") or transaction_info.get("revokedDate"):
+        logger.warning(
+            "Acknowledging revoked App Store transaction without entitlement: product=%s",
+            product_id,
+        )
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.INACTIVE,
+            reason="revoked",
+        )
+
+    expires_ts = expires_ms / 1000.0
+    if expires_ts <= time.time():
+        logger.info(
+            "Acknowledging expired App Store transaction without entitlement: product=%s",
+            product_id,
+        )
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.INACTIVE,
+            reason="expired",
+        )
 
     await update_contractor(contractor_id, {
         "subscription_tier": tier,
@@ -599,7 +699,7 @@ async def update_subscription_from_transaction(contractor_id: str, transaction_i
         "subscription_expires": expires_ts,
     })
     logger.info(f"Subscription updated: contractor={contractor_id} tier={tier}")
-    return True
+    return SubscriptionUpdateResult(SubscriptionUpdateOutcome.ACTIVE)
 
 
 async def check_promo_eligible() -> bool:

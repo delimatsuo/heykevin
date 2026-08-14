@@ -144,6 +144,33 @@ jobs:
             echo "SERVICE=kevin-api" >> "$GITHUB_ENV"
           fi
 
+      - name: Verify rollback preserves subscription promo containment
+        run: |
+          if [ "$ROLLBACK_METHOD" = "traffic-split" ]; then
+            TARGET_DEPLOY_SHA=$(gcloud run revisions describe "$REVISION_OR_TAG" \
+              --project "$GCP_PROJECT_ID" \
+              --region "$GCP_REGION" \
+              --format='json(spec.containers[0].env)' \
+              | python -c 'import json,sys; env=json.load(sys.stdin).get("spec", {}).get("containers", [{}])[0].get("env", []); print(next((item.get("value", "") for item in env if item.get("name") == "DEPLOY_SHA"), ""))')
+            TARGET_PROMO_FLAG=$(gcloud run revisions describe "$REVISION_OR_TAG" \
+              --project "$GCP_PROJECT_ID" \
+              --region "$GCP_REGION" \
+              --format='json(spec.containers[0].env)' \
+              | python -c 'import json,sys; env=json.load(sys.stdin).get("spec", {}).get("containers", [{}])[0].get("env", []); print(next((item.get("value", "") for item in env if item.get("name") == "SUBSCRIPTION_PROMOTIONAL_OFFERS_ENABLED"), ""))')
+            test "$TARGET_PROMO_FLAG" = "false" || (echo "Rollback revision does not keep promotional offers disabled" && exit 1)
+          else
+            TARGET_DEPLOY_SHA="$ROLLBACK_COMMIT_SHA"
+          fi
+
+          [[ "$TARGET_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Rollback target is missing an exact DEPLOY_SHA" && exit 1)
+          git cat-file -e "${TARGET_DEPLOY_SHA}^{commit}" || (echo "Rollback target commit is not present in repository history" && exit 1)
+          git show "${TARGET_DEPLOY_SHA}:app/config.py" \
+            | grep -F "subscription_promotional_offers_enabled: bool = False" >/dev/null \
+            || (echo "Rollback target lacks the promotional-offer default-off guard" && exit 1)
+          git show "${TARGET_DEPLOY_SHA}:app/api/subscription.py" \
+            | grep -F "if not settings.subscription_promotional_offers_enabled:" >/dev/null \
+            || (echo "Rollback target lacks the promotional-eligibility gate" && exit 1)
+
       - name: Rollback via traffic split
         if: inputs.method == 'traffic-split'
         run: |
@@ -165,11 +192,11 @@ jobs:
           if [ "$ROLLBACK_ENVIRONMENT" = "staging" ]; then
             RUNTIME_SERVICE_ACCOUNT="$STAGING_RUNTIME_SERVICE_ACCOUNT"
             BUILD_SERVICE_ACCOUNT="$STAGING_BUILD_SERVICE_ACCOUNT"
-            ENV_VARS="ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=$FIRESTORE_PROJECT_ID,FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL,APNS_SANDBOX=$APNS_SANDBOX,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,DEPLOY_SHA=$DEPLOY_SHA"
+            ENV_VARS="ENVIRONMENT=staging,APPSTORE_ENVIRONMENT=sandbox,CLOUD_RUN_URL=https://kevin-api-staging-l63rergg7a-uc.a.run.app,FIRESTORE_PROJECT_ID=$FIRESTORE_PROJECT_ID,FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL,APNS_SANDBOX=$APNS_SANDBOX,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,SUBSCRIPTION_PROMOTIONAL_OFFERS_ENABLED=false,DEPLOY_SHA=$DEPLOY_SHA"
           else
             RUNTIME_SERVICE_ACCOUNT="$PRODUCTION_RUNTIME_SERVICE_ACCOUNT"
             BUILD_SERVICE_ACCOUNT="$PRODUCTION_BUILD_SERVICE_ACCOUNT"
-            ENV_VARS="ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,DEPLOY_SHA=$DEPLOY_SHA"
+            ENV_VARS="ENVIRONMENT=production,APPSTORE_ENVIRONMENT=production,CLOUD_RUN_URL=https://kevin-api-752910912062.us-central1.run.app,FIRESTORE_PROJECT_ID=$GCP_PROJECT_ID,FIREBASE_DATABASE_URL=https://kevin-491315-rtdb.firebaseio.com,APNS_SANDBOX=false,PRODUCTION_TWILIO_ACCOUNT_SID=$PRODUCTION_TWILIO_ACCOUNT_SID,SUBSCRIPTION_PROMOTIONAL_OFFERS_ENABLED=false,DEPLOY_SHA=$DEPLOY_SHA"
           fi
           gcloud run deploy "$SERVICE" \
             --source . \

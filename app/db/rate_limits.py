@@ -21,9 +21,10 @@ concurrent calls cannot both squeeze in past the limit.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from datetime import UTC, datetime
 
 from app.utils.logging import get_logger
 
@@ -58,7 +59,8 @@ async def check_and_increment(
     key: str,
     limit: int,
     window_seconds: int,
-    now: Optional[float] = None,
+    now: float | None = None,
+    document_ttl_seconds: int | None = None,
 ) -> RateLimitResult:
     """Atomically prune the rolling window, decide allow/deny, and on allow append.
 
@@ -67,20 +69,47 @@ async def check_and_increment(
     so attackers cannot bypass the limit by triggering Firestore errors. Logged
     so operators can investigate.
     """
-    if limit <= 0:
+    if limit <= 0 or window_seconds <= 0:
         # Misconfiguration → deny everything.
         return RateLimitResult(False, 0, window_seconds, 0)
 
     if not key:
         return RateLimitResult(False, 0, window_seconds, 0)
 
-    from app.db.firestore_client import get_firestore_client
+    current_time = float(now) if now is not None else time.time()
+    expires_at: datetime | None = None
+    if document_ttl_seconds is not None:
+        if (
+            isinstance(document_ttl_seconds, bool)
+            or not isinstance(document_ttl_seconds, (int, float))
+            or not math.isfinite(float(document_ttl_seconds))
+            or float(document_ttl_seconds) < float(window_seconds)
+        ):
+            return RateLimitResult(False, 0, window_seconds, limit)
+        try:
+            expires_at = datetime.fromtimestamp(
+                current_time + float(document_ttl_seconds),
+                tz=UTC,
+            )
+        except (OverflowError, OSError, ValueError):
+            return RateLimitResult(False, 0, window_seconds, limit)
+
     from google.cloud import firestore as fs
+
+    from app.db.firestore_client import get_firestore_client
 
     db = get_firestore_client()
     doc_ref = _doc_ref(scope, key)
-    current_time = float(now) if now is not None else time.time()
     window_start = current_time - float(window_seconds)
+
+    def _write_data(bucket: list[float]) -> dict:
+        data = {"bucket": bucket, "updated_at": current_time}
+        if expires_at is not None:
+            # A Firestore TTL policy on this field is required for callers that
+            # opt into bounded document retention. Existing rate-limit users do
+            # not gain or depend on TTL behavior implicitly.
+            data["expires_at"] = expires_at
+        return data
 
     @fs.transactional
     def _txn(transaction) -> RateLimitResult:
@@ -102,7 +131,7 @@ async def check_and_increment(
             retry_after = max(1, int(oldest + window_seconds - current_time) + 1)
             transaction.set(
                 doc_ref,
-                {"bucket": bucket, "updated_at": current_time},
+                _write_data(bucket),
                 merge=True,
             )
             return RateLimitResult(False, 0, retry_after, len(bucket))
@@ -114,7 +143,7 @@ async def check_and_increment(
 
         transaction.set(
             doc_ref,
-            {"bucket": bucket, "updated_at": current_time},
+            _write_data(bucket),
             merge=True,
         )
         return RateLimitResult(True, max(0, limit - len(bucket)), 0, len(bucket))
@@ -123,10 +152,10 @@ async def check_and_increment(
     transaction = db.transaction()
     try:
         return await loop.run_in_executor(None, lambda: _txn(transaction))
-    except Exception as e:  # noqa: BLE001 — fail closed, don't bypass limit
+    except Exception as error:  # noqa: BLE001 - storage uncertainty must fail closed
         logger.error(
-            "rate_limits: Firestore failure scope=%s key=%s err=%s — failing closed",
-            scope, key, e,
-            exc_info=True,
+            "rate_limits: Firestore failure scope=%s exception_type=%s — failing closed",
+            scope,
+            type(error).__name__,
         )
         return RateLimitResult(False, 0, window_seconds, limit)

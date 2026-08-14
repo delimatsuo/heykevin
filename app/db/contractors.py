@@ -21,6 +21,11 @@ PROTECTED_FIELDS = frozenset({
     "trial_start",
     "subscription_uuid",
     "twilio_number",
+    # Public-demo identity is a server-owned routing boundary. A client must
+    # never be able to turn an ordinary tenant into a public ingress target.
+    "public_demo",
+    "demo_enabled_until",
+    "demo_profile_version",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
     # Forwarding truth — derived from carrier signalling, never client-asserted.

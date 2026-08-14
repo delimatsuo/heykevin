@@ -72,6 +72,10 @@ class GeminiPipeline:
     """
 
     URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
+    REALTIME_START_OF_SPEECH_SENSITIVITY = "START_SENSITIVITY_LOW"
+    REALTIME_END_OF_SPEECH_SENSITIVITY = "END_SENSITIVITY_HIGH"
+    REALTIME_PREFIX_PADDING_MS = 300
+    REALTIME_SILENCE_DURATION_MS = 500
     CALLER_SILENCE_PROMPT_SECONDS = 10
     CALLER_SILENCE_HANGUP_SECONDS = 10
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
@@ -96,6 +100,10 @@ class GeminiPipeline:
     # Secondary object bound; the byte budget is the effective limit for normal frames.
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
+    # Tenant calls keep backend speaking state close to caller playout. A
+    # transport that provides its own ordered audio buffer can override this.
+    PACE_AUDIO_OUTPUT = True
+    AUDIO_START_BUFFER_SECONDS = 0.0
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
     # Runaway guard only — NOT a length control. Native-audio output measures
     # ~26 tokens/second (verified across 20+ production turns on 2026-08-06),
@@ -177,6 +185,7 @@ class GeminiPipeline:
         # Buffers for streaming transcript fragments (Gemini sends word-by-word)
         self._kevin_transcript_buf: list[str] = []
         self._caller_transcript_buf: list[str] = []
+        self._caller_turn_number = 0
         self._last_caller_transcript_flushed_at = 0.0
         self._last_caller_transcript_fragment_at = 0.0
         self._last_caller_transcript_fragment_monotonic = 0.0
@@ -256,6 +265,22 @@ class GeminiPipeline:
 
         return config
 
+    def _build_realtime_input_config(self) -> dict:
+        """Return overridable Live VAD controls for the current call surface."""
+
+        return {
+            "automatic_activity_detection": {
+                "start_of_speech_sensitivity": (
+                    self.REALTIME_START_OF_SPEECH_SENSITIVITY
+                ),
+                "end_of_speech_sensitivity": self.REALTIME_END_OF_SPEECH_SENSITIVITY,
+                "prefix_padding_ms": self.REALTIME_PREFIX_PADDING_MS,
+                "silence_duration_ms": self.REALTIME_SILENCE_DURATION_MS,
+            },
+            "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+        }
+
     def _call_label(self) -> str:
         """Return a short non-PII call label for operational logs."""
         return self._call_sid[:8] or "unknown"
@@ -297,18 +322,22 @@ class GeminiPipeline:
             "How can I help you?"
         )
 
+    def _build_text_instruction_payload(self, text: str) -> dict:
+        """Build the model-version-specific payload for an instruction turn."""
+        if self._model.startswith("gemini-3"):
+            return {"realtime_input": {"text": text}}
+        return {
+            "client_content": {
+                "turns": [{"role": "user", "parts": [{"text": text}]}],
+                "turn_complete": True,
+            }
+        }
+
     async def _send_greeting(self) -> None:
         """Ask Gemini to speak the deterministic greeting and nothing else."""
         greeting_text = self._build_greeting_text()
         prompt = f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
-        await self._ws.send(json.dumps({
-            "client_content": {
-                "turns": [
-                    {"role": "user", "parts": [{"text": prompt}]}
-                ],
-                "turn_complete": True,
-            }
-        }))
+        await self._ws.send(json.dumps(self._build_text_instruction_payload(prompt)))
         self._log_voice_timing(
             "greeting_instruction_sent",
             chars=len(greeting_text),
@@ -375,16 +404,7 @@ class GeminiPipeline:
                     # syllable. A genuine barge-in now registers marginally later,
                     # which is the right side to err on: being cut off mid-sentence
                     # reads as broken, a barge-in 200ms later reads as normal.
-                    "realtime_input_config": {
-                        "automatic_activity_detection": {
-                            "start_of_speech_sensitivity": "START_SENSITIVITY_LOW",
-                            "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 500,
-                        },
-                        "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
-                        "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
-                    },
+                    "realtime_input_config": self._build_realtime_input_config(),
                 }
             }
 
@@ -1040,11 +1060,13 @@ class GeminiPipeline:
         )
 
     async def _audio_playout_loop(self):
-        """Send Gemini audio to Twilio paced to playback duration.
+        """Send Gemini audio to the configured transport.
 
         Gemini server content may arrive faster than realtime. Twilio then buffers
         media events, while the backend can mistakenly think Kevin is done talking.
-        Pacing keeps backend speaking state aligned with what the caller hears.
+        Tenant calls pace locally to keep backend speaking state aligned with what
+        the caller hears. Dedicated transports may instead rely on their own
+        ordered playback buffer and marks to absorb provider chunk jitter.
         """
         try:
             while self._connected:
@@ -1060,6 +1082,11 @@ class GeminiPipeline:
                 )
                 sent = False
                 try:
+                    if (
+                        self.AUDIO_START_BUFFER_SECONDS > 0
+                        and response_turn > self._last_response_first_media_sent_turn
+                    ):
+                        await asyncio.sleep(self.AUDIO_START_BUFFER_SECONDS)
                     async with self._audio_output_lock:
                         if (
                             self._interrupt_speaking
@@ -1107,7 +1134,7 @@ class GeminiPipeline:
                                         exception_type=type(error).__name__,
                                     )
                         sent = True
-                    if duration_seconds > 0:
+                    if self.PACE_AUDIO_OUTPUT and duration_seconds > 0:
                         await asyncio.sleep(duration_seconds * 0.9)
                 finally:
                     self._audio_queue.task_done()
@@ -1238,10 +1265,19 @@ class GeminiPipeline:
 
     async def _flush_caller_transcript(self):
         """Flush buffered caller transcript fragments as one message."""
+        fragment_count = len(self._caller_transcript_buf)
         full_text = "".join(self._caller_transcript_buf)
         self._caller_transcript_buf.clear()
         if not full_text.strip():
             return
+        self._caller_turn_number += 1
+        self._log_voice_timing(
+            "caller_turn_complete",
+            turn=self._caller_turn_number,
+            fragments=fragment_count,
+            chars=len(full_text),
+            words=len(full_text.split()),
+        )
         self._transcript_lines.append(f"Caller: {full_text}")
         await self.on_transcript("Caller", full_text)
         self._last_caller_transcript_flushed_at = time.time()
@@ -1609,12 +1645,9 @@ class GeminiPipeline:
             return
         self._assistant_instruction_pending = True
         try:
-            await self._ws.send(json.dumps({
-                "client_content": {
-                    "turns": [{"role": "user", "parts": [{"text": text}]}],
-                    "turn_complete": True,
-                }
-            }))
+            await self._ws.send(
+                json.dumps(self._build_text_instruction_payload(text))
+            )
         except Exception:
             self._assistant_instruction_pending = False
             raise

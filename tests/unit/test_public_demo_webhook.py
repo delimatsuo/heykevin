@@ -203,6 +203,21 @@ async def test_admitted_call_connects_directly_to_native_demo_voice_and_never_em
     assert rate_ttls == [3600, 86_400]
 
 
+def test_stream_twiml_never_double_slashes_a_trailing_slash_base_url(monkeypatch):
+    """A trailing-slash CLOUD_RUN_URL must not misroute the demo call.
+
+    FastAPI registers the route as exactly `/public-demo-stream`; a stray
+    double slash produced from `f"{ws_url}/public-demo-stream"` would not
+    match it, breaking every admitted call before Gemini starts.
+    """
+    monkeypatch.setattr(public_demo.settings, "cloud_run_url", "https://demo.example.test/")
+
+    body = public_demo._public_demo_stream_twiml("signed-demo-token")
+
+    assert 'url="wss://demo.example.test/public-demo-stream"' in body
+    assert "//public-demo-stream" not in body
+
+
 @pytest.mark.asyncio
 async def test_repeat_call_gets_hmac_derived_returning_marker_without_raw_phone(
     monkeypatch,

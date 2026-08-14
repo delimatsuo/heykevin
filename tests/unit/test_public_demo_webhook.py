@@ -25,7 +25,11 @@ os.environ.setdefault("USER_PHONE", "+15555550123")
 from app import config as app_config
 from app.db.contractors import PROTECTED_FIELDS
 from app.services.gemini_pipeline import GeminiPipeline
-from app.services.public_demo import build_public_demo_profile, build_public_demo_system_prompt
+from app.services.public_demo import (
+    PUBLIC_DEMO_DISCLOSURE,
+    build_public_demo_profile,
+    build_public_demo_system_prompt,
+)
 from app.services.public_demo_pipeline import (
     PUBLIC_DEMO_CALM_MALE_VOICE,
     PUBLIC_DEMO_GEMINI_MODEL,
@@ -228,6 +232,29 @@ async def test_repeat_call_gets_hmac_derived_returning_marker_without_raw_phone(
     assert "12025550147" not in body
 
 
+def test_demo_pipeline_speaks_the_documented_disclosure_before_the_offer_to_help(
+    monkeypatch,
+):
+    """The greeting is the only place the promised caller disclosure is spoken
+
+    (the TwiML deliberately has no <Say>; see
+    test_admitted_call_connects_directly_to_native_demo_voice_and_never_embeds_caller_phone).
+    docs/public-call-demo.md promises "Twilio speaks this disclosure before the AI
+    stream connects" -- in this design that means Kevin's own first turn must
+    speak it, or no caller ever hears it.
+    """
+
+    def fake_base_init(self, **_kwargs):
+        self._voice = "Puck"
+
+    monkeypatch.setattr(PublicDemoGeminiPipeline.__mro__[1], "__init__", fake_base_init)
+    pipeline = PublicDemoGeminiPipeline()
+
+    greeting = pipeline._build_greeting_text()
+
+    assert PUBLIC_DEMO_DISCLOSURE in greeting
+
+
 def test_demo_pipeline_uses_calm_male_voice_and_conversational_greeting(monkeypatch):
     def fake_base_init(self, **_kwargs):
         self._voice = "Puck"
@@ -242,7 +269,6 @@ def test_demo_pipeline_uses_calm_male_voice_and_conversational_greeting(monkeypa
     assert pipeline._model == PUBLIC_DEMO_GEMINI_MODEL
     assert pipeline._voice == "Charon"
     assert "AI receptionist" in greeting
-    assert "fictional" not in greeting.lower()
     assert "services" in greeting
     assert "booking a visit" in greeting
 
@@ -256,6 +282,7 @@ def test_demo_pipeline_recognizes_a_returning_caller_without_identity(monkeypatc
 
     greeting = pipeline._build_greeting_text()
 
+    assert PUBLIC_DEMO_DISCLOSURE in greeting
     assert "calling back" in greeting
     assert "this time" in greeting
     assert "AI receptionist" in greeting

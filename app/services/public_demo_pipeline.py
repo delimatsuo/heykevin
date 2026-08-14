@@ -12,6 +12,7 @@ import json
 
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.public_demo import (
+    PUBLIC_DEMO_DISCLOSURE,
     build_public_demo_profile,
     build_public_demo_system_prompt,
     execute_public_demo_tool,
@@ -135,13 +136,15 @@ class PublicDemoGeminiPipeline(GeminiPipeline):
     def _build_greeting_text(self) -> str:
         if self._returning_caller:
             return (
-                "Thanks for calling back to Hey Kevin's Boston Plumbing demo. "
-                "I'm Kevin, the AI receptionist. What can I help with this time?"
+                f"{PUBLIC_DEMO_DISCLOSURE} Thanks for calling back to Hey Kevin's Boston "
+                "Plumbing demo. I'm Kevin, the AI receptionist. What can I help with "
+                "this time?"
             )
         return (
-            "Thanks for calling Hey Kevin's Boston Plumbing demo. I'm Kevin, the AI "
-            "receptionist. You can ask about services, the areas we cover, example "
-            "pricing, or try booking a visit. What can I help with today?"
+            f"{PUBLIC_DEMO_DISCLOSURE} Thanks for calling Hey Kevin's Boston Plumbing "
+            "demo. I'm Kevin, the AI receptionist. You can ask about services, the "
+            "areas we cover, example pricing, or try booking a visit. What can I help "
+            "with today?"
         )
 
     def _build_gemini_tools(self) -> list:

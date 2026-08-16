@@ -2,9 +2,13 @@ import SwiftUI
 
 struct CallHistoryView: View {
     @EnvironmentObject var appState: AppState
-    @State private var calls: [CallRecord] = []
+    @State private var calls: [CallRecord]
     @State private var isLoading = false
     @State private var errorMessage = ""
+
+    init() {
+        _calls = State(initialValue: AppStoreScreenshotFixtures.seededCalls)
+    }
 
     var body: some View {
         NavigationStack {
@@ -26,6 +30,7 @@ struct CallHistoryView: View {
                         }
                     }
                     .onChange(of: appState.ringThroughContacts) { _, newValue in
+                        guard !AppStoreScreenshotFixtures.isEnabled else { return }
                         Task {
                             guard !appState.contractorId.isEmpty else { return }
                             _ = try? await APIClient.shared.patchContractor(
@@ -81,12 +86,19 @@ struct CallHistoryView: View {
                     }
                 }
             }
-            .refreshable { await loadCalls() }
-            .task { await loadCalls() }
+            .refreshable {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                await loadCalls()
+            }
+            .task {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                await loadCalls()
+            }
         }
     }
 
     private func loadCalls() async {
+        guard !AppStoreScreenshotFixtures.isEnabled else { return }
         isLoading = true
         errorMessage = ""
         do {
@@ -156,6 +168,26 @@ struct CallRow: View {
 
     static func timeLabel(for date: Date) -> String {
         let calendar = Calendar.current
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isEnabled {
+            let now = AppStoreScreenshotFixtures.now
+            if calendar.isDate(date, inSameDayAs: now) {
+                let minutes = Int(now.timeIntervalSince(date) / 60)
+                if minutes < 1 { return String(localized: "now") }
+                if minutes < 60 { return String(localized: "\(minutes)m ago") }
+                return date.formatted(date: .omitted, time: .shortened)
+            } else if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+                      calendar.isDate(date, inSameDayAs: yesterday) {
+                return String(localized: "Yest.")
+            } else {
+                let weekday = date.formatted(.dateTime.weekday(.abbreviated))
+                if let days = calendar.dateComponents([.day], from: date, to: now).day, days < 7 {
+                    return weekday
+                }
+                return date.formatted(.dateTime.month(.abbreviated).day())
+            }
+        }
+        #endif
         if calendar.isDateInToday(date) {
             let minutes = Int(Date().timeIntervalSince(date) / 60)
             if minutes < 1 { return String(localized: "now") }
@@ -244,7 +276,9 @@ struct CallDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             appState.markCallAsRead(call.id)
-            Task { await APIClient.shared.markCallsRead([call.id]) }
+            if !AppStoreScreenshotFixtures.isEnabled {
+                Task { await APIClient.shared.markCallsRead([call.id]) }
+            }
         }
     }
 

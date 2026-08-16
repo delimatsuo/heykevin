@@ -4,36 +4,48 @@ import UserNotifications
 @main
 struct KevinApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState.shared
+    @StateObject private var appState: AppState
     @Environment(\.scenePhase) var scenePhase
     @State private var lastSyncTime: Date = .distantPast
     @State private var lastDeviceRegistrationTime: Date = .distantPast
     @State private var isFirstLaunch = true
     @State private var listenerStarted = false
 
+    init() {
+        let state = AppState.shared
+        AppStoreScreenshotFixtures.configure(state)
+        _appState = StateObject(wrappedValue: state)
+    }
+
     var body: some Scene {
         WindowGroup {
-            Group {
-                if appState.isOnboarded {
-                    ContentView()
-                        .environmentObject(appState)
-                } else {
-                    OnboardingView()
-                        .environmentObject(appState)
+            if AppStoreScreenshotFixtures.isEnabled {
+                AppStoreScreenshotRoot()
+                    .environmentObject(appState)
+            } else {
+                Group {
+                    if appState.isOnboarded {
+                        ContentView()
+                            .environmentObject(appState)
+                    } else {
+                        OnboardingView()
+                            .environmentObject(appState)
+                    }
                 }
-            }
-            .appVersionGate()
-            .task {
-                await MainActor.run {
-                    appState.refreshSecureStorageForActiveUse()
+                .appVersionGate()
+                .task {
+                    await MainActor.run {
+                        appState.refreshSecureStorageForActiveUse()
+                    }
+                    // Kick off a version check on cold launch so the gate can decide
+                    // whether to block, nudge, or stay silent.
+                    await AppVersionService.shared.check()
                 }
-                // Kick off a version check on cold launch so the gate can decide
-                // whether to block, nudge, or stay silent.
-                await AppVersionService.shared.check()
             }
         }
         .onChange(of: scenePhase) {
             if scenePhase == .active {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
                 appState.refreshSecureStorageForActiveUse()
 
                 // Start StoreKit transaction listener once

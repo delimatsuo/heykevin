@@ -11,6 +11,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Screenshot fixtures must stay deterministic and network-free. Skipping
+        // notification and PushKit registration also prevents system permission
+        // sheets from obscuring App Store creative.
+        if AppStoreScreenshotFixtures.isEnabled {
+            return true
+        }
+
+        // Request push notification permission
         UNUserNotificationCenter.current().delegate = self
 
         // Deliberately does NOT prompt here. This used to call

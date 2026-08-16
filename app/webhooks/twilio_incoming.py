@@ -55,6 +55,49 @@ def _screening_twiml(call_sid: str, ws_token: str = "") -> str:
     return str(response)
 
 
+def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> str:
+    """TwiML for the ConversationRelay engine (contractor voice_engine=relay).
+
+    Twilio owns STT (Deepgram, `multi` auto language detection), TTS
+    (ElevenLabs) and barge-in; our /relay-stream WebSocket exchanges text
+    only. The deterministic greeting is spoken by Twilio via welcomeGreeting
+    before our server says a word, so time-to-first-audio does not depend on
+    any model. STT/TTS providers are left at Twilio defaults (Deepgram +
+    ElevenLabs) — both required for automatic language detection.
+    """
+    from app.services.quiet_hours import is_business_hours
+    from app.services.entitlements import effective_mode
+    from app.services.relay_pipeline import build_greeting_text
+
+    mode = contractor.get("effective_mode") or effective_mode(contractor)
+    after_hours = mode != "personal" and not is_business_hours(contractor)
+    greeting = build_greeting_text(contractor, after_hours)
+
+    from app.services.voice_pipeline import ELEVENLABS_VOICE_ID
+
+    ws_url = settings.cloud_run_url.replace("https://", "wss://")
+    response = VoiceResponse()
+    connect = Connect()
+    relay = connect.conversation_relay(
+        url=f"{ws_url}/relay-stream/{call_sid}",
+        welcome_greeting=greeting,
+        welcome_greeting_interruptible="any",
+        interruptible="any",
+        # Kevin's established voice (Eric) — without this, ConversationRelay
+        # uses its own ElevenLabs default and Kevin sounds like a stranger.
+        voice=ELEVENLABS_VOICE_ID,
+        # Playback receipts. The exact message shape is undocumented, so the
+        # pipeline logs unknown message types instead of acting on these yet;
+        # once observed on a real call, goodbye teardown can key off them
+        # instead of the fixed grace sleep.
+        events="tokens-played",
+    )
+    relay.language(code="multi")
+    relay.parameter(name="ws_token", value=ws_token)
+    response.append(connect)
+    return str(response)
+
+
 def _safe_incoming_call_push_body(caller_name: str = "", caller_phone: str = "") -> str:
     """Return lock-screen-safe incoming screening copy without caller identity."""
     return "Kevin is screening a call. Open Kevin for details."
@@ -175,6 +218,28 @@ async def _ring_expired_contractor(
         logger.error(f"_ring_expired_contractor failed: {e}", exc_info=True)
 
 
+async def _record_forwarding_evidence(contractor_id: str, seen_at: float):
+    """Stamp forwarding_last_seen_at after a carrier-confirmed forwarded call.
+
+    Best-effort and fire-and-forget: this is observability, and it must never
+    delay or fail the call it was observed on. Throttled to hourly so a busy
+    account does not write on every inbound call.
+    """
+    try:
+        from app.db.contractors import get_contractor, update_contractor
+
+        contractor = await get_contractor(contractor_id)
+        if not contractor:
+            return
+        previous = contractor.get("forwarding_last_seen_at") or 0
+        if isinstance(previous, (int, float)) and seen_at - previous < 3600:
+            return
+        await update_contractor(contractor_id, {"forwarding_last_seen_at": seen_at})
+        logger.info(f"Forwarding confirmed live via ForwardedFrom: {contractor_id}")
+    except Exception as e:
+        logger.warning(f"Could not record forwarding evidence: {type(e).__name__}")
+
+
 async def _handle_deleted_app(
     contractor_id: str,
     caller_phone: str,
@@ -186,11 +251,21 @@ async def _handle_deleted_app(
         from app.db.contractors import update_contractor, get_contractor
         import time
 
-        # Set deleted_app_detected_at if not already set
+        # Deliberately does NOT stamp deleted_app_detected_at. This path runs on
+        # *any* VoIP push failure — an APNs outage, a network blip, a briefly
+        # invalid token — none of which mean the app was uninstalled. That was
+        # harmless while nothing consumed the field, but the 14-day cleanup is
+        # live now, so a false positive here starts a countdown to releasing a
+        # working user's number.
+        #
+        # APNs 410 is the authoritative signal and is handled in
+        # app/services/push_notification.py. This handler just serves voicemail.
         contractor = await get_contractor(contractor_id)
-        if contractor and not contractor.get("deleted_app_detected_at"):
-            await update_contractor(contractor_id, {"deleted_app_detected_at": time.time()})
-            logger.info(f"Deleted app detected: {contractor_id}")
+        if contractor:
+            logger.info(
+                "VoIP push failed for %s — serving voicemail (not treating as deletion)",
+                contractor_id,
+            )
 
     except Exception as e:
         logger.error(f"_handle_deleted_app failed: {e}", exc_info=True)
@@ -225,6 +300,17 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             owner_phone = contractor.get("owner_phone", "")
             business_name = contractor.get("business_name", f"{owner_name}'s office")
             logger.info(f"Contractor found: {business_name} ({contractor_id})")
+
+            # ForwardedFrom is the only positive proof that a user's call
+            # forwarding is actually live — iOS exposes no forwarding state and
+            # the onboarding step cannot verify itself. Carrier-dependent, so
+            # absence means nothing; presence is conclusive.
+            from app.utils.phone import forwarding_confirms_owner
+
+            if forwarding_confirms_owner(form_data.get("ForwardedFrom", ""), owner_phone):
+                asyncio.create_task(
+                    _record_forwarding_evidence(contractor_id, time.time())
+                )
         else:
             contractor_id = ""
             owner_name = settings.user_name
@@ -233,17 +319,22 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             contractor = {}
             logger.info("No contractor found — using default settings")
 
-        # Subscription check — must happen BEFORE routing decisions
-        subscription_status = contractor.get("subscription_status", "trial") if contractor else "trial"
-        subscription_expires = contractor.get("subscription_expires", 0) if contractor else 0
-        now = time.time()
+        # Subscription check — must happen BEFORE routing decisions.
+        # evaluate_subscription_access compares the expiry to the clock for trials
+        # (which we time ourselves) but deliberately fails open on stale `active`
+        # expiries, which may just be a missed Apple renewal notification.
+        from app.services.subscription import evaluate_subscription_access
 
-        # Treat as active if: trial, active, or expires timestamp is in the future (fail-open)
-        is_subscription_active = (
-            subscription_status in ("trial", "active")
-            or (subscription_status == "expired" and subscription_expires > now)
-            or not contractor  # No contractor → use legacy flow
-        )
+        now = time.time()
+        is_subscription_active, access_reason = evaluate_subscription_access(contractor, now)
+
+        if access_reason == "active_stale_expiry_needs_reconciliation":
+            logger.warning(
+                "Subscription expiry is stale for %s — allowing call, needs App Store "
+                "reconciliation (status=active, expired %.0fd ago)",
+                contractor_id,
+                (now - (contractor.get("subscription_expires") or now)) / 86400,
+            )
 
         if not is_subscription_active and contractor:
             # Expired subscription — special handling
@@ -274,6 +365,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                     call_sid=call_sid,
                     conference_name=conference_name,
                     access_token=access_token,
+                    contractor_id=contractor_id,
                 )
 
             if push_succeeded:
@@ -433,7 +525,12 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
 
         elif route == Route.AI_SCREENING:
-            # Connect caller directly to Kevin via Media Streams + Gemini
+            # Engine per contractor: "relay" hands the audio layer to Twilio
+            # ConversationRelay; anything else keeps the Media Streams bridge.
+            if contractor.get("voice_engine") == "relay":
+                return twiml_response(
+                    _relay_screening_twiml(call_sid, ws_token, contractor)
+                )
             return twiml_response(_screening_twiml(call_sid, ws_token=ws_token))
 
         elif route == Route.SPAM_BLOCK:
@@ -475,6 +572,7 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
             call_sid=call_sid,
             conference_name=conference_name,
             access_token=access_token,
+            contractor_id=contractor_id,
         )
 
         logger.info(f"VoIP push sent for known contact: {caller_name[:1] if caller_name else ''}*** ({redact_phone(caller_phone)})")
@@ -631,6 +729,7 @@ async def _post_routing_tasks(
                             call_sid=call_sid,
                             caller_phone=caller_phone,
                             caller_name=caller_name,
+                            contractor_id=contractor_id,
                         )
                     else:
                         logger.warning(f"No push token for contractor {contractor_id} — notification not sent")
@@ -909,6 +1008,101 @@ async def handle_dial_in(request: Request, _=Depends(verify_twilio_signature)):
         response = VoiceResponse()
         response.say("Something went wrong. Please try again.")
         return twiml_response(str(response))
+
+
+async def _lookup_contractor_for_message(to_number: str):
+    """Resolve the contractor who owns the number an inbound message arrived on."""
+    from app.db.contractors import get_contractor_by_twilio_number
+
+    return await get_contractor_by_twilio_number(to_number)
+
+
+async def _record_inbound_message(contractor_id: str, payload: dict) -> bool:
+    """Persist an inbound message under the owning contractor."""
+    from app.db.firestore_client import get_firestore_client
+
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: db.collection("contractors")
+        .document(contractor_id)
+        .collection("inbound_messages")
+        .document(payload["message_sid"])
+        .set(payload),
+    )
+    return True
+
+
+@router.post("/webhooks/twilio/mms-incoming")
+async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signature)):
+    """Receive SMS/MMS sent to a Kevin number.
+
+    Every provisioned number points its `sms_url` here (see
+    `app/db/contractors.py`), but this route did not exist — so every text a
+    caller sent to a Kevin number returned 404 and Twilio recorded an 11200
+    HTTP retrieval failure. The messages were lost silently.
+
+    Deliberately does not auto-reply. Responding to inbound traffic carries A2P
+    and consent implications and is a product decision; this handler's job is to
+    stop dropping messages.
+
+    Response semantics matter here (review finding on PR #143): an unrecognized
+    To number returns 200 — redelivery cannot make the number recognized. But a
+    lookup or persistence failure returns 500 so Twilio redelivers the webhook
+    and the message gets another chance to be stored. Redelivery is idempotent
+    because the record is keyed by MessageSid.
+    """
+    form_data = await request.form()
+    to_number = str(form_data.get("To", "") or "")
+    message_sid = str(form_data.get("MessageSid", "") or "")
+
+    try:
+        num_media = int(str(form_data.get("NumMedia", "0") or "0"))
+    except (TypeError, ValueError):
+        num_media = 0
+
+    # MMS attachments arrive as MediaUrl{N}/MediaContentType{N} form fields.
+    # Without capturing them, an image-only message would be acknowledged and
+    # its content silently discarded.
+    media = []
+    for i in range(min(num_media, 10)):
+        url = str(form_data.get(f"MediaUrl{i}", "") or "")
+        if url:
+            media.append({
+                "url": url,
+                "content_type": str(form_data.get(f"MediaContentType{i}", "") or ""),
+            })
+
+    try:
+        contractor = await _lookup_contractor_for_message(to_number)
+        if contractor:
+            await _record_inbound_message(
+                contractor["contractor_id"],
+                {
+                    "message_sid": message_sid,
+                    "from_number": normalize_phone(str(form_data.get("From", "") or ""))
+                    or str(form_data.get("From", "") or ""),
+                    "to_number": to_number,
+                    "body": str(form_data.get("Body", "") or ""),
+                    "num_media": num_media,
+                    "media": media,
+                    "received_at": time.time(),
+                },
+            )
+            logger.info(
+                "Inbound message recorded for %s (media=%d)",
+                contractor["contractor_id"],
+                num_media,
+            )
+        else:
+            logger.warning("Inbound message to an unrecognized number — dropped")
+    except Exception as e:
+        logger.error(f"Failed to record inbound message: {type(e).__name__}")
+        # Non-2xx → Twilio redelivers later; the write is idempotent by SID.
+        return twiml_response("<Response></Response>", status_code=500)
+
+    return twiml_response("<Response></Response>")
 
 
 @router.post("/webhooks/twilio/fallback")

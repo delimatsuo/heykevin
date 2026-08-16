@@ -66,10 +66,16 @@ _LIVE_ROUTE_PATHS = (
     Path("app/experiments/voice_bakeoff_app.py"),
 )
 _EXPECTED_LIVE_HASHES = {
+    # Re-pinned 2026-08-07 alongside the /relay-stream router registration
+    # (live ConversationRelay engine) — keep in sync with the pin in
+    # test_voice_bakeoff_turn_composition.py and update only with a reviewed
+    # main.py change.
     Path("app/main.py"):
-        "07a6888957d5ecf662eb6d52e0cbef28cc31418e633d7e2b55b4adaab44fe069",
+        "057a810dd5eb2e08651fd965f9264c48681e5bb17ce87bad4fafb4260c6e0334",
+    # Re-pinned 2026-08-10: media_stream.py gained LiveTranscriptPusher (the
+    # trailing-flush fix for the live-view transcript drop seen on CAa5e0de).
     Path("app/webhooks/media_stream.py"):
-        "d7efcef83c3f7e02bb10ae88bc376174e308c42d0c26c5e4ef7b809ea67c0ddb",
+        "50d9870c1eae020a832a2c350e3efa948cb6700297589fa01d54c7a30740a970",
     Path("app/experiments/voice_bakeoff_app.py"):
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
 }

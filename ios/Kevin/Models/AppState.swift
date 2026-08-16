@@ -229,9 +229,6 @@ class AppState: ObservableObject {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.kevinLanguage, forKey: "kevinLanguage") } }
     }
 
-    // Mode change flag (skip restore, go straight to mode select)
-    @Published var pendingModeChange: Bool = false
-
     // Unread calls — tracked locally by call ID
     @Published var readCallIds: Set<String> = {
         let arr = UserDefaults.standard.stringArray(forKey: "readCallIds") ?? []

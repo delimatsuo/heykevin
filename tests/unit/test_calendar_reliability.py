@@ -174,7 +174,10 @@ async def test_missing_schedule_falls_back_to_default_utc_business_hours(monkeyp
 
     assert len(calls) == 1  # did NOT fail closed
     assert slots[0]["start_iso"] == "2026-06-02T09:00:00+00:00"
-    assert slots[-1]["end_iso"] == "2026-06-02T17:00:00+00:00"
+    # Business day still runs 9-17 UTC; slots per day are capped so the
+    # window spread fix (MAX_SLOTS_PER_DAY) bounds how many are offered.
+    assert len(slots) == calendar.MAX_SLOTS_PER_DAY
+    assert slots[-1]["end_iso"] == "2026-06-02T12:00:00+00:00"
     assert calls[0][1]["json"]["timeZone"] == "UTC"
 
 
@@ -429,3 +432,37 @@ async def test_token_refresh_failure_logging_uses_status_only(monkeypatch, caplo
     assert "Google token refresh failed" in caplog.text
     assert "status_code=400" in caplog.text
     assert sensitive_payload not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_slots_span_the_whole_window_not_just_the_earliest_days(monkeypatch):
+    """Live call CAb4533d: with an open calendar, the first ~2.5 days of
+    1-hour slots exhaust MAX_RETURNED_SLOTS before later days are reached,
+    so Kevin literally never sees a Tuesday to offer. The cap must spread
+    across the window (bounded per day), not truncate chronologically.
+    """
+    fixed_now = datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc)  # Thursday
+    monkeypatch.setattr(calendar, "_utc_now", lambda: fixed_now)
+    _patch_client(
+        monkeypatch,
+        [_FakeResponse(200, {"calendars": {"primary": {"busy": []}}})],
+    )
+    contractor = {
+        "google_calendar_access_token": "access-token",
+        "timezone": "America/New_York",
+        "business_hours_start": "09:00",
+        "business_hours_end": "17:00",
+    }
+
+    slots = await calendar.get_available_slots(contractor, days_ahead=7)
+
+    assert len(slots) <= calendar.MAX_RETURNED_SLOTS
+    days_offered = {slot["date"] for slot in slots}
+    # Empty calendar, 7-day window starting Friday: every day must appear —
+    # including the following Tuesday and Wednesday.
+    assert len(days_offered) == 7, days_offered
+    assert any("Tue" in day for day in days_offered)
+    per_day = {}
+    for slot in slots:
+        per_day[slot["date"]] = per_day.get(slot["date"], 0) + 1
+    assert max(per_day.values()) <= calendar.MAX_SLOTS_PER_DAY

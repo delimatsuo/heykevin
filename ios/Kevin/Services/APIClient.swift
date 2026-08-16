@@ -30,7 +30,7 @@ enum BootstrapAuthError: Error, LocalizedError {
     }
 }
 
-class APIClient {
+final class APIClient: @unchecked Sendable {
     static let shared = APIClient()
 
     let baseURL: String = {
@@ -421,12 +421,30 @@ class APIClient {
     // MARK: - Contractor Profile
 
     func getContractorProfile(contractorId: String) async -> [String: Any]? {
+        await getContractorProfile(
+            contractorId: contractorId,
+            bearerToken: contractorToken
+        )
+    }
+
+    /// Account-bound profile fetch for billing reconciliation. The caller
+    /// snapshots the auth context once so an account switch during suspension
+    /// cannot authenticate a request for one account with another account's
+    /// token.
+    func getContractorProfile(
+        contractorId: String,
+        bearerToken: String
+    ) async -> [String: Any]? {
+        guard !contractorId.isEmpty, !bearerToken.isEmpty else { return nil }
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)")!
             var request = URLRequest(url: url)
             request.timeoutInterval = 10
-            authorize(&request)
+            request.setValue(
+                "Bearer \(bearerToken)",
+                forHTTPHeaderField: "Authorization"
+            )
 
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
@@ -577,7 +595,18 @@ class APIClient {
 
     // MARK: - Contractor Mode
 
-    func updateContractorMode(contractorId: String, mode: String) async -> Bool {
+    /// Outcome of a mode change, distinguishing "not entitled" from "it broke".
+    ///
+    /// The server is the authority on entitlement (the local subscription tier is
+    /// only a UI cache), so a 403 here is a real answer — the account needs a
+    /// Business subscription — not a failure to retry.
+    enum ModeUpdateResult {
+        case success
+        case entitlementRequired
+        case failed
+    }
+
+    func updateContractorMode(contractorId: String, mode: String) async -> ModeUpdateResult {
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)")!
@@ -589,10 +618,14 @@ class APIClient {
             authorize(&request)
 
             let (_, response) = try await session.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
+            switch (response as? HTTPURLResponse)?.statusCode {
+            case 200: return .success
+            case 403: return .entitlementRequired
+            default: return .failed
+            }
         } catch {
             debugLog("Update mode failed: \(error.localizedDescription)")
-            return false
+            return .failed
         }
     }
 
@@ -700,10 +733,14 @@ class APIClient {
 
     // MARK: - Subscription
 
-    @discardableResult
-    func verifySubscription(transactionId: String) async -> Bool {
-        let contractorId = await MainActor.run { AppState.shared.contractorId }
-        guard !contractorId.isEmpty else { return false }
+    func verifySubscription(
+        transactionId: String,
+        source: SubscriptionVerificationSource,
+        context: SubscriptionVerificationContext
+    ) async -> SubscriptionVerificationOutcome {
+        guard !context.contractorID.isEmpty, !context.bearerToken.isEmpty else {
+            return .rejected(reason: "missing_account_context")
+        }
         do {
             let url = URL(string: "\(baseURL)/api/subscription/verify")!
             var request = URLRequest(url: url)
@@ -712,23 +749,29 @@ class APIClient {
             request.timeoutInterval = 15
             request.httpBody = try JSONSerialization.data(withJSONObject: [
                 "transaction_id": transactionId,
-                "contractor_id": contractorId,
+                "contractor_id": context.contractorID,
+                "source": source.rawValue,
+                "app_build": Bundle.main.object(
+                    forInfoDictionaryKey: "CFBundleVersion"
+                ) as? String ?? "",
             ])
-            authorize(&request)
-            let (data, response) = try await retryRequest(request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                debugLog("Verify subscription returned non-200")
-                return false
+            request.setValue(
+                "Bearer \(context.bearerToken)",
+                forHTTPHeaderField: "Authorization"
+            )
+            // Verification has its own Retry-After contract. Do not route this
+            // request through the generic one-second 5xx retry wrapper.
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .retryable(after: 30)
             }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  json["status"] as? String == "ok" else {
-                debugLog("Verify subscription returned error response")
-                return false
+            if http.statusCode == 401 {
+                await MainActor.run { AppState.shared.needsReauth = true }
             }
-            return true
+            return SubscriptionVerificationResponseParser.parse(data: data, response: http)
         } catch {
             debugLog("Verify subscription failed: \(error.localizedDescription)")
-            return false
+            return .retryable(after: 30)
         }
     }
 

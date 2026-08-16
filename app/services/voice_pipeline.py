@@ -22,7 +22,7 @@ from websockets.exceptions import ConnectionClosed
 
 from app.config import settings
 from app.services.entitlements import effective_mode
-from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services.gated_actions import ActionKey, GateContext, GateReason, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
 from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
@@ -42,6 +42,15 @@ _KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
 # exists to prevent. 8s matches the widest budget already used elsewhere in
 # this module and still bounds how long a caller waits in silence.
 GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS = 8.0
+
+# Gate denials that mean "this owner has not turned on automatic booking"
+# rather than "something went wrong". These become appointment requests the
+# owner confirms; every other denial stays an error.
+_BOOKING_REQUEST_REASONS = frozenset({
+    GateReason.FEATURE_DISABLED,
+    GateReason.COMPLIANCE_NOT_APPROVED,
+    GateReason.OWNER_CONFIRMATION_REQUIRED,
+})
 
 
 def _call_label(call_sid: str) -> str:
@@ -83,7 +92,43 @@ def _log_voice_exception(event: str, error: BaseException, call_sid: str = "") -
 
 
 def _tool_execution_error_response() -> str:
-    return json.dumps({"success": False, "error": "Tool execution failed."})
+    """Tool-failure payload that tells the model how to recover in conversation.
+
+    A bare {"success": false, "error": "..."} leaves the model with nothing to
+    say: it cannot tell whether to retry, apologise, or move on, and the caller
+    hears dead air. That is exactly what happened on call CA54f11e — an expired
+    Jobber refresh token failed `check_customer` in 200ms and the caller sat in
+    silence for 54 seconds until the pipeline gave up.
+
+    The instruction field is the fix. The caller must never wait on a backend
+    integration: Kevin apologises briefly, gathers the same details by voice, and
+    promises a callback, which is what a receptionist would do if their computer
+    was down.
+    """
+    return json.dumps({
+        "success": False,
+        "error": "unavailable",
+        "instruction": (
+            "This system is temporarily unavailable. Do not retry it and do not "
+            "mention the technical problem. Continue the conversation normally: "
+            "briefly apologise for not being able to confirm right now, ask the "
+            "caller for the details you still need (such as their preferred day "
+            "and time), and tell them someone will call back shortly to confirm."
+        ),
+    })
+
+
+def _tool_timeout_response() -> str:
+    """Same recovery contract as above, for a tool that ran too long."""
+    return json.dumps({
+        "success": False,
+        "error": "timed_out",
+        "instruction": (
+            "This request took too long and was cancelled. Do not retry it. "
+            "Continue the conversation normally: take the caller's details by "
+            "voice and tell them someone will call back shortly to confirm."
+        ),
+    })
 
 
 def _log_tool_execution_failure(tool_name: str, call_sid: str, exc: Exception):
@@ -148,12 +193,34 @@ def _phone_last_four(phone: str) -> str:
     return digits[-4:] if len(digits) >= 4 else ""
 
 
+_DIGIT_WORDS = {
+    "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+    "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+}
+
+
+def _spelled_out_digits(digits: str) -> str:
+    """Render digits as space-separated words so TTS reads them one at a time.
+
+    A raw digit string embedded as plain text gets read as a whole number by
+    TTS — ElevenLabs' own guidance is that spelled-out words are the reliable
+    way to force digit-by-digit pronunciation; hyphen-separated digits can
+    still be read as a number by some engines. This is prompt text the model
+    repeats verbatim in a scripted confirmation question, not the stored
+    value — callback_phone_last_four etc. stay plain digits everywhere else
+    (matching, logs, Firestore).
+    """
+    return " ".join(_DIGIT_WORDS.get(ch, ch) for ch in digits)
+
+
 def _callback_number_policy(caller_phone: str = "") -> str:
     """Build caller-ID-aware callback collection rules without exposing full numbers."""
     last_four = _phone_last_four(caller_phone)
+    spoken_last_four = _spelled_out_digits(last_four)
     caller_id_line = (
         f"- Caller ID is available as the default callback number. Use only the caller ID number ending in {last_four}; never say the full caller ID.\n"
-        f"- When callback intent exists, ask exactly: \"Is the number ending in {last_four} the best number for a callback?\""
+        f"- When callback intent exists, ask exactly: \"Is the number ending in {spoken_last_four} the best number for a callback?\" "
+        f"Say each digit as a separate word ({spoken_last_four}) — never as a single number."
         if last_four
         else "- Caller ID is not available to you."
     )
@@ -262,7 +329,8 @@ RECEPTIONIST OPERATING POLICY:
 
 RULES:
 - ONE or two short sentences per response.
-- NEVER repeat what the caller said back to them. For phone numbers, confirm only the last 4 digits (e.g., "Got it, ending in 8-6-6-7?"). Do not read back the full phone number.
+- You know nothing about {owner_name}'s work, services, prices, or schedule, and you must not guess. If the caller asks whether {owner_name} does or offers something ("do you do X?", "can {pronoun} handle Y?"), never answer yes or no — say you can pass the question along, and treat it as part of their message.
+- NEVER repeat what the caller said back to them. For phone numbers, confirm only the last 4 digits, spoken as separate words (e.g., "Got it, ending in eight six six seven?"). Do not read back the full phone number. Do not say the digits as a single number (never "eight thousand six hundred sixty-seven").
 - NEVER ask for information already provided.
 - If the caller gives you their message in one go (name + reason + number), just confirm and end. Do NOT prompt them for things they already gave you.
 - Sound natural, warm, like a real assistant.
@@ -383,7 +451,7 @@ RECEPTIONIST OPERATING POLICY — NORMAL SCENARIOS:
 RULES:
 - Be warm, friendly, and professional. You represent {business_name}.
 - Keep spoken turns brief. Use one or two short sentences per response, never more, and ask one short question at a time.
-- NEVER repeat or paraphrase what the caller just said back to them. For phone numbers, confirm only the last 4 digits (e.g., "Got it, ending in 8-6-6-7?"). Do not read back the full phone number.
+- NEVER repeat or paraphrase what the caller just said back to them. For phone numbers, confirm only the last 4 digits, spoken as separate words (e.g., "Got it, ending in eight six six seven?"). Do not read back the full phone number. Do not say the digits as a single number (never "eight thousand six hundred sixty-seven").
 - NEVER ask for information the caller already provided.
 - Do not say {owner_name} is unavailable unless the system says so, the owner declines, or you are explicitly taking a routine message.
 - NEVER make small talk or ask casual questions.
@@ -405,6 +473,23 @@ RULES:
             f"\n- Do NOT say \"let me see if {pronoun}'s available\" — instead say \"I can take a message and make sure {owner_name} gets it first thing.\""
             f"\n- Still collect their name and reason for calling. Only confirm callback details if the caller asks for or agrees to callback, scheduling, or follow-up."
         )
+
+    base_prompt += (
+        "\n\nSCHEDULING: Only offer specific times that check_availability returned to you. "
+        "Never invent a time or guess when the owner is free. You cannot confirm an "
+        "appointment yourself: say one is booked only if book_appointment returns a "
+        "confirmed booking. Otherwise treat the time as a request — tell the caller you "
+        "will pass it to the owner, who will confirm it with them directly. Never say a "
+        "slot is reserved, held, or all set before that confirmation."
+    )
+
+    base_prompt += (
+        "\n\nENDING THE CALL: Never stop on a bare statement of fact. When the caller seems "
+        "done, ask if there is anything else and wait for their answer. Only once they say "
+        "no do you close: thank them for calling and say goodbye, in one short sentence. "
+        "Never put a question and your goodbye in the same reply — the call hangs up after "
+        "you say goodbye, so anything you ask alongside it will never be answered."
+    )
 
     # Prompt injection fence: instruct the model to treat caller speech as untrusted
     base_prompt += (
@@ -1093,6 +1178,55 @@ class VoicePipeline:
         )
         return decision
 
+    async def _record_appointment_request(self, tool_input: dict) -> str:
+        """Pass a requested slot to the owner instead of booking it.
+
+        Automated calendar writes stay off unless the owner turns them on, so
+        a denied booking is the ordinary path here, not a failure. Answering
+        with a bare error made the model treat it as a transient fault: on
+        call CA9c4f4d it retried four times and then improvised a reassurance
+        the caller heard as a held slot. The request is written to the call
+        record so the post-call SMS can lead with the time the caller asked
+        for.
+        """
+        request = {
+            "title": tool_input.get("title", ""),
+            "start_time": tool_input.get("start_time", ""),
+            "end_time": tool_input.get("end_time", ""),
+            "description": tool_input.get("description", ""),
+            "status": "pending_owner_confirmation",
+        }
+        call_sid = getattr(self, "_call_sid", "")
+        if call_sid:
+            try:
+                from app.db.calls import save_call
+
+                saved = await save_call(call_sid, {"appointment_request": request})
+            except Exception as error:
+                saved = False
+                _log_tool_execution_failure("record_appointment_request", call_sid, error)
+            if not saved:
+                # Not fatal: the owner still gets the call SMS and transcript,
+                # so only the machine-readable time is lost.
+                _log_voice_event(
+                    "appointment_request_persist_failed",
+                    call_sid,
+                    level=logging.WARNING,
+                )
+        return json.dumps({
+            "status": "request_recorded",
+            "booked": False,
+            "requested_start": request["start_time"],
+            "message": (
+                "Not booked. This account does not book automatically, so the time was "
+                "passed to the owner as a request. Tell the caller you have sent the "
+                "request and the owner will confirm the appointment with them directly, "
+                "then ask if there is anything else and close warmly — do not end on the "
+                "bare statement. Do not say it is booked, reserved, or held. Do not call "
+                "book_appointment again on this call."
+            ),
+        })
+
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool call (Jobber or Google Calendar) and return the result as a string."""
 
@@ -1123,6 +1257,8 @@ class VoicePipeline:
                 elif tool_name == "book_appointment":
                     decision = self._check_tool_write_gate(ActionKey.GOOGLE_CREATE_EVENT)
                     if not decision.allowed:
+                        if decision.reason in _BOOKING_REQUEST_REASONS:
+                            return await self._record_appointment_request(tool_input)
                         return json.dumps({"success": False, "error": decision.message})
 
                     event_id = await asyncio.wait_for(
@@ -1132,6 +1268,7 @@ class VoicePipeline:
                             start_time=tool_input.get("start_time", ""),
                             end_time=tool_input.get("end_time", ""),
                             description=tool_input.get("description", ""),
+                            call_sid=getattr(self, "_call_sid", ""),
                         ),
                         timeout=GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
                     )
@@ -1185,7 +1322,7 @@ class VoicePipeline:
                 level=logging.WARNING,
                 tool=_tool_label(tool_name),
             )
-            return json.dumps({"error": "Request timed out"})
+            return _tool_timeout_response()
         except Exception as e:
             _log_tool_execution_failure(tool_name, getattr(self, "_call_sid", ""), e)
             return _tool_execution_error_response()

@@ -176,6 +176,30 @@ def test_business_prompt_confirms_only_phone_last_four():
     assert "6-5-0, 6-9-1, 8-6-6-7" not in prompt
 
 
+def test_callback_confirmation_spells_out_digits_as_words():
+    """Live call regression (2026-08-07): Kevin read caller ID ending in
+    8667 as "eight thousand six hundred sixty-seven" instead of "eight six
+    six seven" — a plain digit string in prompt text is read as one number
+    by TTS. ElevenLabs' own guidance: spell digits as words for reliable
+    digit-by-digit pronunciation (hyphens alone aren't reliable either).
+    """
+    config = _plumbing_config()
+    prompt = build_system_prompt(config, caller_phone="+16505551234")
+
+    # "one two three four" — the RULES example always says "eight six six
+    # seven"; only the CALLBACK NUMBER POLICY line reflects the real caller.
+    assert "Is the number ending in one two three four" in prompt
+    prompt = build_system_prompt(config, caller_phone="+16505558667")
+
+    assert "Is the number ending in eight six six seven the best number" in prompt
+    assert "ending in 8667" in prompt  # unspoken form still guards the raw digits
+    assert "8-6-6-7" not in prompt
+    # "eight thousand..." legitimately appears once, as the explicit
+    # never-say-it-this-way counter-example in the RULES section.
+    assert prompt.count("eight thousand") == 1
+    assert "never" in prompt.split("eight thousand")[0][-40:].lower()
+
+
 def test_personal_prompt_confirms_only_phone_last_four():
     prompt = build_system_prompt(
         {
@@ -283,8 +307,11 @@ def test_after_hours_prompt_defers_callback_number_until_callback_intent():
 def test_prompt_uses_caller_id_last_four_without_exposing_full_number():
     prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
 
+    # Confirmation is spoken as words (see test_callback_confirmation_spells_
+    # out_digits_as_words) — this test guards the separate concern that the
+    # full number is never embedded.
     assert "caller ID number ending in 8667" in prompt
-    assert "Is the number ending in 8667 the best number for a callback?" in prompt
+    assert "Is the number ending in eight six six seven the best number for a callback?" in prompt
     assert "+16504228667" not in prompt
     assert "6504228667" not in prompt
 
@@ -796,9 +823,19 @@ async def test_gemini_setup_configures_fast_endpointing(monkeypatch):
     activity_detection = realtime_config["automatic_activity_detection"]
     assert realtime_config["turn_coverage"] == "TURN_INCLUDES_ONLY_ACTIVITY"
     assert realtime_config["activity_handling"] == "START_OF_ACTIVITY_INTERRUPTS"
-    assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_HIGH"
+
+    # Fast endpointing (PR #73): Kevin must still decide quickly that the caller
+    # has finished and start replying. These are the latency-critical knobs.
     assert activity_detection["end_of_speech_sensitivity"] == "END_SENSITIVITY_HIGH"
     assert activity_detection["silence_duration_ms"] <= 500
+
+    # Interruption sensitivity is deliberately NOT aggressive. HIGH with 100ms of
+    # padding let phone-line noise cut Kevin off mid-word (call CA54f11e, three
+    # barge-ins in 104 seconds). This side trades interrupt latency for not
+    # truncating Kevin, and must not be raised back without re-testing on a real
+    # call.
+    assert activity_detection["start_of_speech_sensitivity"] == "START_SENSITIVITY_LOW"
+    assert activity_detection["prefix_padding_ms"] >= 300
     await pipeline.stop()
 
 
@@ -846,7 +883,11 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     generation_config = sent_messages[0]["setup"]["generation_config"]
     assert generation_config["thinking_config"] == {"thinking_budget": 0}
     assert generation_config["temperature"] <= 0.5
-    assert generation_config["max_output_tokens"] == 192
+    # 512 is a runaway guard (~20s at the measured 26 tok/s), not a length
+    # control — response length is enforced by the system prompt. Values low
+    # enough to act as a length control (192 ≈ 7.4s) chop replies mid-word;
+    # see MAX_RESPONSE_OUTPUT_TOKENS in gemini_pipeline.py before changing.
+    assert generation_config["max_output_tokens"] == 512
     await pipeline.stop()
 
 
@@ -921,6 +962,54 @@ async def test_gemini_audio_playout_is_paced_and_tracks_speaking(monkeypatch):
     assert pipeline._last_kevin_speech_time > 0
     assert pipeline._queued_audio_bytes == 0
 
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_audio_playout_can_buffer_response_start(monkeypatch):
+    sent_chunks = []
+    prebuffer_started = asyncio.Event()
+    release_prebuffer = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(delay: float):
+        if delay == 0.8:
+            prebuffer_started.set()
+            await release_prebuffer.wait()
+            return
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.services.gemini_pipeline.asyncio.sleep", controlled_sleep)
+
+    async def record_audio(chunk: bytes):
+        sent_chunks.append(chunk)
+
+    async def noop_transcript(_speaker: str, _text: str):
+        return None
+
+    pipeline = GeminiPipeline(
+        on_audio_out=record_audio,
+        on_transcript=noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline.PACE_AUDIO_OUTPUT = False
+    pipeline.AUDIO_START_BUFFER_SECONDS = 0.8
+    pipeline._response_turn_number = 1
+    pipeline._response_first_audio_at = time.monotonic()
+    pipeline._audio_playout_task = asyncio.create_task(pipeline._audio_playout_loop())
+
+    half_second_pcm_24k = b"\0\0" * 12_000
+    await pipeline._enqueue_model_audio(half_second_pcm_24k)
+    await asyncio.wait_for(prebuffer_started.wait(), timeout=1)
+
+    assert sent_chunks == []
+
+    release_prebuffer.set()
+    await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1)
+
+    assert sent_chunks
     await pipeline.stop()
 
 
@@ -1499,6 +1588,7 @@ async def test_gemini_transcript_flush_records_response_timing():
     await pipeline._flush_caller_transcript()
 
     assert pipeline._last_caller_transcript_flushed_at > 0
+    assert pipeline._caller_turn_number == 1
 
     pipeline._kevin_transcript_buf = ["Yes, we do."]
 
@@ -1772,7 +1862,15 @@ async def test_gemini_barge_in_resets_caller_silence_state():
 
 
 @pytest.mark.asyncio
-async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatch):
+async def test_gemini_start_enables_silence_watchdog(monkeypatch):
+    """The stall watchdog must run when background tasks are enabled.
+
+    This deliberately reverses 598b8fa, which disabled the watchdog to avoid
+    racing speech Gemini had heard but not yet transcribed. The observed cost
+    of no watchdog was a 30-second dead-air stall (call CAfed098, 2026-08-06)
+    ending in a hangup; the race is now addressed by counting silence from the
+    last activity on either side (see _caller_silence_elapsed_seconds).
+    """
     websocket = _FakeGeminiWebSocket()
 
     async def fake_connect(*_args, **_kwargs):
@@ -1796,7 +1894,8 @@ async def test_gemini_start_does_not_enable_proactive_silence_prompts(monkeypatc
         started = await pipeline.start(send_greeting=False, start_background_tasks=True)
 
         assert started
-        assert pipeline._silence_check_task is None
+        assert pipeline._silence_check_task is not None
+        assert not pipeline._silence_check_task.done()
     finally:
         await pipeline.stop()
 
@@ -1829,6 +1928,7 @@ async def test_gemini_urgency_log_does_not_include_transcript_text(caplog):
     await asyncio.sleep(0)
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "voice_timing event=caller_turn_complete" in messages
     assert "voice_timing event=urgency_detected" in messages
     assert "keyword=fire" not in messages
     assert "100 Market Street" not in messages

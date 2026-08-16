@@ -16,7 +16,6 @@ struct OnboardingView: View {
     @State private var phoneNumber = ""
     @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var showPaywall = false
-    @State private var didPrepareInitialStep = false
 
     private let businessProductID = "com.kevin.callscreen.business.monthly"
 
@@ -57,9 +56,6 @@ struct OnboardingView: View {
                 }
                 .padding()
             }
-        }
-        .task {
-            await prepareInitialStep()
         }
         .sheet(isPresented: $showPaywall) {
             PaywallView(
@@ -243,6 +239,28 @@ struct OnboardingView: View {
                 .font(.title3)
                 .multilineTextAlignment(.center)
                 .padding(.vertical)
+
+            // Carrier-required SMS consent disclosure. US A2P 10DLC review needs a
+            // verifiable opt-in: the recipient must be shown who is texting them,
+            // what for, how often, that rates apply, and how to stop — at the point
+            // they hand over the number. Its absence is why the first campaign
+            // registration was rejected (error 30909, unverifiable Call to Action).
+            // Wording here must stay in sync with the registered campaign's
+            // message flow and with heykevin.one/terms.
+            VStack(spacing: 8) {
+                Text(String(localized: "By continuing you agree to receive service text messages from Hey Kevin at this number — call summaries, voicemail alerts, and account notices. Message frequency varies with your call volume. Message and data rates may apply. Reply STOP to cancel, HELP for help."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                HStack(spacing: 12) {
+                    Link(String(localized: "Terms"), destination: URL(string: "https://heykevin.one/terms")!)
+                        .font(.caption)
+                    Link(String(localized: "Privacy Policy"), destination: URL(string: "https://heykevin.one/privacy")!)
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal)
 
             Spacer()
 
@@ -644,6 +662,28 @@ struct OnboardingView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
+            // Carrier choice comes FIRST: the dial buttons below derive their
+            // codes from it. When this sat below the buttons, a Verizon user
+            // following the screen top-to-bottom dialed GSM codes their network
+            // silently ignores before ever reaching the picker (review finding
+            // on PR #143).
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "Your carrier"))
+                    .font(.subheadline.weight(.medium))
+                Picker(String(localized: "Your carrier"), selection: $isVerizon) {
+                    Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
+                    Text(String(localized: "Verizon")).tag(true)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: isVerizon) { _, newValue in
+                    appState.isVerizonCarrier = newValue
+                }
+                Text(String(localized: "Verizon uses different codes — pick first, then dial."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             VStack(spacing: 12) {
                 // Step 1: Clear existing forwarding
                 Button {
@@ -694,59 +734,40 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.plain)
 
-                // Step 3: Test
-                Button {
-                    let digits = kevinNumber.filter { $0.isNumber }
-                    if let url = URL(string: "tel:\(digits)") {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    HStack {
-                        Text("3")
-                            .font(.caption.bold())
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(.green))
-                            .foregroundStyle(.white)
-                        Text(String(localized: "Test it — call your Kevin number"))
-                            .font(.subheadline)
-                        Spacer()
-                        Image(systemName: "phone.fill")
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
+                // There is deliberately no "test" button here. The previous
+                // version dialed the Kevin number directly, which reaches Kevin
+                // whether or not forwarding is configured — so it confirmed
+                // success for users who had set nothing up. A real test requires
+                // someone calling the user's own number and the call diverting,
+                // which the device cannot stage for itself.
             }
+
+            // iOS Live Voicemail answers calls on-device before the carrier's
+            // no-answer timer fires, so the forward never triggers. Apple's own
+            // guidance is to turn it off when carrier forwarding misbehaves.
+            // There is no URL scheme that deep-links here — Settings can only be
+            // opened to our own app's pane — so these are plain instructions.
+            VStack(alignment: .leading, spacing: 6) {
+                Label(String(localized: "Turn off Live Voicemail first"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.orange)
+                Text(String(localized: "If Live Voicemail is on, your iPhone answers before Kevin can. Open Settings, find Phone, then Live Voicemail, and switch it off."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(Color.orange.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
 
             Text(String(localized: "Your Kevin number: \(kevinNumber)"))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            if !isVerizon {
-                Button {
-                    isVerizon = true
-                    appState.isVerizonCarrier = true
-                } label: {
-                    Text(String(localized: "Verizon customer? Tap here"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .underline()
-                }
-            } else {
-                Button {
-                    isVerizon = false
-                    appState.isVerizonCarrier = false
-                } label: {
-                    Text(String(localized: "✓ Using Verizon codes — tap to switch back"))
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                }
-            }
-
             Spacer()
 
             Button {
+                recordForwardingOutcome(didSetUp: true)
                 completeOnboarding()
             } label: {
                 Text(String(localized: "I'm All Set"))
@@ -758,6 +779,7 @@ struct OnboardingView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14))
 
             Button(String(localized: "Skip for now")) {
+                recordForwardingOutcome(didSetUp: false)
                 completeOnboarding()
             }
             .font(.subheadline)
@@ -779,59 +801,6 @@ struct OnboardingView: View {
     }
 
     // MARK: - Logic
-
-    @MainActor
-    private func prepareInitialStep() async {
-        guard !didPrepareInitialStep else { return }
-        didPrepareInitialStep = true
-
-        guard appState.pendingModeChange else { return }
-
-        // Mode changes are launched from Settings for an existing, authenticated
-        // account. Do not ask for Sign in with Apple again just to patch mode.
-        guard !appState.contractorId.isEmpty else {
-            appState.pendingModeChange = false
-            return
-        }
-
-        appState.pendingModeChange = false
-        ownerName = appState.userName
-        businessName = appState.businessName
-        if !appState.serviceType.isEmpty {
-            serviceType = appState.serviceType
-        }
-        selectedMode = appState.mode == "personal" ? "business" : "personal"
-        kevinNumber = appState.kevinNumber
-        step = .modeSelect
-
-        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
-            let name = profile["owner_name"] as? String ?? ""
-            let biz = profile["business_name"] as? String ?? ""
-            let svc = profile["service_type"] as? String ?? ""
-            let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? appState.mode
-            let number = profile["twilio_number"] as? String ?? ""
-
-            if !name.isEmpty {
-                ownerName = name
-                appState.userName = name
-            }
-            if !biz.isEmpty {
-                businessName = biz
-                appState.businessName = biz
-            }
-            if !svc.isEmpty {
-                serviceType = svc
-                appState.serviceType = svc
-            }
-            let normalizedMode = mode == "personal" ? "personal" : "business"
-            appState.mode = normalizedMode
-            selectedMode = normalizedMode == "personal" ? "business" : "personal"
-            if !number.isEmpty {
-                kevinNumber = number
-                appState.kevinNumber = number
-            }
-        }
-    }
 
     private func handleSignIn(_ result: Result<ASAuthorization, Error>) {
         switch result {
@@ -869,13 +838,6 @@ struct OnboardingView: View {
     }
 
     private func tryRestore() async {
-        // If user explicitly triggered mode change, skip restore and go to mode select
-        if appState.pendingModeChange {
-            appState.pendingModeChange = false
-            await MainActor.run { step = .modeSelect }
-            return
-        }
-
         // 1. Check if contractorId is already saved (Keychain, migrated from UserDefaults)
         if !appState.contractorId.isEmpty {
             if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
@@ -1201,6 +1163,11 @@ struct OnboardingView: View {
             }
         }
 
+        // Ask for push permission here, not at cold launch. The number now
+        // exists and the user has seen what Kevin does, so the system alert
+        // arrives with context. A denial is unrecoverable in-app and disables
+        // the live-call screen and call summaries entirely.
+        AppDelegate.requestPushAuthorization()
         step = .forwarding
         isLoading = false
     }
@@ -1315,6 +1282,31 @@ struct OnboardingView: View {
             }
         } catch {
             errorMessage = String(localized: "Failed to activate Business mode. Please try again.")
+        }
+    }
+
+    /// Record which exit the user took from the forwarding step.
+    ///
+    /// Previously "I'm All Set" and "Skip for now" were indistinguishable — both
+    /// called `completeOnboarding()` and wrote nothing — so a user who skipped
+    /// setup looked exactly like one who completed it, and nobody could be nudged.
+    ///
+    /// This records *intent*, not truth: the device cannot verify that forwarding
+    /// is live. Ground truth arrives server-side as `forwarding_last_seen_at`,
+    /// derived from Twilio's `ForwardedFrom` on a genuinely forwarded call. The
+    /// gap between the two is the activation funnel we could not previously see.
+    ///
+    /// Fire-and-forget: a failed PATCH must never block onboarding completion.
+    private func recordForwardingOutcome(didSetUp: Bool) {
+        let contractorId = appState.contractorId
+        guard !contractorId.isEmpty else { return }
+        let field = didSetUp ? "forwarding_self_reported_at" : "forwarding_skipped_at"
+        let payload: [String: Any] = [
+            field: Date().timeIntervalSince1970,
+            "forwarding_carrier_family": isVerizon ? "verizon" : "gsm",
+        ]
+        Task {
+            _ = try? await APIClient.shared.patchContractor(contractorId, body: payload)
         }
     }
 

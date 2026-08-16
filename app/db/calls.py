@@ -267,16 +267,25 @@ async def cleanup_old_calls() -> int:
     try:
         db = get_firestore_client()
         cutoff = time.time() - (RETENTION_DAYS * 86400)
-        docs = (
-            db.collection(COLLECTION)
-            .where(filter=FieldFilter("timestamp", "<", cutoff))
-            .limit(500)
-            .stream()
-        )
-        count = 0
-        for doc in docs:
-            doc.reference.delete()
-            count += 1
+
+        def _sweep_batch() -> int:
+            # Synchronous Firestore stream + deletes. Runs in the executor so a
+            # 500-document batch cannot stall the event loop that is serving
+            # Twilio webhooks (review finding on PR #143).
+            docs = (
+                db.collection(COLLECTION)
+                .where(filter=FieldFilter("timestamp", "<", cutoff))
+                .limit(500)
+                .stream()
+            )
+            deleted = 0
+            for doc in docs:
+                doc.reference.delete()
+                deleted += 1
+            return deleted
+
+        loop = asyncio.get_event_loop()
+        count = await loop.run_in_executor(None, _sweep_batch)
         if count:
             logger.info(f"Cleaned up {count} call records older than {RETENTION_DAYS} days")
         return count

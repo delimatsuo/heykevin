@@ -20,6 +20,8 @@ struct SettingsView: View {
     @State private var importMessage = ""
     @State private var syncMessage = ""
     @State private var showModeChangeAlert = false
+    @State private var isSwitchingMode = false
+    @State private var modeChangeError = ""
     @State private var isSaving = false
     @State private var saveError = ""
     @State private var knowledgeLengthWarning = ""
@@ -35,25 +37,39 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                // MARK: - Setup Status
+                // MARK: - Kevin Status
 
                 setupStatusSection
 
-                // MARK: - Subscription Status
+                // MARK: - Account & Plan
+                //
+                // The one place billing lives. "Plan" is what the user pays for;
+                // how Kevin answers calls is a separate concept and lives in the
+                // sections below — keeping them apart is deliberate.
 
                 Section {
                     HStack {
-                        Text("Plan")
+                        Text(String(localized: "Name"))
                         Spacer()
-                        Text(subscriptionStatusLabel)
-                            .foregroundStyle(subscriptionStatusColor)
+                        Text(appState.userName)
+                            .foregroundStyle(Color.secondary)
+                    }
+
+                    HStack {
+                        Text(String(localized: "Plan"))
+                        Spacer()
+                        // Deliberately not status-colored: a green "Business"
+                        // reads as "OK" and re-conflates plan with status, which
+                        // is the confusion this section exists to remove.
+                        Text(planLabel)
+                            .foregroundStyle(Color.secondary)
                     }
 
                     Button {
                         showPaywall = true
                     } label: {
                         HStack {
-                            Text(appState.subscriptionStatus == "trial" ? String(localized: "View Plans") : String(localized: "Subscribe to Kevin AI"))
+                            Text(viewPlansLabel)
                                 .foregroundStyle(.blue)
                             Spacer()
                             Image(systemName: "arrow.right.circle.fill")
@@ -71,59 +87,48 @@ struct SettingsView: View {
                                 Text(String(localized: "Manage Subscription"))
                                 Spacer()
                                 Image(systemName: "arrow.up.right.square")
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             }
                         }
                         .foregroundStyle(.primary)
                     }
                 } header: {
-                    Text("Subscription")
+                    Text(String(localized: "Account & Plan"))
                 }
                 .sheet(isPresented: $showPaywall) {
                     PaywallView(canDismiss: true)
                         .environmentObject(appState)
                 }
 
-                // MARK: - Kevin Status
+                // MARK: - How Kevin Answers
+                //
+                // Answering behavior for both modes. The old "Mode" status row
+                // read like a second plan ("Active — Business" vs "Business
+                // Assistant"); it is now a directional action instead, so plan
+                // and behavior can't be confused.
 
                 Section {
-                    HStack {
-                        Text(String(localized: "Kevin Number"))
-                        Spacer()
-                        Text(formattedKevinNumber)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                } header: {
-                    Text(String(localized: "Kevin"))
-                }
-
-                // MARK: - Profile (adapts to mode)
-
-                if appState.isPersonalMode {
-                    Section {
-                        HStack {
-                            Text(String(localized: "Name"))
-                            Spacer()
-                            Text(appState.userName)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Button {
-                            showModeChangeAlert = true
-                        } label: {
-                            HStack {
-                                Text(String(localized: "Mode"))
-                                Spacer()
-                                Text(appState.isPersonalMode ? String(localized: "Personal Assistant") : String(localized: "Business Assistant"))
-                                    .foregroundStyle(appState.isPersonalMode ? .purple : .blue)
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(Color.secondary)
-                                    .font(.caption)
+                    Toggle(String(localized: "Block spam with disconnect tone"), isOn: $appState.sitToneEnabled)
+                        .onChange(of: appState.sitToneEnabled) { _, newValue in
+                            Task {
+                                isSaving = true
+                                saveError = ""
+                                await updateSitToneEnabled(newValue)
+                                isSaving = false
                             }
                         }
-                        .foregroundStyle(.primary)
 
+                    Toggle(String(localized: "Alert me for urgent calls"), isOn: $appState.smartInterruption)
+                        .onChange(of: appState.smartInterruption) { _, newValue in
+                            Task {
+                                isSaving = true
+                                saveError = ""
+                                await updateContractorSetting("smart_interruption", newValue)
+                                isSaving = false
+                            }
+                        }
+
+                    if appState.isPersonalMode {
                         Button {
                             Task {
                                 appState.contactsUploadConsent = true
@@ -156,20 +161,64 @@ struct SettingsView: View {
                                     .foregroundStyle(.blue)
                             }
                         }
-                    } header: {
-                        Text(String(localized: "My Profile"))
-                    } footer: {
-                        Text(String(localized: "Contacts from your iPhone ring through. Unknown callers are screened by Kevin."))
                     }
-                } else {
-                    Section {
-                        HStack {
-                            Text(String(localized: "Name"))
-                            Spacer()
-                            Text(appState.userName)
-                                .foregroundStyle(.secondary)
-                        }
 
+                    Button {
+                        showModeChangeAlert = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(appState.isPersonalMode
+                                     ? String(localized: "Use Kevin for Your Business")
+                                     : String(localized: "Switch to Personal Screening"))
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.blue)
+                                Text(appState.isPersonalMode
+                                     ? String(localized: "Receptionist mode: intake questions, business hours, knowledge base. Requires a Business plan.")
+                                     : String(localized: "Kevin only screens unknown callers and takes messages. Your business setup is kept."))
+                                    .font(.caption)
+                                    .foregroundStyle(Color.secondary)
+                            }
+                            Spacer()
+                            if isSwitchingMode {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                    .disabled(isSwitchingMode)
+
+                    if !modeChangeError.isEmpty {
+                        Text(modeChangeError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    if !saveError.isEmpty {
+                        Text(saveError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                } header: {
+                    Text(String(localized: "How Kevin Answers"))
+                } footer: {
+                    Text(appState.isPersonalMode
+                         ? String(localized: "Kevin screens unknown callers; contacts from your iPhone ring through. Urgent calls (flooding, fire, gas leak) ring you immediately when alerts are on.")
+                         : String(localized: "Kevin answers as your business receptionist, using the business setup below. Urgent calls (flooding, fire, gas leak) ring you immediately when alerts are on."))
+                }
+                .disabled(isSaving)
+
+                // MARK: - Your Business (business mode only)
+                //
+                // Everything Kevin needs to know about the customer's business,
+                // grouped in one contiguous block — kept apart from the product
+                // settings above. Personal-mode users never see any of this.
+
+                if !appState.isPersonalMode {
+                    Section {
                         HStack {
                             Text(String(localized: "Business"))
                             Spacer()
@@ -177,58 +226,36 @@ struct SettingsView: View {
                                 .foregroundStyle(appState.businessName.isEmpty ? .tertiary : .secondary)
                         }
 
-                        Button {
-                            showModeChangeAlert = true
-                        } label: {
-                            HStack {
-                                Text(String(localized: "Mode"))
-                                Spacer()
-                                Text(String(localized: "Business Assistant"))
-                                    .foregroundStyle(.blue)
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(.tertiary)
-                                    .font(.caption)
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    } header: {
-                        Text(String(localized: "My Business"))
-                    }
-
-                    // MARK: - Business Hours
-
-                    Section {
                         DatePicker(String(localized: "Open"), selection: $businessHoursStart, displayedComponents: .hourAndMinute)
                             .onChange(of: businessHoursStart) { _, _ in saveBusinessHours() }
                         DatePicker(String(localized: "Close"), selection: $businessHoursEnd, displayedComponents: .hourAndMinute)
                             .onChange(of: businessHoursEnd) { _, _ in saveBusinessHours() }
                     } header: {
-                        Text(String(localized: "Business Hours"))
+                        Text(String(localized: "Your Business"))
                     } footer: {
                         Text(String(localized: "Outside these hours, Kevin will tell callers you're closed and take a message."))
                     }
 
-                    // MARK: - Services & Pricing
+                    // MARK: - Knowledge Base
+                    //
+                    // Services and knowledge are the same job — teaching Kevin
+                    // about the business — so they share one card. They open
+                    // differently (push vs sheet), so both titles are styled
+                    // primary with a trailing chevron to read as one list.
 
                     Section {
                         NavigationLink {
                             ServicesView()
                         } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(String(localized: "Services & Pricing"))
-                                        .font(.subheadline)
-                                    Text(String(localized: "Add your services so Kevin can quote estimates"))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(String(localized: "Services & Pricing"))
+                                    .font(.subheadline)
+                                Text(String(localized: "Add your services so Kevin can quote estimates"))
+                                    .font(.caption)
+                                    .foregroundStyle(Color.secondary)
                             }
                         }
-                    }
 
-                    // MARK: - Knowledge Base
-
-                    Section {
                         Button {
                             showKnowledgeEditor = true
                         } label: {
@@ -236,13 +263,15 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(String(localized: "Business Knowledge"))
                                         .font(.subheadline)
+                                        .foregroundStyle(Color.primary)
                                     Text(String(localized: "Tell Kevin about your business so he can answer questions"))
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Color.secondary)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right")
-                                    .foregroundStyle(.tertiary)
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             }
                         }
 
@@ -274,47 +303,9 @@ struct SettingsView: View {
                     } footer: {
                         Text(String(localized: "Kevin uses this info to answer caller questions about your services, pricing, and hours."))
                     }
-                }
 
-                // MARK: - Call Screening
+                    // MARK: - Integrations
 
-                Section {
-                    Toggle(String(localized: "Block spam with disconnect tone"), isOn: $appState.sitToneEnabled)
-                        .onChange(of: appState.sitToneEnabled) { _, newValue in
-                            Task {
-                                isSaving = true
-                                saveError = ""
-                                await updateSitToneEnabled(newValue)
-                                isSaving = false
-                            }
-                        }
-
-                    Toggle(String(localized: "Alert me for urgent calls"), isOn: $appState.smartInterruption)
-                        .onChange(of: appState.smartInterruption) { _, newValue in
-                            Task {
-                                isSaving = true
-                                saveError = ""
-                                await updateContractorSetting("smart_interruption", newValue)
-                                isSaving = false
-                            }
-                        }
-
-                    if !saveError.isEmpty {
-                        Text(saveError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-
-                } header: {
-                    Text(String(localized: "Call Screening"))
-                } footer: {
-                    Text(String(localized: "Urgent call alerts ring your phone immediately when a caller reports an emergency like flooding, fire, or gas leak."))
-                }
-                .disabled(isSaving)
-
-                // MARK: - Integrations
-
-                if !appState.isPersonalMode {
                     Section {
                         // Jobber row
                         HStack {
@@ -323,7 +314,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Schedule checking, job creation, customer lookup"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             if appState.jobberConnected {
@@ -355,9 +346,9 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(String(localized: "Google Calendar"))
                                     .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Availability checking, appointment booking"))
+                                Text(String(localized: "Availability checking, appointment requests"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             if appState.googleCalendarConnected {
@@ -386,7 +377,7 @@ struct SettingsView: View {
                     } header: {
                         Text(String(localized: "Integrations"))
                     } footer: {
-                        Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar to check availability and book appointments."))
+                        Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm."))
                     }
                 }
 
@@ -399,7 +390,7 @@ struct SettingsView: View {
                                 .font(.subheadline.weight(.medium))
                             Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.secondary)
                         }
                     }
 
@@ -417,7 +408,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Forward missed calls to Kevin"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             Image(systemName: "phone.arrow.right")
@@ -437,7 +428,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Stop forwarding, calls ring normally"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             Image(systemName: "xmark.circle")
@@ -457,7 +448,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text(String(localized: "Nuclear option — clears every forwarding type at once"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             Image(systemName: "exclamationmark.octagon")
@@ -505,7 +496,7 @@ struct SettingsView: View {
                             Text(String(localized: "Privacy Policy"))
                             Spacer()
                             Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
                         }
                     }
                     .foregroundStyle(.primary)
@@ -515,7 +506,7 @@ struct SettingsView: View {
                             Text(String(localized: "Terms of Service"))
                             Spacer()
                             Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
                         }
                     }
                     .foregroundStyle(.primary)
@@ -530,7 +521,7 @@ struct SettingsView: View {
                         Text(String(localized: "Version"))
                         Spacer()
                         Text("1.0.0")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.secondary)
                     }
 
                     #if DEBUG
@@ -559,14 +550,15 @@ struct SettingsView: View {
             .sheet(isPresented: $showKnowledgeEditor) {
                 KnowledgeEditorView(knowledgeText: $knowledgeText)
             }
-            .alert(String(localized: "Change Mode"), isPresented: $showModeChangeAlert) {
-                Button(String(localized: "Switch Mode")) {
-                    appState.pendingModeChange = true
-                    appState.isOnboarded = false
+            .alert(String(localized: "Change How Kevin Answers"), isPresented: $showModeChangeAlert) {
+                Button(String(localized: "Switch")) {
+                    Task { await switchMode() }
                 }
                 Button(String(localized: "Cancel"), role: .cancel) {}
             } message: {
-                Text(String(localized: "This will take you through the setup again so you can switch between Personal and Business mode. Your Kevin number will be kept."))
+                Text(appState.isPersonalMode
+                     ? String(localized: "Kevin will become your business receptionist: smart intake questions, business hours, and a knowledge base for FAQs. Your Kevin number will be kept.")
+                     : String(localized: "Kevin will switch to personal screening: unknown callers are screened, saved contacts ring through. Your business setup and Kevin number will be kept."))
             }
             .task {
                 await loadKnowledge()
@@ -590,7 +582,7 @@ struct SettingsView: View {
         PhoneFormatter.format(kevinNumber)
     }
 
-    // MARK: - Setup Status
+    // MARK: - Kevin Status
 
     private var setupStatusSection: some View {
         let numberOK = !appState.kevinNumber.isEmpty
@@ -605,88 +597,150 @@ struct SettingsView: View {
                     .font(.subheadline.weight(.medium))
             }
 
-            // Kevin number
-            SetupRow(
-                title: "Kevin Number",
-                ok: numberOK,
-                okLabel: formattedKevinNumber,
-                failLabel: "No number assigned"
-            ) {
-                if isProvisioningNumber { return }
-                isProvisioningNumber = true
-                Task {
-                    await provisionNumberFromSettings()
-                    isProvisioningNumber = false
-                }
-            } actionLabel: {
-                if isProvisioningNumber {
-                    AnyView(ProgressView().scaleEffect(0.8))
-                } else {
-                    AnyView(Text("Get Number").font(.caption.weight(.medium)).foregroundStyle(.blue))
-                }
-            }
+            // Kevin number — always visible; this is the number calls forward
+            // to (and the number businesses hand out).
+            if numberOK {
+                HStack(spacing: 12) {
+                    // Invisible stand-in for SetupRow's status icon. This row
+                    // has nothing to warn about, but without the gutter its
+                    // text sits flush-left while every row below is indented,
+                    // leaving the card with a ragged left edge.
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .hidden()
 
-            // Call forwarding — track activation locally (carrier state not queryable)
-            HStack(spacing: 12) {
-                Image(systemName: appState.forwardingActivated ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                    .foregroundStyle(appState.forwardingActivated ? Color.green : Color.orange)
-                    .font(.title3)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Call Forwarding")
-                        .font(.subheadline)
-                    Text(appState.forwardingActivated ? "Activated" : "Missed calls must route to Kevin")
-                        .font(.caption)
-                        .foregroundStyle(appState.forwardingActivated ? Color.secondary : Color.orange)
+                    Text(String(localized: "Kevin Number"))
+                    Spacer()
+                    Text(formattedKevinNumber)
+                        .foregroundStyle(Color.secondary)
+                        .textSelection(.enabled)
                 }
-                Spacer()
-                Button {
-                    if !appState.kevinNumber.isEmpty {
-                        UserDefaults.standard.set(appState.kevinNumber, forKey: "forwardingActivatedFor")
-                        appState.forwardingActivated = true
-                        dialCode("*61*\(dialNumber)%23")
+            } else {
+                SetupRow(
+                    title: "Kevin Number",
+                    ok: false,
+                    okLabel: formattedKevinNumber,
+                    failLabel: "No number assigned"
+                ) {
+                    if isProvisioningNumber { return }
+                    isProvisioningNumber = true
+                    Task {
+                        await provisionNumberFromSettings()
+                        isProvisioningNumber = false
                     }
-                } label: {
-                    Text(appState.forwardingActivated ? "Re-activate" : "Unverified")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background((appState.forwardingActivated ? Color.blue : Color.orange).opacity(appState.kevinNumber.isEmpty ? 0.05 : 0.15))
-                        .clipShape(Capsule())
+                } actionLabel: {
+                    if isProvisioningNumber {
+                        AnyView(ProgressView().scaleEffect(0.8))
+                    } else {
+                        AnyView(Text("Get Number").font(.caption.weight(.medium)).foregroundStyle(.blue))
+                    }
                 }
-                .buttonStyle(.borderless)
-                .disabled(appState.kevinNumber.isEmpty)
             }
 
-            // Push notifications
-            SetupRow(
-                title: "Push Notifications",
-                ok: pushOK,
-                okLabel: "Enabled",
-                failLabel: pushPermission == .denied ? "Blocked — tap to enable" : "Not enabled"
-            ) {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
+            // The checklist below shows only while something still needs
+            // attention; once every step passes it collapses to the ready
+            // row above, keeping the screen short for set-up users.
+            if !allGood {
+                // Call forwarding — track activation locally (carrier state not queryable)
+                HStack(spacing: 12) {
+                    Image(systemName: appState.forwardingActivated ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(appState.forwardingActivated ? Color.green : Color.orange)
+                        .font(.title3)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Call Forwarding")
+                            .font(.subheadline)
+                        Text(appState.forwardingActivated ? "Activated" : "Missed calls must route to Kevin")
+                            .font(.caption)
+                            .foregroundStyle(appState.forwardingActivated ? Color.secondary : Color.orange)
+                    }
+                    Spacer()
+                    Button {
+                        if !appState.kevinNumber.isEmpty {
+                            // Match the code to the carrier. Hardcoding the GSM code
+                            // here sent Verizon users a code their network ignores —
+                            // and then showed them a green checkmark for it.
+                            let code = appState.isVerizonCarrier
+                                ? "*71\(dialNumber)"
+                                : "*61*\(dialNumber)%23"
+                            dialCode(code)
+                            // Set the optimistic flag only after dialing is attempted.
+                            // This still records intent rather than fact — the device
+                            // cannot read forwarding state — but it no longer claims
+                            // success before anything has happened. Ground truth is
+                            // the server's forwarding_last_seen_at, derived from
+                            // Twilio's ForwardedFrom on a real forwarded call.
+                            UserDefaults.standard.set(appState.kevinNumber, forKey: "forwardingActivatedFor")
+                            appState.forwardingActivated = true
+                        }
+                    } label: {
+                        Text(appState.forwardingActivated ? "Re-activate" : "Unverified")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background((appState.forwardingActivated ? Color.blue : Color.orange).opacity(appState.kevinNumber.isEmpty ? 0.05 : 0.15))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(appState.kevinNumber.isEmpty)
                 }
-            } actionLabel: {
-                AnyView(Text("Open Settings").font(.caption.weight(.medium)).foregroundStyle(.blue))
-            }
 
-            // Subscription
-            SetupRow(
-                title: "Subscription",
-                ok: subOK,
-                okLabel: appState.subscriptionStatus == "trial" ? "Free trial" : "Active",
-                failLabel: "Expired"
-            ) {
-                showPaywall = true
-            } actionLabel: {
-                AnyView(Text("Subscribe").font(.caption.weight(.medium)).foregroundStyle(.blue))
-            }
+                // Push notifications.
+                //
+                // The action depends on whether iOS has a decision on file:
+                //
+                // - notDetermined: nobody has ever asked. Settings shows no
+                //   Notifications row for an app in this state, so sending the user
+                //   there strands them on a pane with Siri, Search, and Language and
+                //   no way to enable anything. Ask for permission instead.
+                // - denied: the row exists, so deep-link straight to it with
+                //   openNotificationSettingsURLString (iOS 15.4+). The general
+                //   openSettingsURLString only opens the app's top-level pane and
+                //   makes the user hunt.
+                SetupRow(
+                    title: "Push Notifications",
+                    ok: pushOK,
+                    okLabel: "Enabled",
+                    failLabel: pushPermission == .denied ? "Blocked in iOS Settings" : "Not enabled"
+                ) {
+                    if pushPermission == .denied {
+                        if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } else {
+                        AppDelegate.requestPushAuthorization { _ in
+                            Task { await refreshPushPermission() }
+                        }
+                    }
+                } actionLabel: {
+                    AnyView(
+                        Text(pushPermission == .denied
+                             ? String(localized: "Open Settings")
+                             : String(localized: "Enable"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.blue)
+                    )
+                }
 
+                // Subscription state as a setup step; the Account & Plan
+                // section below is where plans are viewed and managed.
+                SetupRow(
+                    title: "Subscription",
+                    ok: subOK,
+                    // Both labels come from planLabel so this row and the
+                    // Account & Plan row can never contradict each other; the
+                    // check/warning icon already carries the pass-fail signal.
+                    okLabel: planLabel,
+                    failLabel: planLabel
+                ) {
+                    showPaywall = true
+                } actionLabel: {
+                    AnyView(Text("Subscribe").font(.caption.weight(.medium)).foregroundStyle(.blue))
+                }
+            }
         } header: {
-            Text("Setup Status")
+            Text(allGood ? String(localized: "Kevin") : String(localized: "Setup Status"))
         }
     }
 
@@ -731,22 +785,26 @@ struct SettingsView: View {
 
     // MARK: - Subscription computed properties
 
-    private var subscriptionStatusLabel: String {
+    /// Value for the "Plan" row. Shows the tier by name when active — the old
+    /// "Active — Business" wording read like a mode and collided with the
+    /// business-assistant concept elsewhere on this screen.
+    private var planLabel: String {
         switch appState.subscriptionStatus {
         case "trial": return "Free Trial"
-        case "active": return "Active — \(tierLabel)"
+        case "active": return tierLabel
         case "expired": return "Expired"
         case "cancelled": return "Cancelled"
         default: return appState.subscriptionStatus.isEmpty ? "Free Trial" : appState.subscriptionStatus.capitalized
         }
     }
 
-    private var subscriptionStatusColor: Color {
+    /// Label for the paywall entry point, phrased for the current state:
+    /// browsing during trial, changing while active, subscribing otherwise.
+    private var viewPlansLabel: String {
         switch appState.subscriptionStatus {
-        case "trial": return .blue
-        case "active": return .green
-        case "expired", "cancelled": return .red
-        default: return .blue
+        case "trial": return String(localized: "View Plans")
+        case "active": return String(localized: "Change Plan")
+        default: return String(localized: "Subscribe to Kevin AI")
         }
     }
 
@@ -829,6 +887,46 @@ struct SettingsView: View {
             await updateContractorSetting("business_hours_start", start)
             await updateContractorSetting("business_hours_end", end)
         }
+    }
+
+    /// Switches Personal <-> Business mode with a direct PATCH.
+    ///
+    /// This used to hand off to `pendingModeChange` + `isOnboarded = false`,
+    /// re-running the full onboarding wizard (mode select, business info entry,
+    /// a contacts-permission re-prompt, a provisioning spinner) just to flip one
+    /// field on an account that already has a Kevin number. That multi-screen
+    /// detour was the reported bug: Cloud Run logs showed mode-switch attempts
+    /// never produced a single network call, meaning the flow was going nowhere
+    /// before it ever reached the point that would persist anything. The
+    /// backend capability this needs — PATCH mode, entitlement-checked — already
+    /// existed and is exactly what onboarding's own "fast path" falls back to
+    /// for a contractor that already has a number. This calls it directly.
+    /// `@MainActor` is explicit here, matching the other save helpers in this
+    /// file: every line below mutates observable state, and a mutation landing
+    /// off the main thread would leave the row showing the old mode — the exact
+    /// symptom this fix exists to remove.
+    @MainActor
+    private func switchMode() async {
+        guard !appState.contractorId.isEmpty else { return }
+        let targetMode = appState.isPersonalMode ? "business" : "personal"
+
+        isSwitchingMode = true
+        modeChangeError = ""
+
+        // Ask the server rather than trusting the cached subscription tier. A 403
+        // is a real answer ("needs Business"), so it routes to the paywall; the
+        // local tier is only a UI cache and can be stale, which would otherwise
+        // paywall someone who is already entitled.
+        switch await APIClient.shared.updateContractorMode(contractorId: appState.contractorId, mode: targetMode) {
+        case .success:
+            appState.mode = targetMode
+        case .entitlementRequired:
+            showPaywall = true
+        case .failed:
+            modeChangeError = String(localized: "Could not switch mode. Please try again.")
+        }
+
+        isSwitchingMode = false
     }
 
     private func updateContractorSetting(_ key: String, _ value: Any) async {
@@ -1045,7 +1143,7 @@ San Jose, Santa Clara, Campbell
                                     .font(.subheadline.weight(.medium))
                                 Text(isRecording ? String(localized: "Recording...") : String(localized: "Talk and Kevin will learn"))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.secondary)
                             }
                         }
                     }
@@ -1080,7 +1178,7 @@ San Jose, Santa Clara, Campbell
                     if knowledgeText.isEmpty {
                         Text(placeholder)
                             .font(.system(.subheadline, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             .padding(.top, 8)
                             .padding(.leading, 5)
                             .allowsHitTesting(false)
@@ -1107,7 +1205,7 @@ San Jose, Santa Clara, Campbell
                 // Tip
                 Text(String(localized: "Type your services, or tap the mic to describe them by voice. Kevin uses this to answer caller questions."))
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                     .padding(.horizontal)
                     .padding(.top, 4)
                     .padding(.bottom, 8)

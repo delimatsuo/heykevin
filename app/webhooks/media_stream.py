@@ -537,6 +537,49 @@ async def _serve_pipeline_ingress(
 TRANSCRIPT_THROTTLE = 1.0
 
 
+class LiveTranscriptPusher:
+    """Throttled live-view pusher whose last line always lands.
+
+    The inline throttle both streams used ("push only if a full window has
+    passed") silently dropped any line arriving inside the window with no
+    line after it. On CAa5e0de Kevin's final reply came 0.7s after the
+    caller's line and the call then went silent, so the app's live view never
+    showed the one line that mattered. A suppressed push now schedules a
+    trailing flush for the moment the window reopens.
+
+    `lines` is the caller's own mutable list; the flush reads it at flush
+    time, so a coalesced flush carries everything said in the window.
+    """
+
+    def __init__(self, call_sid: str, lines: list, throttle: float = TRANSCRIPT_THROTTLE):
+        self._call_sid = call_sid
+        self._lines = lines
+        self._throttle = throttle
+        self._last_push = 0.0
+        self._pending: asyncio.Task | None = None
+
+    def push(self) -> None:
+        now = time.time()
+        remaining = self._throttle - (now - self._last_push)
+        if remaining <= 0:
+            self._last_push = now
+            task = asyncio.create_task(self._write())
+            task.add_done_callback(_log_task_exception)
+        elif self._pending is None or self._pending.done():
+            self._pending = asyncio.create_task(self._flush_later(remaining))
+            self._pending.add_done_callback(_log_task_exception)
+
+    async def _flush_later(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        self._last_push = time.time()
+        await self._write()
+
+    async def _write(self) -> None:
+        await update_active_call(
+            self._call_sid, {"transcript_buffer": "\n".join(self._lines)}
+        )
+
+
 def _active_call_fallback(call_sid: str, call_data: dict | None):
     """Build minimal call context from authenticated RTDB data."""
     if not isinstance(call_data, dict):
@@ -663,7 +706,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     stream_sid = start_stream_sid
     pipeline = None
     transcript_lines = []
-    last_rtdb_update = 0.0
+    transcript_pusher = LiveTranscriptPusher(call_sid, transcript_lines)
 
     try:
         active_call = await _resolve_active_call(call_sid, call_data)
@@ -784,25 +827,14 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
     async def on_transcript(speaker: str, text: str):
         """Transcript update — both Kevin and Caller sides."""
-        nonlocal last_rtdb_update
-
         transcript_lines.append(f"{speaker}: {text}")
 
         # Cap transcript lines to prevent unbounded memory growth
         if len(transcript_lines) > 500:
             transcript_lines[:] = transcript_lines[-500:]
 
-        # Send FULL transcript to RTDB — no truncation
-        transcript_text = "\n".join(transcript_lines)
-
-        # Update RTDB (for app polling)
-        now = time.time()
-        if now - last_rtdb_update >= TRANSCRIPT_THROTTLE:
-            last_rtdb_update = now
-            task = asyncio.create_task(update_active_call(call_sid, {
-                "transcript_buffer": transcript_text,
-            }))
-            task.add_done_callback(_log_task_exception)
+        # Update RTDB (for app polling) — throttled with a trailing flush
+        transcript_pusher.push()
 
     _urgency_push_count = 0
 
@@ -837,6 +869,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 reason="urgent_call",
                 call_sid=call_sid,
                 conference_name=urgent_conf,
+                contractor_id=_cid,
             )
 
         # Also send critical push notification without lock-screen-sensitive context.
@@ -852,6 +885,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 call_sid=call_sid,
                 caller_phone=caller_phone,
                 caller_name=caller_name,
+                contractor_id=_cid,
             )
 
         logger.info("media_event event=urgency_escalated call=%s", _call_label(call_sid))

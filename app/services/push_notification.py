@@ -88,15 +88,48 @@ def _generate_apns_token() -> str:
     return token
 
 
-async def _delete_expired_device_token(device_token: str):
-    """Remove an expired device token from Firestore."""
+async def _record_app_deletion(contractor_id: str):
+    """Stamp deleted_app_detected_at after APNs reports the token is gone.
+
+    APNs 410 means the token is no longer active for this topic. Uninstalling is
+    the usual cause, but not the only one — token rotation and device restores can
+    also produce it. So this is a strong signal, not proof, and it is deliberately
+    only a *starting* condition: number release is separately gated on the number
+    having gone silent (see `_expired_contractor_cleanup`), because releasing a
+    number that still has live forwarding hands a user's calls to whoever Twilio
+    assigns it to next.
+
+    Before this existed, the only writer of this field was the inbound-call path,
+    so a user who deleted the app and received no calls was never detected at all —
+    and never got the SMS telling them how to turn forwarding off.
+    """
+    if not contractor_id:
+        return
+    try:
+        from app.db.contractors import get_contractor, update_contractor
+        import time
+
+        contractor = await get_contractor(contractor_id)
+        if not contractor or contractor.get("deleted_app_detected_at"):
+            return
+        await update_contractor(contractor_id, {"deleted_app_detected_at": time.time()})
+        logger.info(f"App deletion detected via APNs 410: {contractor_id}")
+    except Exception as e:
+        logger.warning(f"Could not record app deletion: {type(e).__name__}")
+
+
+async def _delete_expired_device_token(device_token: str, contractor_id: str = ""):
+    """Remove an expired device token from Firestore and note the app deletion."""
+    await _record_app_deletion(contractor_id)
     try:
         from app.db.firestore_client import get_firestore_client
         db = get_firestore_client()
         loop = asyncio.get_event_loop()
-        doc = await loop.run_in_executor(
-            None, lambda: db.collection("devices").document("primary").get()
-        )
+        if contractor_id:
+            path = db.collection("contractors").document(contractor_id).collection("devices").document("primary")
+        else:
+            path = db.collection("devices").document("primary")
+        doc = await loop.run_in_executor(None, lambda: path.get())
         if doc.exists:
             data = doc.to_dict()
             updates = {}
@@ -105,9 +138,7 @@ async def _delete_expired_device_token(device_token: str):
             if data.get("voip_token") == device_token:
                 updates["voip_token"] = ""
             if updates:
-                await loop.run_in_executor(
-                    None, lambda: db.collection("devices").document("primary").update(updates)
-                )
+                await loop.run_in_executor(None, lambda: path.update(updates))
                 logger.info(f"Deleted expired device token {device_token[:8]}... from Firestore")
     except Exception as e:
         logger.error(f"Failed to delete expired device token: {e}")
@@ -121,6 +152,7 @@ async def send_voip_push(
     call_sid: str = "",
     conference_name: str = "",
     access_token: str = "",
+    contractor_id: str = "",
 ) -> bool:
     """Send a VoIP push notification to trigger CallKit on the iOS app.
 
@@ -175,7 +207,7 @@ async def send_voip_push(
                     return True
                 elif response.status_code == 410:
                     logger.warning(f"Device token expired (410): {device_token[:8]}...")
-                    await _delete_expired_device_token(device_token)
+                    await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
                     logger.error(f"APNs push failed: {response.status_code} {response.text}")
@@ -201,6 +233,7 @@ async def send_regular_push(
     call_sid: str = "",
     caller_phone: str = "",
     caller_name: str = "",
+    contractor_id: str = "",
 ) -> bool:
     """Send a regular APNs push notification (banner, not CallKit)."""
     if not device_token or not settings.apns_key_content:
@@ -247,7 +280,7 @@ async def send_regular_push(
                     return True
                 elif response.status_code == 410:
                     logger.warning(f"Device token expired (410): {device_token[:8]}...")
-                    await _delete_expired_device_token(device_token)
+                    await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
                     logger.error(f"APNs push failed: {response.status_code} {response.text}")
@@ -273,6 +306,7 @@ async def send_urgent_push(
     call_sid: str = "",
     caller_phone: str = "",
     caller_name: str = "",
+    contractor_id: str = "",
 ) -> bool:
     """Send a critical-priority APNs push for urgent/emergency calls.
 
@@ -323,7 +357,7 @@ async def send_urgent_push(
                     return True
                 elif response.status_code == 410:
                     logger.warning(f"Device token expired (410): {device_token[:8]}...")
-                    await _delete_expired_device_token(device_token)
+                    await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
                     logger.error(f"Urgent APNs push failed: {response.status_code} {response.text}")

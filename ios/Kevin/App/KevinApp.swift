@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct KevinApp: App {
@@ -51,6 +52,25 @@ struct KevinApp: App {
                 if !listenerStarted {
                     listenerStarted = true
                     SubscriptionManager.shared.startTransactionListener()
+                }
+
+                // Safety net for accounts that finished onboarding before the
+                // permission prompt moved into it. Those users are never routed
+                // through the provisioning step again, so nothing ever asks them
+                // — and iOS shows no Notifications row in Settings for an app
+                // that has never requested, leaving no way to switch it on.
+                //
+                // This is not the cold-launch prompt that was removed: it only
+                // fires once the user is already onboarded, so they have seen
+                // what Kevin does before the system alert appears.
+                if appState.isOnboarded {
+                    Task {
+                        let status = await UNUserNotificationCenter.current()
+                            .notificationSettings().authorizationStatus
+                        if status == .notDetermined {
+                            AppDelegate.requestPushAuthorization()
+                        }
+                    }
                 }
 
                 #if DEBUG

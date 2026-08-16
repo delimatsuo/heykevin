@@ -26,6 +26,7 @@ from app.services.voice_pipeline import (
     _log_tool_execution_failure,
     _tool_label,
     _tool_execution_error_response,
+    _tool_timeout_response,
     build_system_prompt,
     is_owner_availability_hold,
 )
@@ -71,6 +72,10 @@ class GeminiPipeline:
     """
 
     URGENCY_KEYWORDS = LIVE_URGENCY_KEYWORDS
+    REALTIME_START_OF_SPEECH_SENSITIVITY = "START_SENSITIVITY_LOW"
+    REALTIME_END_OF_SPEECH_SENSITIVITY = "END_SENSITIVITY_HIGH"
+    REALTIME_PREFIX_PADDING_MS = 300
+    REALTIME_SILENCE_DURATION_MS = 500
     CALLER_SILENCE_PROMPT_SECONDS = 10
     CALLER_SILENCE_HANGUP_SECONDS = 10
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
@@ -95,8 +100,22 @@ class GeminiPipeline:
     # Secondary object bound; the byte budget is the effective limit for normal frames.
     MAX_AUDIO_QUEUE_CHUNKS = 1024
     MAX_AUDIO_BACKLOG_RECOVERIES = 1
+    # Tenant calls keep backend speaking state close to caller playout. A
+    # transport that provides its own ordered audio buffer can override this.
+    PACE_AUDIO_OUTPUT = True
+    AUDIO_START_BUFFER_SECONDS = 0.0
     MAX_GREETING_BUSINESS_NAME_WORDS = 6
-    MAX_RESPONSE_OUTPUT_TOKENS = 192
+    # Runaway guard only — NOT a length control. Native-audio output measures
+    # ~26 tokens/second (verified across 20+ production turns on 2026-08-06),
+    # so a token cap always lands mid-word by construction. At 192 the cap
+    # chopped any reply longer than ~7.4s (call CA54f11e turn 5 hit it at
+    # exactly 7,400ms), and the 256→128→192 history of this knob shows it
+    # being oscillated to fight verbosity — that job belongs to the system
+    # prompt ("ONE or two short sentences per response"), which cuts at
+    # sentence boundaries instead of mid-word. 512 ≈ 20s of speech: high
+    # enough that a prompt-compliant reply never hits it, low enough to stop
+    # a runaway turn well before the 12s audio-backlog guard has to.
+    MAX_RESPONSE_OUTPUT_TOKENS = 512
 
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
@@ -166,6 +185,7 @@ class GeminiPipeline:
         # Buffers for streaming transcript fragments (Gemini sends word-by-word)
         self._kevin_transcript_buf: list[str] = []
         self._caller_transcript_buf: list[str] = []
+        self._caller_turn_number = 0
         self._last_caller_transcript_flushed_at = 0.0
         self._last_caller_transcript_fragment_at = 0.0
         self._last_caller_transcript_fragment_monotonic = 0.0
@@ -245,6 +265,22 @@ class GeminiPipeline:
 
         return config
 
+    def _build_realtime_input_config(self) -> dict:
+        """Return overridable Live VAD controls for the current call surface."""
+
+        return {
+            "automatic_activity_detection": {
+                "start_of_speech_sensitivity": (
+                    self.REALTIME_START_OF_SPEECH_SENSITIVITY
+                ),
+                "end_of_speech_sensitivity": self.REALTIME_END_OF_SPEECH_SENSITIVITY,
+                "prefix_padding_ms": self.REALTIME_PREFIX_PADDING_MS,
+                "silence_duration_ms": self.REALTIME_SILENCE_DURATION_MS,
+            },
+            "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+        }
+
     def _call_label(self) -> str:
         """Return a short non-PII call label for operational logs."""
         return self._call_sid[:8] or "unknown"
@@ -286,18 +322,22 @@ class GeminiPipeline:
             "How can I help you?"
         )
 
+    def _build_text_instruction_payload(self, text: str) -> dict:
+        """Build the model-version-specific payload for an instruction turn."""
+        if self._model.startswith("gemini-3"):
+            return {"realtime_input": {"text": text}}
+        return {
+            "client_content": {
+                "turns": [{"role": "user", "parts": [{"text": text}]}],
+                "turn_complete": True,
+            }
+        }
+
     async def _send_greeting(self) -> None:
         """Ask Gemini to speak the deterministic greeting and nothing else."""
         greeting_text = self._build_greeting_text()
         prompt = f"Say exactly this greeting and nothing else: {json.dumps(greeting_text)}"
-        await self._ws.send(json.dumps({
-            "client_content": {
-                "turns": [
-                    {"role": "user", "parts": [{"text": prompt}]}
-                ],
-                "turn_complete": True,
-            }
-        }))
+        await self._ws.send(json.dumps(self._build_text_instruction_payload(prompt)))
         self._log_voice_timing(
             "greeting_instruction_sent",
             chars=len(greeting_text),
@@ -341,16 +381,30 @@ class GeminiPipeline:
                     },
                     "input_audio_transcription": {},
                     "output_audio_transcription": {},
-                    "realtime_input_config": {
-                        "automatic_activity_detection": {
-                            "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
-                            "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                            "prefix_padding_ms": 100,
-                            "silence_duration_ms": 500,
-                        },
-                        "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
-                        "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
-                    },
+                    # The start and end halves of this config do different jobs and
+                    # are tuned separately.
+                    #
+                    # END side (end_of_speech_sensitivity, silence_duration_ms)
+                    # controls how quickly Kevin decides the caller has finished
+                    # and starts replying. Deliberately aggressive for low latency
+                    # — see PR #73, "Fix Gemini voice latency pacing" — and left
+                    # alone here.
+                    #
+                    # START side controls what interrupts Kevin mid-sentence, and
+                    # was the cause of a real defect. START_SENSITIVITY_HIGH with
+                    # only 100ms of prefix padding is the most trigger-happy
+                    # setting available; paired with START_OF_ACTIVITY_INTERRUPTS,
+                    # any brief sound on a phone line — road noise, breathing, a
+                    # cough, line static — registered as "the caller started
+                    # speaking" and cut Kevin off mid-word. Call CA54f11e took
+                    # three barge-ins in 104 seconds that way.
+                    #
+                    # LOW plus 300ms of padding demands clearer evidence of real
+                    # speech before interrupting, while still capturing the first
+                    # syllable. A genuine barge-in now registers marginally later,
+                    # which is the right side to err on: being cut off mid-sentence
+                    # reads as broken, a barge-in 200ms later reads as normal.
+                    "realtime_input_config": self._build_realtime_input_config(),
                 }
             }
 
@@ -358,6 +412,13 @@ class GeminiPipeline:
             tools = self._build_gemini_tools()
             if tools:
                 setup["setup"]["tools"] = tools
+            # Always log the tool surface: during the CAfed098 diagnosis it was
+            # impossible to tell from logs whether zero tool calls meant the
+            # model ignored its tools or never had any.
+            self._log_voice_timing(
+                "live_tools_registered",
+                count=len(tools[0]["function_declarations"]) if tools else 0,
+            )
 
             setup_started_at = time.monotonic()
             await self._ws.send(json.dumps(setup))
@@ -392,8 +453,19 @@ class GeminiPipeline:
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._ensure_audio_playout_task()
 
-            # Gemini owns voice activity and turn detection. A transcript-based
-            # silence timer races speech that Gemini detects before transcribing it.
+            if start_background_tasks:
+                # Stall watchdog. 598b8fa removed this start call because a
+                # transcript-based timer can race speech Gemini has detected
+                # but not yet transcribed; the result (call CAfed098) was a
+                # 30-second dead-air stall with no recovery when a truncated
+                # turn dropped Kevin's closing question. Re-enabled with the
+                # race addressed instead of avoided: the silence clock counts
+                # from the last activity on EITHER side, so an in-flight
+                # caller transcript defers the prompt, and a genuinely
+                # colliding "Are you still there?" is interruptible by the
+                # caller's speech (START_OF_ACTIVITY_INTERRUPTS).
+                self._start_silence_watchdog()
+
             if start_background_tasks and self._call_sid:
                 # Start RTDB command polling (for decline/take_message from iOS app)
                 self._command_check_task = asyncio.create_task(self._command_check_loop())
@@ -988,11 +1060,13 @@ class GeminiPipeline:
         )
 
     async def _audio_playout_loop(self):
-        """Send Gemini audio to Twilio paced to playback duration.
+        """Send Gemini audio to the configured transport.
 
         Gemini server content may arrive faster than realtime. Twilio then buffers
         media events, while the backend can mistakenly think Kevin is done talking.
-        Pacing keeps backend speaking state aligned with what the caller hears.
+        Tenant calls pace locally to keep backend speaking state aligned with what
+        the caller hears. Dedicated transports may instead rely on their own
+        ordered playback buffer and marks to absorb provider chunk jitter.
         """
         try:
             while self._connected:
@@ -1008,6 +1082,11 @@ class GeminiPipeline:
                 )
                 sent = False
                 try:
+                    if (
+                        self.AUDIO_START_BUFFER_SECONDS > 0
+                        and response_turn > self._last_response_first_media_sent_turn
+                    ):
+                        await asyncio.sleep(self.AUDIO_START_BUFFER_SECONDS)
                     async with self._audio_output_lock:
                         if (
                             self._interrupt_speaking
@@ -1055,7 +1134,7 @@ class GeminiPipeline:
                                         exception_type=type(error).__name__,
                                     )
                         sent = True
-                    if duration_seconds > 0:
+                    if self.PACE_AUDIO_OUTPUT and duration_seconds > 0:
                         await asyncio.sleep(duration_seconds * 0.9)
                 finally:
                     self._audio_queue.task_done()
@@ -1186,10 +1265,19 @@ class GeminiPipeline:
 
     async def _flush_caller_transcript(self):
         """Flush buffered caller transcript fragments as one message."""
+        fragment_count = len(self._caller_transcript_buf)
         full_text = "".join(self._caller_transcript_buf)
         self._caller_transcript_buf.clear()
         if not full_text.strip():
             return
+        self._caller_turn_number += 1
+        self._log_voice_timing(
+            "caller_turn_complete",
+            turn=self._caller_turn_number,
+            fragments=fragment_count,
+            chars=len(full_text),
+            words=len(full_text.split()),
+        )
         self._transcript_lines.append(f"Caller: {full_text}")
         await self.on_transcript("Caller", full_text)
         self._last_caller_transcript_flushed_at = time.time()
@@ -1482,7 +1570,7 @@ class GeminiPipeline:
                     timeout=self.TOOL_DISPATCH_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                result_str = json.dumps({"error": "Tool execution timed out"})
+                result_str = _tool_timeout_response()
             except Exception as e:
                 _log_tool_execution_failure(tool_name, self._call_sid, e)
                 result_str = _tool_execution_error_response()
@@ -1557,15 +1645,31 @@ class GeminiPipeline:
             return
         self._assistant_instruction_pending = True
         try:
-            await self._ws.send(json.dumps({
-                "client_content": {
-                    "turns": [{"role": "user", "parts": [{"text": text}]}],
-                    "turn_complete": True,
-                }
-            }))
+            await self._ws.send(
+                json.dumps(self._build_text_instruction_payload(text))
+            )
         except Exception:
             self._assistant_instruction_pending = False
             raise
+
+    def _start_silence_watchdog(self) -> None:
+        """Schedule the caller-silence loop, replacing any stale task."""
+        if self._silence_check_task and not self._silence_check_task.done():
+            return
+        self._silence_check_task = asyncio.create_task(self._silence_check_loop())
+
+    def _caller_silence_elapsed_seconds(self) -> float:
+        """Seconds since the last activity on either side of the call.
+
+        Counting from ``max(kevin, caller)`` rather than Kevin alone is what
+        makes the watchdog safe against 598b8fa's race: caller speech that
+        Gemini heard but only just transcribed refreshes the caller timestamp
+        and defers the prompt, instead of the prompt talking over the caller.
+        """
+        last_activity = max(self._last_kevin_speech_time, self._last_caller_speech_time)
+        if last_activity <= 0:
+            return 0.0
+        return time.time() - last_activity
 
     async def _silence_check_loop(self):
         """Prompt once after caller silence, then end the call if silence continues."""
@@ -1579,8 +1683,10 @@ class GeminiPipeline:
 
                 now = time.time()
                 if self._caller_silence_prompted_at is None:
-                    elapsed = now - self._last_kevin_speech_time
-                    if elapsed >= self.CALLER_SILENCE_PROMPT_SECONDS:
+                    if (
+                        self._caller_silence_elapsed_seconds()
+                        >= self.CALLER_SILENCE_PROMPT_SECONDS
+                    ):
                         await self._prompt_for_caller_silence()
                     continue
 

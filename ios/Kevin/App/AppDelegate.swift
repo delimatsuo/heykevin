@@ -20,18 +20,22 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         // Request push notification permission
         UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            if granted {
-                #if DEBUG
-                print("Push notifications authorized")
-                #endif
-                DispatchQueue.main.async {
-                    UIApplication.shared.registerForRemoteNotifications()
-                }
-            } else {
-                #if DEBUG
-                print("Push notifications denied: \(error?.localizedDescription ?? "")")
-                #endif
+
+        // Deliberately does NOT prompt here. This used to call
+        // requestAuthorization() straight out of didFinishLaunching, which put
+        // the system alert on screen at first launch before the user knew what
+        // the app was. A denial cannot be undone in-app — it takes a trip to
+        // Settings — and it permanently disables the live-call screen, call
+        // summaries, and every push the product depends on.
+        //
+        // Onboarding asks explicitly, in context, via requestPushAuthorization().
+        // Here we only re-register an already-granted permission so existing
+        // users keep refreshing their device token on every launch.
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized
+                    || settings.authorizationStatus == .provisional else { return }
+            DispatchQueue.main.async {
+                UIApplication.shared.registerForRemoteNotifications()
             }
         }
 
@@ -42,6 +46,29 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         voipRegistry = registry
 
         return true
+    }
+
+    /// Ask for notification permission, in context, from onboarding.
+    ///
+    /// Push is not a nice-to-have for this app: the VoIP push is what raises the
+    /// live-call screen, and regular push carries the call summary. Asking at a
+    /// moment the user understands is the difference between a working install
+    /// and a silent one, so this is called after the user has seen what Kevin
+    /// does — never at cold launch.
+    ///
+    /// Safe to call repeatedly: once a decision exists iOS will not re-prompt,
+    /// and an already-granted permission simply re-registers.
+    static func requestPushAuthorization(completion: ((Bool) -> Void)? = nil) {
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, _ in
+            DispatchQueue.main.async {
+                if granted {
+                    UIApplication.shared.registerForRemoteNotifications()
+                }
+                completion?(granted)
+            }
+        }
     }
 
     // Got device token for regular push notifications

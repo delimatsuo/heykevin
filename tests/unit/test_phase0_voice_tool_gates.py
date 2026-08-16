@@ -85,7 +85,11 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
         created.append((args, kwargs))
         return "event-1"
 
+    async def fake_save_call(*_args, **_kwargs):
+        return True
+
     monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+    monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
 
     pipeline = _pipeline({
         "contractor_id": "c1",
@@ -95,7 +99,10 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
     })
     result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
 
-    assert result == {"success": False, "error": "Owner confirmation is required for this action."}
+    # Unapproved automation becomes an owner-confirmed request, never a write.
+    # See tests/unit/test_appointment_requests.py for the request contract.
+    assert result["booked"] is False
+    assert result["status"] == "request_recorded"
     assert created == []
 
 
@@ -103,7 +110,7 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
 async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
     created = []
 
-    async def fake_book_appointment(contractor, *, title, start_time, end_time, description):
+    async def fake_book_appointment(contractor, *, title, start_time, end_time, description, call_sid=""):
         created.append({
             "token": contractor.get("google_calendar_access_token"),
             "title": title,
@@ -264,7 +271,16 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
             },
         ))
 
-    assert result == {"success": False, "error": "Tool execution failed."}
+    assert result["success"] is False
+    assert result["error"] == "unavailable"
+    # The model needs a recovery instruction, not just a failure flag: without
+    # one it has nothing to say and the caller hears dead air (call CA54f11e).
+    assert "instruction" in result
+    assert "call back" in result["instruction"].lower()
+    # The failure payload reaches the model, so it must not carry caller data.
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in json.dumps(result)
+
     assert "book_appointment" in caplog.text
     assert "CA123" in caplog.text
     assert "ValueError" in caplog.text
@@ -423,19 +439,17 @@ async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitiz
             {"id": "tool-1", "name": "book_appointment", "args": sensitive_args}
         ])
 
-    assert pipeline._ws.sent == [
-        {
-            "tool_response": {
-                "function_responses": [
-                    {
-                        "id": "tool-1",
-                        "name": "book_appointment",
-                        "response": {"success": False, "error": "Tool execution failed."},
-                    }
-                ]
-            }
-        }
-    ]
+    assert len(pipeline._ws.sent) == 1
+    sent_responses = pipeline._ws.sent[0]["tool_response"]["function_responses"]
+    assert len(sent_responses) == 1
+    assert sent_responses[0]["id"] == "tool-1"
+    assert sent_responses[0]["name"] == "book_appointment"
+    sent_payload = sent_responses[0]["response"]
+    assert sent_payload["success"] is False
+    assert sent_payload["error"] == "unavailable"
+    # See the sibling assertion above: a failure with no recovery instruction is
+    # what left a real caller in 54 seconds of silence.
+    assert "instruction" in sent_payload
     assert "book_appointment" in caplog.text
     assert "call=CA-GEMIN" in caplog.text
     assert "CA-GEMINI-EXCEPTION" not in caplog.text

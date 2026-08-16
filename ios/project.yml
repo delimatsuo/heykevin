@@ -39,8 +39,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen
         SWIFT_EMIT_LOC_STRINGS: true
-        MARKETING_VERSION: "1.2.5"
-        CURRENT_PROJECT_VERSION: "25"
+        MARKETING_VERSION: "1.2.6"
+        CURRENT_PROJECT_VERSION: "31"
         DEVELOPMENT_TEAM: 3FLG8W6B95
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false
@@ -91,6 +91,18 @@ targets:
         BackendURL: $(BACKEND_URL)
         AppEnvironment: $(APP_ENV)
 
+  KevinTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - KevinTests
+    dependencies:
+      - target: Kevin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen.tests
+        GENERATE_INFOPLIST_FILE: true
+
 schemes:
   Kevin:
     build:
@@ -101,7 +113,8 @@ schemes:
       storeKitConfiguration: Kevin/Products.storekit
     test:
       config: Debug
-      targets: []
+      targets:
+        - KevinTests
     profile:
       config: Staging
     analyze:
@@ -116,8 +129,11 @@ schemes:
       config: Staging
       storeKitConfiguration: Kevin/Products.storekit
     test:
-      config: Staging
-      targets: []
+      # Unit tests need @testable import. Debug already targets the staging
+      # backend, so keep the release-like Staging app non-testable.
+      config: Debug
+      targets:
+        - KevinTests
     profile:
       config: Staging
     analyze:

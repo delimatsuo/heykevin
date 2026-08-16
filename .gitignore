@@ -40,3 +40,9 @@ scripts/update_promo_text.py
 # PNGs, and the script previously existed in exactly one throwaway worktree with
 # no copy in git — ignoring it there would have destroyed the only copy.
 marketing/app-store/screenshots/
+
+# Session screenshots referenced by docs/handoffs — kept local, not for the repo
+jobber-login.png
+live-screen-1.png
+live-screen-2.png
+recents.png

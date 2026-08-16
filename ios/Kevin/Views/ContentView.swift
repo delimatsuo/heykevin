@@ -41,7 +41,7 @@ struct ContentView: View {
                 .tag(AppTab.settings)
         }
         .onChange(of: scenePhase) {
-            if scenePhase == .active {
+            if scenePhase == .active, !AppStoreScreenshotFixtures.isEnabled {
                 appState.checkForActiveCall()
             }
         }
@@ -110,7 +110,9 @@ struct LiveCallTab: View {
         }
         .onAppear {
             if appState.hasActiveCall {
-                startPolling()
+                if !AppStoreScreenshotFixtures.isEnabled {
+                    startPolling()
+                }
                 startElapsedTimer()
             }
         }
@@ -121,7 +123,9 @@ struct LiveCallTab: View {
         }
         .onChange(of: appState.hasActiveCall) {
             if appState.hasActiveCall {
-                startPolling()
+                if !AppStoreScreenshotFixtures.isEnabled {
+                    startPolling()
+                }
                 startElapsedTimer()
             } else {
                 stopPolling()
@@ -481,6 +485,13 @@ struct LiveCallTab: View {
 
     private func startElapsedTimer() {
         elapsedTimer?.invalidate()
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isEnabled {
+            // Freeze the elapsed timer at a deterministic offset for screenshots.
+            elapsed = 137
+            return
+        }
+        #endif
         if let start = appState.callStartTime {
             elapsed = Date().timeIntervalSince(start)
         }

@@ -2,18 +2,24 @@
 
 ## Current status
 
-The public demo is disabled by default and remains unavailable until every
-activation gate below has been proven. The isolated provisioning record created
-on August 11, 2026 is:
+**The public demo is live.** It was deployed directly via `gcloud run deploy`
+on August 12, 2026, and confirmed via `gcloud run services describe` on
+August 14, 2026 to be running with `PUBLIC_DEMO_ENABLED=true` and
+`PUBLIC_DEMO_TTL_POLICIES_VERIFIED=true`. The code that had been driving it
+existed only on the unmerged `codex/public-call-demo` branch until
+[PR #168](https://github.com/delimatsuo/heykevin/pull/168) brought it into
+`main`, so `main` now matches what is actually running. The isolated
+provisioning record created on August 11, 2026 is:
 
 - Boston local number: **+1 (857) 810-6804**
 - GCP project: `hk-public-demo-bos-260811`
 - Public Cloud Run service: `kevin-public-demo` in `us-east4`
 - Dedicated Twilio child: `Hey Kevin Boston Public Demo`
 
-The number must not be publicly listed while `PUBLIC_DEMO_ENABLED=false` or any
-retention, breaker, provider, or controlled-call qualification remains open.
-This fixture is code-owned and intentionally has no contractor/tenant record.
+The activation gate procedure below still describes how to safely bring the
+demo up from disabled; it is not a live checklist for the current deployment,
+which was activated by the owner directly. This fixture is code-owned and
+intentionally has no contractor/tenant record.
 
 The demo must use its dedicated routes. Never point a public demo number at the
 ordinary `/webhooks/twilio/incoming` route.

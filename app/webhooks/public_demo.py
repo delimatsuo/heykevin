@@ -150,7 +150,7 @@ def _public_demo_stream_twiml(
     *,
     returning_caller: bool = False,
 ) -> str:
-    ws_url = settings.cloud_run_url.replace("https://", "wss://")
+    ws_url = settings.cloud_run_url.rstrip("/").replace("https://", "wss://")
     response = VoiceResponse()
     connect = Connect()
     stream = connect.stream(url=f"{ws_url}/public-demo-stream")

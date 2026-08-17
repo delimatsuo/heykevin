@@ -27,6 +27,6 @@ alwaysApply: true
 Mechanical: `composer-2.5-fast` or `cursor-grok-4.5-high-fast`.
 Implementation/PRs: `cursor-grok-4.6-xhigh` or `claude-sonnet-5-thinking-high`.
 Review/security: `claude-opus-5-thinking-high` (fallback
-`claude-opus-4-8-thinking-high`, then grok-4.6-xhigh).
-Research: sonnet or grok, not opus.
+`claude-opus-4-8-thinking-high`, then `cursor-grok-4.6-xhigh`).
+Research: `claude-sonnet-5-thinking-high` or `cursor-grok-4.6-xhigh`, not opus.
 On 429 / usage cap, switch; do not stall. Do not invent slugs.

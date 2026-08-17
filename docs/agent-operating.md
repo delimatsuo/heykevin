@@ -49,7 +49,8 @@ worktree. Never two agents commit on the same checkout.
 
 Read first: worktree `AGENTS.md`, this file, and the active plan under
 `docs/superpowers/plans/`. Quote success criteria; don’t paraphrase. Evidence
-ladder: never inflate. Fixture / mock LLM ≠ production Gemini Live behavior.
+ladder, never inflate: pytest that ran < owner live-test < production
+`deploy_sha`. Fixture / mock LLM ≠ production Gemini Live behavior.
 No public-demo iteration unless a live demo regression is reported.
 
 `firestore.rules` is deny-all client access by design (SECURITY_AUDIT F-26).
@@ -108,7 +109,7 @@ switch; do not stall.
 | Mechanical transcription, greps, “does this file exist”, fixture mapping | `composer-2.5-fast` or `cursor-grok-4.5-high-fast` |
 | Standard implementation, plans, tests, most PRs | `cursor-grok-4.6-xhigh` or `claude-sonnet-5-thinking-high` |
 | Whole-branch / defect-first review, security/PII, architectural knots | `claude-opus-5-thinking-high` (fallback `claude-opus-4-8-thinking-high`, then `cursor-grok-4.6-xhigh`) |
-| Broad cheap research / web fetch | sonnet or grok — not opus |
+| Broad cheap research / web fetch | `claude-sonnet-5-thinking-high` or `cursor-grok-4.6-xhigh` — not opus |
 
 Available slugs (do not invent others): `inherit`,
 `claude-opus-4-8-thinking-high`, `claude-opus-5-thinking-high`,
@@ -139,10 +140,11 @@ Prefer `cursor-grok-4.6-xhigh` for implementation if opus/sonnet fail.
    ```bash
    PATH="/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin:$PATH" python -m pytest -q
    ```
-   Do **not** export `TWILIO_ACCOUNT_SID` / `TELEGRAM_BOT_TOKEN` / `USER_PHONE`
-   at process start; `tests/unit/test_visual_diagnosis_*.py` snapshot forbidden
-   env names and will fail collection. iOS: `cd ios && xcodegen generate` if
-   `ios/project.yml` changed, then that app’s build if you touched Swift.
+   Do **not** export `TWILIO_*`, `TELEGRAM_BOT_TOKEN`, `USER_PHONE`, or other
+   names in `FORBIDDEN_ENV_NAMES` at process start;
+   `tests/unit/test_visual_diagnosis_*.py` snapshot those names and will fail
+   collection. iOS: `cd ios && xcodegen generate` if `ios/project.yml` changed,
+   then that app’s build if you touched Swift.
 8. Mutation-check new guards (would the test still pass if the guard were
    deleted?).
 9. Do not mark a wedge slice done unless the quoted plan row is satisfied.

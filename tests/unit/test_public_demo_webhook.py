@@ -1086,6 +1086,13 @@ def test_dedicated_demo_pipeline_exposes_only_synthetic_tools():
         for item in tools[0]["function_declarations"]
     }
     assert names == {"check_availability", "book_appointment"}
+    availability = next(
+        item
+        for item in tools[0]["function_declarations"]
+        if item["name"] == "check_availability"
+    )
+    assert "preferred_date" in availability["parameters"]["properties"]
+    assert "days_ahead" in availability["parameters"]["properties"]
 
 
 def test_demo_pipeline_constructor_rejects_injected_identity():

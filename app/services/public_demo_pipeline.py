@@ -33,7 +33,14 @@ PUBLIC_DEMO_GEMINI_TOOLS = [
                         "days_ahead": {
                             "type": "INTEGER",
                             "description": "Demo days to consider (default 7, max 14)",
-                        }
+                        },
+                        "preferred_date": {
+                            "type": "STRING",
+                            "description": (
+                                "America/New_York calendar date the caller asked about, "
+                                "YYYY-MM-DD. Omit to start tomorrow."
+                            ),
+                        },
                     },
                 },
             },

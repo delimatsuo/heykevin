@@ -18,7 +18,7 @@ import logging
 import math
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as datetime_time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -369,6 +369,7 @@ YOUR ROLE:
 
 SCHEDULING SIMULATION:
 - Use check_availability for specific demo times. Offer only times returned by that tool.
+- If the caller names a specific day or date, pass preferred_date as YYYY-MM-DD in America/New_York. Omit preferred_date to start from tomorrow.
 - If the caller selects a returned time, book_appointment performs a simulation only. Describe it as a simulated appointment request and say clearly that no appointment was created and nobody will follow up.
 - Never use the words booked, confirmed, reserved, held, all set, or on the schedule unless the same sentence clearly says it is only a simulation and no real appointment exists.
 
@@ -424,6 +425,26 @@ def _coerce_days_ahead(days_ahead: Any) -> int:
     return max(1, min(days, 14))
 
 
+def _parse_preferred_date(value: Any) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def _resolve_first_day(local_now: datetime, preferred_date: Any) -> date:
+    tomorrow = local_now.date() + timedelta(days=1)
+    parsed = _parse_preferred_date(preferred_date)
+    if parsed is None or parsed < tomorrow:
+        return tomorrow
+    latest = tomorrow + timedelta(days=14)
+    if parsed > latest:
+        return latest
+    return parsed
+
+
 def _display_time(value: datetime) -> str:
     return value.strftime("%I:%M %p").lstrip("0")
 
@@ -431,17 +452,19 @@ def _display_time(value: datetime) -> str:
 def public_demo_available_slots(
     now: datetime | float | None = None,
     days_ahead: int = 7,
+    preferred_date: Any = None,
 ) -> list[dict[str, Any]]:
     """Return up to three deterministic, synthetic one-hour Eastern slots.
 
-    The fixture starts tomorrow.  It performs no calendar lookup and its results are
-    never evidence of real capacity.  Naive datetimes are deliberately interpreted as
-    America/New_York wall-clock values so tests do not depend on the host timezone.
+    The fixture starts tomorrow unless preferred_date is a future YYYY-MM-DD.
+    It performs no calendar lookup and its results are never evidence of real
+    capacity.  Naive datetimes are deliberately interpreted as America/New_York
+    wall-clock values so tests do not depend on the host timezone.
     """
 
     local_now = _new_york_now(now)
     days = _coerce_days_ahead(days_ahead)
-    first_day = local_now.date() + timedelta(days=1)
+    first_day = _resolve_first_day(local_now, preferred_date)
     slots: list[dict[str, Any]] = []
 
     for day_offset in range(days):
@@ -482,12 +505,19 @@ def execute_public_demo_tool(
     tool_args = args if isinstance(args, Mapping) else {}
     if name == "check_availability":
         days = _coerce_days_ahead(tool_args.get("days_ahead", 7))
+        preferred_date = tool_args.get("preferred_date")
+        first_day = _resolve_first_day(_new_york_now(now), preferred_date)
         return {
             "success": True,
             "simulated": True,
             "booked": False,
             "confirmed": False,
-            "available_slots": public_demo_available_slots(now=now, days_ahead=days),
+            "preferred_date": first_day.isoformat(),
+            "available_slots": public_demo_available_slots(
+                now=now,
+                days_ahead=days,
+                preferred_date=preferred_date,
+            ),
             "days_checked": days,
             "message": (
                 "Synthetic demo availability only. These times are not real capacity "
@@ -496,9 +526,19 @@ def execute_public_demo_tool(
         }
 
     if name == "book_appointment":
-        available = public_demo_available_slots(now=now, days_ahead=14)
         start_time = tool_args.get("start_time")
         end_time = tool_args.get("end_time")
+        booking_date: Any = None
+        if isinstance(start_time, str):
+            try:
+                booking_date = _new_york_now(datetime.fromisoformat(start_time)).date().isoformat()
+            except ValueError:
+                booking_date = None
+        available = public_demo_available_slots(
+            now=now,
+            days_ahead=14,
+            preferred_date=booking_date,
+        )
         selected = next(
             (
                 slot

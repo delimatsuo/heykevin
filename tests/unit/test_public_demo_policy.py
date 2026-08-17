@@ -113,7 +113,7 @@ def test_profile_has_explicit_no_real_world_and_no_pii_rules_and_builds_prompt()
     assert "licensed and insured?" in knowledge
     assert "no real appointments" in PUBLIC_DEMO_DISCLOSURE.lower()
 
-    prompt = build_public_demo_system_prompt(profile)
+    prompt = build_public_demo_system_prompt(profile, now=FIXED_NOW)
     assert profile["business_name"] in prompt
     assert "Hey Kevin Boston Plumbing Demo" in prompt
     assert "Faucet repair labor: $165-$325" in prompt
@@ -129,6 +129,9 @@ def test_profile_has_explicit_no_real_world_and_no_pii_rules_and_builds_prompt()
     assert 'ask "Is there anything else I can help with?"' in prompt
     assert "preferred_date" in prompt
     assert "YYYY-MM-DD" in prompt
+    assert "TODAY: Tuesday, August 11, 2026" in prompt
+    assert "Tomorrow is Wednesday, August 12, 2026" in prompt
+    assert "say the weekday and date" in prompt
 
 
 def test_synthetic_availability_is_deterministic_and_eastern_relative_to_tomorrow():
@@ -203,11 +206,44 @@ def test_check_availability_tool_passes_preferred_date_and_booking_can_echo_it()
 
 def test_preferred_date_in_the_past_or_unparseable_falls_back_to_tomorrow():
     past = public_demo_available_slots(now=FIXED_NOW, preferred_date="2026-08-01")
-    junk = public_demo_available_slots(now=FIXED_NOW, preferred_date="next Thursday")
+    junk = public_demo_available_slots(now=FIXED_NOW, preferred_date="whenever")
     default = public_demo_available_slots(now=FIXED_NOW)
 
     assert past == default
     assert junk == default
+
+
+def test_weekday_preferred_date_uses_the_named_day_not_tomorrow_nine():
+    """Callers say Friday, not 2026-08-21. ISO-only parsing fell back to tomorrow 9am."""
+
+    monday_morning = datetime(2026, 8, 17, 11, 9, tzinfo=NEW_YORK)
+    friday = public_demo_available_slots(
+        now=monday_morning,
+        preferred_date="Friday",
+    )
+    default = public_demo_available_slots(now=monday_morning)
+    thursday = public_demo_available_slots(
+        now=FIXED_NOW,
+        preferred_date="next Thursday",
+    )
+
+    assert friday[0]["start_iso"] == "2026-08-21T09:00:00-04:00"
+    assert friday[0]["date"] == "Fri Aug 21"
+    assert friday[1]["start_iso"] == "2026-08-21T13:00:00-04:00"
+    assert default[0]["start_iso"] == "2026-08-18T09:00:00-04:00"
+    assert thursday[0]["start_iso"] == "2026-08-13T09:00:00-04:00"
+
+
+def test_check_availability_tool_accepts_weekday_name():
+    monday_morning = datetime(2026, 8, 17, 11, 9, tzinfo=NEW_YORK)
+    availability = execute_public_demo_tool(
+        "check_availability",
+        {"preferred_date": "friday"},
+        now=monday_morning,
+    )
+
+    assert availability["preferred_date"] == "2026-08-21"
+    assert availability["available_slots"][0]["start_iso"] == "2026-08-21T09:00:00-04:00"
 
 
 def test_demo_tools_are_json_serializable_simulated_and_never_book(monkeypatch):

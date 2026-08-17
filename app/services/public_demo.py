@@ -293,7 +293,10 @@ def _format_demo_services(services: object) -> str:
     return "\n".join(lines)
 
 
-def build_public_demo_system_prompt(config: object) -> str:
+def build_public_demo_system_prompt(
+    config: object,
+    now: datetime | float | None = None,
+) -> str:
     """Build the dedicated prompt, rejecting any JSON-reconstructed tenant dict."""
 
     if not is_public_demo_profile(config):
@@ -316,6 +319,13 @@ def build_public_demo_system_prompt(config: object) -> str:
         max_length=5_000,
     )
     services = _format_demo_services(config.get("services", []))
+    local_now = _new_york_now(now)
+    tomorrow = local_now + timedelta(days=1)
+    today_line = (
+        f"TODAY: {local_now.strftime('%A')}, {local_now.strftime('%B')} {local_now.day}, "
+        f"{local_now.year} in America/New_York. Tomorrow is {tomorrow.strftime('%A')}, "
+        f"{tomorrow.strftime('%B')} {tomorrow.day}, {tomorrow.year}."
+    )
 
     return f"""You are Kevin, the AI receptionist for {conversation_business_name}.
 The opening greeting has already told the caller that this is an AI receptionist demo.
@@ -368,8 +378,11 @@ YOUR ROLE:
   starts sharing personal or sensitive information.
 
 SCHEDULING SIMULATION:
+- {today_line}
 - Use check_availability for specific demo times. Offer only times returned by that tool.
-- If the caller names a specific day or date, pass preferred_date as YYYY-MM-DD in America/New_York. Omit preferred_date to start from tomorrow.
+- If the caller names a specific day or date, pass preferred_date. You may pass YYYY-MM-DD in America/New_York or a weekday name such as Friday. Do not omit preferred_date when they named a day.
+- When offering times from the tool, say the weekday and date from the slot, not a clock time alone.
+- Omit preferred_date only when the caller did not name a day; that starts from tomorrow.
 - If the caller selects a returned time, book_appointment performs a simulation only. Describe it as a simulated appointment request and say clearly that no appointment was created and nobody will follow up.
 - Never use the words booked, confirmed, reserved, held, all set, or on the schedule unless the same sentence clearly says it is only a simulation and no real appointment exists.
 
@@ -425,18 +438,63 @@ def _coerce_days_ahead(days_ahead: Any) -> int:
     return max(1, min(days, 14))
 
 
-def _parse_preferred_date(value: Any) -> date | None:
+_WEEKDAY_NAMES: tuple[tuple[str, int], ...] = (
+    ("wednesday", 2),
+    ("thursday", 3),
+    ("tuesday", 1),
+    ("saturday", 5),
+    ("sunday", 6),
+    ("monday", 0),
+    ("friday", 4),
+    ("thurs", 3),
+    ("tues", 1),
+    ("wed", 2),
+    ("thu", 3),
+    ("thur", 3),
+    ("tue", 1),
+    ("mon", 0),
+    ("fri", 4),
+    ("sat", 5),
+    ("sun", 6),
+)
+
+
+def _weekday_index(text: str) -> int | None:
+    lowered = text.lower()
+    for name, index in _WEEKDAY_NAMES:
+        if re.search(rf"\b{re.escape(name)}\b", lowered):
+            return index
+    return None
+
+
+def _parse_preferred_date(value: Any, local_now: datetime) -> date | None:
     if not isinstance(value, str):
         return None
-    try:
-        return date.fromisoformat(value.strip())
-    except ValueError:
+    text = value.strip()
+    if not text:
         return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        pass
+    try:
+        parsed_dt = datetime.fromisoformat(text)
+    except ValueError:
+        parsed_dt = None
+    if parsed_dt is not None:
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=PUBLIC_DEMO_TIMEZONE)
+        return parsed_dt.astimezone(PUBLIC_DEMO_TIMEZONE).date()
+    weekday = _weekday_index(text)
+    if weekday is None:
+        return None
+    tomorrow = local_now.date() + timedelta(days=1)
+    return tomorrow + timedelta(days=(weekday - tomorrow.weekday()) % 7)
 
 
 def _resolve_first_day(local_now: datetime, preferred_date: Any) -> date:
     tomorrow = local_now.date() + timedelta(days=1)
-    parsed = _parse_preferred_date(preferred_date)
+    parsed = _parse_preferred_date(preferred_date, local_now)
     if parsed is None or parsed < tomorrow:
         return tomorrow
     latest = tomorrow + timedelta(days=14)
@@ -456,7 +514,8 @@ def public_demo_available_slots(
 ) -> list[dict[str, Any]]:
     """Return up to three deterministic, synthetic one-hour Eastern slots.
 
-    The fixture starts tomorrow unless preferred_date is a future YYYY-MM-DD.
+    The fixture starts tomorrow unless preferred_date is a future YYYY-MM-DD
+    or a weekday name such as Friday.
     It performs no calendar lookup and its results are never evidence of real
     capacity.  Naive datetimes are deliberately interpreted as America/New_York
     wall-clock values so tests do not depend on the host timezone.
@@ -507,6 +566,10 @@ def execute_public_demo_tool(
         days = _coerce_days_ahead(tool_args.get("days_ahead", 7))
         preferred_date = tool_args.get("preferred_date")
         first_day = _resolve_first_day(_new_york_now(now), preferred_date)
+        logger.info(
+            "public_demo event=tool name=check_availability resolved_date=%s",
+            first_day.isoformat(),
+        )
         return {
             "success": True,
             "simulated": True,

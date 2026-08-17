@@ -7,6 +7,7 @@ import os
 import re
 
 import pytest
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
@@ -34,6 +35,8 @@ class _Query:
         self.filters: list[tuple[str, str, object]] = []
         self.order: tuple[str, object] | None = None
         self.limit_n: int | None = None
+        self.raise_on_stream: BaseException | None = None
+        self.raise_on_order: BaseException | None = None
 
     def where(self, *, filter=None):
         assert isinstance(filter, FieldFilter)
@@ -49,6 +52,10 @@ class _Query:
         return self
 
     def stream(self):
+        if self.raise_on_stream is not None:
+            raise self.raise_on_stream
+        if self.order is not None and self.raise_on_order is not None:
+            raise self.raise_on_order
         rows = self._docs
         for field, op, value in self.filters:
             assert op == "=="
@@ -57,8 +64,8 @@ class _Query:
 
 
 class _Collection:
-    def __init__(self, docs: list[dict]):
-        self.query = _Query(docs)
+    def __init__(self, query: _Query):
+        self.query = query
 
     def where(self, *, filter=None):
         return self.query.where(filter=filter)
@@ -68,11 +75,17 @@ class _DB:
     def __init__(self, docs: list[dict]):
         self.docs = docs
         self.collection_names: list[str] = []
-        self.collection_obj = _Collection(docs)
+        self.queries: list[_Query] = []
+        self.raise_on_stream: BaseException | None = None
+        self.raise_on_order: BaseException | None = None
 
     def collection(self, name):
         self.collection_names.append(name)
-        return self.collection_obj
+        query = _Query(self.docs)
+        query.raise_on_stream = self.raise_on_stream
+        query.raise_on_order = self.raise_on_order
+        self.queries.append(query)
+        return _Collection(query)
 
 
 def test_get_call_history_requires_keyword_contractor_id():
@@ -123,9 +136,11 @@ async def test_get_call_history_excludes_other_tenant_outcomes(monkeypatch):
     rows = await calls_db.get_call_history(phone, contractor_id="tenant-b", limit=10)
 
     assert [row["outcome"] for row in rows] == ["ignored"]
-    assert ("contractor_id", "==", "tenant-b") in db.collection_obj.query.filters
-    assert ("caller_phone", "==", phone) in db.collection_obj.query.filters
-    assert db.collection_obj.query.limit_n == 10
+    assert db.collection_names == ["calls"]
+    query = db.queries[0]
+    assert ("contractor_id", "==", "tenant-b") in query.filters
+    assert ("caller_phone", "==", phone) in query.filters
+    assert query.limit_n == 10
 
 
 def test_incoming_webhook_passes_contractor_id_to_call_history():
@@ -167,3 +182,56 @@ async def test_lookup_history_forwards_contractor_id(monkeypatch):
     assert captured["kwargs"]["contractor_id"] == "tenant-b"
     assert result["times_picked_up"] == 1
     assert result["times_ignored"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_call_history_falls_back_when_composite_index_missing(monkeypatch):
+    phone = "+15551230000"
+    docs = [
+        {
+            "caller_phone": phone,
+            "contractor_id": "tenant-a",
+            "outcome": "picked_up",
+            "timestamp": 200,
+        },
+        {
+            "caller_phone": phone,
+            "contractor_id": "tenant-b",
+            "outcome": "ignored",
+            "timestamp": 50,
+        },
+        {
+            "caller_phone": phone,
+            "contractor_id": "tenant-b",
+            "outcome": "picked_up",
+            "timestamp": 100,
+        },
+    ]
+    db = _DB(docs)
+    db.raise_on_order = FailedPrecondition("The query requires an index.")
+    monkeypatch.setattr(calls_db, "get_firestore_client", lambda: db)
+
+    rows = await calls_db.get_call_history(phone, contractor_id="tenant-b", limit=10)
+
+    assert [row["outcome"] for row in rows] == ["picked_up", "ignored"]
+    assert db.collection_names == ["calls", "calls"]
+    fallback = db.queries[1]
+    assert fallback.order is None
+    assert ("contractor_id", "==", "tenant-b") in fallback.filters
+    assert ("caller_phone", "==", phone) in fallback.filters
+
+
+@pytest.mark.asyncio
+async def test_get_call_history_fails_closed_on_firestore_errors(monkeypatch):
+    db = _DB([])
+    db.raise_on_stream = RuntimeError("unavailable")
+    monkeypatch.setattr(calls_db, "get_firestore_client", lambda: db)
+
+    rows = await calls_db.get_call_history(
+        "+15551230000",
+        contractor_id="tenant-b",
+        limit=10,
+    )
+
+    assert rows == []
+

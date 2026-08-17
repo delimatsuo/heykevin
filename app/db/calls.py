@@ -16,6 +16,7 @@ import secrets as _secrets
 import time
 from typing import Any, Optional
 
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -233,29 +234,59 @@ async def get_call_history(
 
     Both ``contractor_id`` and ``caller_phone`` are query filters so tenant A's
     outcomes cannot influence tenant B's trust score. A missing contractor
-    returns no rows and does not query. Needs a composite index on
-    ``calls(contractor_id, caller_phone, timestamp DESC)``; a missing index
-    fails closed to ``[]``.
+    returns no rows and does not query. Prefers
+    ``calls(contractor_id, caller_phone, timestamp DESC)``; a missing composite
+    index falls back to the same two equality filters without ``order_by`` and
+    sorts in memory. Other Firestore errors fail closed to ``[]``.
     """
     if not contractor_id or not e164_phone:
         return []
     try:
         db = get_firestore_client()
-        docs = (
-            db.collection(COLLECTION)
-            .where(filter=FieldFilter("contractor_id", "==", contractor_id))
-            .where(filter=FieldFilter("caller_phone", "==", e164_phone))
-            .order_by("timestamp", direction=firestore.Query.DESCENDING)
-            .limit(limit)
-            .stream()
-        )
-        return [_maybe_decrypt_call_doc(doc.to_dict()) for doc in docs]
     except Exception as e:
         logger.error(
             "Firestore call history failed: exception_type=%s",
             type(e).__name__,
         )
         return []
+
+    def _tenant_phone_query(*, ordered: bool, fetch_limit: int):
+        query = (
+            db.collection(COLLECTION)
+            .where(filter=FieldFilter("contractor_id", "==", contractor_id))
+            .where(filter=FieldFilter("caller_phone", "==", e164_phone))
+        )
+        if ordered:
+            query = query.order_by("timestamp", direction=firestore.Query.DESCENDING)
+        return list(query.limit(fetch_limit).stream())
+
+    try:
+        docs = _tenant_phone_query(ordered=True, fetch_limit=limit)
+    except FailedPrecondition as error:
+        logger.warning(
+            "Firestore call history index missing; using unordered tenant fallback: %s",
+            error,
+        )
+        try:
+            docs = _tenant_phone_query(ordered=False, fetch_limit=max(limit * 5, 50))
+            docs.sort(
+                key=lambda doc: (doc.to_dict() or {}).get("timestamp", 0),
+                reverse=True,
+            )
+            docs = docs[:limit]
+        except Exception as fallback_error:
+            logger.error(
+                "Firestore call history fallback failed: exception_type=%s",
+                type(fallback_error).__name__,
+            )
+            return []
+    except Exception as e:
+        logger.error(
+            "Firestore call history failed: exception_type=%s",
+            type(e).__name__,
+        )
+        return []
+    return [_maybe_decrypt_call_doc(doc.to_dict()) for doc in docs]
 
 
 async def get_calls_for_contractor(contractor_id: str, limit: int = 100) -> list[dict]:

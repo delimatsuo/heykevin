@@ -223,12 +223,27 @@ async def get_call(call_sid: str) -> Optional[dict]:
     return None
 
 
-async def get_call_history(e164_phone: str, limit: int = 10) -> list[dict]:
-    """Get recent call history for a phone number (transcripts decrypted)."""
+async def get_call_history(
+    e164_phone: str,
+    *,
+    contractor_id: str,
+    limit: int = 10,
+) -> list[dict]:
+    """Get recent call history for a phone number owned by one contractor.
+
+    Both ``contractor_id`` and ``caller_phone`` are query filters so tenant A's
+    outcomes cannot influence tenant B's trust score. A missing contractor
+    returns no rows and does not query. Needs a composite index on
+    ``calls(contractor_id, caller_phone, timestamp DESC)``; a missing index
+    fails closed to ``[]``.
+    """
+    if not contractor_id or not e164_phone:
+        return []
     try:
         db = get_firestore_client()
         docs = (
             db.collection(COLLECTION)
+            .where(filter=FieldFilter("contractor_id", "==", contractor_id))
             .where(filter=FieldFilter("caller_phone", "==", e164_phone))
             .order_by("timestamp", direction=firestore.Query.DESCENDING)
             .limit(limit)

@@ -410,7 +410,10 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             pass
 
         try:
-            calls = await asyncio.wait_for(get_call_history(caller_phone, limit=10), timeout=2.0)
+            calls = await asyncio.wait_for(
+                get_call_history(caller_phone, contractor_id=contractor_id, limit=10),
+                timeout=2.0,
+            )
             if calls:
                 history = {
                     "times_picked_up": sum(1 for c in calls if c.get("outcome") == "picked_up"),

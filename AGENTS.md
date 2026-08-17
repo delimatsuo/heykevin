@@ -1,5 +1,15 @@
 # Hey Kevin — Project Guide for AI Agents
 
+**Operating law:** [`docs/agent-operating.md`](docs/agent-operating.md). Cursor
+also injects `.cursor/rules/agent-autonomy.mdc`, `graph-engineering.mdc`, and
+`slice-execution.mdc`. Work in
+`/Volumes/Extreme Pro/MYPROJECTS/Kevin/.worktrees/…`, never the stale primary
+checkout. Do not bounce engineering or “should I push?” questions. Push, open
+PRs, and `gh pr merge --merge` when reviewed-clean. Come back only for
+owner-gated items in that doc (deploys, flags, App Store, Twilio spend,
+credentials, opening Firestore client rules). Method is Kopadze graph
+engineering, not LangGraph.
+
 ## What This Is
 
 **Hey Kevin** is an AI-powered call screening app for iPhone. When someone calls the user's forwarded number, Kevin (the AI) answers, finds out who's calling and why, transcribes the conversation live, and texts the user a summary. The user can watch live and pick up anytime.

@@ -127,6 +127,8 @@ def test_profile_has_explicit_no_real_world_and_no_pii_rules_and_builds_prompt()
     assert "Is yours an existing" in prompt
     assert "floor-mounted toilet?" in prompt
     assert 'ask "Is there anything else I can help with?"' in prompt
+    assert "preferred_date" in prompt
+    assert "YYYY-MM-DD" in prompt
 
 
 def test_synthetic_availability_is_deterministic_and_eastern_relative_to_tomorrow():
@@ -155,6 +157,57 @@ def test_synthetic_availability_normalizes_utc_and_observes_dst():
     assert len(slots) == 2
     assert slots[0]["start_iso"] == "2027-01-10T09:00:00-05:00"
     assert slots[1]["start_iso"] == "2027-01-10T13:00:00-05:00"
+
+
+def test_synthetic_availability_honors_preferred_date_without_changing_default():
+    later = public_demo_available_slots(
+        now=FIXED_NOW,
+        preferred_date="2026-08-18",
+    )
+    default = public_demo_available_slots(now=FIXED_NOW)
+
+    assert [(slot["start_iso"], slot["end_iso"]) for slot in later] == [
+        ("2026-08-18T09:00:00-04:00", "2026-08-18T10:00:00-04:00"),
+        ("2026-08-18T13:00:00-04:00", "2026-08-18T14:00:00-04:00"),
+        ("2026-08-19T10:00:00-04:00", "2026-08-19T11:00:00-04:00"),
+    ]
+    assert [(slot["start_iso"], slot["end_iso"]) for slot in default] == [
+        ("2026-08-12T09:00:00-04:00", "2026-08-12T10:00:00-04:00"),
+        ("2026-08-12T13:00:00-04:00", "2026-08-12T14:00:00-04:00"),
+        ("2026-08-13T10:00:00-04:00", "2026-08-13T11:00:00-04:00"),
+    ]
+
+
+def test_check_availability_tool_passes_preferred_date_and_booking_can_echo_it():
+    availability = execute_public_demo_tool(
+        "check_availability",
+        {"preferred_date": "2026-08-18", "days_ahead": 7},
+        now=FIXED_NOW,
+    )
+    selected = availability["available_slots"][0]
+    booking = execute_public_demo_tool(
+        "book_appointment",
+        {
+            "title": "demo",
+            "start_time": selected["start_iso"],
+            "end_time": selected["end_iso"],
+        },
+        now=FIXED_NOW,
+    )
+
+    assert availability["preferred_date"] == "2026-08-18"
+    assert selected["start_iso"] == "2026-08-18T09:00:00-04:00"
+    assert booking["requested_start"] == selected["start_iso"]
+    assert booking["booked"] is False
+
+
+def test_preferred_date_in_the_past_or_unparseable_falls_back_to_tomorrow():
+    past = public_demo_available_slots(now=FIXED_NOW, preferred_date="2026-08-01")
+    junk = public_demo_available_slots(now=FIXED_NOW, preferred_date="next Thursday")
+    default = public_demo_available_slots(now=FIXED_NOW)
+
+    assert past == default
+    assert junk == default
 
 
 def test_demo_tools_are_json_serializable_simulated_and_never_book(monkeypatch):

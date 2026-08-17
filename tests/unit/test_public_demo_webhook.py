@@ -247,16 +247,15 @@ async def test_repeat_call_gets_hmac_derived_returning_marker_without_raw_phone(
     assert "12025550147" not in body
 
 
-def test_demo_pipeline_speaks_the_documented_disclosure_before_the_offer_to_help(
+def test_demo_pipeline_greeting_is_a_short_receptionist_intro_not_the_legal_dump(
     monkeypatch,
 ):
-    """The greeting is the only place the promised caller disclosure is spoken
+    """Callers hear a Jobber-style receptionist greeting, not PUBLIC_DEMO_DISCLOSURE.
 
-    (the TwiML deliberately has no <Say>; see
-    test_admitted_call_connects_directly_to_native_demo_voice_and_never_embeds_caller_phone).
-    docs/public-call-demo.md promises "Twilio speaks this disclosure before the AI
-    stream connects" -- in this design that means Kevin's own first turn must
-    speak it, or no caller ever hears it.
+    0501a44 stuffed the landing-page legal paragraph into Kevin's first turn
+    because docs said Twilio would <Say> it and the TwiML correctly does not.
+    The owner rejected that. The written dump stays on the landing page and in
+    the system prompt; the spoken first turn must stay short.
     """
 
     def fake_base_init(self, **_kwargs):
@@ -267,7 +266,12 @@ def test_demo_pipeline_speaks_the_documented_disclosure_before_the_offer_to_help
 
     greeting = pipeline._build_greeting_text()
 
-    assert PUBLIC_DEMO_DISCLOSURE in greeting
+    assert PUBLIC_DEMO_DISCLOSURE not in greeting
+    assert "no booking" not in greeting.lower()
+    assert "sensitive information" not in greeting.lower()
+    assert "fictional Boston-area" not in greeting
+    assert greeting.startswith("Thanks for calling Hey Kevin's Boston Plumbing demo.")
+    assert "I'm Kevin, the AI receptionist." in greeting
 
 
 def test_demo_pipeline_uses_calm_male_voice_and_conversational_greeting(monkeypatch):
@@ -297,7 +301,8 @@ def test_demo_pipeline_recognizes_a_returning_caller_without_identity(monkeypatc
 
     greeting = pipeline._build_greeting_text()
 
-    assert PUBLIC_DEMO_DISCLOSURE in greeting
+    assert PUBLIC_DEMO_DISCLOSURE not in greeting
+    assert "no booking" not in greeting.lower()
     assert "calling back" in greeting
     assert "this time" in greeting
     assert "AI receptionist" in greeting

@@ -260,7 +260,7 @@ class GeminiPipeline:
             config["thinking_config"] = {
                 "thinking_budget": settings.gemini_live_thinking_budget,
             }
-        elif "3." in self._model:
+        elif "3." in self._model or "-3-" in self._model:
             config["thinking_config"] = {"thinking_level": "minimal"}
 
         return config

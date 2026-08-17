@@ -891,6 +891,23 @@ async def test_gemini_setup_disables_dynamic_thinking_for_low_latency(monkeypatc
     await pipeline.stop()
 
 
+def test_gemini_3_thinking_level_applies_to_hyphenated_model_ids():
+    """Some Gemini 3.x model IDs have no dot (e.g. "gemini-3-pro-preview"),
+
+    unlike the currently-configured "gemini-3.1-flash-live-preview". The
+    "2.5"/"3." substring checks in _build_generation_config only match the
+    dotted form, silently skipping the "thinking_level: minimal" latency
+    tuning for a hyphenated one.
+    """
+    pipeline = GeminiPipeline.__new__(GeminiPipeline)
+    pipeline._model = "gemini-3-pro-preview"
+    pipeline._voice = "Puck"
+
+    generation_config = pipeline._build_generation_config()
+
+    assert generation_config["thinking_config"] == {"thinking_level": "minimal"}
+
+
 @pytest.mark.asyncio
 async def test_gemini_process_audio_uses_current_realtime_audio_field():
     sent_messages = []

@@ -79,10 +79,15 @@ async def _lookup_contact(phone: str) -> Optional[dict]:
         return None
 
 
-async def _lookup_history(phone: str) -> dict:
+async def _lookup_history(phone: str, *, contractor_id: str = "") -> dict:
     """Call history lookup — how many times picked up, ignored, etc."""
+    if not contractor_id:
+        return {}
     try:
-        calls = await asyncio.wait_for(get_call_history(phone, limit=20), timeout=LOOKUP_TIMEOUT)
+        calls = await asyncio.wait_for(
+            get_call_history(phone, contractor_id=contractor_id, limit=20),
+            timeout=LOOKUP_TIMEOUT,
+        )
         if not calls:
             return {}
         picked_up = sum(1 for c in calls if c.get("outcome") == "picked_up")
@@ -102,13 +107,18 @@ async def _lookup_history(phone: str) -> dict:
         return {}
 
 
-async def run_lookups(phone: str, twilio_addon_data: Optional[dict] = None) -> dict:
+async def run_lookups(
+    phone: str,
+    twilio_addon_data: Optional[dict] = None,
+    *,
+    contractor_id: str = "",
+) -> dict:
     """Run all lookups in parallel. Returns partial results if some fail."""
     results = await asyncio.gather(
         _lookup_twilio(phone),
         _lookup_nomorobo(phone, twilio_addon_data),
         _lookup_contact(phone),
-        _lookup_history(phone),
+        _lookup_history(phone, contractor_id=contractor_id),
         return_exceptions=True,
     )
 

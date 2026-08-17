@@ -36,7 +36,14 @@ The isolated service must start `uvicorn app.public_demo_main:app`; the normal
 > appointments or services, and no booking, dispatch, callback, message, or
 > payment will occur.
 
-Twilio speaks this disclosure before the AI stream connects.
+This paragraph is landing-page and written-material copy. It is **not**
+spoken on the live number. Kevin's first turn is a short receptionist
+greeting that identifies him as an AI receptionist (Jobber-style). Do not
+fold this dump into `_build_greeting_text` or a Twilio `<Say>`; that was
+tried in `0501a44` and rejected. The system prompt still has the full
+boundary text so Kevin can mention it if the caller asks whether the
+business is real, tries to book or pay, or starts sharing sensitive
+information.
 
 ## Landing-page copy
 
@@ -229,7 +236,8 @@ security/privacy review:
    separate activation condition; app-side controls cannot erase provider records.
 6. Verify the deployed SHA, log levels, and provider/data-plane identities, then set
    `PUBLIC_DEMO_ENABLED=true` last.
-7. Place controlled calls and prove disclosure order, Boston/Somerville in-area
+7. Place controlled calls and prove the short receptionist greeting (no legal dump),
+   Boston/Somerville in-area
    handling, Worcester out-of-area handling, simulated scheduling,
    cutoff behavior (including a deliberately stalled Twilio completion request),
    replay rejection, no real-world side effects, no raw caller/transcript retention,

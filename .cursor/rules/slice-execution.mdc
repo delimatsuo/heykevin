@@ -1,0 +1,35 @@
+---
+description: Per-slice diamond, model routing, pytest, and PR merge for Hey Kevin
+alwaysApply: true
+---
+
+# Every slice
+
+1. Draw the diamond (nodes, IN/OUT, edges). Zero independent jobs → loop
+   yourself.
+2. Fan out only file-disjoint worktrees. One git-mutation owner each.
+3. Reduce in code (SHAs, test counts). Do not LLM-“combine.”
+4. Fresh-context reviewer on `origin/main...HEAD`. Worker ≠ reviewer.
+5. `git push -u origin HEAD` → `gh pr create --repo delimatsuo/heykevin` →
+   `gh pr merge --merge` if reviewed-clean and not owner-gated. Feature rebase:
+   `git push --force-with-lease origin <feature-branch>` only.
+6. Stage explicit paths. Never `git add -A`, `--no-verify`, or git config.
+7. Before “done”:
+   `PATH="<clone>/.venv/bin:$PATH" python -m pytest -q`
+   (Deli’s Mac example: `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`).
+   Do not export any name in `FORBIDDEN_ENV_NAMES` from
+   `tests/unit/test_visual_diagnosis_*.py` at process start (includes
+   `TWILIO_*`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `USER_PHONE`, and the
+   rest of that set). Prefer a clean shell. iOS: `xcodegen generate` if
+   `ios/project.yml` changed.
+8. Mutation-check new guards. Quote plan criteria; don’t paraphrase.
+   Fixture ≠ live Gemini. Default-off on `main` ≠ flags on.
+
+# Model routing (node complexity, not the session)
+
+Mechanical: `composer-2.5-fast` or `cursor-grok-4.5-high-fast`.
+Implementation/PRs: `cursor-grok-4.6-xhigh` or `claude-sonnet-5-thinking-high`.
+Review/security: `claude-opus-5-thinking-high` (fallback
+`claude-opus-4-8-thinking-high`, then `cursor-grok-4.6-xhigh`).
+Research: `claude-sonnet-5-thinking-high` or `cursor-grok-4.6-xhigh`, not opus.
+On 429 / usage cap, switch; do not stall. Do not invent slugs.

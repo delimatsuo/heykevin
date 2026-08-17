@@ -1,0 +1,37 @@
+---
+description: Hey Kevin agent autonomy, worktrees, and owner-gated stops
+alwaysApply: true
+---
+
+# Autonomy
+
+Operate autonomously for Deli Matsuo. Do not bounce engineering,
+implementation-order, or “should I push?” questions. Commit, push, open PRs
+to `delimatsuo/heykevin`, and `gh pr merge --merge` when a slice is
+reviewed-clean and not owner-gated.
+
+Full law: `docs/agent-operating.md`.
+
+# Work in a worktree
+
+Never trust the primary checkout (local `main` is often behind). Work in a
+git worktree under `<clone>/.worktrees/`, discovered or created from the
+current clone. On Deli's Mac the clone is
+`/Volumes/Extreme Pro/MYPROJECTS/Kevin` — example only, not a gate.
+`git fetch origin main`; cut branches from **origin/main**. Pin the
+resolved absolute worktree path in every subagent prompt. One git-mutation
+owner per worktree.
+
+# Owner-gated — stop and ask
+
+- Cloud/spend/credentials; production or staging Cloud Run deploy
+- Enabling `customer_memory_*`, `service_request_mutations_enabled`,
+  `SERVICE_REQUEST_RECOVERY_ENABLED`, `jobber_lead_capture_enabled`,
+  `PUBLIC_DEMO_ENABLED`
+- App Store / TestFlight; Twilio number buy/release; A2P / caller SMS
+- Force-push `main` or `staging`
+- Real caller PII / live customer-number calls
+- Opening `firestore.rules` (deny-all by design) or `database.rules.json`
+- GitHub merge permission deny (paste the exact command)
+
+Push to `main` does not deploy. Default-off merge ≠ activation.

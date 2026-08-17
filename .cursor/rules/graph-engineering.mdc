@@ -1,0 +1,30 @@
+---
+description: Kopadze graph engineering — jobs, edges, diamond, not LangGraph
+alwaysApply: true
+---
+
+# Graph engineering (Kopadze, not LangGraph)
+
+Source: https://x.com/AnatoliKopadze/status/2080668775796314331
+
+A graph is a **plan of jobs** (which jobs exist, which waits on which). It is
+not a supervisor chat, not LangGraph `StateGraph`, not shared `AgentState`.
+
+- **Node** = one agent, one bounded job, one typed IN, one schema’d OUT.
+  Free-text handoffs are a failed graph.
+- **Edge** exists only if data actually moves. Fake-edge test: does this step
+  *read* the previous result? If no, delete the wait and run in parallel. If
+  two nodes write the same file or share a rate-limited API, that *is* an
+  edge — serialize or use **separate worktrees**.
+- **Diamond:** split → fan out → **reduce in code** (zero tokens) →
+  **verifier on a fresh context** → one synthesizer. Ask where the split and
+  merge are, not “more steps.”
+- **Worker never grades itself.** Check tests that *did* pass, not “the agent
+  said done.”
+- Agents sharing one parent chat is a loop in a costume. Return **one report**.
+- **Anchors** sit outside the graph: pytest that ran, `firestore.rules`,
+  `AGENTS.md`, PROTECTED flags. Topology is not truth.
+- **Cap** the first run. Count expected vs returned; never synthesize a
+  partial set. Discovery: two empty rounds *and* a hard agent cap, then stop.
+- **Skip the graph** when there are no independent jobs — that is a **loop**.
+- Do not fan out for theater. Deli is last yes only on owner-gated items.

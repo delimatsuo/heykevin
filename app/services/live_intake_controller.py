@@ -28,6 +28,7 @@ class LiveIntakeController:
     def __init__(self, state: IntakeState) -> None:
         self.state = state
         self.last_action: NextAction | None = None
+        self._credit_kevin_turns = False
 
     @classmethod
     def start(
@@ -51,12 +52,17 @@ class LiveIntakeController:
         self,
         observation: CallerObservation | None = None,
     ) -> str:
+        self._credit_kevin_turns = True
         if observation is not None:
             self.state.apply_caller_observation(observation)
         return self._compose()
 
     def after_kevin_turn(self, kevin_text: str) -> None:
-        if self.last_action is None or not credits_asked_slots(kevin_text):
+        if (
+            not self._credit_kevin_turns
+            or self.last_action is None
+            or not credits_asked_slots(kevin_text)
+        ):
             return
         for slot in self.last_action.allowed_slots:
             self.state.mark_slot_asked(slot)

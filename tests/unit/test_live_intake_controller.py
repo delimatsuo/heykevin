@@ -70,6 +70,20 @@ def test_known_toilet_replacement_does_not_reask_action_or_object():
     assert "service_object" not in controller.last_action.allowed_slots
 
 
+def test_greeting_does_not_credit_opening_service_action():
+    controller = LiveIntakeController.start(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+    )
+    controller.opening_instructions()
+    controller.after_kevin_turn(
+        "Hi, thank you for calling Matsuo Plumbing. My name is Kevin. How can I help you?"
+    )
+    text = controller.after_caller_turn()
+
+    assert "Allowed slots: service_action." in text
+
+
 def test_silence_and_hangup_scripts_do_not_credit_asked_slots():
     assert credits_asked_slots("Are you still there?") is False
     assert credits_asked_slots(

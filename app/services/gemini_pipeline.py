@@ -233,7 +233,7 @@ class GeminiPipeline:
             caller_phone=self._caller_phone,
         )
         self._live_intake = None
-        if mode != "personal" and call_sid:
+        if mode != "personal":
             from app.services.live_intake_controller import LiveIntakeController
 
             self._live_intake = LiveIntakeController.start(

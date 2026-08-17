@@ -2921,6 +2921,27 @@ def test_gemini_business_pipeline_starts_live_intake_controller():
     assert pipeline._live_intake.state.call_sid == "CA_test"
 
 
+def test_gemini_business_pipeline_starts_live_intake_without_call_sid():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    assert pipeline._live_intake is not None
+
+
+def test_public_demo_pipeline_starts_live_intake_controller():
+    from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
+
+    pipeline = PublicDemoGeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+    )
+
+    assert pipeline._live_intake is not None
+
+
 def test_gemini_personal_pipeline_does_not_start_live_intake_controller():
     pipeline = GeminiPipeline(
         on_audio_out=_noop_audio,
@@ -2964,6 +2985,29 @@ async def test_gemini_sends_hold_speech_intake_after_greeting():
         "Do not speak yet. Wait until the caller finishes talking."
     )
     assert "Allowed slots: service_action." in intake
+
+
+@pytest.mark.asyncio
+async def test_greeting_transcript_does_not_skip_service_action_question():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_opening_intake_instructions()
+    pipeline._kevin_transcript_buf = [
+        "Hi, thank you for calling Matsuo Plumbing. My name is Kevin. How can I help you?"
+    ]
+    await pipeline._flush_kevin_transcript()
+    pipeline._caller_transcript_buf = ["Hi, I need to schedule an appointment."]
+    await pipeline._flush_caller_transcript()
+
+    text = _last_instruction_text(pipeline)
+    assert "Allowed slots: service_action." in text
 
 
 @pytest.mark.asyncio

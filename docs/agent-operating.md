@@ -34,18 +34,27 @@ owner deploy plus any flag change.
 
 ## Workspace (standing trap)
 
-Work in a git worktree, never the stale primary checkout:
+Work in a git worktree of the **current clone**, never the primary checkout.
+The primary checkout is often behind `origin/main`; do not trust files there.
 
-`/Volumes/Extreme Pro/MYPROJECTS/Kevin` (local `main` is often behind — do not
-trust files there).
+Discover existing trees with `git worktree list` from the clone root, or
+create one:
 
-Active trees live under:
+```bash
+git fetch origin main
+git worktree add -b <branch> .worktrees/<name> origin/main
+```
 
-`/Volumes/Extreme Pro/MYPROJECTS/Kevin/.worktrees/…`
+Active trees belong under `<clone>/.worktrees/`. Pin the resolved absolute
+worktree path in every subagent prompt once you have it. One git-mutation
+owner per worktree. Never two agents commit on the same checkout.
 
-Always `git fetch origin main` and cut branches from **origin/main**. Pin
-absolute worktree paths in every subagent prompt. One git-mutation owner per
-worktree. Never two agents commit on the same checkout.
+On Deli's Mac this clone is `/Volumes/Extreme Pro/MYPROJECTS/Kevin` and
+worktrees are `.worktrees/` under that path. Treat that as a local example,
+not a gate. Cloud, CI, and other clones (for example `/workspace/heykevin`)
+must use their own clone root and still follow the worktree rule.
+
+Always `git fetch origin main` and cut branches from **origin/main**.
 
 Read first: worktree `AGENTS.md`, this file, and the active plan under
 `docs/superpowers/plans/`. Quote success criteria; don’t paraphrase. Evidence
@@ -136,15 +145,20 @@ Prefer `cursor-grok-4.6-xhigh` for implementation if opus/sonnet fail.
 6. Stage explicit paths. Never `git add -A`. Never `--no-verify`. Never update
    git config. Never force-push `main` or `staging`. Feature-branch rebase
    updates use `git push --force-with-lease origin <feature-branch>` only.
-7. Required checks before “done”:
+7. Required checks before “done”. From the current clone or worktree, put
+   that clone’s `.venv/bin` on PATH (Deli’s Mac example:
+   `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`):
    ```bash
-   PATH="/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin:$PATH" python -m pytest -q
+   PATH="<clone>/.venv/bin:$PATH" python -m pytest -q
    ```
-   Do **not** export `TWILIO_*`, `TELEGRAM_BOT_TOKEN`, `USER_PHONE`, or other
-   names in `FORBIDDEN_ENV_NAMES` at process start;
-   `tests/unit/test_visual_diagnosis_*.py` snapshot those names and will fail
-   collection. iOS: `cd ios && xcodegen generate` if `ios/project.yml` changed,
-   then that app’s build if you touched Swift.
+   Do **not** export any name in `FORBIDDEN_ENV_NAMES` from
+   `tests/unit/test_visual_diagnosis_contracts.py` (same set in
+   `tests/unit/test_visual_diagnosis_state.py`) at process start. That set
+   includes `TWILIO_*`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `USER_PHONE`,
+   and dozens of other credential/config keys. Those tests snapshot
+   `os.environ` and fail collection if any listed name is present. Prefer a
+   clean shell over listing every key. iOS: `cd ios && xcodegen generate` if
+   `ios/project.yml` changed, then that app’s build if you touched Swift.
 8. Mutation-check new guards (would the test still pass if the guard were
    deleted?).
 9. Do not mark a wedge slice done unless the quoted plan row is satisfied.

@@ -15,9 +15,12 @@ alwaysApply: true
    `git push --force-with-lease origin <feature-branch>` only.
 6. Stage explicit paths. Never `git add -A`, `--no-verify`, or git config.
 7. Before “done”:
-   `PATH="/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin:$PATH" python -m pytest -q`
-   Do not export `TWILIO_*` / `TELEGRAM_BOT_TOKEN` / `USER_PHONE` at process
-   start (visual-diagnosis env snapshot). iOS: `xcodegen generate` if
+   `PATH="<clone>/.venv/bin:$PATH" python -m pytest -q`
+   (Deli’s Mac example: `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`).
+   Do not export any name in `FORBIDDEN_ENV_NAMES` from
+   `tests/unit/test_visual_diagnosis_*.py` at process start (includes
+   `TWILIO_*`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `USER_PHONE`, and the
+   rest of that set). Prefer a clean shell. iOS: `xcodegen generate` if
    `ios/project.yml` changed.
 8. Mutation-check new guards. Quote plan criteria; don’t paraphrase.
    Fixture ≠ live Gemini. Default-off on `main` ≠ flags on.

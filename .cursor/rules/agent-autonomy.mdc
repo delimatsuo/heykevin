@@ -14,10 +14,13 @@ Full law: `docs/agent-operating.md`.
 
 # Work in a worktree
 
-Never trust `/Volumes/Extreme Pro/MYPROJECTS/Kevin` (local `main` is often
-behind). Active trees: `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.worktrees/…`.
-`git fetch origin main`; cut branches from **origin/main**. Pin absolute
-worktree paths in every subagent prompt. One git-mutation owner per worktree.
+Never trust the primary checkout (local `main` is often behind). Work in a
+git worktree under `<clone>/.worktrees/`, discovered or created from the
+current clone. On Deli's Mac the clone is
+`/Volumes/Extreme Pro/MYPROJECTS/Kevin` — example only, not a gate.
+`git fetch origin main`; cut branches from **origin/main**. Pin the
+resolved absolute worktree path in every subagent prompt. One git-mutation
+owner per worktree.
 
 # Owner-gated — stop and ask
 

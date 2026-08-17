@@ -2885,20 +2885,194 @@ def test_vcard_ignores_generic_or_wrong_service_type_labels():
     assert "personal" not in vcard
 
 
-def test_stateful_receptionist_controller_is_not_live_wired_in_this_slice():
-    """This slice keeps live-call behavior unchanged while controller tests define policy."""
-    import app.services.gemini_pipeline as gemini_pipeline
+def _personal_config() -> dict:
+    return {
+        "owner_name": "Deli Matsuo",
+        "mode": "personal",
+        "effective_mode": "personal",
+    }
+
+
+def _last_instruction_text(pipeline: GeminiPipeline) -> str:
+    payload = pipeline._ws.sent_payloads[-1]
+    if "client_content" in payload:
+        return payload["client_content"]["turns"][0]["parts"][0]["text"]
+    return payload["realtime_input"]["text"]
+
+
+async def _noop_audio(_chunk: bytes):
+    return None
+
+
+async def _noop_transcript(_speaker: str, _text: str):
+    return None
+
+
+def test_gemini_business_pipeline_starts_live_intake_controller():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.call_sid == "CA_test"
+
+
+def test_gemini_business_pipeline_starts_live_intake_without_call_sid():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        contractor_config=_plumbing_config(),
+    )
+
+    assert pipeline._live_intake is not None
+
+
+def test_public_demo_pipeline_starts_live_intake_controller():
+    from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
+
+    pipeline = PublicDemoGeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+    )
+
+    assert pipeline._live_intake is not None
+
+
+def test_gemini_personal_pipeline_does_not_start_live_intake_controller():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_personal_config(),
+    )
+
+    assert pipeline._live_intake is None
+
+
+def test_voice_pipeline_does_not_import_live_intake_or_receptionist_policy():
     import app.services.voice_pipeline as voice_pipeline
 
-    assert not hasattr(gemini_pipeline.GeminiPipeline, "_receptionist_controller")
-    assert not hasattr(voice_pipeline.VoicePipeline, "_receptionist_controller")
-    live_sources = "\n".join(
-        [
-            inspect.getsource(gemini_pipeline),
-            inspect.getsource(voice_pipeline),
-        ]
+    source = inspect.getsource(voice_pipeline)
+    assert "live_intake_controller" not in source
+    assert "receptionist_state" not in source
+    assert "dialogue_planner" not in source
+    assert "instruction_composer" not in source
+    assert not hasattr(voice_pipeline.VoicePipeline, "_live_intake")
+
+
+@pytest.mark.asyncio
+async def test_gemini_sends_hold_speech_intake_after_greeting():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
     )
-    assert "receptionist_state" not in live_sources
-    assert "dialogue_planner" not in live_sources
-    assert "instruction_composer" not in live_sources
-    assert "receptionist_replay" not in live_sources
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_greeting()
+    await pipeline._send_opening_intake_instructions()
+
+    greeting = json.dumps(pipeline._ws.sent_payloads[0])
+    intake = _last_instruction_text(pipeline)
+    assert "Say exactly this greeting and nothing else:" in greeting
+    assert intake.startswith(
+        "Do not speak yet. Wait until the caller finishes talking."
+    )
+    assert "Allowed slots: service_action." in intake
+
+
+@pytest.mark.asyncio
+async def test_greeting_transcript_does_not_skip_service_action_question():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_opening_intake_instructions()
+    pipeline._kevin_transcript_buf = [
+        "Hi, thank you for calling Matsuo Plumbing. My name is Kevin. How can I help you?"
+    ]
+    await pipeline._flush_kevin_transcript()
+    pipeline._caller_transcript_buf = ["Hi, I need to schedule an appointment."]
+    await pipeline._flush_caller_transcript()
+
+    text = _last_instruction_text(pipeline)
+    assert "Allowed slots: service_action." in text
+
+
+@pytest.mark.asyncio
+async def test_gemini_schedule_turn_asks_object_after_action_question():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_opening_intake_instructions()
+    pipeline._caller_transcript_buf = ["Hi, I need to schedule an appointment."]
+    await pipeline._flush_caller_transcript()
+    pipeline._kevin_transcript_buf = [
+        "Is this a repair, replacement, installation, or inspection?"
+    ]
+    await pipeline._flush_kevin_transcript()
+    payloads_before_second = len(pipeline._ws.sent_payloads)
+    pipeline._caller_transcript_buf = ["Replacement."]
+    await pipeline._flush_caller_transcript()
+
+    assert len(pipeline._ws.sent_payloads) > payloads_before_second
+    text = _last_instruction_text(pipeline)
+    assert "Allowed slots: service_object." in text
+    assert "callback_preference" not in text
+
+
+@pytest.mark.asyncio
+async def test_live_intake_errors_fail_closed(monkeypatch):
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+
+    def boom(_observation=None) -> str:
+        raise RuntimeError("planner exploded")
+
+    monkeypatch.setattr(pipeline._live_intake, "after_caller_turn", boom)
+    pipeline._caller_transcript_buf = ["Hello"]
+    await pipeline._flush_caller_transcript()
+
+    assert pipeline._connected is True
+    assert pipeline._caller_turn_number == 1
+
+
+@pytest.mark.asyncio
+async def test_live_intake_does_not_inject_during_owner_availability_hold():
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    pipeline._waiting_for_owner_availability = True
+    sent_before = len(pipeline._ws.sent_payloads)
+    pipeline._caller_transcript_buf = ["Please get Deli now."]
+    await pipeline._flush_caller_transcript()
+
+    assert len(pipeline._ws.sent_payloads) == sent_before

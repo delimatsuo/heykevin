@@ -232,6 +232,14 @@ class GeminiPipeline:
             after_hours=self._after_hours,
             caller_phone=self._caller_phone,
         )
+        self._live_intake = None
+        if mode != "personal":
+            from app.services.live_intake_controller import LiveIntakeController
+
+            self._live_intake = LiveIntakeController.start(
+                call_sid=call_sid,
+                caller_phone=caller_phone,
+            )
 
         # Voice selection — pick the best voice for the contractor's language
         user_language = self._contractor_config.get("user_language", "en")
@@ -475,6 +483,7 @@ class GeminiPipeline:
                 return True
 
             await self._send_greeting()
+            await self._send_opening_intake_instructions()
             self._audio_input_ready.set()
             return True
 
@@ -1293,6 +1302,8 @@ class GeminiPipeline:
                     self._unavailable_task.cancel()
                     self._unavailable_task = None
 
+        await self._refresh_live_intake_after_caller()
+
     async def _flush_kevin_transcript(
         self,
         detect_goodbye: bool = False,
@@ -1321,6 +1332,8 @@ class GeminiPipeline:
         self._exchange_count += 1
         if apply_side_effects and is_owner_availability_hold(full_text):
             self._start_owner_availability_wait()
+
+        self._credit_live_intake_after_kevin(full_text)
 
         return (
             apply_side_effects
@@ -1651,6 +1664,67 @@ class GeminiPipeline:
         except Exception:
             self._assistant_instruction_pending = False
             raise
+
+    def _intake_injection_allowed(self) -> bool:
+        return (
+            self._live_intake is not None
+            and not self._waiting_for_owner_availability
+        )
+
+    async def _send_opening_intake_instructions(self) -> None:
+        if not self._intake_injection_allowed():
+            return
+        try:
+            text = self._live_intake.opening_instructions()
+        except Exception as error:
+            self._log_voice_timing(
+                "intake_instruction_error",
+                exception_type=type(error).__name__,
+            )
+            return
+        await self._send_live_intake_text(text)
+
+    async def _refresh_live_intake_after_caller(self) -> None:
+        if not self._intake_injection_allowed():
+            return
+        try:
+            text = self._live_intake.after_caller_turn()
+        except Exception as error:
+            self._log_voice_timing(
+                "intake_instruction_error",
+                exception_type=type(error).__name__,
+            )
+            return
+        await self._send_live_intake_text(text)
+
+    def _credit_live_intake_after_kevin(self, kevin_text: str) -> None:
+        if self._live_intake is None:
+            return
+        try:
+            self._live_intake.after_kevin_turn(kevin_text)
+        except Exception as error:
+            self._log_voice_timing(
+                "intake_credit_error",
+                exception_type=type(error).__name__,
+            )
+
+    async def _send_live_intake_text(self, text: str) -> None:
+        try:
+            await self._send_client_instruction(text)
+        except Exception as error:
+            self._log_voice_timing(
+                "intake_instruction_error",
+                exception_type=type(error).__name__,
+            )
+            return
+        self._log_voice_timing(
+            "intake_instruction",
+            action=(
+                self._live_intake.last_action_name
+                if self._live_intake is not None
+                else "none"
+            ),
+        )
 
     def _start_silence_watchdog(self) -> None:
         """Schedule the caller-silence loop, replacing any stale task."""

@@ -36,8 +36,9 @@ PUBLIC_DEMO_GEMINI_TOOLS = [
                         "preferred_date": {
                             "type": "STRING",
                             "description": (
-                                "America/New_York calendar date the caller asked about, "
-                                "YYYY-MM-DD. Omit to start tomorrow."
+                                "America/New_York date the caller asked about: "
+                                "YYYY-MM-DD or a weekday name such as Friday. "
+                                "Omit only when they did not name a day."
                             ),
                         },
                     },

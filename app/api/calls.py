@@ -6,7 +6,9 @@ from typing import List
 
 from app.middleware.auth import verify_api_token, require_contractor_access
 from app.db.calls import get_call, get_calls_for_contractor, cleanup_old_calls
+from app.db.contractors import get_contractor
 from app.db.firestore_client import get_firestore_client
+from app.services.appointment_confirm import AppointmentConfirmError, confirm_appointment
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,6 +32,25 @@ async def api_get_call(call_sid: str, request: Request):
         return {"error": "Not found"}
     require_contractor_access(request, call.get("contractor_id", ""))
     return call
+
+
+@router.post("/{call_sid}/confirm-appointment")
+async def api_confirm_appointment(call_sid: str, request: Request):
+    """Owner tap: write the pending appointment_request to Google Calendar."""
+    call = await get_call(call_sid)
+    if not call:
+        raise HTTPException(status_code=404, detail="Not found")
+    require_contractor_access(request, call.get("contractor_id", ""))
+    contractor_id = call.get("contractor_id", "")
+    contractor = await get_contractor(contractor_id) if contractor_id else None
+    if not contractor:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        return await confirm_appointment(
+            contractor=contractor, call=call, call_sid=call_sid
+        )
+    except AppointmentConfirmError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
 
 
 class MarkReadRequest(BaseModel):

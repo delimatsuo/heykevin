@@ -56,10 +56,17 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
     ),
     SideEffectSurface(
         path="app/api/calls.py",
-        current_behavior="mark-read can write submitted call SIDs.",
-        required_gate="All call mutations must verify every call SID belongs to the authenticated contractor.",
-        required_evidence="Cross-tenant negative tests for list, detail, mark-read, status update, export, and delete.",
+        current_behavior="mark-read can write submitted call SIDs; confirm-appointment writes a Google Calendar event after an owner tap.",
+        required_gate="All call mutations must verify every call SID belongs to the authenticated contractor. Owner confirm uses OWNER_CONFIRM_CALENDAR_EVENT (owner tap + idempotency), not auto-book GOOGLE_CREATE_EVENT.",
+        required_evidence="Cross-tenant negative tests for list, detail, mark-read, status update, export, and delete. Owner-confirm tests for pending tap, auto-book-off success, wrong contractor, missing request, calendar failure, and idempotent second confirm.",
         risk="sensitive_read",
+    ),
+    SideEffectSurface(
+        path="app/services/appointment_confirm.py",
+        current_behavior="Owner Confirm books the pending appointment_request onto Google Calendar and marks the call confirmed.",
+        required_gate="OWNER_CONFIRM_CALENDAR_EVENT requires owner confirmation and idempotency; it must not require gated_actions.google_create_event or integration_write_status.",
+        required_evidence="Owner-confirm unit tests with auto-book flag off, mocked calendar, and no second book when event_id is already stored.",
+        risk="external_write",
     ),
     SideEffectSurface(
         path="app/api/voip.py",

@@ -7,6 +7,7 @@ REQUIRED_PATHS = {
     "app/services/gemini_pipeline.py",
     "app/services/sms.py",
     "app/api/calls.py",
+    "app/services/appointment_confirm.py",
     "app/api/voip.py",
     "app/webhooks/telegram_callback.py",
     "app/webhooks/twilio_incoming.py",

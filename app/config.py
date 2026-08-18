@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     twilio_auth_token: str
     twilio_phone_number: str
     production_twilio_account_sid: str = ""
+    # Optional A2P Messaging Service. Empty keeps the legacy From-only payload.
+    twilio_messaging_service_sid: str = ""
+    twilio_sms_status_callback_url: str = ""
 
     # Vapi (deprecated — kept for backward compat)
     vapi_api_key: str = ""

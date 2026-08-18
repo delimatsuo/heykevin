@@ -227,3 +227,107 @@ async def test_send_mms_with_no_action_uses_legacy_ungated_twilio_payload(monkey
         }
     ]
     record_gate_decision.assert_not_called()
+
+
+_MESSAGING_SERVICE_SID = "MGtest0000000000000000000000000001"
+_STATUS_CALLBACK_URL = "https://example.com/sms-status"
+
+
+@pytest.mark.asyncio
+async def test_send_sms_includes_messaging_service_sid_and_from_when_configured(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(sms, "Client", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(sms.settings, "twilio_messaging_service_sid", _MESSAGING_SERVICE_SID)
+
+    result = await sms.send_sms(
+        "+15551234567",
+        "hello",
+        from_number="+15557654321",
+        action=None,
+    )
+
+    assert result is True
+    assert client.messages.created == [
+        {
+            "to": "+15551234567",
+            "from_": "+15557654321",
+            "body": "hello",
+            "messaging_service_sid": _MESSAGING_SERVICE_SID,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_sms_includes_status_callback_when_configured(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(sms, "Client", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(sms.settings, "twilio_sms_status_callback_url", _STATUS_CALLBACK_URL)
+
+    result = await sms.send_sms(
+        "+15551234567",
+        "hello",
+        from_number="+15557654321",
+        action=None,
+    )
+
+    assert result is True
+    assert client.messages.created == [
+        {
+            "to": "+15551234567",
+            "from_": "+15557654321",
+            "body": "hello",
+            "status_callback": _STATUS_CALLBACK_URL,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_mms_includes_messaging_service_sid_and_from_when_configured(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(sms, "Client", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(sms.settings, "twilio_messaging_service_sid", _MESSAGING_SERVICE_SID)
+
+    result = await sms.send_mms(
+        "+15551234567",
+        "hello",
+        "https://example.com/card.vcf",
+        from_number="+15557654321",
+        action=None,
+    )
+
+    assert result is True
+    assert client.messages.created == [
+        {
+            "to": "+15551234567",
+            "from_": "+15557654321",
+            "body": "hello",
+            "media_url": ["https://example.com/card.vcf"],
+            "messaging_service_sid": _MESSAGING_SERVICE_SID,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_mms_includes_status_callback_when_configured(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(sms, "Client", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(sms.settings, "twilio_sms_status_callback_url", _STATUS_CALLBACK_URL)
+
+    result = await sms.send_mms(
+        "+15551234567",
+        "hello",
+        "https://example.com/card.vcf",
+        from_number="+15557654321",
+        action=None,
+    )
+
+    assert result is True
+    assert client.messages.created == [
+        {
+            "to": "+15551234567",
+            "from_": "+15557654321",
+            "body": "hello",
+            "media_url": ["https://example.com/card.vcf"],
+            "status_callback": _STATUS_CALLBACK_URL,
+        }
+    ]

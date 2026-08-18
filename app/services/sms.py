@@ -41,6 +41,31 @@ def _gate_message_send(
     return True
 
 
+def _message_create_kwargs(
+    *,
+    to: str,
+    body: str,
+    from_number: str = "",
+    media_url: str | None = None,
+) -> dict:
+    kwargs: dict = {
+        "to": to,
+        "body": body,
+    }
+    sender = from_number or settings.twilio_phone_number
+    if sender:
+        kwargs["from_"] = sender
+    messaging_service_sid = (settings.twilio_messaging_service_sid or "").strip()
+    if messaging_service_sid:
+        kwargs["messaging_service_sid"] = messaging_service_sid
+    status_callback = (settings.twilio_sms_status_callback_url or "").strip()
+    if status_callback:
+        kwargs["status_callback"] = status_callback
+    if media_url is not None:
+        kwargs["media_url"] = [media_url]
+    return kwargs
+
+
 async def send_sms(
     to: str,
     body: str,
@@ -62,11 +87,10 @@ async def send_sms(
     try:
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         loop = asyncio.get_running_loop()
-        message = await loop.run_in_executor(None, lambda: client.messages.create(
-            to=to,
-            from_=from_number or settings.twilio_phone_number,
-            body=body,
-        ))
+        create_kwargs = _message_create_kwargs(to=to, body=body, from_number=from_number)
+        message = await loop.run_in_executor(
+            None, lambda: client.messages.create(**create_kwargs)
+        )
         logger.info(f"SMS sent: {message.sid}")
         return True
     except Exception as e:
@@ -96,12 +120,15 @@ async def send_mms(
     try:
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         loop = asyncio.get_running_loop()
-        message = await loop.run_in_executor(None, lambda: client.messages.create(
+        create_kwargs = _message_create_kwargs(
             to=to,
-            from_=from_number or settings.twilio_phone_number,
             body=body,
-            media_url=[media_url],
-        ))
+            from_number=from_number,
+            media_url=media_url,
+        )
+        message = await loop.run_in_executor(
+            None, lambda: client.messages.create(**create_kwargs)
+        )
         logger.info(f"MMS sent: {message.sid}")
         return True
     except Exception as e:

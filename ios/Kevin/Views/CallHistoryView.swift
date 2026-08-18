@@ -258,6 +258,13 @@ struct CallDetailView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.openURL) private var openURL
     let call: CallRecord
+    @State private var appointmentConfirmed = false
+    @State private var isConfirming = false
+    @State private var confirmError = ""
+
+    private var appointmentStatus: String {
+        appointmentConfirmed ? "confirmed" : (call.appointmentStatus ?? "")
+    }
 
     var body: some View {
         ScrollView {
@@ -343,17 +350,64 @@ struct CallDetailView: View {
     }
 
     private var primaryActions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: true)
-                actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
+        VStack(spacing: 10) {
+            if appointmentStatus == "pending_owner_confirmation" {
+                confirmAppointmentButton
+                if !confirmError.isEmpty {
+                    Text(confirmError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
-            VStack(spacing: 10) {
-                actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: true)
-                actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: appointmentStatus != "pending_owner_confirmation")
+                    actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
+                }
+
+                VStack(spacing: 10) {
+                    actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: appointmentStatus != "pending_owner_confirmation")
+                    actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
+                }
             }
         }
+    }
+
+    private var confirmAppointmentButton: some View {
+        Button {
+            Task { await confirmAppointment() }
+        } label: {
+            Label(
+                isConfirming ? String(localized: "Confirming…") : String(localized: "Confirm"),
+                systemImage: "calendar.badge.checkmark"
+            )
+            .font(.headline)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.accentColor)
+        }
+        .disabled(isConfirming)
+        .accessibilityLabel(String(localized: "Confirm"))
+    }
+
+    private func confirmAppointment() async {
+        guard !isConfirming else { return }
+        isConfirming = true
+        confirmError = ""
+        do {
+            try await APIClient.shared.confirmAppointment(callSid: call.id)
+            appointmentConfirmed = true
+        } catch {
+            confirmError = String(localized: "Couldn't add this to Google Calendar. Try again.")
+        }
+        isConfirming = false
     }
 
     private var callSummary: some View {

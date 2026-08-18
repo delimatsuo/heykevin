@@ -19,6 +19,7 @@ class ActionKey(str, Enum):
     JOBBER_CREATE_JOB = "jobber_create_job"
     JOBBER_CREATE_QUOTE = "jobber_create_quote"
     GOOGLE_CREATE_EVENT = "google_create_event"
+    OWNER_CONFIRM_CALENDAR_EVENT = "owner_confirm_calendar_event"
     TWILIO_CALL_REDIRECT = "twilio_call_redirect"
     TWILIO_CONFERENCE_MUTATION = "twilio_conference_mutation"
     TWILIO_NUMBER_PROVISION = "twilio_number_provision"
@@ -98,6 +99,12 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
     ActionKey.JOBBER_CREATE_JOB: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
     ActionKey.JOBBER_CREATE_QUOTE: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
     ActionKey.GOOGLE_CREATE_EVENT: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
+    ActionKey.OWNER_CONFIRM_CALENDAR_EVENT: GatePolicy(
+        requires_flag=False,
+        requires_integration_approval=False,
+        requires_owner_confirmation=True,
+        requires_idempotency=True,
+    ),
     ActionKey.TWILIO_CALL_REDIRECT: GatePolicy(requires_owner_confirmation=True),
     ActionKey.TWILIO_CONFERENCE_MUTATION: GatePolicy(requires_owner_confirmation=True),
     ActionKey.TWILIO_NUMBER_PROVISION: GatePolicy(requires_owner_confirmation=True),

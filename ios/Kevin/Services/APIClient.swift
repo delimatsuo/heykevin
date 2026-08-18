@@ -541,6 +541,7 @@ final class APIClient: @unchecked Sendable {
             let records = callsArray.compactMap { dict -> CallRecord? in
                 let callSid = dict["call_sid"] as? String ?? "\(dict["timestamp"] as? Double ?? 0)-\(dict["caller_phone"] as? String ?? "")"
                 let serverRead = dict["read"] as? Bool ?? false
+                let appointment = dict["appointment_request"] as? [String: Any]
                 return CallRecord(
                     id: callSid,
                     callerPhone: dict["caller_phone"] as? String ?? "",
@@ -551,7 +552,10 @@ final class APIClient: @unchecked Sendable {
                     transcript: dict["transcript"] as? String ?? "",
                     voicemailURL: dict["voicemail_url"] as? String,
                     callbackNumber: dict["callback_number"] as? String,
-                    readOnServer: serverRead
+                    readOnServer: serverRead,
+                    appointmentStatus: appointment?["status"] as? String,
+                    appointmentStartTime: appointment?["start_time"] as? String,
+                    appointmentTitle: appointment?["title"] as? String
                 )
             }
             // Seed local read state from server so unread badges are correct after reinstall
@@ -575,6 +579,21 @@ final class APIClient: @unchecked Sendable {
         authorize(&request)
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["call_sids": callSids])
         _ = try? await retryRequest(request)
+    }
+
+    func confirmAppointment(callSid: String) async throws {
+        let encoded = callSid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? callSid
+        let url = URL(string: "\(baseURL)/api/calls/\(encoded)/confirm-appointment")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+        authorize(&request)
+
+        let (_, response) = try await retryRequest(request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
     }
 
     // MARK: - Contractor PATCH

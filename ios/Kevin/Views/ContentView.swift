@@ -17,6 +17,7 @@ struct ContentView: View {
     @ObservedObject var callManager = CallManager.shared
     @Environment(\.scenePhase) var scenePhase
     @State private var showForcedPaywall = false
+    @State private var showWhatsNew = false
 
     var body: some View {
         TabView(selection: $appState.selectedTab) {
@@ -63,8 +64,19 @@ struct ContentView: View {
             PaywallView(canDismiss: false)
                 .environmentObject(appState)
         }
+        // Feature announcement for 1.2.8. Presented only when the paywall is
+        // not — a forced paywall means the account cannot use the feature being
+        // announced, and stacking a sheet behind a non-dismissable cover would
+        // strand it.
+        .sheet(isPresented: $showWhatsNew) {
+            WhatsNewSheet(needsCalendar: !appState.googleCalendarConnected)
+                .environmentObject(appState)
+        }
         .onAppear {
             showForcedPaywall = appState.subscriptionStatus == "expired"
+            if !showForcedPaywall {
+                showWhatsNew = WhatsNewSheet.shouldPresent(isOnboarded: appState.isOnboarded)
+            }
         }
         .onChange(of: appState.subscriptionStatus) {
             if appState.subscriptionStatus == "expired" {

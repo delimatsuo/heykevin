@@ -199,15 +199,57 @@ async def test_contractor_sms_leads_with_the_appointment_request():
 
 
 @pytest.mark.asyncio
-async def test_contractor_sms_renders_the_request_in_the_contractor_timezone():
-    """A UTC-stamped request must not quote the contractor a UTC wall clock."""
-    job_data = _job_data(appointment_request={"start_time": "2026-08-11T14:00:00+00:00"})
+async def test_contractor_sms_keeps_spoken_noon_when_the_model_stamps_utc():
+    """Gemini often writes Friday 12pm as 12:00Z. That is local wall clock, not UTC.
+
+    Converting 12:00 UTC into America/New_York in August yields 8:00 AM, which
+    is what the owner SMS showed today while the summary still said 12:00 PM.
+    """
+    job_data = _job_data(appointment_request={"start_time": "2026-08-21T12:00:00Z"})
+
+    sms = await post_call._format_contractor_sms(
+        job_data, "job-1", contractor={"timezone": "America/New_York"}
+    )
+
+    assert "Fri, Aug 21 at 12:00 PM" in sms
+    assert "8:00 AM" not in sms
+
+
+@pytest.mark.asyncio
+async def test_contractor_sms_converts_a_real_non_utc_offset_into_contractor_time():
+    """A Pacific-offset slot is an actual instant and should shift to Eastern."""
+    job_data = _job_data(appointment_request={"start_time": "2026-08-11T07:00:00-07:00"})
 
     sms = await post_call._format_contractor_sms(
         job_data, "job-1", contractor={"timezone": "America/New_York"}
     )
 
     assert "Tue, Aug 11 at 10:00 AM" in sms
+
+
+@pytest.mark.asyncio
+async def test_utc_booking_args_are_stored_as_contractor_local_iso(
+    no_calendar_write, saved_calls
+):
+    contractor = {
+        **_unauthorized_contractor(),
+        "timezone": "America/New_York",
+    }
+    pipeline = _pipeline(contractor, call_sid="CAzulu")
+
+    await pipeline._execute_tool(
+        "book_appointment",
+        {
+            **BOOKING_ARGS,
+            "start_time": "2026-08-21T12:00:00Z",
+            "end_time": "2026-08-21T13:00:00Z",
+        },
+    )
+
+    request = saved_calls[0][1]["appointment_request"]
+    assert request["start_time"].startswith("2026-08-21T12:00:00")
+    assert request["start_time"].endswith("-04:00")
+    assert request["end_time"].endswith("-04:00")
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from app.db.calls import save_call
+from app.services.appointment_time import localize_spoken_slot
 from app.services.calendar import book_appointment
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
@@ -67,15 +68,16 @@ async def confirm_appointment(*, contractor: dict, call: dict, call_sid: str) ->
     if not decision.allowed:
         raise AppointmentConfirmError(403, decision.message)
 
-    start_time = str(request.get("start_time") or "")
+    start_time = localize_spoken_slot(str(request.get("start_time") or ""), contractor)
     if not start_time:
         raise AppointmentConfirmError(502, "Appointment is missing a start time")
+    end_time = localize_spoken_slot(str(request.get("end_time") or ""), contractor)
 
     event_id = await book_appointment(
         contractor,
         str(request.get("title") or ""),
         start_time,
-        str(request.get("end_time") or ""),
+        end_time,
         str(request.get("description") or ""),
         call_sid=call_sid,
     )

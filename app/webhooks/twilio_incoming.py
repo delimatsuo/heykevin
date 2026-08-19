@@ -1084,6 +1084,34 @@ async def _record_inbound_message(contractor_id: str, payload: dict) -> bool:
     return True
 
 
+async def _notify_owner_of_inbound_message(contractor_id: str) -> bool:
+    """Push the owner that a caller texted back. Never blocks the webhook.
+
+    Body carries no caller identity and no message text, matching
+    `_safe_incoming_call_push_body` — a push body is lock-screen visible and
+    lands in OS logs, so the content stays in the app behind auth.
+
+    A push failure must not fail the webhook: Twilio would redeliver, and the
+    message is already stored. Notification is best effort.
+    """
+    try:
+        from app.services.push_notification import send_regular_push, get_device_token
+
+        token = await get_device_token(contractor_id=contractor_id)
+        if not token:
+            logger.warning("No push token for contractor — inbound message not surfaced")
+            return False
+        return await send_regular_push(
+            device_token=token,
+            title="New Text Message",
+            body="Someone replied to a text. Open Kevin for details.",
+            contractor_id=contractor_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify owner of inbound message: {type(e).__name__}")
+        return False
+
+
 @router.post("/webhooks/twilio/mms-incoming")
 async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signature)):
     """Receive SMS/MMS sent to a Kevin number.
@@ -1145,6 +1173,12 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
                 contractor["contractor_id"],
                 num_media,
             )
+            # Storing the message is not the same as the owner seeing it.
+            # Nothing reads contractors/{id}/inbound_messages, so before this
+            # every caller reply landed in Firestore unseen. Now that
+            # appointment confirmations invite a reply, a silent store would be
+            # worse than not texting at all.
+            await _notify_owner_of_inbound_message(contractor["contractor_id"])
         else:
             logger.warning("Inbound message to an unrecognized number — dropped")
     except Exception as e:

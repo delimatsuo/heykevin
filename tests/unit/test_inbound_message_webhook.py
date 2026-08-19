@@ -58,8 +58,25 @@ def wired(monkeypatch):
         captured["payload"] = payload
         return True
 
+    captured["pushes"] = []
+
+    async def fake_get_device_token(contractor_id=""):
+        return captured.get("device_token", "tok-abc")
+
+    async def fake_send_regular_push(**kwargs):
+        captured["pushes"].append(kwargs)
+        return True
+
     monkeypatch.setattr(twilio_incoming, "_lookup_contractor_for_message", fake_lookup)
     monkeypatch.setattr(twilio_incoming, "_record_inbound_message", fake_record)
+    # Patched at the source module: _notify_owner_of_inbound_message imports
+    # these at call time, so the local `from ... import` picks up the fakes.
+    monkeypatch.setattr(
+        "app.services.push_notification.get_device_token", fake_get_device_token
+    )
+    monkeypatch.setattr(
+        "app.services.push_notification.send_regular_push", fake_send_regular_push
+    )
     return captured
 
 
@@ -160,3 +177,71 @@ async def test_unparseable_sender_is_stored_verbatim(wired):
     """Short codes and alphanumeric senders will not normalize to E.164."""
     await twilio_incoming.handle_inbound_message(_FakeFormRequest(_form(From="12345")))
     assert wired["payload"]["from_number"] == "12345"
+
+
+# --- Surfacing replies to the owner -----------------------------------------
+# Storing a reply is not the same as the owner seeing it. Nothing reads
+# contractors/{id}/inbound_messages, so before this every caller reply landed in
+# Firestore unseen. Appointment confirmations now invite a reply ("Reply STOP to
+# opt out"), and inviting replies into a black hole is worse than not texting.
+
+
+@pytest.mark.asyncio
+async def test_owner_is_notified_when_a_caller_replies(wired):
+    await twilio_incoming.handle_inbound_message(_FakeFormRequest(_form()))
+
+    assert len(wired["pushes"]) == 1
+    assert wired["pushes"][0]["contractor_id"] == "c-123"
+    assert wired["pushes"][0]["device_token"] == "tok-abc"
+
+
+@pytest.mark.asyncio
+async def test_push_body_carries_no_caller_identity_or_message_text(wired):
+    """Push bodies are lock-screen visible and land in OS logs.
+
+    Matches _safe_incoming_call_push_body: the content stays in the app behind
+    auth. A regression that inlines the caller's number or words fails here.
+    """
+    await twilio_incoming.handle_inbound_message(
+        _FakeFormRequest(_form(Body="my card number is 4111 1111 1111 1111"))
+    )
+
+    push = wired["pushes"][0]
+    blob = f"{push.get('title', '')} {push.get('body', '')}"
+    assert "4111" not in blob
+    assert "card number" not in blob
+    assert "+14155559876" not in blob
+    assert "9876" not in blob
+
+
+@pytest.mark.asyncio
+async def test_unknown_destination_sends_no_push(wired):
+    await twilio_incoming.handle_inbound_message(
+        _FakeFormRequest(_form(To="+14155550000"))
+    )
+    assert wired["pushes"] == []
+
+
+@pytest.mark.asyncio
+async def test_missing_device_token_still_returns_200(wired):
+    """An owner with no registered device must not cause Twilio redelivery."""
+    wired["device_token"] = ""
+    response = await twilio_incoming.handle_inbound_message(_FakeFormRequest(_form()))
+    assert response.status_code == 200
+    assert wired["pushes"] == []
+    # The message itself is still stored — notification is the best-effort part.
+    assert wired["contractor_id"] == "c-123"
+
+
+@pytest.mark.asyncio
+async def test_push_failure_does_not_fail_the_webhook(wired, monkeypatch):
+    """Twilio would redeliver on non-2xx and re-store an already-stored message."""
+
+    async def boom(**kwargs):
+        raise RuntimeError("APNs down")
+
+    monkeypatch.setattr("app.services.push_notification.send_regular_push", boom)
+
+    response = await twilio_incoming.handle_inbound_message(_FakeFormRequest(_form()))
+    assert response.status_code == 200
+    assert wired["contractor_id"] == "c-123"

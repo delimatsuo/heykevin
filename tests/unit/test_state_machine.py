@@ -58,6 +58,8 @@ def test_active_call_serialization():
         caller_phone="+15551234567",
         state=CallState.SCREENING,
         conference_name="call_CA123",
+        ws_token="secret-token",
+        caller_name_trusted=True,
     )
     data = call.to_dict()
     assert data["state"] == "screening"
@@ -66,3 +68,6 @@ def test_active_call_serialization():
     restored = ActiveCall.from_dict(data)
     assert restored.state == CallState.SCREENING
     assert restored.call_sid == "CA123"
+    assert restored.ws_token == "secret-token"
+    assert restored.caller_name_trusted is True
+    assert "customer_memory" not in data

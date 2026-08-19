@@ -13,8 +13,6 @@ States:
 
 import time
 from enum import Enum
-from typing import Optional
-
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -106,6 +104,7 @@ class ActiveCall:
         transcript_buffer: str = "",
         contractor_id: str = "",
         ws_token: str = "",
+        caller_name_trusted: bool = False,
     ):
         self.call_sid = call_sid
         self.caller_phone = caller_phone
@@ -122,6 +121,7 @@ class ActiveCall:
         self.transcript_buffer = transcript_buffer
         self.contractor_id = contractor_id
         self.ws_token = ws_token
+        self.caller_name_trusted = caller_name_trusted is True
         self.state_updated_at = time.time()
 
     def to_dict(self) -> dict:
@@ -141,6 +141,7 @@ class ActiveCall:
             "transcript_buffer": self.transcript_buffer,
             "contractor_id": self.contractor_id,
             "ws_token": self.ws_token,
+            "caller_name_trusted": self.caller_name_trusted,
             "state_updated_at": time.time(),
         }
 
@@ -161,6 +162,8 @@ class ActiveCall:
             telegram_message_id=data.get("telegram_message_id", 0),
             transcript_buffer=data.get("transcript_buffer", ""),
             contractor_id=data.get("contractor_id", ""),
+            ws_token=data.get("ws_token", ""),
+            caller_name_trusted=data.get("caller_name_trusted", False) is True,
         )
         call.state_updated_at = data.get("state_updated_at", time.time())
         call.accepted = data.get("accepted", False)

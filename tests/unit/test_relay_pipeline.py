@@ -254,7 +254,90 @@ def test_relay_twiml_engine_switch():
     assert "/relay-stream/CA_test123" in twiml
     assert '<Language code="multi"' in twiml
     assert '<Parameter name="ws_token" value="tok_abc"' in twiml
+    assert '<Parameter name="spoken_greeting"' in twiml
     assert "Kevin" in twiml  # welcomeGreeting present
+
+
+def test_relay_twiml_greets_a_known_caller_by_name():
+    from app.webhooks.twilio_incoming import _relay_screening_twiml
+
+    twiml = _relay_screening_twiml(
+        "CA_returning",
+        "tok_returning",
+        _contractor(
+            voice_engine="relay",
+            known_caller_name="Jonathan Smith",
+            known_caller_name_trusted=True,
+        ),
+    )
+
+    assert "Hello, Jonathan. How can I help you today?" in twiml
+    assert "demo" not in twiml.lower()
+
+
+def test_relay_history_uses_the_exact_greeting_twilio_already_spoke():
+    recorder = _Recorder()
+    heard = "Hello, Jonathan. How can I help you today?"
+
+    pipeline = RelayPipeline(
+        contractor_config=_contractor(),
+        call_sid="CA_returning",
+        send_to_twilio=recorder.send,
+        on_transcript=recorder.on_transcript,
+        spoken_greeting=heard,
+    )
+
+    assert pipeline.greeting_text == heard
+    assert pipeline._history[0] == {
+        "role": "model",
+        "parts": [{"text": heard}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_returning_customer_tool_uses_transport_call_id(monkeypatch):
+    from app.services.receptionist_tools import CANCEL_SERVICE_REQUEST
+    from app.services.voice_pipeline import VoicePipeline
+
+    captured = {}
+
+    async def fake_execute(
+        self,
+        tool_name,
+        tool_args,
+        *,
+        operation_id="",
+    ):
+        captured.update(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            operation_id=operation_id,
+        )
+        return json.dumps({"status": "applied"})
+
+    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute)
+    recorder = _Recorder()
+    pipeline = RelayPipeline(
+        contractor_config=_contractor(),
+        call_sid="CA_returning",
+        caller_phone="+16175550123",
+        send_to_twilio=recorder.send,
+    )
+
+    result = await pipeline._execute_tool(
+        {
+            "id": "provider-call-7",
+            "name": CANCEL_SERVICE_REQUEST,
+            "args": {"request_id": "request-1", "expected_revision": 1},
+        }
+    )
+
+    assert result == {"status": "applied"}
+    assert captured == {
+        "tool_name": CANCEL_SERVICE_REQUEST,
+        "tool_args": {"request_id": "request-1", "expected_revision": 1},
+        "operation_id": "provider-call-7",
+    }
 
 
 def test_generate_body_disables_thinking_and_uses_configured_model():

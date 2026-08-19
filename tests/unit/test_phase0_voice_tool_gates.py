@@ -9,6 +9,7 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
 import pytest
+from unittest.mock import AsyncMock
 
 from app.services.gated_actions import ActionKey
 from app.services.gemini_pipeline import GeminiPipeline
@@ -17,6 +18,17 @@ from app.services.voice_pipeline import VoicePipeline
 
 async def _noop(*_args, **_kwargs):
     return None
+
+
+@pytest.fixture(autouse=True)
+def _provider_recovery_ready(monkeypatch):
+    from app.services import voice_pipeline
+
+    monkeypatch.setattr(
+        voice_pipeline.settings,
+        "service_request_recovery_enabled",
+        True,
+    )
 
 
 def _pipeline(config):
@@ -79,16 +91,9 @@ async def test_jobber_check_availability_is_unknown_tool_and_does_not_query_avai
 
 @pytest.mark.asyncio
 async def test_google_book_appointment_requires_automation_approval(monkeypatch):
-    created = []
-
-    async def fake_book_appointment(*args, **kwargs):
-        created.append((args, kwargs))
-        return "event-1"
-
     async def fake_save_call(*_args, **_kwargs):
         return True
 
-    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
     monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
 
     pipeline = _pipeline({
@@ -97,38 +102,41 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
         "integration_write_status": "approved",
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
+    monkeypatch.setattr(
+        pipeline,
+        "_create_managed_google_booking",
+        AsyncMock(side_effect=AssertionError("provider saga must not run")),
+    )
     result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
 
     # Unapproved automation becomes an owner-confirmed request, never a write.
     # See tests/unit/test_appointment_requests.py for the request contract.
     assert result["booked"] is False
     assert result["status"] == "request_recorded"
-    assert created == []
+    pipeline._create_managed_google_booking.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypatch):
+async def test_google_book_appointment_calls_managed_saga_when_gate_allows(monkeypatch):
     created = []
 
-    async def fake_book_appointment(contractor, *, title, start_time, end_time, description, call_sid=""):
-        created.append({
-            "token": contractor.get("google_calendar_access_token"),
-            "title": title,
-            "start_time": start_time,
-            "end_time": end_time,
-            "description": description,
-        })
-        return "event-1"
-
-    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
+    async def fake_managed_create(*, tool_input, operation_id):
+        created.append((tool_input, operation_id))
+        return {"success": True, "revision": 1}
 
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
         "integration_write_status": "approved",
+        "service_request_mutations_enabled": True,
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
         "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
+    monkeypatch.setattr(
+        pipeline,
+        "_create_managed_google_booking",
+        fake_managed_create,
+    )
     result = json.loads(await pipeline._execute_tool(
         "book_appointment",
         {
@@ -140,16 +148,91 @@ async def test_google_book_appointment_calls_gcal_book_when_gate_allows(monkeypa
         },
     ))
 
-    assert result == {"success": True, "event_id": "event-1"}
+    assert result == {"success": True, "revision": 1}
     assert created == [
-        {
-            "token": "gcal-token",
+        ({
             "title": "Sink repair",
             "start_time": "2026-07-01T13:00:00-04:00",
             "end_time": "2026-07-01T14:00:00-04:00",
             "description": "Caller asked for the upstairs sink.",
-        }
+            "ignored": "not passed through",
+        }, "")
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag_value", [None, False, 1, "true"])
+async def test_google_booking_requires_literal_tenant_mutation_flag(
+    monkeypatch,
+    flag_value,
+):
+    config = {
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+        "integration_write_status": "approved",
+        "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+    }
+    if flag_value is not None:
+        config["service_request_mutations_enabled"] = flag_value
+    pipeline = _pipeline(config)
+    managed_create = AsyncMock(side_effect=AssertionError("provider saga must stay closed"))
+    monkeypatch.setattr(pipeline, "_create_managed_google_booking", managed_create)
+    monkeypatch.setattr(
+        pipeline,
+        "_record_appointment_request",
+        AsyncMock(return_value='{"status":"request_recorded","booked":false}'),
+    )
+
+    result = json.loads(await pipeline._execute_tool(
+        "book_appointment",
+        {
+            "title": "Sink repair",
+            "start_time": "2026-07-01T13:00:00-04:00",
+            "end_time": "2026-07-01T14:00:00-04:00",
+        },
+    ))
+
+    assert result == {"status": "request_recorded", "booked": False}
+    managed_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_google_booking_stays_request_only_until_recovery_is_ready(monkeypatch):
+    from app.services import voice_pipeline
+
+    monkeypatch.setattr(
+        voice_pipeline.settings,
+        "service_request_recovery_enabled",
+        False,
+    )
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "google_calendar_access_token": "gcal-token",
+        "integration_write_status": "approved",
+        "service_request_mutations_enabled": True,
+        "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
+    })
+    managed_create = AsyncMock(side_effect=AssertionError("provider saga must stay closed"))
+    monkeypatch.setattr(pipeline, "_create_managed_google_booking", managed_create)
+    monkeypatch.setattr(
+        pipeline,
+        "_record_appointment_request",
+        AsyncMock(return_value='{"status":"request_recorded","booked":false}'),
+    )
+
+    result = json.loads(await pipeline._execute_tool(
+        "book_appointment",
+        {
+            "title": "Sink repair",
+            "start_time": "2026-07-01T13:00:00-04:00",
+            "end_time": "2026-07-01T14:00:00-04:00",
+        },
+    ))
+
+    assert result == {"status": "request_recorded", "booked": False}
+    managed_create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -244,21 +327,25 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
         "gate code 2468",
     )
 
-    async def fake_book_appointment(*_args, **_kwargs):
+    async def fake_managed_create(*_args, **_kwargs):
         raise ValueError(
             "Calendar rejected appointment for Jane Private at 123 Secret Lane, "
             "callback +15551234567, gate code 2468."
         )
 
-    monkeypatch.setattr("app.services.calendar.book_appointment", fake_book_appointment)
-
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
         "integration_write_status": "approved",
+        "service_request_mutations_enabled": True,
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
         "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
+    monkeypatch.setattr(
+        pipeline,
+        "_create_managed_google_booking",
+        fake_managed_create,
+    )
 
     with caplog.at_level(logging.ERROR):
         result = json.loads(await pipeline._execute_tool(

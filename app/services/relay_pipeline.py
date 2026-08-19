@@ -27,11 +27,13 @@ from app.services.entitlements import effective_mode
 from app.services.quiet_hours import is_business_hours
 from app.services.urgency import find_urgent_signal
 from app.services.voice_pipeline import (
+    GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
     VoicePipeline,
     _call_label,
     build_system_prompt,
     is_owner_availability_hold,
 )
+from app.services.receptionist_context import build_greeting_text as _shared_greeting_text
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +55,7 @@ MAX_REPLY_TOKENS = 256
 MAX_TOOL_ROUNDS = 3
 
 GENERATE_TIMEOUT_SECONDS = 20.0
+TOOL_DISPATCH_TIMEOUT_SECONDS = GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS + 2.0
 
 
 def build_greeting_text(contractor_config: dict, after_hours: bool) -> str:
@@ -61,29 +64,7 @@ def build_greeting_text(contractor_config: dict, after_hours: bool) -> str:
     Same wording rules as GeminiPipeline._build_greeting_text so the caller
     experience is identical across engines.
     """
-    from app.services.gemini_pipeline import GeminiPipeline
-
-    config = contractor_config or {}
-    business_name = config.get(
-        "business_name",
-        f"{config.get('owner_name', settings.user_name)}'s office",
-    )
-    business_name = " ".join(
-        str(business_name).split()[: GeminiPipeline.MAX_GREETING_BUSINESS_NAME_WORDS]
-    ) or "the office"
-    owner_name = config.get("owner_name", settings.user_name)
-    owner_parts = owner_name.split()
-    owner_first = owner_parts[0] if owner_parts else "the owner"
-    mode = config.get("effective_mode") or effective_mode(config)
-
-    if mode == "personal":
-        return f"Hi, this is Kevin, {owner_first}'s assistant. How can I help?"
-    if after_hours:
-        return f"{business_name} is currently closed. My name is Kevin. How can I help?"
-    return (
-        f"Hi, thank you for calling {business_name}. My name is Kevin. "
-        "How can I help you?"
-    )
+    return _shared_greeting_text(contractor_config, after_hours)
 
 
 class RelayPipeline:
@@ -125,6 +106,7 @@ class RelayPipeline:
         on_urgency_detected: Optional[Callable[[str], Awaitable[None]]] = None,
         on_call_complete: Optional[Callable[[], Awaitable[None]]] = None,
         stream_generate: Optional[Callable] = None,
+        spoken_greeting: str = "",
     ):
         self._contractor_config = contractor_config or {}
         self._call_sid = call_sid
@@ -149,7 +131,14 @@ class RelayPipeline:
             after_hours=self._after_hours,
             caller_phone=caller_phone,
         )
-        self.greeting_text = build_greeting_text(self._contractor_config, self._after_hours)
+        # ConversationRelay already spoke this exact value before opening the
+        # WebSocket. Keep model history aligned even if memory changes between
+        # the pre-TwiML lookup and authenticated stream setup.
+        self.greeting_text = (
+            spoken_greeting
+            if isinstance(spoken_greeting, str) and 0 < len(spoken_greeting) <= 300
+            else build_greeting_text(self._contractor_config, self._after_hours)
+        )
 
         self._history: list[dict] = []
         self._language = "en"
@@ -566,15 +555,29 @@ class RelayPipeline:
         borrowed = VoicePipeline.__new__(VoicePipeline)
         borrowed._contractor_config = self._contractor_config
         borrowed._call_sid = self._call_sid
+        borrowed._caller_phone = self._caller_phone
+        if hasattr(self, "_receptionist_tool_executor"):
+            borrowed._receptionist_tool_executor = self._receptionist_tool_executor
         logger.info(
             "relay_event event=tool_call call=%s tool=%s",
             _call_label(self._call_sid),
             tool_name[:40],
         )
         try:
+            from app.services.receptionist_tools import RECEPTIONIST_TOOL_NAMES
+
+            execution_kwargs = (
+                {"operation_id": str(function_call.get("id", ""))}
+                if tool_name in RECEPTIONIST_TOOL_NAMES
+                else {}
+            )
             result_str = await asyncio.wait_for(
-                borrowed._execute_tool(tool_name, tool_args),
-                timeout=GENERATE_TIMEOUT_SECONDS,
+                borrowed._execute_tool(
+                    tool_name,
+                    tool_args,
+                    **execution_kwargs,
+                ),
+                timeout=TOOL_DISPATCH_TIMEOUT_SECONDS,
             )
             return json.loads(result_str)
         except Exception as error:

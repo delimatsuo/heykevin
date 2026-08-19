@@ -3,8 +3,8 @@
 Contacts are stored as subcollections under each contractor:
   contractors/{contractor_id}/contacts/{phone_hash}
 
-For backward compatibility, if no contractor_id is provided,
-falls back to the legacy global 'contacts' collection.
+Legacy global ``contacts`` and ``caller_contacts`` documents are quarantined:
+runtime reads require a contractor and never fall back across tenant boundaries.
 
 Caller-contact records (auto-extracted name/business/issue summary from a
 prior screening transcript) live in a separate collection. F-14 moves these
@@ -24,9 +24,9 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-LEGACY_COLLECTION = "contacts"
 CALLER_CONTACTS_SUBCOLLECTION = "caller_contacts"
-LEGACY_CALLER_CONTACTS_COLLECTION = "caller_contacts"
+CALLER_CONTACT_PROVENANCE_SCHEMA = 1
+CALLER_CONTACT_PROVENANCE_SOURCE = "tenant_post_call"
 
 
 def caller_contact_key(e164_or_raw_phone: str) -> str:
@@ -48,32 +48,37 @@ def caller_contact_key(e164_or_raw_phone: str) -> str:
     )
 
 
-def _contacts_ref(db, contractor_id: str = ""):
-    """Return the contacts collection reference, scoped to contractor if provided."""
-    if contractor_id:
-        return db.collection("contractors").document(contractor_id).collection("contacts")
-    return db.collection(LEGACY_COLLECTION)
+def _contacts_ref(db, contractor_id: str):
+    """Return one contractor's contacts collection.
+
+    The top-level legacy collection is deliberately not reachable through this
+    helper. A tenant miss must remain a miss; otherwise one owner's saved name,
+    whitelist, or blacklist can affect another owner's call.
+    """
+    if not contractor_id:
+        raise ValueError("contractor_id is required for contact access")
+    return db.collection("contractors").document(contractor_id).collection("contacts")
 
 
 async def get_contact(e164_phone: str, contractor_id: str = "") -> Optional[dict]:
-    """Look up a contact by phone number. Returns None if not found."""
+    """Look up a tenant-scoped contact. Returns None if unbound or not found."""
+    if not contractor_id or not e164_phone:
+        return None
     try:
         db = get_firestore_client()
         doc = _contacts_ref(db, contractor_id).document(phone_hash(e164_phone)).get()
         if doc.exists:
             return doc.to_dict()
-        # Fallback: check legacy global collection if contractor-scoped not found
-        if contractor_id:
-            legacy_doc = db.collection(LEGACY_COLLECTION).document(phone_hash(e164_phone)).get()
-            if legacy_doc.exists:
-                return legacy_doc.to_dict()
     except Exception as e:
         logger.error(f"Firestore contact lookup failed: {e}", exc_info=True)
     return None
 
 
 async def upsert_contact(e164_phone: str, data: dict, contractor_id: str = ""):
-    """Create or update a contact."""
+    """Create or update a tenant-scoped contact."""
+    if not contractor_id or not e164_phone:
+        logger.warning("Refusing unscoped contact write")
+        return
     try:
         db = get_firestore_client()
         doc_id = phone_hash(e164_phone)
@@ -84,7 +89,9 @@ async def upsert_contact(e164_phone: str, data: dict, contractor_id: str = ""):
 
 
 async def list_contacts(contractor_id: str = "", limit: int = 100) -> list[dict]:
-    """List all contacts for a contractor."""
+    """List contacts for one contractor; unscoped reads fail closed."""
+    if not contractor_id:
+        return []
     try:
         db = get_firestore_client()
         docs = _contacts_ref(db, contractor_id).limit(limit).stream()
@@ -188,13 +195,22 @@ def _caller_contact_doc(db, contractor_id: str, phone_key: str):
     )
 
 
+def _caller_contact_has_tenant_provenance(data: object, contractor_id: str) -> bool:
+    """Return whether a caller-contact row was freshly bound by this tenant."""
+    return (
+        isinstance(data, dict)
+        and type(data.get("provenance_schema")) is int
+        and data.get("provenance_schema") == CALLER_CONTACT_PROVENANCE_SCHEMA
+        and data.get("provenance_source") == CALLER_CONTACT_PROVENANCE_SOURCE
+        and data.get("provenance_contractor_id") == contractor_id
+    )
+
+
 async def get_caller_contact(contractor_id: str, phone: str) -> Optional[dict]:
     """Read a caller-contact record scoped to a contractor.
 
-    Falls back to the legacy global ``caller_contacts`` collection while the
-    one-shot migration in ``scripts/migrate_caller_contacts.py`` is being run.
-    Returns None on miss or on Firestore failure (caller treats missing data
-    as "unknown caller").
+    Legacy global records are intentionally not used. Returns None on miss or
+    on Firestore failure (caller treats missing data as "unknown caller").
     """
     if not contractor_id or not phone:
         return None
@@ -206,16 +222,9 @@ async def get_caller_contact(contractor_id: str, phone: str) -> Optional[dict]:
             None, lambda: _caller_contact_doc(db, contractor_id, phone_key).get()
         )
         if doc.exists:
-            return doc.to_dict()
-        # Backward-compat: read-through to legacy global doc until migration runs.
-        legacy = await loop.run_in_executor(
-            None,
-            lambda: db.collection(LEGACY_CALLER_CONTACTS_COLLECTION)
-            .document(phone_key)
-            .get(),
-        )
-        if legacy.exists:
-            return legacy.to_dict()
+            data = doc.to_dict() or {}
+            if _caller_contact_has_tenant_provenance(data, contractor_id):
+                return data
     except Exception as e:  # noqa: BLE001 — caller handles "unknown caller" sentinel.
         logger.warning("caller_contacts: lookup failed contractor=%s err=%s", contractor_id, e)
     return None
@@ -243,40 +252,34 @@ async def upsert_caller_contact(
         phone_key = caller_contact_key(phone)
         loop = asyncio.get_event_loop()
         ref = _caller_contact_doc(db, contractor_id, phone_key)
-        await loop.run_in_executor(None, lambda: ref.set(dict(data), merge=merge))
+        payload = dict(data)
+        payload.update(
+            {
+                "provenance_schema": CALLER_CONTACT_PROVENANCE_SCHEMA,
+                "provenance_source": CALLER_CONTACT_PROVENANCE_SOURCE,
+                "provenance_contractor_id": contractor_id,
+            }
+        )
+
+        def _write():
+            # Never bless an unproven/mismatched row by merging provenance into
+            # it. Replace it with only the current tenant-bound observation.
+            existing = ref.get() if merge else None
+            safe_merge = bool(
+                existing
+                and existing.exists
+                and _caller_contact_has_tenant_provenance(
+                    existing.to_dict() or {},
+                    contractor_id,
+                )
+            )
+            ref.set(payload, merge=safe_merge)
+
+        await loop.run_in_executor(None, _write)
         return True
     except Exception as e:  # noqa: BLE001
         logger.error(
             "caller_contacts: upsert failed contractor=%s err=%s",
-            contractor_id,
-            e,
-            exc_info=True,
-        )
-        return False
-
-
-async def update_caller_contact(contractor_id: str, phone: str, updates: dict) -> bool:
-    """Apply a Firestore .update() to the caller-contact doc (creates if absent)."""
-    if not contractor_id or not phone:
-        return False
-    try:
-        db = get_firestore_client()
-        phone_key = caller_contact_key(phone)
-        loop = asyncio.get_event_loop()
-        ref = _caller_contact_doc(db, contractor_id, phone_key)
-
-        def _do_update():
-            snap = ref.get()
-            if snap.exists:
-                ref.update(dict(updates))
-            else:
-                ref.set(dict(updates), merge=True)
-
-        await loop.run_in_executor(None, _do_update)
-        return True
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            "caller_contacts: update failed contractor=%s err=%s",
             contractor_id,
             e,
             exc_info=True,

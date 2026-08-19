@@ -13,11 +13,11 @@ import time
 
 from fastapi import APIRouter, WebSocket
 
+from app.config import settings
 from app.db.cache import (
     ACTIVE_CALLS_PATH,
     _init_firebase,
     get_active_call,
-    update_active_call,
 )
 from app.services.relay_pipeline import RelayPipeline
 from app.services.voice_pipeline import _call_label
@@ -56,6 +56,9 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         _log_safe_exception("relay_setup_error", error, call_sid)
 
     ws_token = (setup or {}).get("customParameters", {}).get("ws_token", "")
+    spoken_greeting = (setup or {}).get("customParameters", {}).get(
+        "spoken_greeting", ""
+    )
     if not setup or not ws_token:
         logger.warning(
             "relay_event event=stream_auth_rejected call=%s reason=invalid_setup",
@@ -113,6 +116,56 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
                     contractor_config_loaded = with_entitlement_flags(contractor_data)
             if active_call.caller_name:
                 contractor_config_loaded["known_caller_name"] = active_call.caller_name
+                contractor_config_loaded["known_caller_name_trusted"] = (
+                    getattr(active_call, "caller_name_trusted", False) is True
+                )
+            if _contractor_id and active_call.caller_phone:
+                from app.services.receptionist_context import load_customer_memory_context
+
+                contractor_config_loaded.update(
+                    await load_customer_memory_context(
+                        _contractor_id,
+                        active_call.caller_phone,
+                        personalization_enabled=contractor_config_loaded.get(
+                            "customer_memory_personalization_enabled"
+                        )
+                        is True,
+                        mutations_enabled=(
+                            settings.service_request_recovery_enabled is True
+                            and
+                            contractor_config_loaded.get(
+                                "service_request_mutations_enabled"
+                            )
+                            is True
+                            and contractor_config_loaded.get(
+                                "integration_write_status"
+                            )
+                            == "approved"
+                        ),
+                    )
+                )
+            if contractor_config_loaded.get("customer_memory") or contractor_config_loaded.get(
+                "google_calendar_access_token"
+            ):
+                from app.db.service_requests import FirestoreServiceRequestRepository
+                from app.services.google_calendar_request_provider import (
+                    GoogleCalendarRequestProvider,
+                )
+                from app.services.service_request_repository import (
+                    ServiceRequestCommandService,
+                )
+
+                provider_adapter = (
+                    GoogleCalendarRequestProvider(contractor_config_loaded)
+                    if contractor_config_loaded.get("google_calendar_access_token")
+                    else None
+                )
+                contractor_config_loaded["service_request_command_service"] = (
+                    ServiceRequestCommandService(
+                        FirestoreServiceRequestRepository(),
+                        provider_adapter=provider_adapter,
+                    )
+                )
     except Exception as error:
         _log_safe_exception("relay_stream_setup_error", error, call_sid)
         await websocket.close(code=1011)
@@ -189,6 +242,7 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         on_transcript=on_transcript,
         on_urgency_detected=on_urgency_detected,
         on_call_complete=on_call_complete,
+        spoken_greeting=spoken_greeting,
     )
     pipeline.start_background_tasks()
     logger.info(

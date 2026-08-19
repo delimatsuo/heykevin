@@ -33,6 +33,13 @@ PROTECTED_FIELDS = frozenset({
     "forwarding_last_seen_at",
     # Integrations — feature flags are enabled by backend/admin flows only.
     "jobber_lead_capture_enabled",
+    # Customer-memory workflow writes — enabled only after backend/provider
+    # qualification; callers and the iOS profile API cannot self-enable it.
+    "service_request_mutations_enabled",
+    # Durable caller profiling and spoken-name use are independently rolled
+    # out. Absent values are false and clients cannot self-enable either one.
+    "customer_memory_capture_enabled",
+    "customer_memory_personalization_enabled",
     # Identity bindings — written only at account creation / authenticated migration.
     # Allowing PATCH to overwrite these would let an attacker hijack another account
     # by claiming its phone number or Apple user ID. (Security audit F-04.)
@@ -253,6 +260,9 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("business_city", "")
     data.setdefault("business_country_name", "")
     data.setdefault("callback_sla_minutes", 15)
+    data.setdefault("customer_memory_capture_enabled", False)
+    data.setdefault("customer_memory_personalization_enabled", False)
+    data.setdefault("service_request_mutations_enabled", False)
     # Generate a random 6-digit dial-in PIN
     data.setdefault("dial_in_pin", f"{secrets.randbelow(1000000):06d}")
     trial_start = data.setdefault("trial_start", time.time())

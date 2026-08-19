@@ -55,7 +55,11 @@ def _screening_twiml(call_sid: str, ws_token: str = "") -> str:
     return str(response)
 
 
-def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> str:
+def _relay_screening_twiml(
+    call_sid: str,
+    ws_token: str,
+    contractor: dict,
+) -> str:
     """TwiML for the ConversationRelay engine (contractor voice_engine=relay).
 
     Twilio owns STT (Deepgram, `multi` auto language detection), TTS
@@ -69,9 +73,10 @@ def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> st
     from app.services.entitlements import effective_mode
     from app.services.relay_pipeline import build_greeting_text
 
-    mode = contractor.get("effective_mode") or effective_mode(contractor)
-    after_hours = mode != "personal" and not is_business_hours(contractor)
-    greeting = build_greeting_text(contractor, after_hours)
+    greeting_config = dict(contractor)
+    mode = greeting_config.get("effective_mode") or effective_mode(greeting_config)
+    after_hours = mode != "personal" and not is_business_hours(greeting_config)
+    greeting = build_greeting_text(greeting_config, after_hours)
 
     from app.services.voice_pipeline import ELEVENLABS_VOICE_ID
 
@@ -94,6 +99,10 @@ def _relay_screening_twiml(call_sid: str, ws_token: str, contractor: dict) -> st
     )
     relay.language(code="multi")
     relay.parameter(name="ws_token", value=ws_token)
+    # Twilio speaks this before opening our WebSocket. Echo the exact heard
+    # greeting into the authenticated setup message so RelayPipeline can seed
+    # matching history without persisting customer memory in RTDB.
+    relay.parameter(name="spoken_greeting", value=greeting)
     response.append(connect)
     return str(response)
 
@@ -248,8 +257,7 @@ async def _handle_deleted_app(
 ):
     """Handle call when app is deleted — record deleted_app_detected_at, send voicemail SMS."""
     try:
-        from app.db.contractors import update_contractor, get_contractor
-        import time
+        from app.db.contractors import get_contractor
 
         # Deliberately does NOT stamp deleted_app_detected_at. This path runs on
         # *any* VoIP push failure — an APNs outage, a network blip, a briefly
@@ -404,10 +412,14 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
 
         contact = None
         history = {}
-        try:
-            contact = await asyncio.wait_for(get_contact(caller_phone, contractor_id=contractor_id), timeout=2.0)
-        except Exception:
-            pass
+        if contractor_id:
+            try:
+                contact = await asyncio.wait_for(
+                    get_contact(caller_phone, contractor_id=contractor_id),
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
 
         try:
             calls = await asyncio.wait_for(
@@ -446,12 +458,13 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             route = Route.AI_SCREENING
 
         caller_name = contact.get("name", "") if contact else ""
+        caller_name_trusted = bool(caller_name)
 
         # Check if we know this caller from previous calls (per-contractor
         # caller_contacts subcollection — F-14: was a global collection that leaked
         # caller names across contractors). The new helper reads from
-        # contractors/{contractor_id}/caller_contacts/{phone_key} and transparently
-        # falls back to the legacy global doc until the migration script runs.
+        # contractors/{contractor_id}/caller_contacts/{phone_key}. Legacy global
+        # records are quarantined and never read into a tenant call.
         if not caller_name and contractor_id:
             try:
                 from app.db.contacts import get_caller_contact as _get_caller_contact
@@ -461,6 +474,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 )
                 if contact_data:
                     caller_name = contact_data.get("caller_name", "")
+                    caller_name_trusted = False
                     if caller_name:
                         logger.info(f"Known caller: {caller_name[:1]}*** ({redact_phone(caller_phone)})")
             except Exception:
@@ -481,6 +495,32 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         # Generate WebSocket auth token for AI screening media stream
         ws_token = secrets.token_urlsafe(32) if route == Route.AI_SCREENING else ""
 
+        greeting_config = dict(contractor)
+        if caller_name_trusted:
+            greeting_config["known_caller_name"] = caller_name
+            greeting_config["known_caller_name_trusted"] = True
+
+        # ConversationRelay speaks welcomeGreeting before its WebSocket is
+        # established, so only that engine needs a bounded pre-TwiML identity
+        # lookup. Request details are loaded later, after WebSocket auth. The
+        # media-stream engines do all memory reads after auth and buffer ingress.
+        is_relay = contractor.get("voice_engine") == "relay"
+        if route == Route.AI_SCREENING and is_relay:
+            from app.services.receptionist_context import load_customer_memory_context
+
+            greeting_config.update(
+                await load_customer_memory_context(
+                    contractor_id,
+                    caller_phone,
+                    include_requests=False,
+                    personalization_enabled=contractor.get(
+                        "customer_memory_personalization_enabled"
+                    )
+                    is True,
+                    mutations_enabled=False,
+                )
+            )
+
         # Save call record and send notifications in background (don't block response)
         asyncio.create_task(_post_routing_tasks(
             call_sid=call_sid,
@@ -493,6 +533,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             conference_name=conference_name,
             contractor_id=contractor_id,
             ws_token=ws_token,
+            caller_name_trusted=caller_name_trusted,
         ))
 
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -530,9 +571,13 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         elif route == Route.AI_SCREENING:
             # Engine per contractor: "relay" hands the audio layer to Twilio
             # ConversationRelay; anything else keeps the Media Streams bridge.
-            if contractor.get("voice_engine") == "relay":
+            if is_relay:
                 return twiml_response(
-                    _relay_screening_twiml(call_sid, ws_token, contractor)
+                    _relay_screening_twiml(
+                        call_sid,
+                        ws_token,
+                        greeting_config,
+                    )
                 )
             return twiml_response(_screening_twiml(call_sid, ws_token=ws_token))
 
@@ -672,6 +717,7 @@ async def _post_routing_tasks(
     conference_name: str,
     contractor_id: str = "",
     ws_token: str = "",
+    caller_name_trusted: bool = False,
 ):
     """Background tasks after routing — save call record, send push, save RTDB state."""
     call_sid_var.set(call_sid)
@@ -717,6 +763,7 @@ async def _post_routing_tasks(
                     spam_score=spam_score,
                     contractor_id=contractor_id,
                     ws_token=ws_token,
+                    caller_name_trusted=caller_name_trusted,
                 )
                 await save_active_call(active_call)
 

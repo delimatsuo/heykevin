@@ -10,10 +10,14 @@ Full-duplex architecture based on Deepgram best practices:
 """
 
 import asyncio
+import base64
+from datetime import UTC, datetime
+import hashlib
 import json
 import logging
 import re
 import time
+import unicodedata
 from typing import Callable, Awaitable, Optional
 
 import httpx
@@ -23,6 +27,10 @@ from websockets.exceptions import ConnectionClosed
 from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, GateReason, check_gated_action
+from app.services.receptionist_context import (
+    build_customer_memory_prompt,
+    build_greeting_text,
+)
 from app.services.side_effect_audit import record_gate_decision
 from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
@@ -33,7 +41,14 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _SAFE_LOG_METRIC_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
-_KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
+_KNOWN_TOOL_NAMES = {
+    "add_service_to_request",
+    "book_appointment",
+    "cancel_service_request",
+    "check_availability",
+    "check_customer",
+    "reschedule_service_request",
+}
 
 # Google Calendar tool calls can need three sequential round-trips when the
 # stored access token has expired: the original request (401), a token
@@ -41,7 +56,85 @@ _KNOWN_TOOL_NAMES = {"book_appointment", "check_availability", "check_customer"}
 # to the caller as a tool failure — the exact failure app/services/calendar.py
 # exists to prevent. 8s matches the widest budget already used elsewhere in
 # this module and still bounds how long a caller waits in silence.
-GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS = 8.0
+# Managed booking is a three-boundary saga: durable prepare (<=5s), provider
+# confirmation (<=8s), then durable finalize (<=5s). Keep the outer budget
+# larger than their combined fail-closed bounds so it cannot cancel a valid
+# finalization after Google has accepted the event.
+GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS = 20.0
+
+
+def provider_mutation_infrastructure_ready() -> bool:
+    """Return the server-owned readiness gate for durable provider writes."""
+
+    return settings.service_request_recovery_enabled is True
+
+
+def _managed_booking_identity(
+    contractor_id: str,
+    caller_phone: str,
+    title: object,
+    start_time: object,
+    end_time: object,
+) -> tuple[str, str, str, str, str]:
+    """Return stable request/provider IDs plus canonical booking fields.
+
+    Identity is product semantic state, never a call SID or model tool-call ID,
+    so a crash or later-call retry resolves to the same durable intent.
+    """
+    from app.services.service_request_repository import customer_key_for_phone
+
+    if not isinstance(contractor_id, str) or not contractor_id.strip():
+        raise ValueError("contractor_id is required")
+    if not isinstance(title, str):
+        raise ValueError("booking title is invalid")
+    normalized_title = " ".join(
+        re.sub(
+            r"[\x00-\x1f\x7f]+",
+            " ",
+            unicodedata.normalize("NFKC", title),
+        ).split()
+    )
+    if not normalized_title or len(normalized_title) > 200:
+        raise ValueError("booking title is invalid")
+    if (
+        not isinstance(start_time, str)
+        or not isinstance(end_time, str)
+        or len(start_time) > 80
+        or len(end_time) > 80
+    ):
+        raise ValueError("booking schedule is invalid")
+    start = datetime.fromisoformat(start_time)
+    end = datetime.fromisoformat(end_time)
+    if (
+        start.tzinfo is None
+        or start.utcoffset() is None
+        or end.tzinfo is None
+        or end.utcoffset() is None
+        or end <= start
+    ):
+        raise ValueError("booking schedule is invalid")
+    canonical_start = start.astimezone(UTC).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    canonical_end = end.astimezone(UTC).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    material = json.dumps(
+        {
+            "contractor_id": contractor_id.strip(),
+            "customer_key": customer_key_for_phone(caller_phone),
+            "end": canonical_end,
+            "start": canonical_start,
+            "title": normalized_title,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    digest = hashlib.sha256(material).digest()
+    request_id = f"sr_{digest.hex()[:32]}"
+    event_id = base64.b32hexencode(digest).decode("ascii").lower().rstrip("=")[:32]
+    return request_id, event_id, normalized_title, canonical_start, canonical_end
 
 # Gate denials that mean "this owner has not turned on automatic booking"
 # rather than "something went wrong". These become appointment requests the
@@ -505,7 +598,7 @@ RULES:
         "Match the caller's language — never force them to speak English. Detect the language from their first words."
     )
 
-    return base_prompt
+    return base_prompt + build_customer_memory_prompt(config)
 
 ELEVENLABS_VOICE_ID = "cjVigY5qzO86Huf0OWal"  # Eric — Smooth, Trustworthy, American male
 ELEVENLABS_VOICE_ID_SPANISH = "onwK4e9ZLuTAKqWW03F9"  # Daniel — Multilingual male
@@ -638,27 +731,13 @@ class VoicePipeline:
         # Start silence timeout check loop
         self._silence_check_task = asyncio.create_task(self._silence_check_loop())
 
-        mode = self._contractor_config.get("effective_mode") or effective_mode(self._contractor_config)
         business_name = self._contractor_config.get(
             "business_name",
             f"{self._contractor_config.get('owner_name', settings.user_name)}'s office"
         )
-        owner_name = self._contractor_config.get("owner_name", settings.user_name)
         user_language = self._contractor_config.get("user_language", "en")
 
-        # Choose greeting based on business hours
-        if mode == "personal":
-            greeting = f"Hi, this is Kevin, {owner_name.split()[0]}'s assistant. How can I help?"
-        elif self._after_hours:
-            hours_start = self._contractor_config.get("business_hours_start", "8:00")
-            hours_end = self._contractor_config.get("business_hours_end", "5:00")
-            greeting = (
-                f"Hi, thanks for calling {business_name}. "
-                f"We're currently closed — our hours are {hours_start} to {hours_end}. "
-                f"But I can take a message and make sure it gets handled. How can I help?"
-            )
-        else:
-            greeting = f"Hi, thanks for calling {business_name}, this is Kevin. How can I help you?"
+        greeting = build_greeting_text(self._contractor_config, self._after_hours)
 
         # If the contractor's language isn't English, use the multilingual model
         # and translate the greeting so Kevin starts in the contractor's language
@@ -1106,6 +1185,143 @@ class VoicePipeline:
         },
     ]
 
+    @staticmethod
+    def _service_request_tools() -> list[dict]:
+        from app.services.receptionist_tools import anthropic_tool_declarations
+
+        return anthropic_tool_declarations()
+
+    def _has_service_request_context(self) -> bool:
+        context = self._contractor_config.get("service_request_context")
+        return (
+            isinstance(context, dict)
+            and bool(context.get("customer_key"))
+            and bool(context.get("open_service_requests"))
+            and provider_mutation_infrastructure_ready()
+            and self._contractor_config.get("service_request_mutations_enabled") is True
+            and self._contractor_config.get("integration_write_status") == "approved"
+            and bool(self._contractor_config.get("google_calendar_access_token"))
+        )
+
+    def _managed_provider_create_enabled(self) -> bool:
+        """Fail closed unless this tenant is enrolled in durable provider writes."""
+
+        return (
+            provider_mutation_infrastructure_ready()
+            and self._contractor_config.get("service_request_mutations_enabled") is True
+            and self._contractor_config.get("integration_write_status") == "approved"
+            and bool(self._contractor_config.get("google_calendar_access_token"))
+        )
+
+    def _service_request_executor(self):
+        from app.services.receptionist_tools import ReceptionistToolExecutor
+
+        executor = getattr(self, "_receptionist_tool_executor", None)
+        if executor is not None:
+            return executor
+        service = self._contractor_config.get("service_request_command_service")
+        if service is None:
+            raise RuntimeError("durable service-request command service is unavailable")
+        executor = ReceptionistToolExecutor(
+            service,
+            contractor_id=self._contractor_config.get("contractor_id", ""),
+            caller_phone=getattr(self, "_caller_phone", ""),
+        )
+        self._receptionist_tool_executor = executor
+        return executor
+
+    async def _create_managed_google_booking(
+        self,
+        *,
+        tool_input: dict,
+        operation_id: str,
+    ) -> dict:
+        """Run booking through the shared, durable provider-create saga."""
+        if not self._managed_provider_create_enabled():
+            return {
+                "success": False,
+                "error": "Managed appointment creation is not enabled for this account.",
+            }
+        contractor_id = str(self._contractor_config.get("contractor_id") or "")
+        caller_phone = str(getattr(self, "_caller_phone", "") or "")
+        command_service = self._contractor_config.get("service_request_command_service")
+        if not contractor_id or not caller_phone or command_service is None:
+            return {
+                "success": False,
+                "error": "I couldn't safely prepare and confirm that appointment.",
+            }
+
+        try:
+            from app.services.service_request_repository import (
+                ProviderBinding,
+                ServiceRequestCommandStatus,
+            )
+
+            request_id, event_id, title, start_time, end_time = _managed_booking_identity(
+                contractor_id,
+                caller_phone,
+                tool_input.get("title", "Appointment"),
+                tool_input.get("start_time", ""),
+                tool_input.get("end_time", ""),
+            )
+            description = tool_input.get("description", "")
+            if not isinstance(description, str):
+                raise ValueError("booking description is invalid")
+            transport_key = hashlib.sha256(
+                "\x00".join(
+                    [
+                        "provider-create-transport-v1",
+                        str(getattr(self, "_call_sid", "")),
+                        operation_id,
+                        request_id,
+                    ]
+                ).encode("utf-8")
+            ).hexdigest()
+            created = await command_service.create_provider_service_request(
+                contractor_id=contractor_id,
+                caller_phone=caller_phone,
+                request_id=request_id,
+                services=[title],
+                scheduled_start=start_time,
+                scheduled_end=end_time,
+                expected_revision=0,
+                idempotency_key=transport_key,
+                binding=ProviderBinding(
+                    kind="google_calendar",
+                    resource_id=event_id,
+                ),
+                title=title,
+                description=description,
+            )
+            if created.status is ServiceRequestCommandStatus.APPLIED:
+                return {
+                    "success": True,
+                    "revision": created.revision,
+                }
+            if created.status is ServiceRequestCommandStatus.PENDING_PROVIDER:
+                return {
+                    "success": False,
+                    "pending_provider": True,
+                    "error": (
+                        "The appointment could not be fully confirmed yet. Do not claim "
+                        "it is booked; ask the business to follow up."
+                    ),
+                }
+            return {
+                "success": False,
+                "error": "The appointment could not be safely created or confirmed.",
+            }
+        except Exception as error:  # noqa: BLE001 - do not expose provider/customer data
+            _log_tool_execution_failure(
+                "create_managed_google_booking",
+                getattr(self, "_call_sid", ""),
+                error,
+            )
+            return {
+                "success": False,
+                "error": "The appointment could not be safely created or confirmed.",
+            }
+
     async def _prefetch_jobber_context(self):
         """Look up caller in Jobber and prepend CRM context to system prompt.
 
@@ -1227,15 +1443,62 @@ class VoicePipeline:
             ),
         })
 
-    async def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
+    async def _execute_tool(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        *,
+        operation_id: str = "",
+    ) -> str:
         """Execute a tool call (Jobber or Google Calendar) and return the result as a string."""
+
+        from app.services.receptionist_tools import (
+            ADD_SERVICE_TO_REQUEST,
+            CANCEL_SERVICE_REQUEST,
+            RESCHEDULE_SERVICE_REQUEST,
+        )
+
+        if tool_name in {
+            CANCEL_SERVICE_REQUEST,
+            RESCHEDULE_SERVICE_REQUEST,
+            ADD_SERVICE_TO_REQUEST,
+        }:
+            if not self._has_service_request_context():
+                return json.dumps({
+                    "status": "failed",
+                    "success": False,
+                    "confirmed": False,
+                    "message": "That request change is not enabled for this account.",
+                })
+            try:
+                result = await self._service_request_executor().execute(
+                    tool_name,
+                    tool_input,
+                    operation_id=(
+                        f"{getattr(self, '_call_sid', '')}:{operation_id}"
+                        if operation_id
+                        else ""
+                    ),
+                )
+            except Exception as error:
+                _log_tool_execution_failure(
+                    tool_name,
+                    getattr(self, "_call_sid", ""),
+                    error,
+                )
+                result = {
+                    "status": "failed",
+                    "success": False,
+                    "confirmed": False,
+                    "message": "I couldn't complete or confirm that change.",
+                }
+            return json.dumps(result)
 
         # --- Google Calendar tools ---
         if self._has_google_calendar() and not self._has_jobber():
             from app.services.calendar import (
                 GoogleCalendarUnavailableError,
                 get_available_slots as gcal_slots,
-                book_appointment as gcal_book,
             )
 
             token = self._get_google_calendar_token()
@@ -1260,21 +1523,16 @@ class VoicePipeline:
                         if decision.reason in _BOOKING_REQUEST_REASONS:
                             return await self._record_appointment_request(tool_input)
                         return json.dumps({"success": False, "error": decision.message})
+                    if not self._managed_provider_create_enabled():
+                        return await self._record_appointment_request(tool_input)
 
-                    event_id = await asyncio.wait_for(
-                        gcal_book(
-                            self._contractor_config,
-                            title=tool_input.get("title", "Appointment"),
-                            start_time=tool_input.get("start_time", ""),
-                            end_time=tool_input.get("end_time", ""),
-                            description=tool_input.get("description", ""),
-                            call_sid=getattr(self, "_call_sid", ""),
+                    return json.dumps(await asyncio.wait_for(
+                        self._create_managed_google_booking(
+                            tool_input=tool_input,
+                            operation_id=operation_id,
                         ),
                         timeout=GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
-                    )
-                    if event_id:
-                        return json.dumps({"success": True, "event_id": event_id})
-                    return json.dumps({"success": False, "error": "Failed to create event"})
+                    ))
 
                 else:
                     return json.dumps({"error": f"Unknown tool: {tool_name}"})
@@ -1333,12 +1591,14 @@ class VoicePipeline:
         self._conversation.append({"role": "user", "content": f"<caller_speech>{caller_text}</caller_speech>"})
 
         # Select tools: Jobber > Google Calendar > none
+        active_tools = []
         if self._has_jobber():
-            active_tools = self.JOBBER_TOOLS
+            active_tools.extend(self.JOBBER_TOOLS)
         elif self._has_google_calendar():
-            active_tools = self.CALENDAR_TOOLS
-        else:
-            active_tools = None
+            active_tools.extend(self.CALENDAR_TOOLS)
+        if self._has_service_request_context():
+            active_tools.extend(self._service_request_tools())
+        active_tools = active_tools or None
 
         use_tools = active_tools is not None
         max_tool_iterations = 3
@@ -1422,7 +1682,20 @@ class VoicePipeline:
                                 tool=_tool_label(tool_name),
                             )
 
-                            result_str = await self._execute_tool(tool_name, tool_input)
+                            from app.services.receptionist_tools import (
+                                RECEPTIONIST_TOOL_NAMES,
+                            )
+
+                            execution_kwargs = (
+                                {"operation_id": tool_id}
+                                if tool_name in RECEPTIONIST_TOOL_NAMES
+                                else {}
+                            )
+                            result_str = await self._execute_tool(
+                                tool_name,
+                                tool_input,
+                                **execution_kwargs,
+                            )
 
                             # Check for tool failure
                             tool_failed = False

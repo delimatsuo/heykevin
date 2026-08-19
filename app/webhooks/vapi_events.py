@@ -12,7 +12,6 @@ import asyncio
 import hashlib
 import hmac
 import time
-from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -24,7 +23,7 @@ from app.services.state_machine import ActiveCall, CallState
 from app.services.scoring import calculate_trust_score
 from app.services.routing import determine_route, Route
 from app.services.telegram_bot import update_transcript, send_call_notification
-from app.utils.logging import get_logger, call_sid_var, redact_phone
+from app.utils.logging import get_logger, redact_phone
 from app.utils.phone import normalize_phone
 
 logger = get_logger(__name__)
@@ -177,12 +176,13 @@ async def _handle_assistant_request(data: dict) -> dict:
 
     # Fast lookups (< 2 seconds)
     contact = None
-    try:
-        contact = await asyncio.wait_for(
-            get_contact(caller_phone, contractor_id=contractor_id), timeout=2.0
-        )
-    except Exception:
-        pass
+    if contractor_id:
+        try:
+            contact = await asyncio.wait_for(
+                get_contact(caller_phone, contractor_id=contractor_id), timeout=2.0
+            )
+        except Exception:
+            pass
 
     lookups = {
         "contact": contact,

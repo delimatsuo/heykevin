@@ -206,8 +206,14 @@ async def filter_to_unknown_callers(records: list[dict]) -> tuple[list[dict], in
     dropped = 0
     check_failures = 0
     for record in records:
+        contractor_id = str(record.get("contractor_id") or "")
+        if not contractor_id:
+            # A tenant-unbound call cannot be compared with a saved contact
+            # without consulting the quarantined global collection.
+            check_failures += 1
+            continue
         try:
-            contact = await get_contact(record["phone"], record.get("contractor_id", ""))
+            contact = await get_contact(record["phone"], contractor_id)
         except Exception:
             # A failed check is NOT a miss. Treating it as "unknown caller" would
             # keep saved contacts in the sample and inflate the usable-name rate

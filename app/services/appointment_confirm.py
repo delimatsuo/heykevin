@@ -61,6 +61,11 @@ def _caller_confirmation_body(contractor: dict, request: dict) -> str:
     lines = [f"Your appointment with {business} is confirmed for {when}."]
     if contact:
         lines.append(f"If this time no longer works, call {contact}.")
+    # CTIA/carrier requirement: every caller-facing message carries an opt-out.
+    # The caller never signed up with Hey Kevin — they phoned a business — so
+    # the way out has to travel with the message itself. Twilio's Messaging
+    # Service handles the STOP keyword; this line is the disclosure.
+    lines.append("Reply STOP to opt out.")
     return "\n".join(lines)
 
 

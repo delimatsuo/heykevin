@@ -50,3 +50,37 @@ def localize_spoken_slot(value: str, contractor: dict[str, Any] | None) -> str:
     else:
         localized = parsed.astimezone(zone)
     return localized.isoformat()
+
+
+def format_wall_clock(start_time: str, contractor: dict[str, Any] | None) -> str:
+    """Render a slot as the contractor's wall clock, e.g. Fri, Aug 21 at 12:00 PM."""
+    localized = localize_spoken_slot(start_time, contractor)
+    parsed = parse_iso_datetime(localized)
+    if parsed is None:
+        return start_time
+    hour = parsed.hour % 12 or 12
+    meridiem = "AM" if parsed.hour < 12 else "PM"
+    return f"{parsed:%a}, {parsed:%b} {parsed.day} at {hour}:{parsed:%M} {meridiem}"
+
+
+def slot_is_plausible(
+    value: str,
+    contractor: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Reject absurd years (e.g. 2020) while allowing last week's leftover slot."""
+    localized = localize_spoken_slot(value, contractor)
+    parsed = parse_iso_datetime(localized)
+    if parsed is None:
+        return False
+    if parsed.tzinfo is None:
+        zone = contractor_zone(contractor)
+        parsed = parsed.replace(tzinfo=zone or ZoneInfo("UTC"))
+    clock = now or datetime.now(parsed.tzinfo)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=parsed.tzinfo)
+    else:
+        clock = clock.astimezone(parsed.tzinfo)
+    delta = parsed - clock
+    return timedelta(days=-400) <= delta <= timedelta(days=400)

@@ -817,16 +817,9 @@ def _format_requested_time(start_time: str, contractor: dict | None) -> str:
     UTC/Z stamps from the model are spoken local clocks, not converted
     instants — see app.services.appointment_time.localize_spoken_slot.
     """
-    from app.services.appointment_time import localize_spoken_slot, parse_iso_datetime
+    from app.services.appointment_time import format_wall_clock
 
-    localized = localize_spoken_slot(start_time, contractor)
-    parsed = parse_iso_datetime(localized)
-    if parsed is None:
-        return start_time
-
-    hour = parsed.hour % 12 or 12
-    meridiem = "AM" if parsed.hour < 12 else "PM"
-    return f"{parsed:%a}, {parsed:%b} {parsed.day} at {hour}:{parsed:%M} {meridiem}"
+    return format_wall_clock(start_time, contractor)
 
 
 async def _format_contractor_sms(

@@ -37,15 +37,25 @@ def _contractor(**overrides):
     data = {
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "owner_phone": "+15550000001",
+        "twilio_number": "+15557654321",
+        "business_name": "Electus USA",
+        "owner_name": "Deli",
+        "timezone": "America/New_York",
     }
     data.update(overrides)
     return data
+
+
+def _compliant_contractor(**overrides):
+    return _contractor(sms_compliance_status="approved", **overrides)
 
 
 def _call(**overrides):
     data = {
         "call_sid": CALL_SID,
         "contractor_id": "c1",
+        "caller_phone": "+15551112222",
         "appointment_request": dict(PENDING_REQUEST),
     }
     data.update(overrides)
@@ -89,6 +99,25 @@ def saved_calls(monkeypatch):
     return saved
 
 
+@pytest.fixture
+def sent_sms(monkeypatch):
+    sent = []
+
+    async def fake_send_sms(to, body, from_number="", **kwargs):
+        sent.append(
+            {
+                "to": to,
+                "body": body,
+                "from_number": from_number,
+                "kwargs": kwargs,
+            }
+        )
+        return True
+
+    monkeypatch.setattr("app.services.appointment_confirm.send_sms", fake_send_sms)
+    return sent
+
+
 def test_owner_confirm_action_does_not_reuse_auto_book_gate():
     policy = GATE_POLICIES[ActionKey.OWNER_CONFIRM_CALENDAR_EVENT]
     auto_book = GATE_POLICIES[ActionKey.GOOGLE_CREATE_EVENT]
@@ -100,6 +129,15 @@ def test_owner_confirm_action_does_not_reuse_auto_book_gate():
     assert policy.requires_idempotency is True
     assert auto_book.requires_flag is True
     assert auto_book.requires_integration_approval is True
+
+
+def test_caller_confirmed_sms_is_not_a_feature_flag():
+    policy = GATE_POLICIES[ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS]
+    assert ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS.value == "appointment_confirmed_caller_sms"
+    assert policy.requires_flag is False
+    assert policy.requires_sms_compliance is True
+    assert policy.requires_owner_confirmation is True
+    assert policy.requires_idempotency is True
 
 
 @pytest.mark.asyncio
@@ -209,3 +247,156 @@ async def test_wrong_contractor_is_denied(monkeypatch):
         await calls_api.api_confirm_appointment(CALL_SID, _Request(contractor_id="other"))
 
     assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_owner_confirm_texts_caller_after_calendar_write(
+    booked_events, saved_calls, sent_sms
+):
+    result = await confirm_appointment(
+        contractor=_compliant_contractor(),
+        call=_call(),
+        call_sid=CALL_SID,
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["caller_notified"] is True
+    assert len(sent_sms) == 1
+    sms = sent_sms[0]
+    assert sms["to"] == "+15551112222"
+    assert sms["from_number"] == "+15557654321"
+    assert "Electus USA" in sms["body"]
+    assert "Tue, Aug 11 at 10:00 AM" in sms["body"]
+    assert "http" not in sms["body"].lower()
+    assert "yes" not in sms["body"].lower()
+    saved_request = saved_calls[0][1]["appointment_request"]
+    assert isinstance(saved_request["caller_notified_at"], int)
+
+
+@pytest.mark.asyncio
+async def test_owner_confirm_skips_caller_sms_without_compliance(
+    booked_events, saved_calls, sent_sms
+):
+    result = await confirm_appointment(
+        contractor=_contractor(),
+        call=_call(),
+        call_sid=CALL_SID,
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["caller_notified"] is False
+    assert sent_sms == []
+    assert "caller_notified_at" not in saved_calls[0][1]["appointment_request"]
+
+
+@pytest.mark.asyncio
+async def test_owner_confirm_skips_sms_to_owner_phone(
+    booked_events, saved_calls, sent_sms
+):
+    result = await confirm_appointment(
+        contractor=_compliant_contractor(),
+        call=_call(caller_phone="+15550000001"),
+        call_sid=CALL_SID,
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["caller_notified"] is False
+    assert sent_sms == []
+
+
+@pytest.mark.asyncio
+async def test_already_confirmed_does_not_text_twice(
+    booked_events, saved_calls, sent_sms
+):
+    call = _call(
+        appointment_request={
+            **PENDING_REQUEST,
+            "status": "confirmed",
+            "event_id": "event-1",
+            "confirmed_at": 1_700_000_000,
+            "caller_notified_at": 1_700_000_001,
+        }
+    )
+
+    result = await confirm_appointment(
+        contractor=_compliant_contractor(),
+        call=call,
+        call_sid=CALL_SID,
+    )
+
+    assert result["status"] == "already_confirmed"
+    assert result["caller_notified"] is True
+    assert sent_sms == []
+    assert booked_events == []
+    assert saved_calls == []
+
+
+@pytest.mark.asyncio
+async def test_already_confirmed_retries_caller_sms_if_never_sent(
+    booked_events, saved_calls, sent_sms
+):
+    call = _call(
+        appointment_request={
+            **PENDING_REQUEST,
+            "status": "confirmed",
+            "event_id": "event-1",
+            "confirmed_at": 1_700_000_000,
+        }
+    )
+
+    result = await confirm_appointment(
+        contractor=_compliant_contractor(),
+        call=call,
+        call_sid=CALL_SID,
+    )
+
+    assert result["status"] == "already_confirmed"
+    assert result["caller_notified"] is True
+    assert booked_events == []
+    assert len(sent_sms) == 1
+    assert saved_calls[0][1]["appointment_request"]["event_id"] == "event-1"
+    assert isinstance(
+        saved_calls[0][1]["appointment_request"]["caller_notified_at"], int
+    )
+
+
+@pytest.mark.asyncio
+async def test_sms_failure_does_not_fail_confirm(
+    booked_events, saved_calls, monkeypatch
+):
+    async def fake_send_sms(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr("app.services.appointment_confirm.send_sms", fake_send_sms)
+
+    result = await confirm_appointment(
+        contractor=_compliant_contractor(),
+        call=_call(),
+        call_sid=CALL_SID,
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["caller_notified"] is False
+    assert saved_calls[0][1]["appointment_request"]["event_id"] == "event-1"
+    assert "caller_notified_at" not in saved_calls[0][1]["appointment_request"]
+
+
+@pytest.mark.asyncio
+async def test_absurd_year_is_rejected(booked_events, saved_calls, sent_sms):
+    with pytest.raises(AppointmentConfirmError) as exc:
+        await confirm_appointment(
+            contractor=_compliant_contractor(),
+            call=_call(
+                appointment_request={
+                    **PENDING_REQUEST,
+                    "start_time": "2020-08-21T12:00:00Z",
+                    "end_time": "2020-08-21T13:00:00Z",
+                }
+            ),
+            call_sid=CALL_SID,
+        )
+
+    assert exc.value.status_code == 422
+    assert booked_events == []
+    assert saved_calls == []
+    assert sent_sms == []

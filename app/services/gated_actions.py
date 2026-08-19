@@ -13,6 +13,7 @@ class ActionKey(str, Enum):
     CALLER_AUTO_REPLY = "caller_auto_reply"
     CALLER_CONFIRMATION_SMS = "caller_confirmation_sms"
     CALLER_CONFIRMATION_MMS = "caller_confirmation_mms"
+    APPOINTMENT_CONFIRMED_CALLER_SMS = "appointment_confirmed_caller_sms"
     CALLER_VCARD_MMS = "caller_vcard_mms"
     ESTIMATE_TOKEN_CREATE = "estimate_token_create"
     ESTIMATE_RESULT_SMS = "estimate_result_sms"
@@ -77,6 +78,7 @@ SMS_ACTIONS = {
     ActionKey.CALLER_AUTO_REPLY,
     ActionKey.CALLER_CONFIRMATION_SMS,
     ActionKey.CALLER_CONFIRMATION_MMS,
+    ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS,
     ActionKey.CALLER_VCARD_MMS,
     ActionKey.ESTIMATE_RESULT_SMS,
 }
@@ -93,6 +95,12 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
     ActionKey.CALLER_AUTO_REPLY: GatePolicy(requires_sms_compliance=True),
     ActionKey.CALLER_CONFIRMATION_SMS: GatePolicy(requires_sms_compliance=True),
     ActionKey.CALLER_CONFIRMATION_MMS: GatePolicy(requires_sms_compliance=True),
+    ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS: GatePolicy(
+        requires_flag=False,
+        requires_sms_compliance=True,
+        requires_owner_confirmation=True,
+        requires_idempotency=True,
+    ),
     ActionKey.CALLER_VCARD_MMS: GatePolicy(requires_sms_compliance=True),
     ActionKey.ESTIMATE_TOKEN_CREATE: GatePolicy(requires_owner_confirmation=True),
     ActionKey.ESTIMATE_RESULT_SMS: GatePolicy(requires_sms_compliance=True),

@@ -352,6 +352,7 @@ struct CallDetailView: View {
     private var primaryActions: some View {
         VStack(spacing: 10) {
             if appointmentStatus == "pending_owner_confirmation" {
+                appointmentRequestCard
                 confirmAppointmentButton
                 if !confirmError.isEmpty {
                     Text(confirmError)
@@ -375,6 +376,41 @@ struct CallDetailView: View {
         }
     }
 
+    private var appointmentRequestCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let title = call.appointmentTitle, !title.isEmpty {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+            }
+            Text(formattedAppointmentStart)
+                .font(.headline)
+            Text(String(localized: "Adds this time to Google Calendar. Nothing is booked until you confirm."))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var formattedAppointmentStart: String {
+        guard let raw = call.appointmentStartTime, !raw.isEmpty else {
+            return String(localized: "Requested time")
+        }
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let basic = ISO8601DateFormatter()
+        basic.formatOptions = [.withInternetDateTime]
+        if let date = withFractional.date(from: raw) ?? basic.date(from: raw) {
+            return date.formatted(date: .abbreviated, time: .shortened)
+        }
+        return raw
+    }
+
     private var confirmAppointmentButton: some View {
         Button {
             Task { await confirmAppointment() }
@@ -395,6 +431,7 @@ struct CallDetailView: View {
         }
         .disabled(isConfirming)
         .accessibilityLabel(String(localized: "Confirm"))
+        .accessibilityHint(formattedAppointmentStart)
     }
 
     private func confirmAppointment() async {

@@ -63,9 +63,9 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
     ),
     SideEffectSurface(
         path="app/services/appointment_confirm.py",
-        current_behavior="Owner Confirm books the pending appointment_request onto Google Calendar and marks the call confirmed.",
-        required_gate="OWNER_CONFIRM_CALENDAR_EVENT requires owner confirmation and idempotency; it must not require gated_actions.google_create_event or integration_write_status.",
-        required_evidence="Owner-confirm unit tests with auto-book flag off, mocked calendar, and no second book when event_id is already stored.",
+        current_behavior="Owner Confirm books the pending appointment_request onto Google Calendar and marks the call confirmed. After a successful calendar write it may SMS the caller an informational confirmation (not a book link).",
+        required_gate="OWNER_CONFIRM_CALENDAR_EVENT requires owner confirmation and idempotency; it must not require gated_actions.google_create_event or integration_write_status. Caller SMS uses APPOINTMENT_CONFIRMED_CALLER_SMS (SMS compliance + owner tap, no feature flag, skip when caller is the owner).",
+        required_evidence="Owner-confirm unit tests with auto-book flag off, mocked calendar, no second book when event_id is already stored, caller SMS after book, skip owner/self, skip without SMS compliance, no SMS on calendar failure, and 422 on absurd years.",
         risk="external_write",
     ),
     SideEffectSurface(

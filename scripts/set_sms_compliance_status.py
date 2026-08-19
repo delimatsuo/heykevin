@@ -30,10 +30,16 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from typing import Any, Iterator
 
 COLLECTION = "contractors"
 FIELD = "sms_compliance_status"
+# Provenance. A compliance attestation that records only "approved" cannot
+# answer who asserted it, when, or against what wording — the questions that
+# actually get asked later. Written alongside the value, never instead of it.
+UPDATED_AT_FIELD = "sms_compliance_updated_at"
+SOURCE_FIELD = "sms_compliance_source"
 FIRESTORE_STREAM_TIMEOUT_SECONDS = 15
 
 # "missing" is an audit bucket for an absent field, not a value we ever write.
@@ -71,8 +77,13 @@ def find_targets(
     return matches
 
 
-def apply_status(client: Any, contractor_id: str, status: str) -> None:
-    client.collection(COLLECTION).document(contractor_id).update({FIELD: status})
+def apply_status(client: Any, contractor_id: str, status: str, *, note: str = "") -> None:
+    updates = {
+        FIELD: status,
+        UPDATED_AT_FIELD: time.time(),
+        SOURCE_FIELD: f"cli:{note}" if note else "cli",
+    }
+    client.collection(COLLECTION).document(contractor_id).update(updates)
 
 
 def main(argv: list[str] | None = None, client_factory: Any | None = None) -> int:
@@ -98,6 +109,12 @@ def main(argv: list[str] | None = None, client_factory: Any | None = None) -> in
         "--apply",
         action="store_true",
         help="Perform the write. Without this flag the script only reports.",
+    )
+    parser.add_argument(
+        "--note",
+        default="",
+        help="Short provenance note recorded alongside the value "
+        "(e.g. the wording version or ticket the attestation came from).",
     )
     args = parser.parse_args(argv)
 
@@ -149,7 +166,7 @@ def main(argv: list[str] | None = None, client_factory: Any | None = None) -> in
         return 0
 
     try:
-        apply_status(client, target["id"], args.status)
+        apply_status(client, target["id"], args.status, note=args.note)
     except Exception:
         print("Write failed. Verify write access to the requested project.", file=sys.stderr)
         return 1

@@ -94,8 +94,47 @@ def test_apply_writes_the_field():
     )
 
     assert code == 0
-    assert client.writes == [("electus", {"sms_compliance_status": "approved"})]
+    assert len(client.writes) == 1
+    doc_id, updates = client.writes[0]
+    assert doc_id == "electus"
+    assert updates["sms_compliance_status"] == "approved"
     assert client.docs["electus"]["sms_compliance_status"] == "approved"
+
+
+def test_apply_records_provenance_alongside_the_value():
+    """An attestation of "approved" alone cannot say who asserted it or when."""
+    module = _load_module()
+    client = _FakeClient(_docs())
+
+    module.main(
+        [
+            "--project", "p",
+            "--contractor-id", "electus",
+            "--status", "approved",
+            "--apply",
+            "--note", "onboarding-v2",
+        ],
+        client_factory=_factory(client),
+    )
+
+    _, updates = client.writes[0]
+    assert updates["sms_compliance_source"] == "cli:onboarding-v2"
+    assert isinstance(updates["sms_compliance_updated_at"], float)
+    assert updates["sms_compliance_updated_at"] > 0
+
+
+def test_provenance_is_recorded_even_without_a_note():
+    module = _load_module()
+    client = _FakeClient(_docs())
+
+    module.main(
+        ["--project", "p", "--contractor-id", "electus", "--status", "approved", "--apply"],
+        client_factory=_factory(client),
+    )
+
+    _, updates = client.writes[0]
+    assert updates["sms_compliance_source"] == "cli"
+    assert updates["sms_compliance_updated_at"] > 0
 
 
 def test_business_name_selector_resolves_unique_match():
@@ -108,7 +147,10 @@ def test_business_name_selector_resolves_unique_match():
     )
 
     assert code == 0
-    assert client.writes == [("electus", {"sms_compliance_status": "approved"})]
+    assert len(client.writes) == 1
+    doc_id, updates = client.writes[0]
+    assert doc_id == "electus"
+    assert updates["sms_compliance_status"] == "approved"
 
 
 def test_ambiguous_selector_refuses_to_write():

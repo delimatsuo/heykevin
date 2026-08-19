@@ -1169,11 +1169,18 @@ class VoicePipeline:
                     },
                     "start_time": {
                         "type": "string",
-                        "description": "Start time in ISO 8601 format (from check_availability results)",
+                        "description": (
+                            "Start time in ISO 8601 with the business owner's timezone offset. "
+                            "Copy start_iso from check_availability when available. "
+                            "Never use Z; 12pm Eastern is 2026-08-21T12:00:00-04:00, not 12:00:00Z."
+                        ),
                     },
                     "end_time": {
                         "type": "string",
-                        "description": "End time in ISO 8601 format (from check_availability results)",
+                        "description": (
+                            "End time in ISO 8601 with the business owner's timezone offset. "
+                            "Copy end_iso from check_availability when available. Never use Z."
+                        ),
                     },
                     "description": {
                         "type": "string",
@@ -1405,10 +1412,13 @@ class VoicePipeline:
         record so the post-call SMS can lead with the time the caller asked
         for.
         """
+        from app.services.appointment_time import localize_spoken_slot
+
+        contractor = getattr(self, "_contractor_config", None) or {}
         request = {
             "title": tool_input.get("title", ""),
-            "start_time": tool_input.get("start_time", ""),
-            "end_time": tool_input.get("end_time", ""),
+            "start_time": localize_spoken_slot(str(tool_input.get("start_time", "")), contractor),
+            "end_time": localize_spoken_slot(str(tool_input.get("end_time", "")), contractor),
             "description": tool_input.get("description", ""),
             "status": "pending_owner_confirmation",
         }

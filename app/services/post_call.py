@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 import logging
 import re
 import time
-from zoneinfo import ZoneInfo
 
 from app.db import calls as call_db
 from app.db import jobs as job_db
@@ -810,31 +809,20 @@ async def _load_appointment_request(call_sid: str) -> dict:
     return request if isinstance(request, dict) else {}
 
 
-def _contractor_zone(contractor: dict | None):
-    """Resolve the contractor's IANA timezone, or None when unusable."""
-    name = (contractor or {}).get("timezone") or ""
-    if not name:
-        return None
-    try:
-        return ZoneInfo(name)
-    except Exception:
-        return None
-
-
 def _format_requested_time(start_time: str, contractor: dict | None) -> str:
     """Render a requested slot as the contractor's own wall clock.
 
     Falls back to the raw value rather than dropping the line: a time we
     cannot parse is still the only record of what the caller asked for.
+    UTC/Z stamps from the model are spoken local clocks, not converted
+    instants — see app.services.appointment_time.localize_spoken_slot.
     """
-    try:
-        parsed = datetime.fromisoformat(start_time)
-    except (TypeError, ValueError):
-        return start_time
+    from app.services.appointment_time import localize_spoken_slot, parse_iso_datetime
 
-    zone = _contractor_zone(contractor)
-    if zone is not None:
-        parsed = parsed.astimezone(zone) if parsed.tzinfo else parsed.replace(tzinfo=zone)
+    localized = localize_spoken_slot(start_time, contractor)
+    parsed = parse_iso_datetime(localized)
+    if parsed is None:
+        return start_time
 
     hour = parsed.hour % 12 or 12
     meridiem = "AM" if parsed.hour < 12 else "PM"

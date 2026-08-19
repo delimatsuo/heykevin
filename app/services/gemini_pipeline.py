@@ -1494,8 +1494,20 @@ class GeminiPipeline:
                         "type": "OBJECT",
                         "properties": {
                             "title": {"type": "STRING", "description": "Short description of the appointment"},
-                            "start_time": {"type": "STRING", "description": "Start time in ISO 8601 format"},
-                            "end_time": {"type": "STRING", "description": "End time in ISO 8601 format"},
+                            "start_time": {
+                                "type": "STRING",
+                                "description": (
+                                    "Start time in ISO 8601 with the business owner's timezone offset. "
+                                    "Copy start_iso from check_availability. Never use Z."
+                                ),
+                            },
+                            "end_time": {
+                                "type": "STRING",
+                                "description": (
+                                    "End time in ISO 8601 with the business owner's timezone offset. "
+                                    "Copy end_iso from check_availability. Never use Z."
+                                ),
+                            },
                             "description": {"type": "STRING", "description": "Additional notes"},
                         },
                         "required": ["title", "start_time", "end_time"],

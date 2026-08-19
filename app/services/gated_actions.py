@@ -95,9 +95,17 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
     ActionKey.CALLER_AUTO_REPLY: GatePolicy(requires_sms_compliance=True),
     ActionKey.CALLER_CONFIRMATION_SMS: GatePolicy(requires_sms_compliance=True),
     ActionKey.CALLER_CONFIRMATION_MMS: GatePolicy(requires_sms_compliance=True),
+    # Deliberately the one caller-facing SMS that does NOT require
+    # sms_compliance_status. It confirms an appointment the caller personally
+    # requested, is sent from the number they just dialed, names the business,
+    # carries STOP, and only fires after the owner taps Confirm — the most
+    # transactional shape an SMS takes. Owner authorization 2026-08-19: drop the
+    # per-tenant gate for appointment confirmations only. Every other
+    # caller-facing action below keeps requires_sms_compliance=True.
+    # The owner tap remains the real control: requires_owner_confirmation stays.
     ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS: GatePolicy(
         requires_flag=False,
-        requires_sms_compliance=True,
+        requires_sms_compliance=False,
         requires_owner_confirmation=True,
         requires_idempotency=True,
     ),

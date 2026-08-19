@@ -135,9 +135,27 @@ def test_caller_confirmed_sms_is_not_a_feature_flag():
     policy = GATE_POLICIES[ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS]
     assert ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS.value == "appointment_confirmed_caller_sms"
     assert policy.requires_flag is False
-    assert policy.requires_sms_compliance is True
     assert policy.requires_owner_confirmation is True
     assert policy.requires_idempotency is True
+
+
+def test_appointment_confirmation_is_the_only_caller_sms_exempt_from_compliance():
+    """Owner authorization 2026-08-19 covered appointment confirmations ONLY.
+
+    Written as an exemption *allowlist* rather than a per-action boolean so a
+    future action that quietly drops requires_sms_compliance fails here instead
+    of silently texting callers on unverified tenants.
+    """
+    exempt = {
+        action
+        for action, policy in GATE_POLICIES.items()
+        if action.value.startswith(("caller_", "appointment_confirmed_caller"))
+        and not policy.requires_sms_compliance
+    }
+    assert exempt == {ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS}
+
+    # The owner tap is what replaces the compliance gate — not nothing.
+    assert GATE_POLICIES[ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS].requires_owner_confirmation is True
 
 
 @pytest.mark.asyncio
@@ -274,9 +292,15 @@ async def test_owner_confirm_texts_caller_after_calendar_write(
 
 
 @pytest.mark.asyncio
-async def test_owner_confirm_skips_caller_sms_without_compliance(
+async def test_owner_confirm_sends_caller_sms_without_compliance_status(
     booked_events, saved_calls, sent_sms
 ):
+    """Always-send: an unset sms_compliance_status no longer suppresses it.
+
+    Inverted from the original skip-without-compliance test by owner
+    authorization on 2026-08-19. Production had 0 of 113 contractors approved,
+    so gating here meant the confirmation never sent for anyone.
+    """
     result = await confirm_appointment(
         contractor=_contractor(),
         call=_call(),
@@ -284,9 +308,25 @@ async def test_owner_confirm_skips_caller_sms_without_compliance(
     )
 
     assert result["status"] == "confirmed"
-    assert result["caller_notified"] is False
-    assert sent_sms == []
-    assert "caller_notified_at" not in saved_calls[0][1]["appointment_request"]
+    assert result["caller_notified"] is True
+    assert len(sent_sms) == 1
+    assert "caller_notified_at" in saved_calls[0][1]["appointment_request"]
+
+
+@pytest.mark.asyncio
+async def test_caller_sms_carries_stop_disclosure(booked_events, saved_calls, sent_sms):
+    """The caller never signed up with Hey Kevin, so the way out ships with the text."""
+    await confirm_appointment(
+        contractor=_contractor(),
+        call=_call(),
+        call_sid=CALL_SID,
+    )
+
+    assert len(sent_sms) == 1
+    body = sent_sms[0]["body"]
+    assert "Reply STOP to opt out." in body
+    # The opt-out belongs in the caller's message, not smuggled into another field.
+    assert body.splitlines()[-1] == "Reply STOP to opt out."
 
 
 @pytest.mark.asyncio

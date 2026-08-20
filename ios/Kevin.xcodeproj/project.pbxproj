@@ -14,6 +14,8 @@
 		1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */; };
 		2603D9A0B3120B8CD74E39BF /* InCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CF580A4F3F56EFF7D346DB8 /* InCallView.swift */; };
 		28FA50EE1B2E526416669436 /* Products.storekit in Resources */ = {isa = PBXBuildFile; fileRef = EA4F50F9BE60CBE958B7212B /* Products.storekit */; };
+		32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3218F28F84345FE46322FFD3 /* AccountDeletion.swift */; };
+		3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */; };
 		4AB09E327BD6CE7025092BCE /* ContactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2612E9351242FAB54735AE26 /* ContactsView.swift */; };
 		63B9A02E0F7BB4CA8F62DABB /* CallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5785E9B2BC1B30AE3E1FBD /* CallManager.swift */; };
 		67B3C158C6AC0D76A0DC4377 /* AppVersionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */; };
@@ -60,6 +62,7 @@
 		2612E9351242FAB54735AE26 /* ContactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsView.swift; sourceTree = "<group>"; };
 		26F75183A354A43842B21498 /* SubscriptionVerification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionVerification.swift; sourceTree = "<group>"; };
 		2D5785E9B2BC1B30AE3E1FBD /* CallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallManager.swift; sourceTree = "<group>"; };
+		3218F28F84345FE46322FFD3 /* AccountDeletion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDeletion.swift; sourceTree = "<group>"; };
 		34E49E9623A3159EBDEC4CFE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		355A811D1510B586161B0963 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		359DC411E16B65BDC5671DB2 /* KeychainManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainManager.swift; sourceTree = "<group>"; };
@@ -87,6 +90,7 @@
 		E7C19B72552CD77728455C37 /* KevinTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = KevinTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA4249AB29D64072D037CA55 /* Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Call.swift; sourceTree = "<group>"; };
 		EA4F50F9BE60CBE958B7212B /* Products.storekit */ = {isa = PBXFileReference; path = Products.storekit; sourceTree = "<group>"; };
+		EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDeletionTests.swift; sourceTree = "<group>"; };
 		EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSyncManager.swift; sourceTree = "<group>"; };
 		F13DF6B56C517300EE66A80B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -168,6 +172,7 @@
 		7817B9C1269F1EDE195929E8 /* KevinTests */ = {
 			isa = PBXGroup;
 			children = (
+				EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */,
 				C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */,
 			);
 			path = KevinTests;
@@ -193,6 +198,7 @@
 		C977083BB647294CC16AA873 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				3218F28F84345FE46322FFD3 /* AccountDeletion.swift */,
 				47EE37D6867D61B09BEC0482 /* APIClient.swift */,
 				88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */,
 				B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */,
@@ -335,6 +341,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */,
 				1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -344,6 +351,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1350A5D8B974608BC1FEC2B6 /* APIClient.swift in Sources */,
+				32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */,
 				AEEEB58F01869C0D299ACC4C /* AppDelegate.swift in Sources */,
 				04E14990283A4EB360D3FF82 /* AppState.swift in Sources */,
 				EC3DBCCF4D0EC9EB624553E4 /* AppStoreScreenshotFixtures.swift in Sources */,

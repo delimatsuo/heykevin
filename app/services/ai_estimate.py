@@ -1,5 +1,6 @@
 """AI diagnosis and cost estimation via Gemini."""
 
+import asyncio
 import base64
 import json
 
@@ -11,6 +12,9 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+FILES_API_UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+FILES_API_POLL_TIMEOUT_SECONDS = 120.0
+FILES_API_POLL_INTERVAL_SECONDS = 2.0
 
 
 def _format_services_for_estimate(services: list) -> str:
@@ -29,23 +33,16 @@ def _format_services_for_estimate(services: list) -> str:
     return "\n".join(lines)
 
 
-async def analyze_media(
-    media_bytes: bytes,
-    media_type: str,
-    services_list: list,
+def _build_estimate_prompt(
     business_name: str,
+    services_list: list,
     text_description: str = "",
-) -> dict:
-    """Analyze uploaded media with Gemini and return diagnosis + cost estimate.
-
-    Returns dict with: diagnosis, matched_services, estimate_min, estimate_max,
-    requires_manual_investigation, confidence.
-    """
+) -> str:
     formatted_services = _format_services_for_estimate(services_list)
-
-    prompt = f"""You are a diagnostic assistant for {business_name}.
+    return f"""You are a diagnostic assistant for {business_name}.
 
 Analyze this media from a customer describing a problem they need help with.
+The caller may describe the problem out loud — use what they say as well as what is visible.
 {f'The customer also described the issue as: "{text_description}"' if text_description else ''}
 
 Based on what you see/hear, provide:
@@ -71,23 +68,167 @@ Return valid JSON only, no other text:
 confidence must be one of: "high", "medium", "low"
 If confidence is "low", set requires_manual_investigation to true."""
 
-    # Build Gemini request
-    parts = []
 
-    # Add media
+def _parse_gemini_response(data: dict) -> dict:
+    candidates = data.get("candidates", [])
+    if not candidates:
+        return _manual_investigation_result()
+
+    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    if "```" in text:
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    result = json.loads(text.strip())
+
+    result.setdefault("diagnosis", None)
+    result.setdefault("matched_services", [])
+    result.setdefault("estimate_min", None)
+    result.setdefault("estimate_max", None)
+    result.setdefault("requires_manual_investigation", False)
+    result.setdefault("confidence", "low")
+
+    if result["confidence"] == "low":
+        result["requires_manual_investigation"] = True
+
+    return result
+
+
+async def _analyze_video(
+    client: httpx.AsyncClient,
+    media_bytes: bytes,
+    media_type: str,
+    prompt: str,
+    poll_timeout_seconds: float = FILES_API_POLL_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = FILES_API_POLL_INTERVAL_SECONDS,
+) -> dict:
+    """Analyze video via Gemini Files API: resumable upload -> poll ACTIVE -> generateContent."""
+    # 1. Initiate resumable upload session
+    init_headers = {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": str(len(media_bytes)),
+        "X-Goog-Upload-Header-Content-Type": media_type,
+        "Content-Type": "application/json",
+    }
+    init_body = json.dumps({"file": {"displayName": "estimate_video"}})
+    init_resp = await client.post(
+        f"{FILES_API_UPLOAD_URL}?key={settings.gemini_api_key}",
+        headers=init_headers,
+        content=init_body,
+        timeout=30.0,
+    )
+    if init_resp.status_code != 200:
+        raise RuntimeError(f"Files API start failed: {init_resp.status_code} {init_resp.text[:200]}")
+
+    upload_url = init_resp.headers.get("x-goog-upload-url") or init_resp.headers.get("Location")
+    if not upload_url:
+        raise RuntimeError("Files API did not return an upload URL")
+
+    # 2. Upload file bytes
+    upload_headers = {
+        "Content-Length": str(len(media_bytes)),
+        "X-Goog-Upload-Offset": "0",
+        "X-Goog-Upload-Command": "upload, finalize",
+    }
+    upload_resp = await client.post(
+        upload_url,
+        headers=upload_headers,
+        content=media_bytes,
+        timeout=60.0,
+    )
+    if upload_resp.status_code != 200:
+        raise RuntimeError(f"Files API upload failed: {upload_resp.status_code} {upload_resp.text[:200]}")
+
+    file_info = upload_resp.json().get("file", {})
+    file_name = file_info.get("name")  # e.g. "files/abc123xyz"
+    file_uri = file_info.get("uri")
+    file_state = file_info.get("state", "PROCESSING")
+
+    if not file_name:
+        raise RuntimeError("Files API upload response missing file resource name")
+
+    # 3. Poll until ACTIVE (or give up after poll_timeout_seconds)
+    max_poll_attempts = max(1, int(poll_timeout_seconds / max(0.1, poll_interval_seconds)))
+    if file_state != "ACTIVE":
+        for _ in range(max_poll_attempts):
+            poll_resp = await client.get(
+                f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={settings.gemini_api_key}",
+                timeout=30.0,
+            )
+            if poll_resp.status_code != 200:
+                raise RuntimeError(f"Files API poll error: {poll_resp.status_code} {poll_resp.text[:200]}")
+            poll_data = poll_resp.json()
+            state = poll_data.get("state", "")
+            if state == "ACTIVE":
+                file_uri = poll_data.get("uri", file_uri)
+                break
+            if state in ("FAILED", "ERROR"):
+                raise RuntimeError(f"Files API processing failed with state: {state}")
+            await asyncio.sleep(poll_interval_seconds)
+        else:
+            raise TimeoutError(f"Files API processing timed out waiting for ACTIVE state after {poll_timeout_seconds}s")
+
+    # 4. generateContent with file_data
+    resolved_uri = file_uri or f"https://generativelanguage.googleapis.com/v1beta/{file_name}"
+    gen_body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "file_data": {
+                            "mime_type": media_type,
+                            "file_uri": resolved_uri,
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 500,
+        },
+    }
+
+    gen_resp = await client.post(
+        f"{GEMINI_API_URL}?key={settings.gemini_api_key}",
+        json=gen_body,
+        timeout=60.0,
+    )
+    if gen_resp.status_code != 200:
+        raise RuntimeError(f"Gemini generateContent error: {gen_resp.status_code} {gen_resp.text[:200]}")
+
+    result = _parse_gemini_response(gen_resp.json())
+    logger.info(
+        f"AI video estimate: confidence={result['confidence']}, "
+        f"diagnosis={str(result.get('diagnosis', ''))[:50]}"
+    )
+    return result
+
+
+async def _analyze_image(
+    client: httpx.AsyncClient,
+    media_bytes: bytes,
+    media_type: str,
+    prompt: str,
+) -> dict:
+    """Analyze image via inline base64 in generateContent."""
     media_b64 = base64.b64encode(media_bytes).decode("utf-8")
-    parts.append({
-        "inline_data": {
-            "mime_type": media_type,
-            "data": media_b64,
-        }
-    })
-
-    # Add text prompt
-    parts.append({"text": prompt})
-
     request_body = {
-        "contents": [{"parts": parts}],
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": media_type,
+                            "data": media_b64,
+                        }
+                    },
+                ]
+            }
+        ],
         "generationConfig": {
             "temperature": 0.2,
             "maxOutputTokens": 500,
@@ -95,47 +236,21 @@ If confidence is "low", set requires_manual_investigation to true."""
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{GEMINI_API_URL}?key={settings.gemini_api_key}",
-                json=request_body,
-                timeout=60.0,
-            )
+        response = await client.post(
+            f"{GEMINI_API_URL}?key={settings.gemini_api_key}",
+            json=request_body,
+            timeout=60.0,
+        )
+        if response.status_code != 200:
+            logger.error(f"Gemini API error: {response.status_code} {response.text[:200]}")
+            return _manual_investigation_result()
 
-            if response.status_code != 200:
-                logger.error(f"Gemini API error: {response.status_code} {response.text[:200]}")
-                return _manual_investigation_result()
-
-            data = response.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return _manual_investigation_result()
-
-            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-
-            # Parse JSON from response (handle markdown code blocks)
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            result = json.loads(text.strip())
-
-            # Ensure required fields
-            result.setdefault("diagnosis", None)
-            result.setdefault("matched_services", [])
-            result.setdefault("estimate_min", None)
-            result.setdefault("estimate_max", None)
-            result.setdefault("requires_manual_investigation", False)
-            result.setdefault("confidence", "low")
-
-            # Force manual investigation if low confidence
-            if result["confidence"] == "low":
-                result["requires_manual_investigation"] = True
-
-            logger.info(f"AI estimate: confidence={result['confidence']}, "
-                        f"diagnosis={str(result.get('diagnosis', ''))[:50]}")
-            return result
-
+        result = _parse_gemini_response(response.json())
+        logger.info(
+            f"AI estimate: confidence={result['confidence']}, "
+            f"diagnosis={str(result.get('diagnosis', ''))[:50]}"
+        )
+        return result
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse Gemini response: {e}")
         return _manual_investigation_result()
@@ -145,6 +260,42 @@ If confidence is "low", set requires_manual_investigation to true."""
     except Exception as e:
         logger.error(f"AI estimate error: {e}", exc_info=True)
         return _manual_investigation_result()
+
+
+async def analyze_media(
+    media_bytes: bytes,
+    media_type: str,
+    services_list: list,
+    business_name: str,
+    text_description: str = "",
+    poll_timeout_seconds: float = FILES_API_POLL_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = FILES_API_POLL_INTERVAL_SECONDS,
+) -> dict:
+    """Analyze uploaded media with Gemini and return diagnosis + cost estimate.
+
+    Images use the inline_data path; videos use the Files API resumable upload path.
+    Returns dict with: diagnosis, matched_services, estimate_min, estimate_max,
+    requires_manual_investigation, confidence.
+    """
+    prompt = _build_estimate_prompt(business_name, services_list, text_description)
+
+    async with httpx.AsyncClient() as client:
+        if (media_type or "").startswith("video/"):
+            return await _analyze_video(
+                client,
+                media_bytes=media_bytes,
+                media_type=media_type,
+                prompt=prompt,
+                poll_timeout_seconds=poll_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+        else:
+            return await _analyze_image(
+                client,
+                media_bytes=media_bytes,
+                media_type=media_type,
+                prompt=prompt,
+            )
 
 
 def _manual_investigation_result() -> dict:

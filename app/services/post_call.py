@@ -949,7 +949,8 @@ async def _format_caller_sms_with_estimate(
                     if estimate_url:
                         base_msg += (
                             f"\n\n\U0001f4f7 Want a free AI diagnosis and estimate? "
-                            f"Upload a photo or video of the issue:\n{estimate_url}"
+                            f"Record a short video (under a minute) showing the problem "
+                            f"while you describe it, or upload a photo:\n{estimate_url}"
                         )
         except Exception as error:
             _log_post_call_exception(

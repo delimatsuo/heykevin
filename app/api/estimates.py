@@ -1,21 +1,37 @@
 """AI estimate endpoints — token creation, upload, analysis, results."""
 
+import asyncio
 import hashlib
 import os
 import secrets
 import time
-
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 from typing import Optional
 
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from google.cloud.firestore import transactional
+from pydantic import BaseModel
+
 from app.config import settings
-from app.middleware.auth import verify_api_token, require_contractor_access
-from app.db.firestore_client import get_firestore_client
 from app.db.contractors import get_contractor
+from app.db.firestore_client import get_firestore_client
+from app.middleware.auth import require_contractor_access, verify_api_token
 from app.services.ai_estimate import analyze_media
+from app.services.estimate_media import (
+    archive_media,
+    gcs_redirect_url,
+    make_watch_url,
+    read_media,
+    verify_watch_sig,
+)
+from app.services.estimate_notifications import send_estimate_notifications
+from app.services.estimate_worker import (
+    claim_notification_and_complete,
+    claim_notification_and_fail,
+)
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
+from app.services import sms as sms_module
 from app.services.sms import send_sms
 from app.utils.logging import get_logger, redact_phone
 
@@ -33,6 +49,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 10MB
 MAX_VIDEO_SIZE = 50 * 1024 * 1024   # 50MB
+
 
 # Hard absolute cap on any upload, regardless of content type. Defends against
 # DoS via memory exhaustion described in SECURITY_AUDIT.md F-10
@@ -96,29 +113,37 @@ async def create_estimate_token(body: CreateTokenRequest, request: Request = Non
 
     token = secrets.token_urlsafe(32)
     token_hash = _hash_token(token)
+    now = time.time()
 
-    db = get_firestore_client()
-    db.collection(COLLECTION).document(token_hash).set({
+    doc_data = {
         "token_hash": token_hash,
         "contractor_id": body.contractor_id,
         "caller_phone": body.caller_phone,
         "call_sid": body.call_sid,
-        "created_at": time.time(),
-        "expires_at": time.time() + TOKEN_EXPIRY_SECONDS,
+        "created_at": now,
+        "expires_at": now + TOKEN_EXPIRY_SECONDS,
         "status": "pending",
         "upload_count": 0,
         "result": None,
-    })
+        "completed_at": None,
+    }
 
+    db = get_firestore_client()
+    db.collection(COLLECTION).document(token_hash).set(doc_data)
+
+    logger.info(f"Created estimate token for {redact_phone(body.caller_phone)} ({body.contractor_id})")
     estimate_url = f"https://heykevin.one/estimate/{token}"
-    logger.info(f"Estimate token created for {redact_phone(body.caller_phone)}")
-    return {"status": "ok", "token": token, "url": estimate_url}
+    return {
+        "status": "ok",
+        "token": token,
+        "url": estimate_url,
+    }
 
 
-# --- Public endpoints: token is the auth ---
+# --- Public endpoints (token in URL path) ---
 
 async def _get_estimate_doc(token: str) -> Optional[dict]:
-    """Look up an estimate by token. Returns None if invalid/expired."""
+    """Look up an estimate by raw token (hashes token first)."""
     token_hash = _hash_token(token)
     db = get_firestore_client()
     doc = db.collection(COLLECTION).document(token_hash).get()
@@ -132,12 +157,11 @@ async def _get_estimate_doc(token: str) -> Optional[dict]:
 
 @router.get("/{token}")
 async def get_estimate(token: str):
-    """Get estimate status/result. Public — token is the auth."""
+    """Public endpoint: token is the auth. Pollable: returns status + result."""
     estimate = await _get_estimate_doc(token)
     if not estimate:
-        return {"error": "Invalid or expired token"}, 404
+        raise HTTPException(status_code=404, detail="Invalid or expired token")
 
-    # Don't expose internal fields
     return {
         "status": estimate.get("status", "pending"),
         "result": estimate.get("result"),
@@ -150,25 +174,25 @@ class UploadUrlRequest(BaseModel):
 
 @router.post("/{token}/upload-url")
 async def get_upload_url(token: str, body: UploadUrlRequest):
-    """Get a signed GCS upload URL. Public — token is the auth."""
+    """Get a signed upload URL. Public — token is the auth."""
     estimate = await _get_estimate_doc(token)
     if not estimate:
-        return {"error": "Invalid or expired token"}, 404
+        raise HTTPException(status_code=404, detail="Invalid or expired token")
 
     if estimate.get("upload_count", 0) >= MAX_UPLOADS_PER_TOKEN:
-        return {"error": "Upload limit reached"}, 429
+        raise HTTPException(status_code=429, detail="Upload limit reached")
 
     if body.content_type not in ALLOWED_CONTENT_TYPES:
-        return {"error": f"File type not allowed. Accepted: {', '.join(ALLOWED_CONTENT_TYPES)}"}, 400
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type not allowed. Accepted: {', '.join(ALLOWED_CONTENT_TYPES)}",
+        )
 
     max_size = MAX_VIDEO_SIZE if body.content_type.startswith("video/") else MAX_IMAGE_SIZE
 
-    # For MVP: accept direct upload to our endpoint instead of GCS
-    # TODO: Switch to GCS signed URLs for production scale
     token_hash = _hash_token(token)
     upload_url = f"{settings.cloud_run_url}/api/estimates/{token}/upload"
 
-    # Increment upload count
     db = get_firestore_client()
     db.collection(COLLECTION).document(token_hash).update({
         "upload_count": estimate.get("upload_count", 0) + 1,
@@ -181,7 +205,7 @@ async def get_upload_url(token: str, body: UploadUrlRequest):
     }
 
 
-async def _read_request_with_cap(request, max_bytes: int) -> bytes:
+async def _read_request_with_cap(request: Request, max_bytes: int) -> bytes:
     """Stream the request body and abort early past `max_bytes`.
 
     F-10 (SECURITY_AUDIT.md line 37): the previous implementation called
@@ -219,22 +243,159 @@ async def _read_request_with_cap(request, max_bytes: int) -> bytes:
                 detail=f"File too large. Max: {max_bytes // (1024 * 1024)}MB",
             )
         chunks.append(chunk)
+
     return b"".join(chunks)
 
 
-@router.post("/{token}/upload")
-async def upload_and_analyze(token: str, request: Request):
-    """Receive media upload and trigger Gemini analysis.
+async def _run_async_estimate_analysis(
+    token_hash: str,
+    media_id: str,
+    media_bytes: Optional[bytes],
+    media_content_type: str,
+    description: str,
+    contractor: Optional[dict],
+    caller_phone: str,
+    call_sid: str,
+    object_path: Optional[str] = None,
+) -> None:
+    """Background task to run Gemini analysis for an estimate."""
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(token_hash)
+    services = contractor.get("services", []) if contractor else []
+    business_name = contractor.get("business_name", "") if contractor else ""
 
-    For MVP: direct upload. Production should use GCS signed URLs.
+    try:
+        if media_bytes is None and object_path:
+            media_bytes = read_media(object_path)
 
-    Size handling: rejects oversized uploads early via streamed-chunk
-    accumulation, never buffering more than `MAX_UPLOAD_BYTES` in memory
-    (SECURITY_AUDIT.md F-10).
+        result = await analyze_media(
+            media_bytes=media_bytes,
+            media_type=media_content_type,
+            services_list=services,
+            business_name=business_name,
+            text_description=description,
+        )
+
+        now = time.time()
+        accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: claim_notification_and_complete(db, doc_ref, media_id, result, now),
+        )
+        if accepted and should_notify:
+            watch_url = make_watch_url(media_id) if object_path else ""
+            sms_fn = send_sms if send_sms is not sms_module.send_sms else None
+            await send_estimate_notifications(
+                caller_phone=caller_phone,
+                contractor=contractor,
+                call_sid=call_sid,
+                token_hash=token_hash,
+                result=result,
+                is_failure=False,
+                watch_url=watch_url,
+                send_sms_fn=sms_fn,
+            )
+    except Exception as error:
+        logger.error(
+            "Async estimate analysis failed for %s: %s",
+            token_hash[:8],
+            type(error).__name__,
+        )
+        now = time.time()
+        try:
+            accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: claim_notification_and_fail(db, doc_ref, media_id, now),
+            )
+            if accepted and should_notify:
+                watch_url = make_watch_url(media_id) if object_path else ""
+                sms_fn = send_sms if send_sms is not sms_module.send_sms else None
+                await send_estimate_notifications(
+                    caller_phone=caller_phone,
+                    contractor=contractor,
+                    call_sid=call_sid,
+                    token_hash=token_hash,
+                    is_failure=True,
+                    watch_url=watch_url,
+                    send_sms_fn=sms_fn,
+                )
+        except Exception as e:
+            logger.error(
+                "Failed to mark estimate %s as failed: %s",
+                token_hash[:8],
+                type(e).__name__,
+            )
+
+
+def _claim_upload(
+    *,
+    media_id: str,
+    object_path: Optional[str],
+    content_type: str,
+    caller_description: str,
+    token_hash: str,
+) -> tuple[bool, dict]:
+    """Atomically claim the estimate for one upload attempt.
+
+    Shared by the video and photo paths: only pending or a terminal state may
+    transition to processing, so a photo submitted while a video attempt is
+    running is rejected instead of clobbering that attempt's media identity.
+
+    Every claim also appends the attempt to media_ids/media_paths. A re-upload
+    replaces the *current* media_id, but a watch link texted for an earlier
+    attempt was signed for 90 days — the history keeps it resolvable.
     """
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(token_hash)
+    tx = db.transaction()
+
+    @transactional
+    def _transaction_fn(transaction) -> tuple[bool, dict]:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False, {}
+        data = snapshot.to_dict() or {}
+        if time.time() > data.get("expires_at", 0):
+            return False, {}
+        if data.get("status") == "processing":
+            return False, data
+
+        attempts = (data.get("attempts") or 0) + 1
+        now = time.time()
+        media_ids = list(data.get("media_ids") or [])
+        media_paths = dict(data.get("media_paths") or {})
+        if object_path:
+            media_ids.append(media_id)
+            media_paths[media_id] = object_path
+        updates = {
+            "status": "processing",
+            "attempts": attempts,
+            "lease_expires_at": now + 300.0,
+            "media_id": media_id,
+            "media_object_path": object_path,
+            "media_content_type": content_type,
+            "description": caller_description,
+            "notified_at": None,
+            "result": None,
+            "media_ids": media_ids,
+            "media_paths": media_paths,
+        }
+        transaction.update(doc_ref, updates)
+        data.update(updates)
+        return True, data
+
+    return _transaction_fn(tx)
+
+
+@router.post("/{token}/upload")
+async def upload_and_analyze(
+    token: str,
+    request: Request,
+    description: Optional[str] = Query(default="", max_length=500),
+):
+    """Receive media upload and trigger Gemini analysis."""
     estimate = await _get_estimate_doc(token)
     if not estimate:
-        return {"error": "Invalid or expired token"}, 404
+        raise HTTPException(status_code=404, detail="Invalid or expired token")
 
     token_hash = _hash_token(token)
     contractor = await get_contractor(estimate["contractor_id"])
@@ -259,93 +420,173 @@ async def upload_and_analyze(token: str, request: Request):
         _gate_denied_response(decision)
 
     content_type = request.headers.get("content-type", "application/octet-stream")
-
-    # Per-content-type cap, but never exceeding the absolute MAX_UPLOAD_BYTES.
     type_max = MAX_VIDEO_SIZE if content_type.startswith("video/") else MAX_IMAGE_SIZE
     effective_max = min(type_max, MAX_UPLOAD_BYTES)
 
-    # Stream the body with the cap; raises HTTPException(413) on overflow.
     body = await _read_request_with_cap(request, effective_max)
+    media_id = secrets.token_urlsafe(16)
+    is_video = content_type.startswith("video/")
+    # Not dead code: when tests (or any caller) invoke this handler directly
+    # rather than through FastAPI, `description` is the Query FieldInfo object,
+    # and stringifying it stores framework repr garbage as the caller's words.
+    # An earlier review wrongly removed this guard; it is load-bearing.
+    caller_description = description.strip()[:500] if isinstance(description, str) else ""
 
-    # Update status
-    db = get_firestore_client()
-    db.collection(COLLECTION).document(token_hash).update({"status": "processing"})
+    # Cheap pre-check before any GCS write: a repeated POST while an attempt
+    # is already processing must not archive another object. The handler-start
+    # snapshot may be slightly stale; the claim transaction below remains the
+    # authority — this only stops the storage spend on the obvious case, since
+    # the public upload endpoint does not enforce upload_count.
+    if estimate.get("status") == "processing":
+        return JSONResponse(status_code=409, content={"status": "processing"})
 
-    # Get contractor's service list
-    services = contractor.get("services", []) if contractor else []
-    business_name = contractor.get("business_name", "") if contractor else ""
+    if is_video:
+        # 1. Archive to GCS
+        try:
+            object_path = archive_media(token_hash, media_id, body, content_type)
+        except Exception as e:
+            logger.error("Failed to archive estimate media for %s: %s", token_hash[:8], type(e).__name__)
+            raise HTTPException(status_code=503, detail="Storage unavailable")
 
-    # Run Gemini analysis
-    result = await analyze_media(
-        media_bytes=body,
-        media_type=content_type,
-        services_list=services,
-        business_name=business_name,
-    )
+        # 2. Atomic claim in Firestore transaction
+        claimed, claim_data = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _claim_upload(
+                media_id=media_id,
+                object_path=object_path,
+                content_type=content_type,
+                caller_description=caller_description,
+                token_hash=token_hash,
+            ),
+        )
+        if not claimed:
+            if claim_data.get("status") == "processing":
+                return JSONResponse(status_code=409, content={"status": "processing"})
+            raise HTTPException(status_code=404, detail="Invalid or expired token")
 
-    # Store result
-    db.collection(COLLECTION).document(token_hash).update({
-        "status": "complete",
-        "result": result,
-        "completed_at": time.time(),
-    })
-
-    # Send SMS to customer
-    caller_phone = estimate.get("caller_phone", "")
-    twilio_number = contractor.get("twilio_number", "") if contractor else ""
-
-    if caller_phone:
-        if result.get("requires_manual_investigation"):
-            customer_msg = (
-                f"Thanks for your upload. This issue will require {business_name}'s "
-                f"technician to manually investigate. We are unable to provide an "
-                f"AI estimate at this time.\n\n"
-                f"Call {business_name}: {twilio_number}"
+        # 3. Schedule async background task
+        asyncio.create_task(
+            _run_async_estimate_analysis(
+                token_hash=token_hash,
+                media_id=media_id,
+                media_bytes=body,
+                media_content_type=content_type,
+                description=caller_description,
+                contractor=contractor,
+                caller_phone=estimate.get("caller_phone", ""),
+                call_sid=estimate.get("call_sid", ""),
+                object_path=object_path,
             )
-        else:
-            diagnosis = result.get("diagnosis", "")
-            est_min = result.get("estimate_min", 0)
-            est_max = result.get("estimate_max", 0)
-            customer_msg = (
-                f"AI Diagnosis: {diagnosis}\n\n"
-                f"Estimated Cost: ${est_min}-${est_max}\n\n"
-                f"⚠️ This is an AI-generated estimate. The actual cost may differ "
-                f"based on the technician's hands-on diagnosis.\n\n"
-                f"Call {business_name}: {twilio_number}"
-            )
-        await send_sms(
-            caller_phone,
-            customer_msg,
-            from_number=twilio_number,
-            contractor=contractor,
-            action=ActionKey.ESTIMATE_RESULT_SMS,
-            gate_context=context,
         )
 
-    # Send SMS to contractor
-    contractor_phone = contractor.get("owner_phone", "") if contractor else ""
-    if contractor_phone:
-        if result.get("requires_manual_investigation"):
-            contractor_msg = (
-                f"📋 AI ESTIMATE REQUEST\n"
-                f"From: {caller_phone}\n"
-                f"Result: Requires manual investigation\n"
-                f"The AI could not confidently diagnose the issue."
-            )
-        else:
-            diagnosis = result.get("diagnosis", "")
-            est_min = result.get("estimate_min", 0)
-            est_max = result.get("estimate_max", 0)
-            matched = ", ".join(s.get("name", "") for s in result.get("matched_services", []))
-            contractor_msg = (
-                f"📋 AI ESTIMATE SENT\n"
-                f"To: {caller_phone}\n"
-                f"Diagnosis: {diagnosis}\n"
-                f"Services: {matched}\n"
-                f"Estimate: ${est_min}-${est_max}\n"
-                f"Confidence: {result.get('confidence', 'unknown')}"
-            )
-        await send_sms(contractor_phone, contractor_msg, from_number=twilio_number)
+        return JSONResponse(status_code=202, content={"status": "processing"})
 
-    logger.info(f"Estimate complete for {redact_phone(caller_phone)}: {result.get('confidence', 'unknown')}")
-    return {"status": "ok", "result": result}
+    else:
+        # Photo path — synchronous inline execution with resilient GCS archiving
+        object_path = None
+        try:
+            object_path = archive_media(token_hash, media_id, body, content_type)
+        except Exception as e:
+            logger.error("Failed to archive photo media for %s: %s", token_hash[:8], type(e).__name__)
+
+        # Same atomic claim as video: a photo submitted while a video attempt
+        # is processing must not replace that attempt's media identity.
+        claimed, claim_data = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _claim_upload(
+                media_id=media_id,
+                object_path=object_path,
+                content_type=content_type,
+                caller_description=caller_description,
+                token_hash=token_hash,
+            ),
+        )
+        if not claimed:
+            if claim_data.get("status") == "processing":
+                return JSONResponse(status_code=409, content={"status": "processing"})
+            raise HTTPException(status_code=404, detail="Invalid or expired token")
+
+        db = get_firestore_client()
+
+        services = contractor.get("services", []) if contractor else []
+        business_name = contractor.get("business_name", "") if contractor else ""
+
+        result = await analyze_media(
+            media_bytes=body,
+            media_type=content_type,
+            services_list=services,
+            business_name=business_name,
+            text_description=caller_description,
+        )
+
+        completed_time = time.time()
+        db.collection(COLLECTION).document(token_hash).update({
+            "status": "complete",
+            "result": result,
+            "completed_at": completed_time,
+            "notified_at": completed_time,
+        })
+
+        caller_phone = estimate.get("caller_phone", "")
+        call_sid = estimate.get("call_sid", "")
+        watch_url = make_watch_url(media_id) if object_path else ""
+
+        sms_fn = send_sms if send_sms is not sms_module.send_sms else None
+        await send_estimate_notifications(
+            caller_phone=caller_phone,
+            contractor=contractor,
+            call_sid=call_sid,
+            token_hash=token_hash,
+            result=result,
+            is_failure=False,
+            watch_url=watch_url,
+            send_sms_fn=sms_fn,
+        )
+
+        logger.info(
+            f"Estimate complete for {redact_phone(caller_phone)}: {result.get('confidence', 'unknown')}"
+        )
+        return {"status": "complete", "result": result}
+
+
+# --- Media watch redirect endpoint ---
+
+@router.get("/media/{media_id}")
+async def get_estimate_media_redirect(
+    media_id: str,
+    e: Optional[int] = Query(default=None),
+    s: Optional[str] = Query(default=None),
+    expires: Optional[int] = Query(default=None),
+    sig: Optional[str] = Query(default=None),
+):
+    """Serve signed GCS redirect URL for contractor to watch customer video."""
+    expiry_val = e if e is not None else (expires if expires is not None else 0)
+    sig_val = s if s is not None else (sig if sig is not None else "")
+
+    if not verify_watch_sig(media_id, expiry_val, sig_val):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    db = get_firestore_client()
+    # media_ids keeps every attempt, so a watch link texted before a re-upload
+    # (signed for 90 days) still resolves after media_id moves on. The
+    # equality fallback covers documents written before the history existed.
+    docs = list(
+        db.collection(COLLECTION).where("media_ids", "array_contains", media_id).limit(1).stream()
+    )
+    if not docs:
+        docs = list(db.collection(COLLECTION).where("media_id", "==", media_id).limit(1).stream())
+    if not docs:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    data = docs[0].to_dict() or {}
+    object_path = (data.get("media_paths") or {}).get(media_id) or (
+        data.get("media_object_path", "") if data.get("media_id") == media_id else ""
+    )
+    if not object_path:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    redirect_url = gcs_redirect_url(object_path)
+    if not redirect_url:
+        raise HTTPException(status_code=404, detail="Media unavailable")
+
+    return RedirectResponse(url=redirect_url, status_code=302)

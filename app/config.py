@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     # Cloud Run URL (for WebSocket URL generation)
     cloud_run_url: str = PRODUCTION_CLOUD_RUN_URL
 
+    # GCS Bucket for estimate media archives
+    estimate_media_bucket: str = ""
+
     # Firebase / Firestore
     # Production may rely on Cloud Run ADC. Staging/development must set an
     # explicit non-production project and RTDB URL to avoid touching live data.

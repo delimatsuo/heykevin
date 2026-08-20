@@ -18,6 +18,29 @@ struct ActiveCallInfo {
 /// authenticate solely with the Apple identity token, which expires after
 /// roughly 10 minutes. The backend returns 401 when the token is missing,
 /// expired, or invalid.
+/// A failed appointment confirmation, carrying the status so the UI can tell a
+/// permanent problem from a retryable one.
+///
+/// A live call on 2026-08-19 stored "Friday, August 21st" as the year 2020 —
+/// the model had no current date to resolve against. `slot_is_plausible`
+/// rejected it with 422, but the app rendered every failure as "Couldn't add
+/// this to Google Calendar. Try again.", inviting a retry that could never
+/// succeed. Same shape as the bug PR #156 fixed on the voice side, where a
+/// permanent denial read as a transient fault and got retried four times.
+struct AppointmentConfirmFailure: Error, LocalizedError {
+    let statusCode: Int
+
+    /// 422: the stored time itself is unusable. Retrying cannot help — the
+    /// owner needs to reach the caller and agree a real time.
+    var isTimeUnusable: Bool { statusCode == 422 }
+
+    var errorDescription: String? {
+        isTimeUnusable
+            ? String(localized: "Kevin didn't capture a usable time for this request. Use Call Back to agree a time with the caller.")
+            : String(localized: "Couldn't add this to Google Calendar. Try again.")
+    }
+}
+
 enum BootstrapAuthError: Error, LocalizedError {
     /// The backend rejected the Apple identity token (HTTP 401).
     case unauthenticated
@@ -592,7 +615,12 @@ final class APIClient: @unchecked Sendable {
 
         let (_, response) = try await retryRequest(request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
+            // The status has to survive. A 422 means the stored time is not
+            // bookable — no amount of retrying fixes it — while a 502 is the
+            // Calendar call failing and is worth another tap. Collapsing both
+            // into URLError told the owner to "try again" forever.
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw AppointmentConfirmFailure(statusCode: status)
         }
     }
 

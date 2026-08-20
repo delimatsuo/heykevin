@@ -441,6 +441,9 @@ struct CallDetailView: View {
         do {
             try await APIClient.shared.confirmAppointment(callSid: call.id)
             appointmentConfirmed = true
+        } catch let failure as AppointmentConfirmFailure {
+            // Distinguishes "this time is unusable" from "Calendar hiccuped".
+            confirmError = failure.localizedDescription
         } catch {
             confirmError = String(localized: "Couldn't add this to Google Calendar. Try again.")
         }

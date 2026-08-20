@@ -12,6 +12,7 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPaywall = false
     @State private var showDeleteAccountAlert = false
+    @State private var showDeleteAccountError = false
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -486,6 +487,11 @@ struct SettingsView: View {
                     Button(String(localized: "Cancel"), role: .cancel) {}
                 } message: {
                     Text(String(localized: "This will permanently delete your Kevin account and release your Kevin number. Make sure to deactivate call forwarding first."))
+                }
+                .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
+                    Button(String(localized: "OK"), role: .cancel) {}
+                } message: {
+                    Text(String(localized: "The server couldn't complete the deletion, so your account is unchanged. Please check your connection and try again."))
                 }
 
                 // MARK: - Legal
@@ -1051,6 +1057,7 @@ struct SettingsView: View {
 
     private func deleteAccount() async {
         guard !appState.contractorId.isEmpty else { return }
+        var outcome = AccountDeletionOutcome.failed
         do {
             let encodedId = appState.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? appState.contractorId
             let url = URL(string: "\(appState.backendURL)/api/contractors/\(encodedId)")!
@@ -1058,16 +1065,24 @@ struct SettingsView: View {
             request.httpMethod = "DELETE"
             request.timeoutInterval = 15
             APIClient.shared.authorize(&request)
-            let (_, _) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            outcome = AccountDeletionResponseParser.parse(response: response, data: data)
         } catch {
             debugLog("Delete account failed: \(error)")
         }
-        // Clear local state regardless of server response
+        // Only clear local state when the server confirmed the deletion.
+        // Clearing it on failure strands the user: logged out locally while
+        // the account stays active and billing, with no way to retry.
         await MainActor.run {
-            appState.contractorId = ""
-            appState.kevinNumber = ""
-            appState.isOnboarded = false
-            APIClient.shared.contractorToken = ""
+            switch outcome {
+            case .deleted:
+                appState.contractorId = ""
+                appState.kevinNumber = ""
+                appState.isOnboarded = false
+                APIClient.shared.contractorToken = ""
+            case .failed:
+                showDeleteAccountError = true
+            }
         }
     }
 }

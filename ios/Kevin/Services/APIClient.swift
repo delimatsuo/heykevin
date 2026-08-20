@@ -578,7 +578,8 @@ final class APIClient: @unchecked Sendable {
                     readOnServer: serverRead,
                     appointmentStatus: appointment?["status"] as? String,
                     appointmentStartTime: appointment?["start_time"] as? String,
-                    appointmentTitle: appointment?["title"] as? String
+                    appointmentTitle: appointment?["title"] as? String,
+                    appointmentCallerNotified: appointment?["caller_notified_at"] != nil
                 )
             }
             // Seed local read state from server so unread badges are correct after reinstall

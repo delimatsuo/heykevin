@@ -260,6 +260,13 @@ struct CallDetailView: View {
     let call: CallRecord
     @State private var appointmentConfirmed = false
     @State private var callerWasNotified = false
+
+    /// True when this session's confirm reported a text, or when the record
+    /// already carries one from a previous confirm. Reading both means a
+    /// historical confirmation still shows the line after a reload.
+    private var callerWasTexted: Bool {
+        callerWasNotified || call.appointmentCallerNotified
+    }
     @State private var isConfirming = false
     @State private var confirmError = ""
 
@@ -418,7 +425,7 @@ struct CallDetailView: View {
             }
             Text(formattedAppointmentStart)
                 .font(.headline)
-            if callerWasNotified {
+            if callerWasTexted {
                 Text(String(localized: "The caller was texted this time."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)

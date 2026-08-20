@@ -194,6 +194,36 @@ async def test_delete_contractor_refused_by_gate_makes_no_changes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_release_number_refused_by_gate_makes_no_changes(monkeypatch):
+    """If the gate refuses, the endpoint returns 403 and releases nothing."""
+    calls = []
+
+    async def fake_get_contractor(cid):
+        return _contractor(contractor_id=cid)
+
+    async def fake_release(cid):
+        calls.append(cid)
+        return True
+
+    def refusing_gate(contractor, action, context):
+        return GateDecision(
+            allowed=False,
+            action=action,
+            reason=GateReason.OWNER_CONFIRMATION_REQUIRED,
+            message="Owner confirmation is required for this action.",
+        )
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_api, "release_twilio_number", fake_release)
+    monkeypatch.setattr(contractors_api, "check_gated_action", refusing_gate)
+
+    with pytest.raises(HTTPException) as exc:
+        await contractors_api.api_release_number("c1", _owner_request())
+    assert exc.value.status_code == 403
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_release_number_failure_returns_http_500(monkeypatch):
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid)

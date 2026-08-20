@@ -70,6 +70,8 @@ class FakeQuery:
             for field, op, val in self.filters:
                 if op == "==" and data.get(field) != val:
                     match = False
+                if op == "array_contains" and val not in (data.get(field) or []):
+                    match = False
                     break
             if match:
                 results.append(FakeDocSnapshot(key, data, self.collection.document(key)))
@@ -512,6 +514,9 @@ async def test_second_upload_while_processing_returns_409_and_starts_nothing(set
     assert doc["status"] == "processing"
     assert doc["media_id"] == first_media_id
     assert doc["media_object_path"] == first_object
+    # Review round 3, item 3: the conflict must be detected before any GCS
+    # write — a valid token must not be able to spam objects into the bucket.
+    assert archive_called is False
 
 
 # 20. Re-upload after failed → fresh media_id and object; the stored result/watch pair always refers to the same attempt.
@@ -600,3 +605,120 @@ async def test_description_parameter_passed_to_analyzer_and_stored_never_logged(
     # Assert sensitive description never appears in log output
     all_logs = "\n".join(logged_messages)
     assert sensitive_text not in all_logs
+
+
+# --- Review round 3 (PR #190 triage items 1-4) ------------------------------
+
+
+# Item 2: a photo submitted while a video attempt is processing must not
+# clobber that attempt's media identity. The handler-start snapshot is stale
+# here on purpose, so the cheap pre-check passes and only the atomic claim
+# stands between the photo and the running attempt.
+@pytest.mark.asyncio
+async def test_photo_during_video_processing_hits_the_claim_and_409s(setup_env, monkeypatch):
+    db = setup_env
+    token = "test-token-photo-race"
+    token_hash = _seed_estimate(db, token)
+
+    video_media_id = "video_attempt_media"
+    video_object = f"{token_hash}/{video_media_id}.mp4"
+    db.collection("estimates").document(token_hash).update({
+        "status": "processing",
+        "attempts": 1,
+        "lease_expires_at": time.time() + 300,
+        "media_id": video_media_id,
+        "media_object_path": video_object,
+    })
+
+    # Stale snapshot: the handler believes the estimate is still pending.
+    stale = db.collection("estimates").document(token_hash).get().to_dict().copy()
+    stale["status"] = "pending"
+
+    async def stale_get(_token):
+        return stale
+
+    monkeypatch.setattr(estimates, "_get_estimate_doc", stale_get)
+    monkeypatch.setattr(estimates, "archive_media", lambda *a, **kw: f"{token_hash}/photo.jpg")
+
+    analyzer_called = False
+
+    async def no_analyze(**kwargs):
+        nonlocal analyzer_called
+        analyzer_called = True
+        return {}
+
+    monkeypatch.setattr(estimates, "analyze_media", no_analyze)
+
+    request = _StreamingRequest(body=b"photo-bytes", content_type="image/jpeg")
+    resp = await estimates.upload_and_analyze(token, request=request)
+
+    assert resp.status_code == 409
+    assert analyzer_called is False
+    doc = db.collection("estimates").document(token_hash).get().to_dict()
+    assert doc["media_id"] == video_media_id
+    assert doc["media_object_path"] == video_object
+
+
+# Item 4: a watch link texted before a re-upload was signed for 90 days; the
+# media history must keep it resolvable after media_id moves on.
+@pytest.mark.asyncio
+async def test_superseded_watch_link_still_resolves_via_media_history(setup_env, monkeypatch):
+    db = setup_env
+    token = "test-token-history"
+    token_hash = _seed_estimate(db, token)
+
+    old_id, new_id = "attempt_one_media", "attempt_two_media"
+    old_path = f"{token_hash}/{old_id}.mp4"
+    new_path = f"{token_hash}/{new_id}.mp4"
+    db.collection("estimates").document(token_hash).update({
+        "media_id": new_id,
+        "media_object_path": new_path,
+        "media_ids": [old_id, new_id],
+        "media_paths": {old_id: old_path, new_id: new_path},
+    })
+
+    monkeypatch.setattr(
+        estimates,
+        "gcs_redirect_url",
+        lambda path: f"https://storage.googleapis.com/test-bucket/{path}?signed=true",
+    )
+
+    from urllib.parse import parse_qs, urlparse
+
+    for media_id, expected_path in ((old_id, old_path), (new_id, new_path)):
+        watch_url = estimates.make_watch_url(media_id)
+        qs = parse_qs(urlparse(watch_url).query)
+        response = await estimates.get_estimate_media_redirect(
+            media_id, e=int(qs["e"][0]), s=qs["s"][0]
+        )
+        assert response.status_code == 302
+        assert expected_path in response.headers["location"]
+
+
+# Item 4 regression: uploads claimed through _claim_upload record their
+# attempt in the history so future links never dangle.
+@pytest.mark.asyncio
+async def test_claim_appends_media_history(setup_env, monkeypatch):
+    db = setup_env
+    token = "test-token-history-append"
+    token_hash = _seed_estimate(db, token)
+
+    monkeypatch.setattr(estimates, "archive_media", lambda *a, **kw: f"{token_hash}/vid.mp4")
+
+    started = asyncio.Event()
+
+    async def hold_analyzer(**kwargs):
+        started.set()
+        return {"diagnosis": "x", "confidence": "high"}
+
+    monkeypatch.setattr(estimates, "analyze_media", hold_analyzer)
+    monkeypatch.setattr(estimates, "send_sms", lambda *a, **kw: None)
+
+    request = _StreamingRequest(body=b"video-bytes", content_type="video/mp4")
+    resp = await estimates.upload_and_analyze(token, request=request)
+    assert resp.status_code == 202
+    await started.wait()
+
+    doc = db.collection("estimates").document(token_hash).get().to_dict()
+    assert doc["media_id"] in doc["media_ids"]
+    assert doc["media_paths"][doc["media_id"]] == doc["media_object_path"]

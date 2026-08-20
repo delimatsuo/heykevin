@@ -166,3 +166,77 @@ def test_media_id_not_derived_from_upload_token(monkeypatch):
     assert upload_token_hash not in watch_url
     assert upload_token[:8] not in watch_url
     assert upload_token_hash[:8] not in watch_url
+
+
+# --- Review round 3, item 1: signing must work without a private key --------
+# Cloud Run ADC comes from the metadata server and cannot sign bytes locally;
+# generate_signed_url must route through IAM signBlob by passing
+# service_account_email + access_token. Local key credentials keep the direct
+# path. These pin both branches.
+
+
+class _CapturingBlob:
+    def __init__(self):
+        self.kwargs = None
+
+    def generate_signed_url(self, **kwargs):
+        self.kwargs = kwargs
+        return "https://signed.example/url"
+
+
+class _CapturingClient:
+    def __init__(self, blob):
+        self._blob = blob
+
+    def bucket(self, name):
+        return self
+
+    def blob(self, path):
+        return self._blob
+
+
+class _MetadataCreds:
+    """No sign_bytes attribute — the Cloud Run ambient credential shape."""
+
+    service_account_email = "runtime-sa@kevin-491315.iam.gserviceaccount.com"
+    token = None
+
+    def refresh(self, _request):
+        self.token = "fresh-access-token"
+
+
+class _KeyCreds:
+    """Local service-account key: can sign directly."""
+
+    def sign_bytes(self, data):  # pragma: no cover - existence is the branch
+        return b"sig"
+
+
+def test_signed_url_uses_iam_signblob_when_credentials_cannot_sign(monkeypatch):
+    monkeypatch.setattr(settings, "estimate_media_bucket", "test-bucket")
+    blob = _CapturingBlob()
+
+    url = estimate_media.gcs_redirect_url(
+        "tok/vid.mp4",
+        client_factory=lambda: _CapturingClient(blob),
+        credentials_factory=lambda: (_MetadataCreds(), "proj"),
+    )
+
+    assert url == "https://signed.example/url"
+    assert blob.kwargs["service_account_email"].startswith("runtime-sa@")
+    assert blob.kwargs["access_token"] == "fresh-access-token"
+
+
+def test_signed_url_signs_directly_with_a_local_key(monkeypatch):
+    monkeypatch.setattr(settings, "estimate_media_bucket", "test-bucket")
+    blob = _CapturingBlob()
+
+    url = estimate_media.gcs_redirect_url(
+        "tok/vid.mp4",
+        client_factory=lambda: _CapturingClient(blob),
+        credentials_factory=lambda: (_KeyCreds(), "proj"),
+    )
+
+    assert url == "https://signed.example/url"
+    assert "service_account_email" not in blob.kwargs
+    assert "access_token" not in blob.kwargs

@@ -326,6 +326,66 @@ async def _run_async_estimate_analysis(
             )
 
 
+def _claim_upload(
+    *,
+    media_id: str,
+    object_path: Optional[str],
+    content_type: str,
+    caller_description: str,
+    token_hash: str,
+) -> tuple[bool, dict]:
+    """Atomically claim the estimate for one upload attempt.
+
+    Shared by the video and photo paths: only pending or a terminal state may
+    transition to processing, so a photo submitted while a video attempt is
+    running is rejected instead of clobbering that attempt's media identity.
+
+    Every claim also appends the attempt to media_ids/media_paths. A re-upload
+    replaces the *current* media_id, but a watch link texted for an earlier
+    attempt was signed for 90 days — the history keeps it resolvable.
+    """
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(token_hash)
+    tx = db.transaction()
+
+    @transactional
+    def _transaction_fn(transaction) -> tuple[bool, dict]:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False, {}
+        data = snapshot.to_dict() or {}
+        if time.time() > data.get("expires_at", 0):
+            return False, {}
+        if data.get("status") == "processing":
+            return False, data
+
+        attempts = (data.get("attempts") or 0) + 1
+        now = time.time()
+        media_ids = list(data.get("media_ids") or [])
+        media_paths = dict(data.get("media_paths") or {})
+        if object_path:
+            media_ids.append(media_id)
+            media_paths[media_id] = object_path
+        updates = {
+            "status": "processing",
+            "attempts": attempts,
+            "lease_expires_at": now + 300.0,
+            "media_id": media_id,
+            "media_object_path": object_path,
+            "media_content_type": content_type,
+            "description": caller_description,
+            "notified_at": None,
+            "result": None,
+            "media_ids": media_ids,
+            "media_paths": media_paths,
+        }
+        transaction.update(doc_ref, updates)
+        data.update(updates)
+        return True, data
+
+    return _transaction_fn(tx)
+
+
 @router.post("/{token}/upload")
 async def upload_and_analyze(
     token: str,
@@ -366,7 +426,19 @@ async def upload_and_analyze(
     body = await _read_request_with_cap(request, effective_max)
     media_id = secrets.token_urlsafe(16)
     is_video = content_type.startswith("video/")
-    caller_description = str(description or "").strip()[:500]
+    # Not dead code: when tests (or any caller) invoke this handler directly
+    # rather than through FastAPI, `description` is the Query FieldInfo object,
+    # and stringifying it stores framework repr garbage as the caller's words.
+    # An earlier review wrongly removed this guard; it is load-bearing.
+    caller_description = description.strip()[:500] if isinstance(description, str) else ""
+
+    # Cheap pre-check before any GCS write: a repeated POST while an attempt
+    # is already processing must not archive another object. The handler-start
+    # snapshot may be slightly stale; the claim transaction below remains the
+    # authority — this only stops the storage spend on the obvious case, since
+    # the public upload endpoint does not enforce upload_count.
+    if estimate.get("status") == "processing":
+        return JSONResponse(status_code=409, content={"status": "processing"})
 
     if is_video:
         # 1. Archive to GCS
@@ -377,43 +449,16 @@ async def upload_and_analyze(
             raise HTTPException(status_code=503, detail="Storage unavailable")
 
         # 2. Atomic claim in Firestore transaction
-        db = get_firestore_client()
-        doc_ref = db.collection(COLLECTION).document(token_hash)
-
-        def _claim_tx() -> tuple[bool, dict]:
-            tx = db.transaction()
-
-            @transactional
-            def _transaction_fn(transaction) -> tuple[bool, dict]:
-                snapshot = doc_ref.get(transaction=transaction)
-                if not snapshot.exists:
-                    return False, {}
-                data = snapshot.to_dict() or {}
-                if time.time() > data.get("expires_at", 0):
-                    return False, {}
-                if data.get("status") == "processing":
-                    return False, data
-
-                attempts = (data.get("attempts") or 0) + 1
-                now = time.time()
-                updates = {
-                    "status": "processing",
-                    "attempts": attempts,
-                    "lease_expires_at": now + 300.0,
-                    "media_id": media_id,
-                    "media_object_path": object_path,
-                    "media_content_type": content_type,
-                    "description": caller_description,
-                    "notified_at": None,
-                    "result": None,
-                }
-                transaction.update(doc_ref, updates)
-                data.update(updates)
-                return True, data
-
-            return _transaction_fn(tx)
-
-        claimed, claim_data = await asyncio.get_running_loop().run_in_executor(None, _claim_tx)
+        claimed, claim_data = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _claim_upload(
+                media_id=media_id,
+                object_path=object_path,
+                content_type=content_type,
+                caller_description=caller_description,
+                token_hash=token_hash,
+            ),
+        )
         if not claimed:
             if claim_data.get("status") == "processing":
                 return JSONResponse(status_code=409, content={"status": "processing"})
@@ -444,20 +489,24 @@ async def upload_and_analyze(
         except Exception as e:
             logger.error("Failed to archive photo media for %s: %s", token_hash[:8], type(e).__name__)
 
-        now = time.time()
-        attempts = (estimate.get("attempts") or 0) + 1
+        # Same atomic claim as video: a photo submitted while a video attempt
+        # is processing must not replace that attempt's media identity.
+        claimed, claim_data = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _claim_upload(
+                media_id=media_id,
+                object_path=object_path,
+                content_type=content_type,
+                caller_description=caller_description,
+                token_hash=token_hash,
+            ),
+        )
+        if not claimed:
+            if claim_data.get("status") == "processing":
+                return JSONResponse(status_code=409, content={"status": "processing"})
+            raise HTTPException(status_code=404, detail="Invalid or expired token")
+
         db = get_firestore_client()
-        db.collection(COLLECTION).document(token_hash).update({
-            "status": "processing",
-            "attempts": attempts,
-            "lease_expires_at": now + 300.0,
-            "media_id": media_id,
-            "media_object_path": object_path,
-            "media_content_type": content_type,
-            "description": caller_description,
-            "notified_at": None,
-            "result": None,
-        })
 
         services = contractor.get("services", []) if contractor else []
         business_name = contractor.get("business_name", "") if contractor else ""
@@ -518,12 +567,21 @@ async def get_estimate_media_redirect(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     db = get_firestore_client()
-    docs = list(db.collection(COLLECTION).where("media_id", "==", media_id).limit(1).stream())
+    # media_ids keeps every attempt, so a watch link texted before a re-upload
+    # (signed for 90 days) still resolves after media_id moves on. The
+    # equality fallback covers documents written before the history existed.
+    docs = list(
+        db.collection(COLLECTION).where("media_ids", "array_contains", media_id).limit(1).stream()
+    )
+    if not docs:
+        docs = list(db.collection(COLLECTION).where("media_id", "==", media_id).limit(1).stream())
     if not docs:
         raise HTTPException(status_code=404, detail="Media not found")
 
     data = docs[0].to_dict() or {}
-    object_path = data.get("media_object_path", "")
+    object_path = (data.get("media_paths") or {}).get(media_id) or (
+        data.get("media_object_path", "") if data.get("media_id") == media_id else ""
+    )
     if not object_path:
         raise HTTPException(status_code=404, detail="Media not found")
 

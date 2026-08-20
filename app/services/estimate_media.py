@@ -86,9 +86,36 @@ def verify_watch_sig(media_id: str, expires: int, sig: str) -> bool:
     return hmac.compare_digest(sig or "", expected)
 
 
+def _iam_signing_kwargs(
+    credentials_factory: Optional[Callable[[], tuple]] = None,
+) -> dict:
+    """Signing kwargs that work without a local private key.
+
+    On Cloud Run the ambient credentials come from the metadata server and
+    cannot sign bytes locally, so a bare generate_signed_url raises. Passing
+    service_account_email + access_token makes the storage library sign via
+    the IAM signBlob API instead — which is why §6 grants the runtime service
+    account roles/iam.serviceAccountTokenCreator on itself. Local
+    service-account keys (tests, dev) keep the direct path.
+    """
+    import google.auth
+    from google.auth.transport import requests as google_auth_requests
+
+    factory = credentials_factory or google.auth.default
+    credentials, _project = factory()
+    if hasattr(credentials, "sign_bytes"):
+        return {}
+    credentials.refresh(google_auth_requests.Request())
+    return {
+        "service_account_email": credentials.service_account_email,
+        "access_token": credentials.token,
+    }
+
+
 def gcs_redirect_url(
     object_path: str,
     client_factory: Optional[Callable[[], storage.Client]] = None,
+    credentials_factory: Optional[Callable[[], tuple]] = None,
 ) -> str:
     """Generate a V4 signed GET URL with 1-hour expiry for GCS media playback."""
     bucket_name = (settings.estimate_media_bucket or "").strip()
@@ -102,6 +129,7 @@ def gcs_redirect_url(
         version="v4",
         expiration=datetime.timedelta(hours=1),
         method="GET",
+        **_iam_signing_kwargs(credentials_factory),
     )
 
 

@@ -1,6 +1,8 @@
 import os
 
 import httpx
+import time
+
 import pytest
 from fastapi import FastAPI, HTTPException
 
@@ -41,6 +43,15 @@ class _AuthedRequest:
     state = _AuthState()
 
 
+class _Snapshot:
+    def __init__(self, data):
+        self._data = data
+        self.exists = True
+
+    def to_dict(self):
+        return dict(self._data)
+
+
 class _Doc:
     def __init__(self, db, key):
         self.db = db
@@ -51,6 +62,21 @@ class _Doc:
 
     def set(self, data):
         self.db.sets.append({"key": self.key, "data": data})
+
+    def get(self, transaction=None):
+        # Photos now claim through a Firestore transaction before analyzing
+        # (PR #190 review round 3, item 2). A pending, unexpired doc lets the
+        # claim succeed so these gate tests keep exercising the SMS gate.
+        return _Snapshot({
+            "status": "pending",
+            "expires_at": time.time() + 3600,
+            "attempts": 0,
+        })
+
+
+class _Tx:
+    def update(self, doc_ref, data):
+        doc_ref.update(data)
 
 
 class _Collection:
@@ -68,6 +94,9 @@ class _DB:
 
     def collection(self, _name):
         return _Collection(self)
+
+    def transaction(self):
+        return _Tx()
 
 
 async def _estimate_doc(_token):
@@ -87,6 +116,9 @@ def _set_common_estimate_fakes(monkeypatch):
     monkeypatch.setattr(estimates, "_get_estimate_doc", _estimate_doc)
     monkeypatch.setattr(estimates, "analyze_media", _analyze_media)
     monkeypatch.setattr(estimates, "get_firestore_client", lambda: db)
+    # Same neutralization the estimate worker tests use: the decorator needs
+    # a real Firestore transaction object; the claim logic is what matters here.
+    monkeypatch.setattr(estimates, "transactional", lambda fn: fn)
     return db
 
 

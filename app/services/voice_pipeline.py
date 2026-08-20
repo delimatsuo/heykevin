@@ -1437,11 +1437,11 @@ class VoicePipeline:
         transient fault, which is how call CA9c4f4d ended up retrying four
         times and improvising (PR #156).
         """
-        from app.services.appointment_time import slot_is_plausible
+        from app.services.appointment_time import slot_is_bookable
 
         contractor = getattr(self, "_contractor_config", None) or {}
         start_time = str(tool_input.get("start_time", "") or "")
-        if slot_is_plausible(start_time, contractor):
+        if slot_is_bookable(start_time, contractor):
             return None
 
         _log_voice_event(
@@ -1449,16 +1449,21 @@ class VoicePipeline:
             getattr(self, "_call_sid", ""),
             level=logging.WARNING,
         )
+        # No "error" key on purpose. _handle_caller_speech treats any tool
+        # result carrying one as a hard failure: it speaks "I can't check the
+        # schedule right now", takes a message, and returns without giving the
+        # model another turn — so the instruction below would never be read on
+        # the legacy pipeline. This mirrors the request_recorded shape, which
+        # is a denial the model is meant to act on rather than a fault.
         return json.dumps({
-            "success": False,
+            "status": "date_not_understood",
             "booked": False,
-            "error": "implausible_start_time",
-            "retry": False,
-            "instruction": (
-                "That date is not a usable appointment date. Do NOT call "
-                "book_appointment again with the same value. Ask the caller to "
-                "say the day and month again, resolve it against today's date "
-                "using the current year, and only then call this tool again."
+            "message": (
+                "Nothing was recorded: that date did not resolve to a usable "
+                "appointment time. Do not call book_appointment again with the "
+                "same value. Ask the caller to say the day and month again, "
+                "resolve it against today's date using the current year, and "
+                "then call book_appointment once with the corrected time."
             ),
         })
 

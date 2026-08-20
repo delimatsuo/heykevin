@@ -52,9 +52,8 @@ def test_the_original_defect_year_2020_is_rejected():
 
     assert result is not None
     payload = json.loads(result)
-    assert payload["success"] is False
     assert payload["booked"] is False
-    assert payload["error"] == "implausible_start_time"
+    assert payload["status"] == "date_not_understood"
 
 
 def test_a_normal_upcoming_slot_passes_through():
@@ -67,11 +66,44 @@ def test_rejection_tells_the_model_not_to_retry_the_same_value():
         _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
     )
 
-    assert payload["retry"] is False
-    instruction = payload["instruction"]
-    assert "Do NOT call book_appointment again with the same value" in instruction
+    message = payload["message"]
+    assert "Do not call book_appointment again with the same value" in message
     # It must say what to do instead, not merely what not to do.
-    assert "Ask the caller" in instruction
+    assert "Ask the caller" in message
+
+
+def test_rejection_carries_no_error_key():
+    """An "error" key would never reach the model on the legacy pipeline.
+
+    _handle_caller_speech treats any tool result with a truthy `error` as a
+    hard failure: it speaks "I can't check the schedule right now", takes a
+    message, and returns without another model turn — so the instruction would
+    be discarded exactly where it is needed.
+    """
+    payload = json.loads(
+        _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
+    )
+
+    assert "error" not in payload
+
+
+def test_a_year_out_in_either_direction_is_rejected():
+    """The likeliest model error, and the lenient Confirm predicate misses it.
+
+    slot_is_plausible allows ±400 days, so both of these pass it. The live
+    booking path needs the tighter window or the guard is theatre.
+    """
+    from app.services.appointment_time import slot_is_plausible
+
+    contractor = {"timezone": "America/New_York"}
+    for value in (_iso(-365), _iso(366)):
+        assert slot_is_plausible(value, contractor) is True, "precondition"
+        assert _Pipe()._reject_implausible_slot({"start_time": value}) is not None
+
+
+def test_a_booking_a_few_months_out_is_still_allowed():
+    """The window must not be so tight it rejects a real advance booking."""
+    assert _Pipe()._reject_implausible_slot({"start_time": _iso(120)}) is None
 
 
 def test_missing_start_time_is_rejected_rather_than_stored_empty():
@@ -84,17 +116,20 @@ def test_unparseable_start_time_is_rejected():
 
 
 def test_far_future_is_rejected():
-    """A year mistyped forward is as wrong as one mistyped back."""
     assert _Pipe()._reject_implausible_slot({"start_time": _iso(900)}) is not None
 
 
-def test_recent_past_still_allowed():
-    """Deliberate: a slot from last week is a leftover, not a hallucinated year.
+def test_the_past_is_rejected_for_a_new_booking():
+    """A booking agreed on the call is not retrospective.
 
-    slot_is_plausible allows -400..+400 days. Rejecting the recent past here
-    would break confirming an appointment agreed a few days ago.
+    Distinct from Confirm, where a slot from last week is a legitimate leftover
+    and slot_is_plausible still accepts it.
     """
-    assert _Pipe()._reject_implausible_slot({"start_time": _iso(-3)}) is None
+    from app.services.appointment_time import slot_is_plausible
+
+    contractor = {"timezone": "America/New_York"}
+    assert slot_is_plausible(_iso(-3), contractor) is True, "Confirm still allows it"
+    assert _Pipe()._reject_implausible_slot({"start_time": _iso(-3)}) is not None
 
 
 # --- wiring -----------------------------------------------------------------
@@ -143,7 +178,7 @@ async def test_tool_call_with_a_2020_date_records_nothing(monkeypatch):
     )
 
     payload = json.loads(raw)
-    assert payload["error"] == "implausible_start_time"
+    assert payload["status"] == "date_not_understood"
     # The whole point: nothing about this date reaches the call record.
     assert saved == []
 
@@ -165,5 +200,5 @@ async def test_tool_call_with_a_good_date_still_records_the_request(monkeypatch)
     )
 
     payload = json.loads(raw)
-    assert payload.get("error") != "implausible_start_time"
+    assert payload["status"] == "request_recorded"
     assert len(saved) == 1

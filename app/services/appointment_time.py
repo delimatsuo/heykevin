@@ -63,17 +63,16 @@ def format_wall_clock(start_time: str, contractor: dict[str, Any] | None) -> str
     return f"{parsed:%a}, {parsed:%b} {parsed.day} at {hour}:{parsed:%M} {meridiem}"
 
 
-def slot_is_plausible(
+def _slot_offset(
     value: str,
     contractor: dict[str, Any] | None,
-    *,
     now: datetime | None = None,
-) -> bool:
-    """Reject absurd years (e.g. 2020) while allowing last week's leftover slot."""
+) -> timedelta | None:
+    """How far a spoken slot sits from now, or None when it will not parse."""
     localized = localize_spoken_slot(value, contractor)
     parsed = parse_iso_datetime(localized)
     if parsed is None:
-        return False
+        return None
     if parsed.tzinfo is None:
         zone = contractor_zone(contractor)
         parsed = parsed.replace(tzinfo=zone or ZoneInfo("UTC"))
@@ -82,5 +81,48 @@ def slot_is_plausible(
         clock = clock.replace(tzinfo=parsed.tzinfo)
     else:
         clock = clock.astimezone(parsed.tzinfo)
-    delta = parsed - clock
-    return timedelta(days=-400) <= delta <= timedelta(days=400)
+    return parsed - clock
+
+
+def slot_is_plausible(
+    value: str,
+    contractor: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Reject absurd years (e.g. 2020) while allowing last week's leftover slot.
+
+    Deliberately lenient: this guards the owner's Confirm tap, where a request
+    taken a week ago is still legitimately bookable. Do not reuse it to vet a
+    slot during a live call — see `slot_is_bookable`.
+    """
+    offset = _slot_offset(value, contractor, now)
+    if offset is None:
+        return False
+    return timedelta(days=-400) <= offset <= timedelta(days=400)
+
+
+# A slot being agreed during a call is a different question from one the owner
+# is confirming later. `slot_is_plausible`'s ±400 days keeps a leftover request
+# confirmable, but that window also swallows the likeliest model error — a year
+# out either way. On 2026-08-20 both 2025-08-21 and 2027-08-21 sit inside it.
+#
+# check_availability only ever offers 14 days ahead, so a horizon of six months
+# leaves ample room for a caller asking well in advance while still catching a
+# year-sized mistake. The past is barely allowed at all: a new booking is not
+# retrospective, and a day of grace covers a slot earlier today.
+BOOKABLE_GRACE = timedelta(days=1)
+BOOKABLE_HORIZON = timedelta(days=180)
+
+
+def slot_is_bookable(
+    value: str,
+    contractor: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Whether a slot is sane to accept while still on the call with the caller."""
+    offset = _slot_offset(value, contractor, now)
+    if offset is None:
+        return False
+    return -BOOKABLE_GRACE <= offset <= BOOKABLE_HORIZON

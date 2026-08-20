@@ -1,6 +1,7 @@
 """Voice pipeline <-> Google Calendar adapter: contractor context and typed failures."""
 
 import json
+from datetime import datetime, timedelta, timezone
 import os
 
 import pytest
@@ -13,6 +14,19 @@ os.environ.setdefault("USER_PHONE", "test-user-number")
 
 from app.services.gated_actions import ActionKey
 from app.services.voice_pipeline import VoicePipeline
+
+def _upcoming(hour: int) -> str:
+    """An upcoming slot, relative to now.
+
+    book_appointment rejects a start_time outside the bookable window — no
+    past bookings, and no more than six months out. A frozen date drifts into
+    the past and fails the suite on a calendar date rather than a code change.
+    Nothing here asserts the literal value.
+    """
+    when = datetime.now(timezone(timedelta(hours=-4))) + timedelta(days=3)
+    return when.replace(hour=hour, minute=0, second=0, microsecond=0).isoformat()
+
+
 
 
 async def _noop(*_args, **_kwargs):
@@ -95,7 +109,7 @@ async def test_google_check_availability_distinguishes_provider_failure_from_no_
         ),
         (
             "book_appointment",
-            {"title": "Estimate", "start_time": "2026-08-06T09:00:00Z", "end_time": "2026-08-06T10:00:00Z"},
+            {"title": "Estimate", "start_time": _upcoming(9), "end_time": _upcoming(10)},
             "managed_create",
             {"success": True, "revision": 1},
         ),

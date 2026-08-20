@@ -85,8 +85,8 @@ The subset that most often bites:
 
 - **`app/services/estimate_media.py` (new).** Owns media persistence and the
   watch link. Public surface:
-  - `archive_media(token_hash, media_bytes, content_type) -> str | None` —
-    writes `gs://{ESTIMATE_MEDIA_BUCKET}/{token_hash}/media.{ext}`, returns the
+  - `archive_media(token_hash, media_id, media_bytes, content_type) -> str | None` —
+    writes `gs://{ESTIMATE_MEDIA_BUCKET}/{token_hash}/{media_id}.{ext}`, returns the
     object path, or `None` when `ESTIMATE_MEDIA_BUCKET` is unset (feature
     degrades: no archive, no watch link, analysis still runs). GCS client
     injectable for tests, mirroring `client_factory` in
@@ -109,17 +109,44 @@ The subset that most often bites:
   line to the analysis prompt: the caller may describe the problem out loud —
   use what they say as well as what is visible.
 - **`app/api/estimates.py` (modify).**
-  - `upload_and_analyze`: after the capped buffer — archive to GCS; for video,
-    set status `processing`, schedule the analysis+notification as a
-    background task (`asyncio.create_task`, the `post_call` pattern), and
-    return `202 {"status": "processing"}` immediately. Photos may stay
-    synchronous. If the GCS write fails **for video**, return 503 and do not
-    analyze: with no archive there is no owner link and no recovery, so an
-    honest retry beats a half-delivered result.
+  - `upload_and_analyze` (video): after the capped buffer —
+    1. Generate a fresh `media_id` (random) **per upload attempt**; archive to
+       `{token_hash}/{media_id}.{ext}`. Attempts never share an object, so a
+       retry can never overwrite the bytes a running analysis or an
+       already-sent watch link refers to.
+    2. **Claim atomically** (Firestore transaction): only `pending` or a
+       terminal state may transition to `processing`; write `attempts += 1`,
+       `lease_expires_at = now + 300`, plus the media fields, in the same
+       transaction. A second upload while one is `processing` gets
+       `409 {"status": "processing"}` and starts nothing.
+    3. Schedule the inline attempt (`asyncio.create_task`) and return
+       `202 {"status": "processing"}`.
+    Durability does **not** rest on that task surviving: this mirrors
+    `app/services/post_call_handoff.py`, where the persisted record is the
+    queue and the in-process attempt is only the fast path (see worker loop
+    below). If the GCS write fails, return 503 and claim nothing: with no
+    archive there is no owner link and no recovery, so an honest retry beats
+    a half-delivered result.
+  - `upload_and_analyze` (photo): stays synchronous and inline; archived to
+    its own `{token_hash}/{media_id}.{ext}` too; responds
+    `200 {"status": "complete", "result": {...}}` (today's `"ok"` becomes
+    `"complete"` — the feature is dark, nothing consumes the old shape).
+  - Optional caller text: the upload POST accepts `?description=<url-encoded>`
+    (cap 500 chars). Persist it on the estimate doc and pass it to
+    `analyze_media(text_description=...)`. Never log it.
   - New `GET /api/estimates/media/{media_id}?e=<expires>&s=<sig>`: verify
     signature and expiry → 302 to `gcs_redirect_url`. 403 on bad/expired
     signature; 404 on unknown media. Public route; the signature is the auth.
     Never log the signature or the caller's phone.
+- **Recovery worker (new, small).** `estimate_worker_loop` registered in
+  `app/main.py` beside `post_call_worker_loop`, same shape: periodically scan
+  for estimates in `processing` whose `lease_expires_at` has passed, re-claim
+  (attempts += 1, fresh lease), and re-run analysis from the GCS bytes. After
+  `MAX_ANALYSIS_ATTEMPTS = 3`, mark `failed` and send the failure
+  notifications. Completion and notifications must be **idempotent**: a
+  `notified_at` field on the doc guards the SMS pair, so a recovered re-run
+  never double-texts (same pattern as `caller_notified_at` on appointment
+  requests).
 - **`app/services/post_call.py` (modify).** Caller-facing offer copy becomes
   video-first (D1). Keep it short; it is an SMS.
 - **Owner completion SMS** (in `app/api/estimates.py` today): append
@@ -131,9 +158,14 @@ The subset that most often bites:
 ### 4.2 Data
 
 On the estimate document (Firestore `estimates` collection): add
-`media_object_path`, `media_id` (random, not derived from the upload token —
-the watch link must not leak the token that authorizes uploads),
-`media_content_type`. Status values: `pending → processing → complete | failed`.
+`media_object_path`, `media_id` (random per upload attempt, not derived from
+the upload token — the watch link must not leak the token that authorizes
+uploads), `media_content_type`, `description` (optional caller text),
+`attempts`, `lease_expires_at`, `notified_at`. Status values:
+`pending → processing → complete | failed`; only the atomic claim may enter
+`processing`. `media_id`/`media_object_path` always describe the attempt the
+current `result` came from, so the watch link and the diagnosis can never
+refer to different videos.
 
 ### 4.3 Failure handling (every path ends in a definite state)
 
@@ -143,7 +175,10 @@ the watch link must not leak the token that authorizes uploads),
 | Files API upload/poll error, or not `ACTIVE` within 120s | status `failed`; caller SMS "we couldn't process this — call the business directly"; owner SMS still sent **with watch link** (the artifact survives analysis death) |
 | `generateContent` error | same as above |
 | Result/owner SMS send fails | logged; background task never raises; status still reflects analysis outcome |
-| Background task crashes unexpectedly | wrap the whole task; any exception → status `failed` + the notifications above. **No estimate may remain `processing` forever.** |
+| Background task crashes unexpectedly | wrap the whole task; any exception → status `failed` + the notifications above |
+| Instance dies / task cancelled after 202 | the persisted claim is the queue: `estimate_worker_loop` finds the expired lease, re-claims, re-runs from GCS; after `MAX_ANALYSIS_ATTEMPTS` → `failed` + notifications. **No estimate may remain `processing` forever, even across instance restarts.** |
+| Worker re-runs an attempt that already completed | idempotent: terminal status is not overwritten; `notified_at` prevents duplicate SMS |
+| Second upload while one is `processing` | `409 {"status": "processing"}`; nothing scheduled, nothing overwritten |
 
 Existing gate checks (`ESTIMATE_RESULT_SMS` on upload, `ESTIMATE_TOKEN_CREATE`
 on token creation) stay exactly where and as they are.
@@ -157,14 +192,18 @@ paste-ready Lovable prompt that implements:
   accept="video/*" capture="environment">`), guidance "up to about a minute";
   secondary "Upload a photo instead"; optional short text description.
 - Flow: `POST /api/estimates/{token}/upload-url` (existing) → `POST` the file
-  to the returned URL with the file's `Content-Type` header → on `202`, show
-  "Got it — we'll text your estimate shortly" → poll `GET
-  /api/estimates/{token}` every 5s for up to 3 minutes; show the result if
-  `complete`, the failure copy if `failed`, and stop polling either way.
+  to the returned URL with the file's `Content-Type` header, appending
+  `?description=<url-encoded text>` when the caller typed one. Handle every
+  2xx by its JSON `status`: `complete` → render the result immediately (the
+  synchronous photo path); `processing` → show "Got it — we'll text your
+  estimate shortly" and poll `GET /api/estimates/{token}` every 5s for up to
+  3 minutes; show the result if `complete`, the failure copy if `failed`, and
+  stop polling either way (the SMS still delivers after the page gives up).
 - Client-side size check before upload (reject > 50MB with "please record a
   shorter video").
-- Error states: expired link (already handled by the page), 413 (too large),
-  429 (upload limit), 5xx (try again).
+- Error states: expired link (already handled by the page), 409 (an upload is
+  already being analyzed — "we're already working on your last upload"),
+  413 (too large), 429 (upload limit), 5xx (try again).
 
 The prompt must spell out exact copy, since Lovable output tracks its input.
 
@@ -237,9 +276,25 @@ reviewer can run:
 **media endpoint**
 15. Valid signature → 302 with a GCS URL. Invalid → 403. Unknown id → 404.
 
-**Mutation evidence (mandatory):** for tests 4, 8, 10, 11 — temporarily break
+**durability and isolation** (fake Firestore transaction, fake clock)
+16. Video upload persists the claim (`processing`, `attempts=1`,
+    `lease_expires_at`) **before** the 202 is returned.
+17. `estimate_worker_loop` re-claims an estimate whose lease expired and
+    completes it from the archived bytes; a doc already `complete` is left
+    untouched and no SMS is re-sent (`notified_at` guard asserted).
+18. After `MAX_ANALYSIS_ATTEMPTS` expired leases → `failed`, failure SMS to
+    caller and owner sent exactly once.
+19. Second upload while `processing` → 409, no new task, no object overwrite
+    (first attempt's `media_id`/object path unchanged).
+20. Re-upload after `failed` → fresh `media_id` and object; the stored
+    result/watch pair always refers to the same attempt.
+21. `?description=` reaches `analyze_media(text_description=...)`, is stored
+    on the doc, and never appears in log output.
+
+**Mutation evidence (mandatory):** for tests 4, 8, 10, 11, 17, 19 — temporarily break
 the guarded behavior (accept any signature; remove the poll bound; drop the
-503; swallow the task exception), show the named test failing, restore, show
+503; swallow the task exception; delete the lease-expiry sweep; drop the 409
+claim check), show the named test failing, restore, show
 it passing. Include the transcript in the PR description. A safety test that
 survives its mutation is a finding against the work.
 
@@ -250,7 +305,7 @@ Binary, in order; any failure blocks merge:
 1. Full suite: `PATH="<clone>/.venv/bin:$PATH" python -m pytest tests/unit -q`
    → **0 failed**, total ≥ 2559 + the new tests. No skipped tests introduced.
 2. All §8 tests exist under the names/behaviors described and pass.
-3. Mutation evidence present in the PR for tests 4, 8, 10, 11, and the
+3. Mutation evidence present in the PR for tests 4, 8, 10, 11, 17, 19, and the
    reviewer can reproduce at least two of them independently.
 4. `ruff check` clean on every touched file; `git diff --check` clean.
 5. Invariant table in the PR: each §4.3 row mapped to the test that proves it.

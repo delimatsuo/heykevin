@@ -143,9 +143,12 @@ in the release artifact.
 - Logs contain no transcript text, audio payload, full phone, customer record,
   OAuth code, bearer token, integration token, or provider API key.
 - Production must have a valid `TRANSCRIPT_ENCRYPTION_KEY` and must fail closed
-  if it is absent or invalid. The current plaintext fallback in
-  `app/db/calls.py` remains a production blocker until separately hardened and
-  configured.
+  if it is absent or invalid. **Satisfied.** `app/config.py` rejects startup in
+  staging, production, and demo when the key is missing or not valid 32-byte
+  base64, so the plaintext fallback in `app/db/calls.py` is reachable only in
+  development and tests. Production serves `/health` normally, which means a
+  valid key is configured — a missing one would prevent boot. Re-verify by
+  reading the guard, not by assuming this line stays true.
 - Cloud Run secret delivery and access must be reviewed against
   `docs/security/phase0-release-readiness.md`; service metadata must never be
   copied into release notes or tickets.

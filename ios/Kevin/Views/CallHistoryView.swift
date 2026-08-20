@@ -259,6 +259,14 @@ struct CallDetailView: View {
     @Environment(\.openURL) private var openURL
     let call: CallRecord
     @State private var appointmentConfirmed = false
+    @State private var callerWasNotified = false
+
+    /// True when this session's confirm reported a text, or when the record
+    /// already carries one from a previous confirm. Reading both means a
+    /// historical confirmation still shows the line after a reload.
+    private var callerWasTexted: Bool {
+        callerWasNotified || call.appointmentCallerNotified
+    }
     @State private var isConfirming = false
     @State private var confirmError = ""
 
@@ -360,6 +368,8 @@ struct CallDetailView: View {
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            } else if appointmentStatus == "confirmed" || appointmentStatus == "booked" {
+                appointmentConfirmedCard
             }
 
             ViewThatFits(in: .horizontal) {
@@ -387,6 +397,39 @@ struct CallDetailView: View {
             Text(String(localized: "Adds this time to Google Calendar. Nothing is booked until you confirm."))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Shown once the appointment is on the calendar.
+    ///
+    /// Before this, confirming made the whole card disappear: the request card
+    /// and button were gated on `pending_owner_confirmation`, so a successful
+    /// confirm left only Call Back and Message. The single piece of feedback
+    /// was a button vanishing, which reads the same as a glitch — and the
+    /// owner lost the time itself, with Google Calendar the only way to check.
+    private var appointmentConfirmedCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(String(localized: "Added to Google Calendar"), systemImage: "checkmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.green)
+            if let title = call.appointmentTitle, !title.isEmpty {
+                Text(title)
+                    .font(.subheadline)
+            }
+            Text(formattedAppointmentStart)
+                .font(.headline)
+            if callerWasTexted {
+                Text(String(localized: "The caller was texted this time."))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -439,7 +482,7 @@ struct CallDetailView: View {
         isConfirming = true
         confirmError = ""
         do {
-            try await APIClient.shared.confirmAppointment(callSid: call.id)
+            callerWasNotified = try await APIClient.shared.confirmAppointment(callSid: call.id)
             appointmentConfirmed = true
         } catch let failure as AppointmentConfirmFailure {
             // Distinguishes "this time is unusable" from "Calendar hiccuped".

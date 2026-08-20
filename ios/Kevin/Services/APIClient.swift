@@ -18,6 +18,18 @@ struct ActiveCallInfo {
 /// authenticate solely with the Apple identity token, which expires after
 /// roughly 10 minutes. The backend returns 401 when the token is missing,
 /// expired, or invalid.
+enum BootstrapAuthError: Error, LocalizedError {
+    /// The backend rejected the Apple identity token (HTTP 401).
+    case unauthenticated
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthenticated:
+            return String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
+        }
+    }
+}
+
 /// A failed appointment confirmation, carrying the status so the UI can tell a
 /// permanent problem from a retryable one.
 ///
@@ -38,18 +50,6 @@ struct AppointmentConfirmFailure: Error, LocalizedError {
         isTimeUnusable
             ? String(localized: "Kevin didn't capture a usable time for this request. Use Call Back to agree a time with the caller.")
             : String(localized: "Couldn't add this to Google Calendar. Try again.")
-    }
-}
-
-enum BootstrapAuthError: Error, LocalizedError {
-    /// The backend rejected the Apple identity token (HTTP 401).
-    case unauthenticated
-
-    var errorDescription: String? {
-        switch self {
-        case .unauthenticated:
-            return String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
-        }
     }
 }
 
@@ -578,7 +578,8 @@ final class APIClient: @unchecked Sendable {
                     readOnServer: serverRead,
                     appointmentStatus: appointment?["status"] as? String,
                     appointmentStartTime: appointment?["start_time"] as? String,
-                    appointmentTitle: appointment?["title"] as? String
+                    appointmentTitle: appointment?["title"] as? String,
+                    appointmentCallerNotified: appointment?["caller_notified_at"] != nil
                 )
             }
             // Seed local read state from server so unread badges are correct after reinstall
@@ -604,7 +605,15 @@ final class APIClient: @unchecked Sendable {
         _ = try? await retryRequest(request)
     }
 
-    func confirmAppointment(callSid: String) async throws {
+    /// Returns whether the backend actually texted the caller.
+    ///
+    /// The UI must not claim a text was sent when it wasn't: the send is
+    /// skipped when the caller is the owner's own number (self-test) and can
+    /// fail outright when the caller has replied STOP. `caller_notified` is
+    /// the server's answer to that, so the confirmation card reads it instead
+    /// of assuming.
+    @discardableResult
+    func confirmAppointment(callSid: String) async throws -> Bool {
         let encoded = callSid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? callSid
         let url = URL(string: "\(baseURL)/api/calls/\(encoded)/confirm-appointment")!
         var request = URLRequest(url: url)
@@ -613,7 +622,7 @@ final class APIClient: @unchecked Sendable {
         request.timeoutInterval = 15
         authorize(&request)
 
-        let (_, response) = try await retryRequest(request)
+        let (data, response) = try await retryRequest(request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             // The status has to survive. A 422 means the stored time is not
             // bookable — no amount of retrying fixes it — while a 502 is the
@@ -622,6 +631,11 @@ final class APIClient: @unchecked Sendable {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw AppointmentConfirmFailure(statusCode: status)
         }
+
+        // A missing or unreadable field means "we don't know", which must read
+        // as false — claiming a text that never went is worse than staying quiet.
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (json?["caller_notified"] as? Bool) ?? false
     }
 
     // MARK: - Contractor PATCH

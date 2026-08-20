@@ -15,6 +15,11 @@ struct CallRecord: Identifiable {
     let appointmentStatus: String?
     let appointmentStartTime: String?
     let appointmentTitle: String?
+    /// Whether the backend recorded that it texted the caller, from the
+    /// persisted `caller_notified_at`. Without this the confirmed card
+    /// suppressed the line for every historical confirmation, because the
+    /// in-view state only learns the answer from a confirm this session.
+    let appointmentCallerNotified: Bool
 
     init(
         id: String,
@@ -29,7 +34,8 @@ struct CallRecord: Identifiable {
         readOnServer: Bool,
         appointmentStatus: String? = nil,
         appointmentStartTime: String? = nil,
-        appointmentTitle: String? = nil
+        appointmentTitle: String? = nil,
+        appointmentCallerNotified: Bool = false
     ) {
         self.id = id
         self.callerPhone = callerPhone
@@ -44,6 +50,7 @@ struct CallRecord: Identifiable {
         self.appointmentStatus = appointmentStatus
         self.appointmentStartTime = appointmentStartTime
         self.appointmentTitle = appointmentTitle
+        self.appointmentCallerNotified = appointmentCallerNotified
     }
 
     /// Whether the caller left a message (has transcript with caller speech beyond the initial exchange).

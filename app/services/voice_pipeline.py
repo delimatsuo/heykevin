@@ -567,6 +567,25 @@ RULES:
             f"\n- Still collect their name and reason for calling. Only confirm callback details if the caller asks for or agrees to callback, scheduling, or follow-up."
         )
 
+    # Kevin had no idea what day it was. Callers speak in relative terms —
+    # "Friday", "the 21st", "next week" — and with no anchor the model invented
+    # a year: a live call on 2026-08-19 asking for "Friday, August 21st" was
+    # stored as 2020-08-21 (also a Friday, which is how it looked plausible).
+    # The year only came out right when the model copied start_iso back from
+    # check_availability; a caller who named a time directly got fiction.
+    # Anchoring in the contractor's own zone, since "today" is theirs, not UTC's.
+    from app.services.appointment_time import contractor_zone
+
+    _zone = contractor_zone(config)
+    _today = datetime.now(_zone) if _zone else datetime.now()
+    base_prompt += (
+        f"\n\nTODAY'S DATE: It is {_today.strftime('%A, %B %-d, %Y')}. "
+        "Resolve every relative date the caller gives you — \"Friday\", \"tomorrow\", "
+        "\"the 21st\", \"next week\" — against that date, and always use the current "
+        "year unless the caller states a different one explicitly. Never emit a date "
+        "in a past year."
+    )
+
     base_prompt += (
         "\n\nSCHEDULING: Only offer specific times that check_availability returned to you. "
         "Never invent a time or guess when the owner is free. You cannot confirm an "

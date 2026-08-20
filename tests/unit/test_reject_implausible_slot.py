@@ -1,0 +1,169 @@
+"""A bad appointment date must never leave the call.
+
+`slot_is_plausible` already guarded the owner's Confirm tap, but that fires at
+the very end. On 2026-08-19 a caller asked for "Friday, August 21st", Kevin
+accepted it out loud, the owner got an SMS for it, and only Confirm caught that
+the stored year was 2020 — by which point the wrong date had reached both the
+caller's ears and the owner's phone.
+
+The prompt now states today's date, but a stated date is guidance, not a
+guarantee. This rejects at the tool boundary so the model has to re-ask rather
+than the system quietly recording fiction.
+"""
+
+import json
+import os
+
+import pytest
+from datetime import datetime, timedelta, timezone
+
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
+os.environ.setdefault("USER_PHONE", "+15550000001")
+
+from app.services.voice_pipeline import VoicePipeline
+
+
+class _Pipe:
+    """Borrow the real method without constructing a full pipeline.
+
+    Mirrors the `__new__` idiom the pipelines already use to share
+    `_execute_tool` across engines.
+    """
+
+    def __init__(self, contractor=None):
+        self._contractor_config = contractor or {"timezone": "America/New_York"}
+        self._call_sid = "CAtest"
+
+    _reject_implausible_slot = VoicePipeline._reject_implausible_slot
+
+
+def _iso(days_from_now: int, hour: int = 10) -> str:
+    when = datetime.now(timezone(timedelta(hours=-4))) + timedelta(days=days_from_now)
+    return when.replace(hour=hour, minute=0, second=0, microsecond=0).isoformat()
+
+
+def test_the_original_defect_year_2020_is_rejected():
+    result = _Pipe()._reject_implausible_slot(
+        {"start_time": "2020-08-21T15:00:00-04:00"}
+    )
+
+    assert result is not None
+    payload = json.loads(result)
+    assert payload["success"] is False
+    assert payload["booked"] is False
+    assert payload["error"] == "implausible_start_time"
+
+
+def test_a_normal_upcoming_slot_passes_through():
+    assert _Pipe()._reject_implausible_slot({"start_time": _iso(4)}) is None
+
+
+def test_rejection_tells_the_model_not_to_retry_the_same_value():
+    """A bare error reads as a transient fault — that is the PR #156 bug."""
+    payload = json.loads(
+        _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
+    )
+
+    assert payload["retry"] is False
+    instruction = payload["instruction"]
+    assert "Do NOT call book_appointment again with the same value" in instruction
+    # It must say what to do instead, not merely what not to do.
+    assert "Ask the caller" in instruction
+
+
+def test_missing_start_time_is_rejected_rather_than_stored_empty():
+    assert _Pipe()._reject_implausible_slot({}) is not None
+    assert _Pipe()._reject_implausible_slot({"start_time": ""}) is not None
+
+
+def test_unparseable_start_time_is_rejected():
+    assert _Pipe()._reject_implausible_slot({"start_time": "next friday-ish"}) is not None
+
+
+def test_far_future_is_rejected():
+    """A year mistyped forward is as wrong as one mistyped back."""
+    assert _Pipe()._reject_implausible_slot({"start_time": _iso(900)}) is not None
+
+
+def test_recent_past_still_allowed():
+    """Deliberate: a slot from last week is a leftover, not a hallucinated year.
+
+    slot_is_plausible allows -400..+400 days. Rejecting the recent past here
+    would break confirming an appointment agreed a few days ago.
+    """
+    assert _Pipe()._reject_implausible_slot({"start_time": _iso(-3)}) is None
+
+
+# --- wiring -----------------------------------------------------------------
+# The tests above call the method directly, so they would all still pass if the
+# call were deleted from the book_appointment handler. These drive the real tool
+# dispatcher instead, and assert nothing was written.
+
+
+def _noop(*_args, **_kwargs):
+    return None
+
+
+def _live_pipeline(call_sid="CAwire"):
+    return VoicePipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        on_call_complete=_noop,
+        call_sid=call_sid,
+        # Calendar connected but unauthorized to write — the shape that
+        # reaches the request path, matching test_appointment_requests.
+        contractor_config={
+            "contractor_id": "c1",
+            "google_calendar_access_token": "gcal-token",
+            "timezone": "America/New_York",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_with_a_2020_date_records_nothing(monkeypatch):
+    saved = []
+
+    async def fake_save_call(sid, payload):
+        saved.append((sid, payload))
+        return True
+
+    monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
+
+    raw = await _live_pipeline()._execute_tool(
+        "book_appointment",
+        {
+            "title": "Toilet replacement",
+            "start_time": "2020-08-21T15:00:00-04:00",
+            "end_time": "2020-08-21T16:00:00-04:00",
+        },
+    )
+
+    payload = json.loads(raw)
+    assert payload["error"] == "implausible_start_time"
+    # The whole point: nothing about this date reaches the call record.
+    assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_tool_call_with_a_good_date_still_records_the_request(monkeypatch):
+    """The guard must not swallow the ordinary path."""
+    saved = []
+
+    async def fake_save_call(sid, payload):
+        saved.append((sid, payload))
+        return True
+
+    monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
+
+    raw = await _live_pipeline()._execute_tool(
+        "book_appointment",
+        {"title": "Toilet replacement", "start_time": _iso(3), "end_time": _iso(3, 11)},
+    )
+
+    payload = json.loads(raw)
+    assert payload.get("error") != "implausible_start_time"
+    assert len(saved) == 1

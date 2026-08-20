@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 
@@ -107,7 +108,16 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
         "_create_managed_google_booking",
         AsyncMock(side_effect=AssertionError("provider saga must not run")),
     )
-    result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
+    # A valid start_time is now a precondition: book_appointment rejects an
+    # implausible or missing one before the gate runs. This test is about the
+    # gate, so it supplies a real slot instead of relying on the old behaviour
+    # of recording a request with no time at all.
+    _slot = datetime.now(timezone(timedelta(hours=-4))) + timedelta(days=3)
+    result = json.loads(await pipeline._execute_tool("book_appointment", {
+        "title": "Repair",
+        "start_time": _slot.replace(hour=10, minute=0, second=0, microsecond=0).isoformat(),
+        "end_time": _slot.replace(hour=11, minute=0, second=0, microsecond=0).isoformat(),
+    }))
 
     # Unapproved automation becomes an owner-confirmed request, never a write.
     # See tests/unit/test_appointment_requests.py for the request contract.

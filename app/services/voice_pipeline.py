@@ -1420,6 +1420,48 @@ class VoicePipeline:
         )
         return decision
 
+    def _reject_implausible_slot(self, tool_input: dict) -> Optional[str]:
+        """Refuse a start_time that cannot be a real appointment.
+
+        Returns a tool result to send back, or None when the slot is fine.
+
+        The prompt now states today's date, but a stated date is guidance, not
+        a guarantee. `slot_is_plausible` already guarded the owner's Confirm
+        tap — except that fires at the *end*, after the wrong date has been
+        spoken aloud to the caller and texted to the owner. On 2026-08-19 a
+        caller asking for "Friday, August 21st" heard Kevin accept it and the
+        owner got an SMS for it, and only Confirm caught the stored year 2020.
+
+        Checking here means a bad date never leaves the call. The model is told
+        explicitly not to retry the same value — a bare error reads as a
+        transient fault, which is how call CA9c4f4d ended up retrying four
+        times and improvising (PR #156).
+        """
+        from app.services.appointment_time import slot_is_plausible
+
+        contractor = getattr(self, "_contractor_config", None) or {}
+        start_time = str(tool_input.get("start_time", "") or "")
+        if slot_is_plausible(start_time, contractor):
+            return None
+
+        _log_voice_event(
+            "appointment_slot_rejected",
+            getattr(self, "_call_sid", ""),
+            level=logging.WARNING,
+        )
+        return json.dumps({
+            "success": False,
+            "booked": False,
+            "error": "implausible_start_time",
+            "retry": False,
+            "instruction": (
+                "That date is not a usable appointment date. Do NOT call "
+                "book_appointment again with the same value. Ask the caller to "
+                "say the day and month again, resolve it against today's date "
+                "using the current year, and only then call this tool again."
+            ),
+        })
+
     async def _record_appointment_request(self, tool_input: dict) -> str:
         """Pass a requested slot to the owner instead of booking it.
 
@@ -1547,6 +1589,12 @@ class VoicePipeline:
                     return json.dumps({"available_slots": slots, "days_checked": days})
 
                 elif tool_name == "book_appointment":
+                    # Before the gate, so it covers both outcomes: the request
+                    # path that production actually uses today, and auto-book
+                    # if it is ever turned on.
+                    rejection = self._reject_implausible_slot(tool_input)
+                    if rejection is not None:
+                        return rejection
                     decision = self._check_tool_write_gate(ActionKey.GOOGLE_CREATE_EVENT)
                     if not decision.allowed:
                         if decision.reason in _BOOKING_REQUEST_REASONS:

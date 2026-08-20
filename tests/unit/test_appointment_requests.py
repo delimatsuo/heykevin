@@ -7,6 +7,7 @@ retries the tool, and improvises a reassurance the caller hears as "reserved".
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 import os
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
@@ -36,10 +37,22 @@ def _pipeline(config, call_sid="CA123"):
     )
 
 
+def _soon(hour: int) -> str:
+    """A slot a few days out, relative to now.
+
+    Frozen dates expire: book_appointment now rejects a start_time outside the
+    plausibility window, so a hardcoded date would silently become an
+    implausible one and fail this suite on a calendar date rather than a code
+    change. Nothing here asserts the literal value.
+    """
+    when = datetime.now(timezone(timedelta(hours=-4))) + timedelta(days=3)
+    return when.replace(hour=hour, minute=0, second=0, microsecond=0).isoformat()
+
+
 BOOKING_ARGS = {
     "title": "Faucet repair - John Smith",
-    "start_time": "2026-08-11T10:00:00-04:00",
-    "end_time": "2026-08-11T11:00:00-04:00",
+    "start_time": _soon(10),
+    "end_time": _soon(11),
     "description": "Kitchen sink leaking",
 }
 

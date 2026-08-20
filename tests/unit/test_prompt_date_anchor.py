@@ -76,8 +76,20 @@ def test_date_anchor_uses_the_contractor_timezone_not_utc():
 def test_prompt_tells_the_model_to_resolve_relative_dates():
     prompt = _business_prompt()
     anchor = prompt[prompt.index("TODAY'S DATE:"):]
-    assert "current year" in anchor
-    assert "past year" in anchor
+    assert "next occurrence" in anchor
+    assert "already past" in anchor
+
+
+def test_prompt_does_not_pin_the_model_to_the_current_year():
+    """"Use the current year" is wrong for four days of December.
+
+    On Dec 30 a caller asking for January 2 means next year. Pinning to the
+    current year yields a past date, which the tool-time guard then rejects —
+    looping the caller instead of booking them.
+    """
+    anchor = _business_prompt()
+    anchor = anchor[anchor.index("TODAY'S DATE:"):]
+    assert "current year" not in anchor
 
 
 def test_missing_timezone_still_produces_a_date_anchor():

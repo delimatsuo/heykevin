@@ -16,6 +16,7 @@ import os
 
 import pytest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
@@ -202,3 +203,52 @@ async def test_tool_call_with_a_good_date_still_records_the_request(monkeypatch)
     payload = json.loads(raw)
     assert payload["status"] == "request_recorded"
     assert len(saved) == 1
+
+
+def test_grace_means_earlier_today_not_a_rolling_day():
+    """At 3pm, yesterday 4pm is 23 hours back — inside a duration grace.
+
+    A duration-based window would accept a date the caller cannot be booking.
+    "Already past" is a calendar question.
+    """
+    from app.services.appointment_time import slot_is_bookable
+
+    contractor = {"timezone": "America/New_York"}
+    ny = ZoneInfo("America/New_York")
+    now = datetime(2026, 8, 20, 15, 0, tzinfo=ny)
+
+    yesterday_4pm = datetime(2026, 8, 19, 16, 0, tzinfo=ny).isoformat()
+    assert slot_is_bookable(yesterday_4pm, contractor, now=now) is False
+
+    # Earlier the same day is still fine — that is what the grace was for.
+    earlier_today = datetime(2026, 8, 20, 9, 0, tzinfo=ny).isoformat()
+    assert slot_is_bookable(earlier_today, contractor, now=now) is True
+
+
+def test_recovery_wording_survives_a_year_boundary():
+    """"Use the current year" sends a December caller asking for January backwards.
+
+    On Dec 30 2026, "January 2" means 2027. Telling the model to use the
+    current year produces a past date that fails this same guard again, looping
+    the caller instead of recovering.
+    """
+    payload = json.loads(
+        _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
+    )
+
+    assert "current year" not in payload["message"]
+    assert "next occurrence" in payload["message"]
+
+
+def test_prompt_date_rule_survives_a_year_boundary():
+    from app.services.voice_pipeline import build_system_prompt
+
+    prompt = build_system_prompt({
+        "owner_name": "Deli",
+        "business_name": "Electus USA",
+        "effective_mode": "business",
+        "timezone": "America/New_York",
+    })
+    anchor = prompt[prompt.index("TODAY'S DATE:"):]
+    assert "next occurrence" in anchor
+    assert "always use the current year" not in anchor

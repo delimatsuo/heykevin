@@ -63,12 +63,12 @@ def format_wall_clock(start_time: str, contractor: dict[str, Any] | None) -> str
     return f"{parsed:%a}, {parsed:%b} {parsed.day} at {hour}:{parsed:%M} {meridiem}"
 
 
-def _slot_offset(
+def _localized_pair(
     value: str,
     contractor: dict[str, Any] | None,
     now: datetime | None = None,
-) -> timedelta | None:
-    """How far a spoken slot sits from now, or None when it will not parse."""
+) -> tuple[datetime, datetime] | None:
+    """Return (slot, now) in one timezone, or None when the slot will not parse."""
     localized = localize_spoken_slot(value, contractor)
     parsed = parse_iso_datetime(localized)
     if parsed is None:
@@ -81,7 +81,17 @@ def _slot_offset(
         clock = clock.replace(tzinfo=parsed.tzinfo)
     else:
         clock = clock.astimezone(parsed.tzinfo)
-    return parsed - clock
+    return parsed, clock
+
+
+def _slot_offset(
+    value: str,
+    contractor: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> timedelta | None:
+    """How far a spoken slot sits from now, or None when it will not parse."""
+    pair = _localized_pair(value, contractor, now)
+    return None if pair is None else pair[0] - pair[1]
 
 
 def slot_is_plausible(
@@ -109,9 +119,8 @@ def slot_is_plausible(
 #
 # check_availability only ever offers 14 days ahead, so a horizon of six months
 # leaves ample room for a caller asking well in advance while still catching a
-# year-sized mistake. The past is barely allowed at all: a new booking is not
-# retrospective, and a day of grace covers a slot earlier today.
-BOOKABLE_GRACE = timedelta(days=1)
+# year-sized mistake. The past is not allowed at all beyond today itself: a
+# booking agreed on the call is not retrospective.
 BOOKABLE_HORIZON = timedelta(days=180)
 
 
@@ -122,7 +131,19 @@ def slot_is_bookable(
     now: datetime | None = None,
 ) -> bool:
     """Whether a slot is sane to accept while still on the call with the caller."""
-    offset = _slot_offset(value, contractor, now)
-    if offset is None:
+    pair = _localized_pair(value, contractor, now)
+    if pair is None:
         return False
-    return -BOOKABLE_GRACE <= offset <= BOOKABLE_HORIZON
+    slot, clock = pair
+
+    # "Already past" is a calendar question, not a duration one. A rolling
+    # 24-hour grace would accept yesterday 4pm while it is 3pm today — only 23
+    # hours back, but a date the caller cannot possibly be booking. Compare
+    # dates in the contractor's own zone, so any time today is still fine.
+    zone = contractor_zone(contractor)
+    slot_local = slot.astimezone(zone) if zone else slot
+    clock_local = clock.astimezone(zone) if zone else clock
+    if slot_local.date() < clock_local.date():
+        return False
+
+    return (slot - clock) <= BOOKABLE_HORIZON

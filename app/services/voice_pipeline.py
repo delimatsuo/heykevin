@@ -581,9 +581,9 @@ RULES:
     base_prompt += (
         f"\n\nTODAY'S DATE: It is {_today.strftime('%A, %B %-d, %Y')}. "
         "Resolve every relative date the caller gives you — \"Friday\", \"tomorrow\", "
-        "\"the 21st\", \"next week\" — against that date, and always use the current "
-        "year unless the caller states a different one explicitly. Never emit a date "
-        "in a past year."
+        "\"the 21st\", \"next week\" — against that date. Pick the next occurrence "
+        "that has not already passed: on December 30 a caller asking for January 2 "
+        "means next year, not this one. Never emit a date that is already past."
     )
 
     base_prompt += (
@@ -1462,8 +1462,9 @@ class VoicePipeline:
                 "Nothing was recorded: that date did not resolve to a usable "
                 "appointment time. Do not call book_appointment again with the "
                 "same value. Ask the caller to say the day and month again, "
-                "resolve it against today's date using the current year, and "
-                "then call book_appointment once with the corrected time."
+                "resolve it against today's date by choosing the next occurrence "
+                "that has not already passed — near year-end that may be next "
+                "year — then call book_appointment once with the corrected time."
             ),
         })
 

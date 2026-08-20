@@ -10,9 +10,8 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
-from app.api import estimates
 from app.config import settings
-from app.services import estimate_worker
+from app.services import estimate_notifications, estimate_worker
 
 
 class FakeDocSnapshot:
@@ -94,6 +93,16 @@ class FakeCollection:
         return FakeQuery(self).stream()
 
 
+class FakeTransaction:
+    def __init__(self, db: "FakeDB"):
+        self.db = db
+        self._read_only = False
+        self._id = b"fake-tx"
+
+    def update(self, doc_ref: FakeDocRef, data: dict) -> None:
+        doc_ref.update(data)
+
+
 class FakeDB:
     def __init__(self):
         self.collections: dict[str, FakeCollection] = {}
@@ -103,6 +112,9 @@ class FakeDB:
             self.collections[name] = FakeCollection(name)
         return self.collections[name]
 
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self)
+
 
 # 17. estimate_worker_loop re-claims an estimate whose lease expired and completes it from the archived bytes;
 # a doc already complete is left untouched and no SMS is re-sent (notified_at guard asserted).
@@ -110,7 +122,7 @@ class FakeDB:
 async def test_estimate_worker_loop_reclaims_expired_lease_and_completes_idempotently(monkeypatch):
     db = FakeDB()
     monkeypatch.setattr(estimate_worker, "get_firestore_client", lambda: db)
-    monkeypatch.setattr(estimates, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
     monkeypatch.setattr(settings, "vcard_hmac_secret", "secret-test-key-32bytes-length-1234567")
     monkeypatch.setattr(settings, "estimate_media_bucket", "test-bucket")
 
@@ -182,7 +194,7 @@ async def test_estimate_worker_loop_reclaims_expired_lease_and_completes_idempot
 
     monkeypatch.setattr(estimate_worker, "read_media", lambda path: b"archived-gcs-bytes")
     monkeypatch.setattr(estimate_worker, "analyze_media", fake_analyze_media)
-    monkeypatch.setattr(estimates, "send_sms", capture_sms)
+    monkeypatch.setattr(estimate_notifications, "send_sms", capture_sms)
 
     # Run one sweep of the recovery worker
     await estimate_worker.run_pending_estimates_once(now=now)
@@ -209,7 +221,7 @@ async def test_estimate_worker_loop_reclaims_expired_lease_and_completes_idempot
 async def test_estimate_worker_loop_marks_failed_after_max_attempts(monkeypatch):
     db = FakeDB()
     monkeypatch.setattr(estimate_worker, "get_firestore_client", lambda: db)
-    monkeypatch.setattr(estimates, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
     monkeypatch.setattr(settings, "vcard_hmac_secret", "secret-test-key-32bytes-length-1234567")
     monkeypatch.setattr(settings, "estimate_media_bucket", "test-bucket")
 
@@ -255,7 +267,7 @@ async def test_estimate_worker_loop_marks_failed_after_max_attempts(monkeypatch)
         analyzer_called = True
 
     monkeypatch.setattr(estimate_worker, "analyze_media", fail_analyzer)
-    monkeypatch.setattr(estimates, "send_sms", capture_sms)
+    monkeypatch.setattr(estimate_notifications, "send_sms", capture_sms)
 
     # First sweep: should transition to failed and send SMS
     await estimate_worker.run_pending_estimates_once(now=now)

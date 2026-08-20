@@ -16,6 +16,7 @@ os.environ.setdefault("USER_PHONE", "+15550000001")
 
 from app.api import estimates
 from app.config import settings
+from app.services import estimate_notifications, estimate_worker
 from app.services.gated_actions import ActionKey
 
 
@@ -136,6 +137,7 @@ def setup_env(monkeypatch):
     db = FakeDB()
     monkeypatch.setattr(estimates, "get_firestore_client", lambda: db)
     monkeypatch.setattr(estimates, "transactional", lambda fn: fn)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
     monkeypatch.setattr(settings, "vcard_hmac_secret", "secret-test-key-32bytes-length-1234567")
     monkeypatch.setattr(settings, "estimate_media_bucket", "test-bucket")
     monkeypatch.setattr(settings, "cloud_run_url", "https://api.example.com")
@@ -262,7 +264,7 @@ async def test_background_analysis_failure_marks_failed_and_sends_sms_with_watch
     async def failing_analyzer(**kwargs):
         raise RuntimeError("Gemini Files API failed to process video")
 
-    monkeypatch.setattr(estimates, "send_sms", capture_send_sms)
+    monkeypatch.setattr(estimate_notifications, "send_sms", capture_send_sms)
     monkeypatch.setattr(estimates, "analyze_media", failing_analyzer)
     monkeypatch.setattr(estimates, "archive_media", lambda *a, **kw: f"{token_hash}/med_fail.mp4")
 
@@ -310,7 +312,7 @@ async def test_video_analysis_success_marks_complete_and_sends_sms_with_watch_ur
             "confidence": "high",
         }
 
-    monkeypatch.setattr(estimates, "send_sms", capture_send_sms)
+    monkeypatch.setattr(estimate_notifications, "send_sms", capture_send_sms)
     monkeypatch.setattr(estimates, "analyze_media", success_analyzer)
     monkeypatch.setattr(estimates, "archive_media", lambda *a, **kw: f"{token_hash}/med_succ.mp4")
 
@@ -388,7 +390,7 @@ async def test_photo_upload_synchronous_result_archived_no_files_api(setup_env, 
 
     monkeypatch.setattr(estimates, "archive_media", fake_archive)
     monkeypatch.setattr(estimates, "analyze_media", fake_analyze_media)
-    monkeypatch.setattr(estimates, "send_sms", capture_send_sms)
+    monkeypatch.setattr(estimate_notifications, "send_sms", capture_send_sms)
 
     request = _StreamingRequest(body=b"fake-photo-data", content_type="image/jpeg")
     result = await estimates.upload_and_analyze(token, request=request)
@@ -537,7 +539,7 @@ async def test_reupload_after_failed_creates_fresh_media_id_and_object(setup_env
 
     monkeypatch.setattr(estimates, "archive_media", track_archive)
     monkeypatch.setattr(estimates, "analyze_media", fast_analyze)
-    monkeypatch.setattr(estimates, "send_sms", lambda *a, **kw: None)
+    monkeypatch.setattr(estimate_notifications, "send_sms", lambda *a, **kw: None)
 
     request = _StreamingRequest(body=b"retry-video-data", content_type="video/mp4")
     resp = await estimates.upload_and_analyze(token, request=request)
@@ -576,7 +578,7 @@ async def test_description_parameter_passed_to_analyzer_and_stored_never_logged(
 
     monkeypatch.setattr(estimates, "analyze_media", capture_analyzer)
     monkeypatch.setattr(estimates, "archive_media", lambda *a, **kw: f"{token_hash}/media.mp4")
-    monkeypatch.setattr(estimates, "send_sms", lambda *a, **kw: None)
+    monkeypatch.setattr(estimate_notifications, "send_sms", lambda *a, **kw: None)
     monkeypatch.setattr(estimates.logger, "info", capture_log)
 
     sensitive_text = "SECRET_CALLER_DESCRIPTION_TEXT_12345"

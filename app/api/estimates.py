@@ -24,8 +24,14 @@ from app.services.estimate_media import (
     read_media,
     verify_watch_sig,
 )
+from app.services.estimate_notifications import send_estimate_notifications
+from app.services.estimate_worker import (
+    claim_notification_and_complete,
+    claim_notification_and_fail,
+)
 from app.services.gated_actions import ActionKey, GateContext, check_gated_action
 from app.services.side_effect_audit import record_gate_decision
+from app.services import sms as sms_module
 from app.services.sms import send_sms
 from app.utils.logging import get_logger, redact_phone
 
@@ -45,104 +51,11 @@ MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 10MB
 MAX_VIDEO_SIZE = 50 * 1024 * 1024   # 50MB
 
 
-async def send_estimate_notifications(
-    caller_phone: str,
-    contractor: Optional[dict],
-    call_sid: str,
-    token_hash: str,
-    result: Optional[dict] = None,
-    is_failure: bool = False,
-    watch_url: str = "",
-) -> None:
-    """Send customer and contractor notification SMS for an estimate outcome."""
-    business_name = (contractor or {}).get("business_name", "the business")
-    twilio_number = (contractor or {}).get("twilio_number", "")
-    contractor_phone = (contractor or {}).get("owner_phone", "")
-
-    # Customer SMS
-    if caller_phone:
-        if is_failure:
-            customer_msg = (
-                f"Thanks for your upload. We couldn't process this media. "
-                f"Please call {business_name} directly at {twilio_number}."
-                if twilio_number
-                else f"Thanks for your upload. We couldn't process this media. "
-                f"Please call {business_name} directly."
-            )
-        elif result and result.get("requires_manual_investigation"):
-            customer_msg = (
-                f"Thanks for your upload. This issue will require {business_name}'s "
-                f"technician to manually investigate. We are unable to provide an "
-                f"AI estimate at this time.\n\n"
-                f"Call {business_name}: {twilio_number}"
-            )
-        else:
-            diagnosis = (result or {}).get("diagnosis", "")
-            est_min = (result or {}).get("estimate_min", 0)
-            est_max = (result or {}).get("estimate_max", 0)
-            customer_msg = (
-                f"AI Diagnosis: {diagnosis}\n\n"
-                f"Estimated Cost: ${est_min}-${est_max}\n\n"
-                f"⚠️ This is an AI-generated estimate. The actual cost may differ "
-                f"based on the technician's hands-on diagnosis.\n\n"
-                f"Call {business_name}: {twilio_number}"
-            )
-
-        try:
-            context = GateContext(
-                source="estimate",
-                actor="system",
-                idempotency_key=f"{token_hash[:12]}:result",
-            )
-            await send_sms(
-                caller_phone,
-                customer_msg,
-                from_number=twilio_number,
-                contractor=contractor,
-                action=ActionKey.ESTIMATE_RESULT_SMS,
-                gate_context=context,
-            )
-        except Exception as e:
-            logger.error("Failed to send customer estimate SMS for %s: %s", token_hash[:8], e)
-
-    # Contractor SMS
-    if contractor_phone:
-        if is_failure:
-            contractor_msg = (
-                f"📋 AI ESTIMATE FAILED\n"
-                f"From: {caller_phone}\n"
-                f"Result: We couldn't process the caller's media."
-            )
-        elif result and result.get("requires_manual_investigation"):
-            contractor_msg = (
-                f"📋 AI ESTIMATE REQUEST\n"
-                f"From: {caller_phone}\n"
-                f"Result: Requires manual investigation\n"
-                f"The AI could not confidently diagnose the issue."
-            )
-        else:
-            diagnosis = (result or {}).get("diagnosis", "")
-            est_min = (result or {}).get("estimate_min", 0)
-            est_max = (result or {}).get("estimate_max", 0)
-            matched = ", ".join(s.get("name", "") for s in (result or {}).get("matched_services", []))
-            contractor_msg = (
-                f"📋 AI ESTIMATE SENT\n"
-                f"To: {caller_phone}\n"
-                f"Diagnosis: {diagnosis}\n"
-                f"Services: {matched}\n"
-                f"Estimate: ${est_min}-${est_max}\n"
-                f"Confidence: {(result or {}).get('confidence', 'unknown')}"
-            )
-
-        if watch_url:
-            contractor_msg += f"\n\nWatch the caller's video: {watch_url}"
-
-        try:
-            await send_sms(contractor_phone, contractor_msg, from_number=twilio_number)
-        except Exception as e:
-            logger.error("Failed to send contractor estimate SMS for %s: %s", token_hash[:8], e)
-
-
+# Hard absolute cap on any upload, regardless of content type. Defends against
+# DoS via memory exhaustion described in SECURITY_AUDIT.md F-10
+# (line 37 — `app/api/estimates.py:138-159`). Configurable via env var
+# (default 50 MiB to match the largest legitimate video upload — operators
+# can lower it to 10 MiB or similar if videos are not required).
 def _max_upload_bytes_default() -> int:
     raw = os.environ.get("MAX_UPLOAD_BYTES", "").strip()
     if not raw:
@@ -200,36 +113,37 @@ async def create_estimate_token(body: CreateTokenRequest, request: Request = Non
 
     token = secrets.token_urlsafe(32)
     token_hash = _hash_token(token)
+    now = time.time()
 
-    db = get_firestore_client()
-    db.collection(COLLECTION).document(token_hash).set({
+    doc_data = {
         "token_hash": token_hash,
         "contractor_id": body.contractor_id,
         "caller_phone": body.caller_phone,
         "call_sid": body.call_sid,
-        "created_at": time.time(),
-        "expires_at": time.time() + TOKEN_EXPIRY_SECONDS,
+        "created_at": now,
+        "expires_at": now + TOKEN_EXPIRY_SECONDS,
         "status": "pending",
         "upload_count": 0,
         "result": None,
-        "media_object_path": None,
-        "media_id": None,
-        "media_content_type": None,
-        "description": None,
-        "attempts": 0,
-        "lease_expires_at": 0,
-        "notified_at": None,
-    })
+        "completed_at": None,
+    }
 
+    db = get_firestore_client()
+    db.collection(COLLECTION).document(token_hash).set(doc_data)
+
+    logger.info(f"Created estimate token for {redact_phone(body.caller_phone)} ({body.contractor_id})")
     estimate_url = f"https://heykevin.one/estimate/{token}"
-    logger.info(f"Estimate token created for {redact_phone(body.caller_phone)}")
-    return {"status": "ok", "token": token, "url": estimate_url}
+    return {
+        "status": "ok",
+        "token": token,
+        "url": estimate_url,
+    }
 
 
-# --- Public endpoints: token is the auth ---
+# --- Public endpoints (token in URL path) ---
 
 async def _get_estimate_doc(token: str) -> Optional[dict]:
-    """Look up an estimate by token. Returns None if invalid/expired."""
+    """Look up an estimate by raw token (hashes token first)."""
     token_hash = _hash_token(token)
     db = get_firestore_client()
     doc = db.collection(COLLECTION).document(token_hash).get()
@@ -243,7 +157,7 @@ async def _get_estimate_doc(token: str) -> Optional[dict]:
 
 @router.get("/{token}")
 async def get_estimate(token: str):
-    """Get estimate status/result. Public — token is the auth."""
+    """Public endpoint: token is the auth. Pollable: returns status + result."""
     estimate = await _get_estimate_doc(token)
     if not estimate:
         raise HTTPException(status_code=404, detail="Invalid or expired token")
@@ -260,7 +174,7 @@ class UploadUrlRequest(BaseModel):
 
 @router.post("/{token}/upload-url")
 async def get_upload_url(token: str, body: UploadUrlRequest):
-    """Get upload URL. Public — token is the auth."""
+    """Get a signed upload URL. Public — token is the auth."""
     estimate = await _get_estimate_doc(token)
     if not estimate:
         raise HTTPException(status_code=404, detail="Invalid or expired token")
@@ -275,6 +189,7 @@ async def get_upload_url(token: str, body: UploadUrlRequest):
         )
 
     max_size = MAX_VIDEO_SIZE if body.content_type.startswith("video/") else MAX_IMAGE_SIZE
+
     token_hash = _hash_token(token)
     upload_url = f"{settings.cloud_run_url}/api/estimates/{token}/upload"
 
@@ -291,7 +206,16 @@ async def get_upload_url(token: str, body: UploadUrlRequest):
 
 
 async def _read_request_with_cap(request: Request, max_bytes: int) -> bytes:
-    """Stream the request body and abort early past `max_bytes`."""
+    """Stream the request body and abort early past `max_bytes`.
+
+    F-10 (SECURITY_AUDIT.md line 37): the previous implementation called
+    `await request.body()` which buffers the entire payload before any size
+    check, letting a malicious client OOM the worker by streaming a multi-GB
+    body. We now check `Content-Length` up front (cheap rejection) and also
+    accumulate chunks from `request.stream()`, raising 413 the moment the
+    running total crosses `max_bytes`.
+    """
+    # Cheap up-front rejection: trust Content-Length when the client sets it.
     cl_header = request.headers.get("content-length", "").strip()
     if cl_header:
         try:
@@ -304,6 +228,7 @@ async def _read_request_with_cap(request: Request, max_bytes: int) -> bytes:
                 detail=f"File too large. Max: {max_bytes // (1024 * 1024)}MB",
             )
 
+    # Stream chunks; abort the moment we exceed the cap.
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
@@ -311,12 +236,14 @@ async def _read_request_with_cap(request: Request, max_bytes: int) -> bytes:
             continue
         total += len(chunk)
         if total > max_bytes:
+            # Discard buffered data so it cannot continue to consume RAM.
             chunks.clear()
             raise HTTPException(
                 status_code=413,
                 detail=f"File too large. Max: {max_bytes // (1024 * 1024)}MB",
             )
         chunks.append(chunk)
+
     return b"".join(chunks)
 
 
@@ -331,7 +258,7 @@ async def _run_async_estimate_analysis(
     call_sid: str,
     object_path: Optional[str] = None,
 ) -> None:
-    """Background task for Gemini video analysis."""
+    """Background task to run Gemini analysis for an estimate."""
     db = get_firestore_client()
     doc_ref = db.collection(COLLECTION).document(token_hash)
     services = contractor.get("services", []) if contractor else []
@@ -349,39 +276,39 @@ async def _run_async_estimate_analysis(
             text_description=description,
         )
 
-        doc_snap = doc_ref.get()
-        if doc_snap.exists and doc_snap.to_dict().get("media_id") == media_id:
-            now = time.time()
-            doc_ref.update({
-                "status": "complete",
-                "result": result,
-                "completed_at": now,
-            })
+        now = time.time()
+        accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: claim_notification_and_complete(db, doc_ref, media_id, result, now),
+        )
+        if accepted and should_notify:
             watch_url = make_watch_url(media_id) if object_path else ""
-            doc_data = doc_snap.to_dict() or {}
-            if not doc_data.get("notified_at"):
-                await send_estimate_notifications(
-                    caller_phone=caller_phone,
-                    contractor=contractor,
-                    call_sid=call_sid,
-                    token_hash=token_hash,
-                    result=result,
-                    is_failure=False,
-                    watch_url=watch_url,
-                )
-                doc_ref.update({"notified_at": time.time()})
+            sms_fn = send_sms if send_sms is not sms_module.send_sms else None
+            await send_estimate_notifications(
+                caller_phone=caller_phone,
+                contractor=contractor,
+                call_sid=call_sid,
+                token_hash=token_hash,
+                result=result,
+                is_failure=False,
+                watch_url=watch_url,
+                send_sms_fn=sms_fn,
+            )
     except Exception as error:
-        logger.error("Async estimate analysis failed for %s: %s", token_hash[:8], error)
-        doc_snap = doc_ref.get()
-        if doc_snap.exists and doc_snap.to_dict().get("media_id") == media_id:
-            now = time.time()
-            doc_ref.update({
-                "status": "failed",
-                "completed_at": now,
-            })
-            watch_url = make_watch_url(media_id) if object_path else ""
-            doc_data = doc_snap.to_dict() or {}
-            if not doc_data.get("notified_at"):
+        logger.error(
+            "Async estimate analysis failed for %s: %s",
+            token_hash[:8],
+            type(error).__name__,
+        )
+        now = time.time()
+        try:
+            accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: claim_notification_and_fail(db, doc_ref, media_id, now),
+            )
+            if accepted and should_notify:
+                watch_url = make_watch_url(media_id) if object_path else ""
+                sms_fn = send_sms if send_sms is not sms_module.send_sms else None
                 await send_estimate_notifications(
                     caller_phone=caller_phone,
                     contractor=contractor,
@@ -389,15 +316,21 @@ async def _run_async_estimate_analysis(
                     token_hash=token_hash,
                     is_failure=True,
                     watch_url=watch_url,
+                    send_sms_fn=sms_fn,
                 )
-                doc_ref.update({"notified_at": time.time()})
+        except Exception as e:
+            logger.error(
+                "Failed to mark estimate %s as failed: %s",
+                token_hash[:8],
+                type(e).__name__,
+            )
 
 
 @router.post("/{token}/upload")
 async def upload_and_analyze(
     token: str,
     request: Request,
-    description: str = Query(default="", max_length=500),
+    description: Optional[str] = Query(default="", max_length=500),
 ):
     """Receive media upload and trigger Gemini analysis."""
     estimate = await _get_estimate_doc(token)
@@ -433,18 +366,14 @@ async def upload_and_analyze(
     body = await _read_request_with_cap(request, effective_max)
     media_id = secrets.token_urlsafe(16)
     is_video = content_type.startswith("video/")
-    caller_description = ""
-    if isinstance(description, str):
-        caller_description = description.strip()[:500]
-    elif hasattr(request, "query_params"):
-        caller_description = request.query_params.get("description", "").strip()[:500]
+    caller_description = str(description or "").strip()[:500]
 
     if is_video:
         # 1. Archive to GCS
         try:
             object_path = archive_media(token_hash, media_id, body, content_type)
         except Exception as e:
-            logger.error("Failed to archive estimate media for %s: %s", token_hash[:8], e)
+            logger.error("Failed to archive estimate media for %s: %s", token_hash[:8], type(e).__name__)
             raise HTTPException(status_code=503, detail="Storage unavailable")
 
         # 2. Atomic claim in Firestore transaction
@@ -508,8 +437,12 @@ async def upload_and_analyze(
         return JSONResponse(status_code=202, content={"status": "processing"})
 
     else:
-        # Photo path — synchronous inline execution
-        object_path = archive_media(token_hash, media_id, body, content_type)
+        # Photo path — synchronous inline execution with resilient GCS archiving
+        object_path = None
+        try:
+            object_path = archive_media(token_hash, media_id, body, content_type)
+        except Exception as e:
+            logger.error("Failed to archive photo media for %s: %s", token_hash[:8], type(e).__name__)
 
         now = time.time()
         attempts = (estimate.get("attempts") or 0) + 1
@@ -549,6 +482,7 @@ async def upload_and_analyze(
         call_sid = estimate.get("call_sid", "")
         watch_url = make_watch_url(media_id) if object_path else ""
 
+        sms_fn = send_sms if send_sms is not sms_module.send_sms else None
         await send_estimate_notifications(
             caller_phone=caller_phone,
             contractor=contractor,
@@ -557,6 +491,7 @@ async def upload_and_analyze(
             result=result,
             is_failure=False,
             watch_url=watch_url,
+            send_sms_fn=sms_fn,
         )
 
         logger.info(

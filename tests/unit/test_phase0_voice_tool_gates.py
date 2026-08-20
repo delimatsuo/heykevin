@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 
@@ -14,6 +15,19 @@ from unittest.mock import AsyncMock
 from app.services.gated_actions import ActionKey
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
+
+def _upcoming(hour: int) -> str:
+    """An upcoming slot, relative to now.
+
+    book_appointment rejects a start_time outside the bookable window — no
+    past bookings, and no more than six months out. A frozen date drifts into
+    the past and fails the suite on a calendar date rather than a code change.
+    Nothing here asserts the literal value.
+    """
+    when = datetime.now(timezone(timedelta(hours=-4))) + timedelta(days=3)
+    return when.replace(hour=hour, minute=0, second=0, microsecond=0).isoformat()
+
+
 
 
 async def _noop(*_args, **_kwargs):
@@ -107,7 +121,16 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
         "_create_managed_google_booking",
         AsyncMock(side_effect=AssertionError("provider saga must not run")),
     )
-    result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
+    # A valid start_time is now a precondition: book_appointment rejects an
+    # implausible or missing one before the gate runs. This test is about the
+    # gate, so it supplies a real slot instead of relying on the old behaviour
+    # of recording a request with no time at all.
+    _slot = datetime.now(timezone(timedelta(hours=-4))) + timedelta(days=3)
+    result = json.loads(await pipeline._execute_tool("book_appointment", {
+        "title": "Repair",
+        "start_time": _slot.replace(hour=10, minute=0, second=0, microsecond=0).isoformat(),
+        "end_time": _slot.replace(hour=11, minute=0, second=0, microsecond=0).isoformat(),
+    }))
 
     # Unapproved automation becomes an owner-confirmed request, never a write.
     # See tests/unit/test_appointment_requests.py for the request contract.
@@ -141,8 +164,8 @@ async def test_google_book_appointment_calls_managed_saga_when_gate_allows(monke
         "book_appointment",
         {
             "title": "Sink repair",
-            "start_time": "2026-07-01T13:00:00-04:00",
-            "end_time": "2026-07-01T14:00:00-04:00",
+            "start_time": _upcoming(13),
+            "end_time": _upcoming(14),
             "description": "Caller asked for the upstairs sink.",
             "ignored": "not passed through",
         },
@@ -152,8 +175,8 @@ async def test_google_book_appointment_calls_managed_saga_when_gate_allows(monke
     assert created == [
         ({
             "title": "Sink repair",
-            "start_time": "2026-07-01T13:00:00-04:00",
-            "end_time": "2026-07-01T14:00:00-04:00",
+            "start_time": _upcoming(13),
+            "end_time": _upcoming(14),
             "description": "Caller asked for the upstairs sink.",
             "ignored": "not passed through",
         }, "")
@@ -188,8 +211,8 @@ async def test_google_booking_requires_literal_tenant_mutation_flag(
         "book_appointment",
         {
             "title": "Sink repair",
-            "start_time": "2026-07-01T13:00:00-04:00",
-            "end_time": "2026-07-01T14:00:00-04:00",
+            "start_time": _upcoming(13),
+            "end_time": _upcoming(14),
         },
     ))
 
@@ -226,8 +249,8 @@ async def test_google_booking_stays_request_only_until_recovery_is_ready(monkeyp
         "book_appointment",
         {
             "title": "Sink repair",
-            "start_time": "2026-07-01T13:00:00-04:00",
-            "end_time": "2026-07-01T14:00:00-04:00",
+            "start_time": _upcoming(13),
+            "end_time": _upcoming(14),
         },
     ))
 
@@ -268,8 +291,8 @@ async def test_google_calendar_create_error_logging_omits_response_text(monkeypa
         result = await calendar.book_appointment(
             {"contractor_id": "c1", "google_calendar_access_token": "gcal-token"},
             title="Jane Private repair",
-            start_time="2026-07-01T13:00:00-04:00",
-            end_time="2026-07-01T14:00:00-04:00",
+            start_time=_upcoming(13),
+            end_time=_upcoming(14),
             description="123 Secret Lane callback +15551234567",
         )
 
@@ -352,8 +375,8 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
             "book_appointment",
             {
                 "title": "Jane Private repair",
-                "start_time": "2026-07-01T13:00:00-04:00",
-                "end_time": "2026-07-01T14:00:00-04:00",
+                "start_time": _upcoming(13),
+                "end_time": _upcoming(14),
                 "description": "123 Secret Lane callback +15551234567",
             },
         ))
@@ -629,8 +652,8 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
                             "name": "book_appointment",
                             "input": {
                                 "title": "Jane Private faucet repair",
-                                "start_time": "2026-07-01T13:00:00-04:00",
-                                "end_time": "2026-07-01T14:00:00-04:00",
+                                "start_time": _upcoming(13),
+                                "end_time": _upcoming(14),
                                 "description": "Address 123 Secret Lane, callback +15551234567.",
                             },
                         }
@@ -671,7 +694,7 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
         "Jane Private",
         "123 Secret Lane",
         "+15551234567",
-        "2026-07-01T13:00:00-04:00",
+        _upcoming(13),
     ):
         assert sensitive_value not in caplog.text
 

@@ -287,7 +287,7 @@ async def test_estimate_result_sms_allowed_passes_gate_context_to_caller_sms_onl
 
     result = await estimates.upload_and_analyze(raw_token, request=_Request())
 
-    assert result["status"] == "ok"
+    assert result["status"] == "complete"
     assert len(sent) == 2
 
     caller_args, caller_kwargs = sent[0]
@@ -356,7 +356,7 @@ async def test_estimate_upload_route_injects_request_and_executes_sms_gate(monke
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json()["status"] == "complete"
     assert len(sent) == 2
     assert audits
     assert audits[0]["action"] == ActionKey.ESTIMATE_RESULT_SMS

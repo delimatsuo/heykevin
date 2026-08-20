@@ -47,6 +47,7 @@ logger = get_logger(__name__)
 _shutting_down = False
 _post_call_worker_task: asyncio.Task | None = None
 _service_request_recovery_task: asyncio.Task | None = None
+_estimate_worker_task: asyncio.Task | None = None
 
 app = FastAPI(
     title="Kevin",
@@ -390,7 +391,7 @@ async def _expired_contractor_cleanup():
 
 @app.on_event("startup")
 async def startup():
-    global _post_call_worker_task, _service_request_recovery_task
+    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task
 
     # Validate required config
     required = ['twilio_account_sid', 'twilio_auth_token', 'anthropic_api_key',
@@ -414,6 +415,10 @@ async def startup():
 
     if _post_call_worker_task is None or _post_call_worker_task.done():
         _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
+    from app.services.estimate_worker import estimate_worker_loop
+
+    if _estimate_worker_task is None or _estimate_worker_task.done():
+        _estimate_worker_task = asyncio.create_task(estimate_worker_loop())
     from app.services.service_request_recovery import (
         service_request_recovery_worker_loop,
     )
@@ -439,13 +444,18 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _post_call_worker_task, _service_request_recovery_task
+    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task
 
     if _post_call_worker_task is not None:
         _post_call_worker_task.cancel()
         with suppress(asyncio.CancelledError):
             await _post_call_worker_task
         _post_call_worker_task = None
+    if _estimate_worker_task is not None:
+        _estimate_worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _estimate_worker_task
+        _estimate_worker_task = None
     if _service_request_recovery_task is not None:
         _service_request_recovery_task.cancel()
         with suppress(asyncio.CancelledError):

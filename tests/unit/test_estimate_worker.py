@@ -288,3 +288,95 @@ async def test_estimate_worker_loop_marks_failed_after_max_attempts(monkeypatch)
     # Second sweep: should NOT send any additional SMS (idempotency)
     await estimate_worker.run_pending_estimates_once(now=now + 50)
     assert len(sms_sent) == 2
+
+
+# --- Direct claim-function coverage (added in review) -----------------------
+# The loop-level tests exercise the status guard: an already-terminal doc is
+# untouched. The notified_at branch inside the claims never evaluates on those
+# paths, so a mutation forcing should_notify=True survived the suite — the
+# exact guard §4.2 names was unverified. These test the claim functions
+# directly with the state that branch exists for.
+
+
+def _claims_db_with(doc_id: str, data: dict):
+    db = FakeDB()
+    collection = db.collection("estimates")
+    doc_ref = collection.document(doc_id)
+    doc_ref.set(data)
+    return db, doc_ref
+
+
+def test_notification_claim_complete_denies_resend_when_already_notified(monkeypatch):
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    db, doc_ref = _claims_db_with("tok1", {
+        "status": "processing",
+        "media_id": "m1",
+        "notified_at": 123.0,
+    })
+
+    accepted, should_notify, _ = estimate_worker.claim_notification_and_complete(
+        db, doc_ref, "m1", {"diagnosis": "x"}, 999.0
+    )
+
+    assert accepted is True
+    assert should_notify is False
+    # Terminal transition still happens; only the notification right is denied.
+    assert doc_ref.get().to_dict()["status"] == "complete"
+    # The original notified_at is preserved, not overwritten.
+    assert doc_ref.get().to_dict()["notified_at"] == 123.0
+
+
+def test_notification_claim_fail_denies_resend_when_already_notified(monkeypatch):
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    db, doc_ref = _claims_db_with("tok2", {
+        "status": "processing",
+        "media_id": "m2",
+        "notified_at": 123.0,
+    })
+
+    accepted, should_notify, _ = estimate_worker.claim_notification_and_fail(
+        db, doc_ref, "m2", 999.0
+    )
+
+    assert accepted is True
+    assert should_notify is False
+    assert doc_ref.get().to_dict()["status"] == "failed"
+
+
+def test_reanalysis_claim_max_attempts_with_prior_notification_does_not_renotify(monkeypatch):
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    db, doc_ref = _claims_db_with("tok3", {
+        "status": "processing",
+        "media_id": "m3",
+        "attempts": estimate_worker.MAX_ANALYSIS_ATTEMPTS,
+        "lease_expires_at": 10.0,
+        "notified_at": 123.0,
+    })
+
+    action, _ = estimate_worker.claim_reanalysis_or_fail(db, doc_ref, now=999.0)
+
+    assert action == "failed_no_notify"
+    assert doc_ref.get().to_dict()["status"] == "failed"
+
+
+def test_notification_claim_grants_exactly_one_winner(monkeypatch):
+    """Two sequential claimants on the same doc: first wins, second is denied.
+
+    The fake transaction cannot interleave, but the winner's write lands
+    before the loser's read — the ordering real Firestore transactions
+    guarantee. The loser must see accepted=False (terminal status), never a
+    second should_notify=True.
+    """
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    db, doc_ref = _claims_db_with("tok4", {
+        "status": "processing",
+        "media_id": "m4",
+        "notified_at": None,
+    })
+
+    first = estimate_worker.claim_notification_and_complete(db, doc_ref, "m4", {}, 1.0)
+    second = estimate_worker.claim_notification_and_complete(db, doc_ref, "m4", {}, 2.0)
+
+    assert first[0] is True and first[1] is True
+    assert second[0] is False
+    assert second[1] is False

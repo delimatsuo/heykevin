@@ -604,7 +604,15 @@ final class APIClient: @unchecked Sendable {
         _ = try? await retryRequest(request)
     }
 
-    func confirmAppointment(callSid: String) async throws {
+    /// Returns whether the backend actually texted the caller.
+    ///
+    /// The UI must not claim a text was sent when it wasn't: the send is
+    /// skipped when the caller is the owner's own number (self-test) and can
+    /// fail outright when the caller has replied STOP. `caller_notified` is
+    /// the server's answer to that, so the confirmation card reads it instead
+    /// of assuming.
+    @discardableResult
+    func confirmAppointment(callSid: String) async throws -> Bool {
         let encoded = callSid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? callSid
         let url = URL(string: "\(baseURL)/api/calls/\(encoded)/confirm-appointment")!
         var request = URLRequest(url: url)
@@ -613,7 +621,7 @@ final class APIClient: @unchecked Sendable {
         request.timeoutInterval = 15
         authorize(&request)
 
-        let (_, response) = try await retryRequest(request)
+        let (data, response) = try await retryRequest(request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             // The status has to survive. A 422 means the stored time is not
             // bookable — no amount of retrying fixes it — while a 502 is the
@@ -622,6 +630,11 @@ final class APIClient: @unchecked Sendable {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw AppointmentConfirmFailure(statusCode: status)
         }
+
+        // A missing or unreadable field means "we don't know", which must read
+        // as false — claiming a text that never went is worse than staying quiet.
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (json?["caller_notified"] as? Bool) ?? false
     }
 
     // MARK: - Contractor PATCH

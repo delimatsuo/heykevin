@@ -489,6 +489,7 @@ async def release_twilio_number(contractor_id: str) -> bool:
         lambda: client.incoming_phone_numbers.list(phone_number=twilio_number, limit=1)
     )
 
+    updates = {"twilio_number": "", "number_released_at": int(time.time())}
     if numbers:
         await loop.run_in_executor(
             None,
@@ -496,17 +497,24 @@ async def release_twilio_number(contractor_id: str) -> bool:
         )
         logger.info(f"Released Twilio number {redact_phone(twilio_number)} for contractor {contractor_id}")
     else:
-        logger.warning(f"Twilio number {redact_phone(twilio_number)} not found in account")
+        # A number we believe we own but Twilio does not list is an anomaly,
+        # not a success: it may be a format mismatch on a number that still
+        # bills. Record it on the document so reconciliation can find it.
+        logger.error(
+            f"Twilio number {redact_phone(twilio_number)} for contractor {contractor_id} "
+            f"not found in Twilio account; clearing profile and recording anomaly"
+        )
+        updates["number_release_anomaly"] = int(time.time())
 
     # Clear the number from the contractor profile
-    await update_contractor(contractor_id, {"twilio_number": ""})
+    await update_contractor(contractor_id, updates)
     return True
 
 
 async def deactivate_contractor(contractor_id: str) -> bool:
     """Deactivate a contractor account and release their Twilio number."""
     await release_twilio_number(contractor_id)
-    await update_contractor(contractor_id, {"active": False})
+    await update_contractor(contractor_id, {"active": False, "deactivated_at": int(time.time())})
     logger.info(f"Contractor deactivated: {contractor_id}")
     return True
 

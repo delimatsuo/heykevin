@@ -19,6 +19,8 @@ from app.services.apple_auth import (
     verify_apple_identity_token,
 )
 from app.services.entitlements import has_business_entitlement, with_entitlement_flags
+from app.services.gated_actions import ActionKey, GateContext, check_gated_action
+from app.services.side_effect_audit import record_gate_decision
 from app.utils.logging import get_logger, redact_phone
 
 logger = get_logger(__name__)
@@ -508,30 +510,62 @@ async def api_update_services(contractor_id: str, body: ServicesList, request: R
     return {"status": "ok", "count": len(sanitized)}
 
 
+def _irreversible_gate(contractor: Optional[dict], action: ActionKey, contractor_id: str) -> None:
+    """Refuse an irreversible account operation the backend gate does not allow.
+
+    The owner's own authenticated request on their own account is the owner
+    confirmation; the idempotency key is derived server-side so retries of the
+    same operation are the same action.
+    """
+    context = GateContext(
+        source="ios",
+        actor="owner",
+        owner_confirmed=True,
+        idempotency_key=f"{contractor_id}:{action.value}",
+    )
+    decision = check_gated_action(contractor, action, context)
+    record_gate_decision(
+        action=action,
+        contractor_id=contractor_id,
+        source=context.source,
+        resource_id=context.idempotency_key,
+        decision=decision,
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.message)
+
+
 @router.delete("/{contractor_id}")
 async def api_delete_contractor(contractor_id: str, request: Request):
     """Deactivate a contractor account and release their Twilio number."""
     require_contractor_access(request, contractor_id)
+    contractor = await get_contractor(contractor_id)
+    _irreversible_gate(contractor, ActionKey.ACCOUNT_DELETE, contractor_id)
     try:
         await deactivate_contractor(contractor_id)
-        return {"status": "ok"}
     except Exception as e:
+        # A 200 here strands the user: iOS clears local state while the
+        # account stays active and the number keeps billing. Fail loudly so
+        # the client keeps its credentials and can retry.
         logger.error(f"Account deletion failed for {contractor_id}: {e}", exc_info=True)
-        return {"status": "error", "message": "Failed to deactivate account"}
+        raise HTTPException(status_code=500, detail="Failed to deactivate account")
+    return {"status": "ok"}
 
 
 @router.delete("/{contractor_id}/phone-number")
 async def api_release_number(contractor_id: str, request: Request):
     """Release a contractor's Twilio number without deleting the account."""
     require_contractor_access(request, contractor_id)
+    contractor = await get_contractor(contractor_id)
+    _irreversible_gate(contractor, ActionKey.TWILIO_NUMBER_RELEASE, contractor_id)
     try:
         released = await release_twilio_number(contractor_id)
-        if released:
-            return {"status": "ok"}
-        return {"status": "error", "message": "No number to release"}
     except Exception as e:
         logger.error(f"Number release failed for {contractor_id}: {e}", exc_info=True)
-        return {"status": "error", "message": "Failed to release phone number"}
+        raise HTTPException(status_code=500, detail="Failed to release phone number")
+    # No number on file means the desired end state already holds; report it
+    # as success so a retry after a partial failure heals instead of erroring.
+    return {"status": "ok", "released": bool(released)}
 
 
 @router.post("/{contractor_id}/structure-knowledge")

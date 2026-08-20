@@ -18,6 +18,18 @@ struct ActiveCallInfo {
 /// authenticate solely with the Apple identity token, which expires after
 /// roughly 10 minutes. The backend returns 401 when the token is missing,
 /// expired, or invalid.
+enum BootstrapAuthError: Error, LocalizedError {
+    /// The backend rejected the Apple identity token (HTTP 401).
+    case unauthenticated
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthenticated:
+            return String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
+        }
+    }
+}
+
 /// A failed appointment confirmation, carrying the status so the UI can tell a
 /// permanent problem from a retryable one.
 ///
@@ -38,18 +50,6 @@ struct AppointmentConfirmFailure: Error, LocalizedError {
         isTimeUnusable
             ? String(localized: "Kevin didn't capture a usable time for this request. Use Call Back to agree a time with the caller.")
             : String(localized: "Couldn't add this to Google Calendar. Try again.")
-    }
-}
-
-enum BootstrapAuthError: Error, LocalizedError {
-    /// The backend rejected the Apple identity token (HTTP 401).
-    case unauthenticated
-
-    var errorDescription: String? {
-        switch self {
-        case .unauthenticated:
-            return String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
-        }
     }
 }
 

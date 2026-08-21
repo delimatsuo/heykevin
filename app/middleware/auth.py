@@ -26,6 +26,13 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 _token_cache: dict[str, str] = {}  # token_hash -> contractor_id
 
 
+def invalidate_contractor_tokens(contractor_id: str) -> None:
+    """Remove a contractor's cached token mappings (called on deactivation)."""
+    stale = [h for h, cid in _token_cache.items() if cid == contractor_id]
+    for h in stale:
+        _token_cache.pop(h, None)
+
+
 async def verify_api_token(request: Request):
     """Validate Bearer token on /api/* routes.
 

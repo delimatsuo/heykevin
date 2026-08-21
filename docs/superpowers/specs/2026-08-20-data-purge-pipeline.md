@@ -1,8 +1,10 @@
 # Data-Purge Pipeline — Spec (for owner review, do not build yet)
 
-Status: **SPEC ONLY.** Authorized 2026-08-20 as "spec (don't build) the
-data-purge pipeline for my review." Nothing here is implemented. Building it,
-deploying it, and any change to the deletion copy are owner-gated.
+Status: **APPROVED FOR BUILD** — owner reviewed §3 on 2026-08-21 and decided:
+30-day grace period; the minimal tombstone allowlist below; deletion copy
+amended to the "within 30 days" phrasing (explicitly authorized); data export
+deferred as a separate follow-up. Deploying and enabling PURGE_ENABLED remain
+owner-gated.
 
 ## 1. Problem
 
@@ -37,10 +39,10 @@ sold product. Surfaced by the PR #192 review; recorded in memory
 
 ## 3. Owner decisions required (the spec's open inputs)
 
-1. **Grace period** before purge. Recommendation: **30 days** after
+1. **Grace period** before purge. DECIDED 2026-08-21: **30 days** after
    `deactivated_at`. Covers accidental deletions and disputes; matches the
    billing-reconciliation window where post-deletion renewals are recorded.
-2. **What survives as a tombstone.** Recommendation: replace
+2. **What survives as a tombstone.** DECIDED 2026-08-21: replace
    `contractors/{id}` with a minimal tombstone document keeping ONLY:
    `active: False`, `purged_at`, `deactivated_at`, `subscription_uuid`,
    `post_deletion_billing`, `number_release_anomaly`, `deleted_app_detected_at`.
@@ -54,11 +56,10 @@ sold product. Surfaced by the PR #192 review; recorded in memory
    2026-08-20) attribute App Store renewals for a purged account. Purging it
    would re-create the silent-billing hole. `apple_transactions` bindings
    stay for the same reason (fraud/replay defense, no PII beyond the binding).
-3. **Copy alignment.** After purge ships, "deletes all data" becomes true
+3. **Copy alignment.** DECIDED 2026-08-21: amend to "within 30 days" phrasing, shipped with this PR, translated. Original note: After purge ships, "deletes all data" becomes true
    (modulo tombstone). Whether to adjust copy to mention the grace period is
    an owner call — copy changes stay owner-gated either way.
-4. **Data export before deletion** (GDPR/CCPA portability): explicitly OUT of
-   this spec; decide separately.
+4. **Data export before deletion** (GDPR/CCPA portability): DECIDED 2026-08-21 — deferred, tracked as follow-up.
 
 ## 4. Design
 

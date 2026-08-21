@@ -51,7 +51,12 @@ TOMBSTONE_FIELDS = (
     "active",
     "purged_at",
     "deactivated_at",
+    "deletion_requested_at",
     "subscription_uuid",
+    # Rebound detection (subscription.py) matches a re-signed-up customer by
+    # apple_user_id — without it, a paying returnee's renewals become
+    # unattributable post-purge and misclassify as post-deletion charges.
+    "apple_user_id",
     "post_deletion_billing",
     "number_release_anomaly",
     "deleted_app_detected_at",
@@ -94,14 +99,23 @@ def _purge_sync(contractor_id: str) -> dict[str, Any]:
         # Structurally impossible to purge an active (or ambiguous) account:
         # only an explicit active=False written by deactivation qualifies.
         return {"refused": "not_deactivated"}
+    if not data.get("deletion_requested_at"):
+        # THE critical guard: the 14-day deleted-app cleanup deactivates
+        # accounts through the same deactivate_contractor — and even texts
+        # 'reinstall to reactivate'. Deactivation is NOT consent to erase.
+        # Only the user's own DELETE stamps deletion_requested_at.
+        return {"refused": "no_deletion_request"}
 
     counts: dict[str, int] = {}
 
     # 1. Nested receipts FIRST, then their customer_memory parents.
+    # list_documents(), not stream(): the forget flow deletes a memory doc
+    # while writing a receipt beneath it, and stream() never yields such
+    # phantom parents — their receipts would survive as permanent orphans.
     memory = doc_ref.collection("customer_memory")
-    for mem_snap in memory.stream():
+    for mem_ref in memory.list_documents():
         _delete_collection_sync(
-            db, mem_snap.reference.collection("command_receipts"), counts,
+            db, mem_ref.collection("command_receipts"), counts,
             "command_receipts",
         )
     _delete_collection_sync(db, memory, counts, "customer_memory")
@@ -129,8 +143,19 @@ def _purge_sync(contractor_id: str) -> dict[str, Any]:
             if bucket is not None:
                 blobs = list(bucket.list_blobs(prefix=f"{est.id}/"))
                 if blobs:
-                    bucket.delete_blobs(blobs)
+                    # on_error: a concurrent sweep may have deleted a blob
+                    # already; already-gone is success for a purge.
+                    bucket.delete_blobs(blobs, on_error=lambda _b: None)
                     counts["estimate_media"] = counts.get("estimate_media", 0) + len(blobs)
+            else:
+                # Degraded mode (bucket unset): the doc is the only mapping
+                # to the GCS prefixes; record what we could not delete so
+                # the operator sees the gap (lifecycle deletes it in <=90d).
+                skipped = len((est.to_dict() or {}).get("media_ids") or [])
+                if skipped:
+                    counts["estimate_media_skipped"] = (
+                        counts.get("estimate_media_skipped", 0) + skipped
+                    )
             batch.delete(est.reference)
         batch.commit()
         counts["estimates"] = counts.get("estimates", 0) + len(est_snaps)
@@ -147,12 +172,18 @@ def _purge_sync(contractor_id: str) -> dict[str, Any]:
         )
 
     # 5. The PII kill step: overwrite (no merge) with the tombstone.
+    # Re-read first: the delete phase takes time, and an App Store webhook
+    # write (post_deletion_billing) landing mid-purge must survive — that
+    # record is the billing evidence this tombstone exists to keep.
+    fresh_snap = doc_ref.get()
+    fresh = (fresh_snap.to_dict() if fresh_snap.exists else None) or data
     purged_at = int(time.time())
     tombstone: dict[str, Any] = {"active": False, "purged_at": purged_at}
-    for field in ("deactivated_at", "subscription_uuid", "post_deletion_billing",
-                  "number_release_anomaly", "deleted_app_detected_at"):
-        if data.get(field) is not None:
-            tombstone[field] = data[field]
+    for field in TOMBSTONE_FIELDS:
+        if field in ("active", "purged_at"):
+            continue
+        if fresh.get(field) is not None:
+            tombstone[field] = fresh[field]
     doc_ref.set(tombstone)
 
     # Aggregate counts only — never contents.
@@ -184,19 +215,22 @@ async def purge_sweep(now: float | None = None) -> list[str]:
 
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
+    # Single-field range filter (auto-indexed; no composite index needed):
+    # grace is anchored on the user's deletion REQUEST — the only thing that
+    # consents to a purge. active/purged_at are re-checked client-side and
+    # again inside purge_contractor.
     snaps = await loop.run_in_executor(
         None,
         lambda: list(
             db.collection("contractors")
-            .where(filter=FieldFilter("active", "==", False))
-            .where(filter=FieldFilter("deactivated_at", "<", cutoff))
+            .where(filter=FieldFilter("deletion_requested_at", "<", cutoff))
             .stream()
         ),
     )
     purged: list[str] = []
     for snap in snaps:
         data = snap.to_dict() or {}
-        if data.get("purged_at"):
+        if data.get("purged_at") or data.get("active") is not False:
             continue
         cid = snap.id
         try:

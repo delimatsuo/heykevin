@@ -39,13 +39,23 @@ sold product. Surfaced by the PR #192 review; recorded in memory
 
 ## 3. Owner decisions required (the spec's open inputs)
 
-1. **Grace period** before purge. DECIDED 2026-08-21: **30 days** after
+1. **Grace period** before purge. DECIDED 2026-08-21: **30 days** —
+   anchored on `deletion_requested_at` (stamped ONLY by the user's own
+   DELETE), never on `deactivated_at`: the deleted-app cleanup deactivates
+   accounts through the same code path and even promises reactivation by
+   SMS, so deactivation alone is not consent to erase. Admin-disabled
+   (abuse) accounts are deliberately NOT purged — no deletion request
+   exists. Original decision: **30 days** after
    `deactivated_at`. Covers accidental deletions and disputes; matches the
    billing-reconciliation window where post-deletion renewals are recorded.
 2. **What survives as a tombstone.** DECIDED 2026-08-21: replace
    `contractors/{id}` with a minimal tombstone document keeping ONLY:
-   `active: False`, `purged_at`, `deactivated_at`, `subscription_uuid`,
+   `active: False`, `purged_at`, `deactivated_at`, `deletion_requested_at`,
+   `subscription_uuid`, `apple_user_id`,
    `post_deletion_billing`, `number_release_anomaly`, `deleted_app_detected_at`.
+   `apple_user_id` (added in review): rebound detection matches a
+   re-signed-up paying customer by it — purging it would make their
+   renewals unattributable and misclassified as post-deletion charges.
    `active: False` is load-bearing: the reconciliation guard in
    `handle_appstore_notification` requires an EXPLICIT `active is False`
    (a missing field falls through to not-found), and the §4 sweep query

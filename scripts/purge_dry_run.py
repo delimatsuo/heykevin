@@ -39,14 +39,13 @@ def main(argv: list[str] | None = None, client_factory=None) -> int:
 
     candidates = list(
         client.collection("contractors")
-        .where(filter=FieldFilter("active", "==", False))
-        .where(filter=FieldFilter("deactivated_at", "<", cutoff))
+        .where(filter=FieldFilter("deletion_requested_at", "<", cutoff))
         .stream()
     )
     eligible = 0
     for snap in candidates:
         data = snap.to_dict() or {}
-        if data.get("purged_at"):
+        if data.get("purged_at") or data.get("active") is not False:
             continue
         eligible += 1
         doc_ref = snap.reference

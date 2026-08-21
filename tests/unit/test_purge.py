@@ -88,6 +88,17 @@ class _FakeCollection:
     def limit(self, n):
         return _FakeCollection(self._store, self._path, self._filters, n)
 
+    def list_documents(self):
+        depth = self._path.count("/") + 2
+        ids = set()
+        for path in self._store.docs:
+            if not path.startswith(self._path + "/"):
+                continue
+            parts = path.split("/")
+            want = self._path.count("/") + 1
+            ids.add(parts[want])
+        return [_FakeDoc(self._store, f"{self._path}/{i}") for i in sorted(ids)]
+
     def stream(self, **_kwargs):
         depth = self._path.count("/") + 2
         out = []
@@ -155,7 +166,7 @@ class _FakeBucket:
     def list_blobs(self, prefix=""):
         return [b for b in self.blobs if b.name.startswith(prefix)]
 
-    def delete_blobs(self, blobs):
+    def delete_blobs(self, blobs, on_error=None):
         for b in blobs:
             self._deleted.append(b.name)
             self.blobs.remove(b)
@@ -188,6 +199,7 @@ def _seed_contractor(db, cid="c1", **overrides):
     doc = {
         "active": False,
         "deactivated_at": 1_000_000,
+        "deletion_requested_at": 1_000_000,
         "subscription_uuid": "uuid-1",
         "owner_phone": "+15559990000",
         "business_name": "Acme Plumbing",
@@ -218,6 +230,53 @@ async def test_purge_refuses_active_contractor(db, gcs):
 
 
 @pytest.mark.asyncio
+async def test_purge_refuses_system_deactivated_account(db, gcs):
+    """THE critical guard: the 14-day deleted-app cleanup deactivates
+    accounts through the same deactivate_contractor and even texts users
+    'reinstall to reactivate'. Deactivation is NOT a deletion request —
+    only the user's explicit DELETE (which stamps deletion_requested_at)
+    may ever lead to a purge."""
+    from app.db.purge import purge_contractor
+
+    _seed_contractor(db)
+    del db.docs["contractors/c1"]["deletion_requested_at"]
+    db.docs["contractors/c1/contacts/p1"] = {"name": "Pat"}
+
+    result = await purge_contractor("c1")
+
+    assert result["refused"] == "no_deletion_request"
+    assert "contractors/c1/contacts/p1" in db.docs
+
+
+@pytest.mark.asyncio
+async def test_sweep_never_touches_system_deactivated_accounts(db, gcs, monkeypatch):
+    from app.db import purge as purge_module
+
+    monkeypatch.setattr(purge_module.settings, "purge_enabled", True)
+    old_ts = _now() - 40 * 24 * 3600
+    _seed_contractor(db, cid="lapsed", deactivated_at=old_ts)
+    del db.docs["contractors/lapsed"]["deletion_requested_at"]
+
+    purged = await purge_module.purge_sweep(now=_now())
+
+    assert purged == []
+    assert "purged_at" not in db.docs["contractors/lapsed"]
+
+
+def test_user_delete_endpoint_stamps_the_deletion_request():
+    """The marker's only writer is the user's own DELETE — reachability pin."""
+    import inspect
+    from app.api import contractors as contractors_api
+    from app.db import contractors as contractors_db
+
+    assert "user_requested=True" in inspect.getsource(
+        contractors_api.api_delete_contractor
+    )
+    src = inspect.getsource(contractors_db.deactivate_contractor)
+    assert "deletion_requested_at" in src
+
+
+@pytest.mark.asyncio
 async def test_purge_refuses_missing_active_field(db, gcs):
     from app.db.purge import purge_contractor
 
@@ -235,7 +294,7 @@ async def test_tombstone_is_an_exact_allowlist(db, gcs):
     from app.db.purge import TOMBSTONE_FIELDS, purge_contractor
 
     _seed_contractor(db, number_release_anomaly={"at": 5, "number": "+15551112222"},
-                     deleted_app_detected_at=999)
+                     deleted_app_detected_at=999, apple_user_id="apple-1")
     db.docs["contractors/c1/contacts/p1"] = {"name": "Pat", "phone": "+15558887777"}
 
     result = await purge_contractor("c1")
@@ -247,6 +306,10 @@ async def test_tombstone_is_an_exact_allowlist(db, gcs):
     assert tomb["purged_at"]
     assert tomb["subscription_uuid"] == "uuid-1"
     assert tomb["post_deletion_billing"]["charges"] == 1
+    assert tomb["apple_user_id"] == "apple-1", (
+        "rebound detection needs this after purge — without it a paying "
+        "re-signed-up customer's renewals become unattributable"
+    )
     assert "owner_phone" not in tomb
     assert "business_name" not in tomb
     assert "contractors/c1/contacts/p1" not in db.docs
@@ -293,6 +356,61 @@ async def test_nested_command_receipts_leave_no_orphans(db, gcs):
     orphans = [p for p in db.docs if "command_receipts" in p]
     assert orphans == []
     assert "contractors/c1/customer_memory/m1" not in db.docs
+
+
+@pytest.mark.asyncio
+async def test_receipts_under_phantom_parents_are_deleted(db, gcs):
+    """The forget flow deletes the customer_memory doc while writing a
+    receipt beneath it — real Firestore stream() never yields the missing
+    parent, so traversal must use list_documents(), which does."""
+    from app.db.purge import purge_contractor
+
+    _seed_contractor(db)
+    # phantom parent: receipts exist, the parent doc does not
+    db.docs["contractors/c1/customer_memory/ghost/command_receipts/r1"] = {"op": "forget"}
+
+    await purge_contractor("c1")
+
+    assert not [p for p in db.docs if "command_receipts" in p]
+
+
+@pytest.mark.asyncio
+async def test_tombstone_merges_fields_written_mid_purge(db, gcs, monkeypatch):
+    """A post_deletion_billing write landing during the delete phase must
+    survive the tombstone overwrite — that record is the billing evidence."""
+    from app.db import purge as purge_module
+
+    _seed_contractor(db)
+    db.docs["contractors/c1/contacts/p1"] = {"name": "Pat"}
+
+    real_batch = _FakeDb.batch
+
+    def batch_with_side_write(self):
+        # simulate the App Store webhook racing the purge
+        self.docs["contractors/c1"]["post_deletion_billing"] = {
+            "count": 9, "charges": 9, "last_type": "DID_RENEW"}
+        return real_batch(self)
+
+    monkeypatch.setattr(_FakeDb, "batch", batch_with_side_write)
+
+    await purge_module.purge_contractor("c1")
+
+    tomb = db.docs["contractors/c1"]
+    assert tomb["post_deletion_billing"]["count"] == 9
+
+
+@pytest.mark.asyncio
+async def test_degraded_mode_records_skipped_media(db, monkeypatch):
+    from app.db import purge as purge_module
+
+    monkeypatch.setattr(purge_module, "_media_bucket", lambda: None)
+    _seed_contractor(db)
+    db.docs["estimates/tok1"] = {"contractor_id": "c1", "media_ids": ["m1", "m2"]}
+
+    result = await purge_module.purge_contractor("c1")
+
+    assert result["deleted"]["estimate_media_skipped"] == 2
+    assert "estimates/tok1" not in db.docs
 
 
 @pytest.mark.asyncio
@@ -360,8 +478,8 @@ async def test_sweep_respects_grace_period(db, gcs, monkeypatch):
     monkeypatch.setattr(purge_module.settings, "purge_enabled", True)
     recent = _now() - 5 * 24 * 3600
     old = _now() - 31 * 24 * 3600
-    _seed_contractor(db, cid="fresh", deactivated_at=recent)
-    _seed_contractor(db, cid="ripe", deactivated_at=old)
+    _seed_contractor(db, cid="fresh", deactivated_at=recent, deletion_requested_at=recent)
+    _seed_contractor(db, cid="ripe", deactivated_at=old, deletion_requested_at=old)
 
     purged = await purge_module.purge_sweep(now=_now())
 
@@ -378,7 +496,7 @@ async def test_sweep_disabled_by_default(db, gcs, monkeypatch):
     assert Settings.model_fields["purge_enabled"].default is False
 
     old = _now() - 31 * 24 * 3600
-    _seed_contractor(db, cid="ripe", deactivated_at=old)
+    _seed_contractor(db, cid="ripe", deactivated_at=old, deletion_requested_at=old)
     monkeypatch.setattr(purge_module.settings, "purge_enabled", False)
 
     purged = await purge_module.purge_sweep(now=_now())
@@ -393,7 +511,7 @@ async def test_sweep_skips_already_purged(db, gcs, monkeypatch):
 
     monkeypatch.setattr(purge_module.settings, "purge_enabled", True)
     old = _now() - 40 * 24 * 3600
-    _seed_contractor(db, cid="done", deactivated_at=old, purged_at=123)
+    _seed_contractor(db, cid="done", deactivated_at=old, deletion_requested_at=old, purged_at=123)
 
     purged = await purge_module.purge_sweep(now=_now())
 
@@ -406,8 +524,8 @@ async def test_sweep_isolates_a_poisoned_account(db, gcs, monkeypatch):
 
     monkeypatch.setattr(purge_module.settings, "purge_enabled", True)
     old = _now() - 31 * 24 * 3600
-    _seed_contractor(db, cid="bad", deactivated_at=old)
-    _seed_contractor(db, cid="good", deactivated_at=old)
+    _seed_contractor(db, cid="bad", deactivated_at=old, deletion_requested_at=old)
+    _seed_contractor(db, cid="good", deactivated_at=old, deletion_requested_at=old)
 
     real = purge_module.purge_contractor
 
@@ -461,7 +579,7 @@ def test_dry_run_reports_without_deleting(db, capsys):
     spec.loader.exec_module(mod)
 
     old = 4_000_000 - 31 * 24 * 3600
-    _seed_contractor(db, cid="ripe", deactivated_at=old)
+    _seed_contractor(db, cid="ripe", deactivated_at=old, deletion_requested_at=old)
     db.docs["contractors/ripe/contacts/p1"] = {"name": "Pat"}
     before = dict(db.docs)
 

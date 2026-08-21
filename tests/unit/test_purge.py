@@ -615,3 +615,16 @@ def test_dry_run_reports_without_deleting(db, capsys):
     assert "Nothing was deleted" in out
     assert "'contacts': 1" in out
     assert "Pat" not in out, "no PII in dry-run output"
+
+
+def test_purge_one_script_exists_and_refuses_bulk():
+    """The single-target tool must exist for the rollout's manual-test step
+    and must have no bulk mode — bulk erasure only happens via the sweep."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "scripts" / "purge_one.py").read_text()
+    assert 'add_argument("--contractor-id", required=True)' in src
+    assert '"--apply"' in src
+    # no bulk-mode argument, and no sweep over the contractors collection
+    assert 'add_argument("--all"' not in src
+    assert 'collection("contractors").stream' not in src

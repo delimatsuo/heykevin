@@ -551,7 +551,7 @@ async def api_delete_contractor(contractor_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Contractor not found")
     _irreversible_gate(contractor, ActionKey.ACCOUNT_DELETE, contractor_id, request)
     try:
-        await deactivate_contractor(contractor_id)
+        await deactivate_contractor(contractor_id, user_requested=True)
     except HTTPException:
         raise
     except Exception as e:

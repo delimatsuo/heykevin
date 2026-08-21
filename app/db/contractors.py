@@ -29,6 +29,9 @@ PROTECTED_FIELDS = frozenset({
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
     "deactivated_at",
+    # Consent signal for the data purge; a client that could forge it could
+    # trigger erasure of an account that never asked for it.
+    "deletion_requested_at",
     "number_released_at",
     # Reconciliation signal for a number Twilio no longer lists but we
     # believed we owned; a client that could clear it could hide a billing
@@ -567,10 +570,18 @@ async def release_twilio_number(contractor_id: str) -> bool:
     return True
 
 
-async def deactivate_contractor(contractor_id: str) -> bool:
-    """Deactivate a contractor account and release their Twilio number."""
+async def deactivate_contractor(contractor_id: str, user_requested: bool = False) -> bool:
+    """Deactivate a contractor account and release their Twilio number.
+
+    user_requested=True is set ONLY by the user's own DELETE endpoint and
+    stamps deletion_requested_at — the sole consent signal the data purge
+    accepts. System deactivations (deleted-app cleanup) must never set it.
+    """
     await release_twilio_number(contractor_id)
-    await update_contractor(contractor_id, {"active": False, "deactivated_at": int(time.time())})
+    updates = {"active": False, "deactivated_at": int(time.time())}
+    if user_requested:
+        updates["deletion_requested_at"] = int(time.time())
+    await update_contractor(contractor_id, updates)
     # Drop this instance's cached token mappings so the deleted account's
     # token stops authenticating here immediately. Other warm instances keep
     # their entry until recycle — a bounded, documented residual.

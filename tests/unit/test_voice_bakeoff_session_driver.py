@@ -66,11 +66,12 @@ _LIVE_ROUTE_PATHS = (
     Path("app/experiments/voice_bakeoff_app.py"),
 )
 _EXPECTED_LIVE_HASHES = {
-    # Re-pinned 2026-08-20 for estimate_worker_loop registration.
-    # Keep in sync with the pin in test_voice_bakeoff_turn_composition.py
-    # and update only with a reviewed main.py change.
+    # Re-pinned 2026-08-21 for _data_purge_sweep registration (PR #195,
+    # owner-approved purge spec). Keep in sync with the pin in
+    # test_voice_bakeoff_turn_composition.py and update only with a reviewed
+    # main.py change.
     Path("app/main.py"):
-        "e8d3cfa4384ec97e7dc4f3172588ace0fb7d8bf610cd76751d160198a462da80",
+        "ef0822b399b292cf56345dd8f73adf13b9c33ec3877bf806a38bbbcf793555f9",
     # Re-pinned 2026-08-12: authenticated media streams now load the shared,
     # default-off customer-memory and service-request context.
     Path("app/webhooks/media_stream.py"):

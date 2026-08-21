@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # heard the same job's street two different ways). Restricted to the
     # Geocoding API; feature is inert while unset.
     google_maps_api_key: str = ""
+    # Data purge (spec 2026-08-20, owner-approved 2026-08-21). Default OFF:
+    # enabling in production is an owner action (env change + deploy).
+    purge_enabled: bool = False
+    purge_grace_days: int = 30
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4

@@ -100,12 +100,12 @@ _IMPLEMENTATION_FILES = {
 _BASELINE_HASHES = {
     "app/experiments/voice_bakeoff_app.py":
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
-    # Re-pinned 2026-08-20 for estimate_worker_loop registration.
-    # The pin's job is to force exactly this kind of deliberate
-    # acknowledgment — update it only alongside a reviewed change to main.py,
-    # never to silence a diff.
+    # Re-pinned 2026-08-21 for _data_purge_sweep registration (PR #195,
+    # owner-approved purge spec). The pin's job is to force exactly this kind
+    # of deliberate acknowledgment — update it only alongside a reviewed
+    # change to main.py, never to silence a diff.
     "app/main.py":
-        "e8d3cfa4384ec97e7dc4f3172588ace0fb7d8bf610cd76751d160198a462da80",
+        "ef0822b399b292cf56345dd8f73adf13b9c33ec3877bf806a38bbbcf793555f9",
     # Re-pinned 2026-08-12: authenticated media streams now load the shared,
     # default-off customer-memory and service-request context.
     "app/webhooks/media_stream.py":

@@ -1,8 +1,10 @@
 # Data-Purge Pipeline — Spec (for owner review, do not build yet)
 
-Status: **SPEC ONLY.** Authorized 2026-08-20 as "spec (don't build) the
-data-purge pipeline for my review." Nothing here is implemented. Building it,
-deploying it, and any change to the deletion copy are owner-gated.
+Status: **APPROVED FOR BUILD** — owner reviewed §3 on 2026-08-21 and decided:
+30-day grace period; the minimal tombstone allowlist below; deletion copy
+amended to the "within 30 days" phrasing (explicitly authorized); data export
+deferred as a separate follow-up. Deploying and enabling PURGE_ENABLED remain
+owner-gated.
 
 ## 1. Problem
 
@@ -32,18 +34,29 @@ sold product. Surfaced by the PR #192 review; recorded in memory
 | Estimate records | `estimates/*` (top-level, by `contractor_id`; holds `caller_phone`, descriptions, analysis results) | forever |
 | Settings prefs | `contractors/{id}/settings/preferences` (greeting name, text-reply message) | forever |
 | Estimate media | `gs://kevin-estimate-media/...` | 90-day lifecycle (existing) |
+| Conference bindings | `conference_bindings` (contractor_id + call_sid; 2h logical expiry never physically deleted) | forever |
 | Apple tx bindings | `apple_transactions` | forever |
 | RTDB live-call state | `active_calls/{call_sid}` | transient (already ephemeral) |
 
 ## 3. Owner decisions required (the spec's open inputs)
 
-1. **Grace period** before purge. Recommendation: **30 days** after
+1. **Grace period** before purge. DECIDED 2026-08-21: **30 days** —
+   anchored on `deletion_requested_at` (stamped ONLY by the user's own
+   DELETE), never on `deactivated_at`: the deleted-app cleanup deactivates
+   accounts through the same code path and even promises reactivation by
+   SMS, so deactivation alone is not consent to erase. Admin-disabled
+   (abuse) accounts are deliberately NOT purged — no deletion request
+   exists. Original decision: **30 days** after
    `deactivated_at`. Covers accidental deletions and disputes; matches the
    billing-reconciliation window where post-deletion renewals are recorded.
-2. **What survives as a tombstone.** Recommendation: replace
+2. **What survives as a tombstone.** DECIDED 2026-08-21: replace
    `contractors/{id}` with a minimal tombstone document keeping ONLY:
-   `active: False`, `purged_at`, `deactivated_at`, `subscription_uuid`,
+   `active: False`, `purged_at`, `deactivated_at`, `deletion_requested_at`,
+   `subscription_uuid`, `apple_user_id`,
    `post_deletion_billing`, `number_release_anomaly`, `deleted_app_detected_at`.
+   `apple_user_id` (added in review): rebound detection matches a
+   re-signed-up paying customer by it — purging it would make their
+   renewals unattributable and misclassified as post-deletion charges.
    `active: False` is load-bearing: the reconciliation guard in
    `handle_appstore_notification` requires an EXPLICIT `active is False`
    (a missing field falls through to not-found), and the §4 sweep query
@@ -54,11 +67,10 @@ sold product. Surfaced by the PR #192 review; recorded in memory
    2026-08-20) attribute App Store renewals for a purged account. Purging it
    would re-create the silent-billing hole. `apple_transactions` bindings
    stay for the same reason (fraud/replay defense, no PII beyond the binding).
-3. **Copy alignment.** After purge ships, "deletes all data" becomes true
+3. **Copy alignment.** DECIDED 2026-08-21: amend to "within 30 days" phrasing, shipped with this PR, translated. Original note: After purge ships, "deletes all data" becomes true
    (modulo tombstone). Whether to adjust copy to mention the grace period is
    an owner call — copy changes stay owner-gated either way.
-4. **Data export before deletion** (GDPR/CCPA portability): explicitly OUT of
-   this spec; decide separately.
+4. **Data export before deletion** (GDPR/CCPA portability): DECIDED 2026-08-21 — deferred, tracked as follow-up.
 
 ## 4. Design
 
@@ -80,7 +92,7 @@ Two phases, reusing the existing lifecycle machinery:
    and Firestore does not cascade-delete subcollections — deleting the
    memory doc first orphans its receipts. Delete each memory doc's
    `command_receipts` collection, then the memory doc.
-2. Delete `calls`, `jobs`, `post_call_handoffs`, and `estimates` where
+2. Delete `calls`, `jobs`, `post_call_handoffs`, `conference_bindings`, and `estimates` where
    `contractor_id == {id}` (batched queries; `estimates` is top-level and
    holds `caller_phone` + analysis results).
 3. Delete `gs://$ESTIMATE_MEDIA_BUCKET` objects under the contractor's

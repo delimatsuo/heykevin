@@ -132,7 +132,7 @@ async def test_delete_contractor_success_returns_ok(monkeypatch):
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid)
 
-    async def fake_deactivate(cid):
+    async def fake_deactivate(cid, **kwargs):
         calls.append(cid)
         return True
 
@@ -152,7 +152,7 @@ async def test_delete_contractor_failure_returns_http_500(monkeypatch):
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid)
 
-    async def fake_deactivate(cid):
+    async def fake_deactivate(cid, **kwargs):
         raise RuntimeError("twilio down")
 
     monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
@@ -171,7 +171,7 @@ async def test_delete_contractor_refused_by_gate_makes_no_changes(monkeypatch):
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid)
 
-    async def fake_deactivate(cid):
+    async def fake_deactivate(cid, **kwargs):
         calls.append(cid)
         return True
 
@@ -266,7 +266,7 @@ async def test_release_number_with_no_number_is_idempotent_ok(monkeypatch):
 async def test_cross_tenant_delete_is_refused_before_any_work(monkeypatch):
     calls = []
 
-    async def fake_deactivate(cid):
+    async def fake_deactivate(cid, **kwargs):
         calls.append(cid)
         return True
 
@@ -523,7 +523,7 @@ async def test_gate_context_reflects_the_real_actor(monkeypatch):
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid)
 
-    async def fake_deactivate(cid):
+    async def fake_deactivate(cid, **kwargs):
         return True
 
     monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
@@ -548,7 +548,7 @@ async def test_endpoint_preserves_http_exceptions_from_callees(monkeypatch):
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid)
 
-    async def fake_deactivate(cid):
+    async def fake_deactivate(cid, **kwargs):
         raise HTTPException(status_code=409, detail="forwarding still live")
 
     monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)

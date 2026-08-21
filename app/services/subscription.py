@@ -918,6 +918,11 @@ async def handle_appstore_notification(payload: dict) -> bool:
                                 "subscription_status": "active",
                                 "subscription_tier": fwd_tier,
                                 "subscription_expires": fwd_expires,
+                                # Provenance: lets a later terminal event for
+                                # the OLD subscription end this entitlement
+                                # without ever touching one the rebound
+                                # account bought independently.
+                                "subscription_forwarded_from": cid,
                             })
                             logger.info(
                                 "Rebound entitlement forwarded: %s -> %s tier=%s",
@@ -928,6 +933,26 @@ async def handle_appstore_notification(payload: dict) -> bool:
                                 "Rebound entitlement forward failed: %s -> %s err=%s",
                                 cid, rebound["contractor_id"], fwd_err,
                             )
+                elif (
+                    notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE")
+                    and rebound.get("subscription_forwarded_from") == cid
+                ):
+                    # The old subscription this entitlement was forwarded
+                    # from has ended — end the forwarded entitlement too, or
+                    # the rebound account stays active on a dead sub.
+                    try:
+                        await update_contractor(rebound["contractor_id"], {
+                            "subscription_status": "expired",
+                        })
+                        logger.info(
+                            "Forwarded entitlement expired: %s -> %s type=%s",
+                            cid, rebound["contractor_id"], notification_type,
+                        )
+                    except Exception as fwd_err:
+                        logger.error(
+                            "Forwarded entitlement expiry failed: %s -> %s err=%s",
+                            cid, rebound["contractor_id"], fwd_err,
+                        )
             # Log BEFORE the write and never raise past it: the webhook acks
             # 200 on any exception, so a raised write error would be a
             # permanently lost record with no trace. The log line survives.

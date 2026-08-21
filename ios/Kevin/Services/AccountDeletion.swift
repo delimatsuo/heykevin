@@ -48,6 +48,16 @@ enum AccountDeletionFirstStep: Equatable {
 /// subscription, so a user with an active subscription must be warned (and
 /// offered Manage Subscription) before the deletion confirmation.
 enum AccountDeletionFlow {
+    /// Server truth first, Keychain cache as fallback (field-wise): the
+    /// cache defaults to "trial" and can be stale, and a stale skip of the
+    /// billing warning means an active subscriber deletes without it.
+    static func resolve(
+        freshStatus: String?, freshTier: String?,
+        cachedStatus: String, cachedTier: String
+    ) -> (status: String, tier: String) {
+        (freshStatus ?? cachedStatus, freshTier ?? cachedTier)
+    }
+
     static func firstStep(subscriptionStatus: String, subscriptionTier: String) -> AccountDeletionFirstStep {
         switch subscriptionStatus {
         case "active":

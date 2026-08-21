@@ -481,11 +481,31 @@ struct SettingsView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        switch AccountDeletionFlow.firstStep(subscriptionStatus: appState.subscriptionStatus, subscriptionTier: appState.subscriptionTier) {
-                        case .warnActiveSubscription:
-                            showSubscriptionWarningAlert = true
-                        case .confirmDelete:
-                            showDeleteAccountAlert = true
+                        // Fetch the authoritative subscription state before
+                        // deciding which alert to show — the cached status
+                        // defaults to "trial" and a stale cache would skip
+                        // the billing warning for an active subscriber.
+                        Task {
+                            let profile = await APIClient.shared.getContractorProfile(
+                                contractorId: appState.contractorId
+                            )
+                            let resolved = AccountDeletionFlow.resolve(
+                                freshStatus: profile?["subscription_status"] as? String,
+                                freshTier: profile?["subscription_tier"] as? String,
+                                cachedStatus: appState.subscriptionStatus,
+                                cachedTier: appState.subscriptionTier
+                            )
+                            await MainActor.run {
+                                switch AccountDeletionFlow.firstStep(
+                                    subscriptionStatus: resolved.status,
+                                    subscriptionTier: resolved.tier
+                                ) {
+                                case .warnActiveSubscription:
+                                    showSubscriptionWarningAlert = true
+                                case .confirmDelete:
+                                    showDeleteAccountAlert = true
+                                }
+                            }
                         }
                     } label: {
                         if isDeletingAccount {

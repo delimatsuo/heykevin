@@ -160,3 +160,37 @@ final class AccountDeletionFlowTests: XCTestCase {
         )
     }
 }
+
+/// The cached Keychain status defaults to "trial" and can be stale; the
+/// server is the source of truth. At deletion time the flow fetches the
+/// authoritative status and falls back to the cache only when the fetch
+/// fails — otherwise an active subscriber on a fresh reinstall deletes
+/// without ever seeing the billing warning.
+final class AccountDeletionResolveTests: XCTestCase {
+    func testFreshServerValuesWin() {
+        let r = AccountDeletionFlow.resolve(
+            freshStatus: "active", freshTier: "personal",
+            cachedStatus: "trial", cachedTier: "none"
+        )
+        XCTAssertEqual(r.status, "active")
+        XCTAssertEqual(r.tier, "personal")
+    }
+
+    func testMissingFetchFallsBackToCache() {
+        let r = AccountDeletionFlow.resolve(
+            freshStatus: nil, freshTier: nil,
+            cachedStatus: "active", cachedTier: "business"
+        )
+        XCTAssertEqual(r.status, "active")
+        XCTAssertEqual(r.tier, "business")
+    }
+
+    func testPartialFetchFallsBackFieldwise() {
+        let r = AccountDeletionFlow.resolve(
+            freshStatus: "expired", freshTier: nil,
+            cachedStatus: "trial", cachedTier: "personal"
+        )
+        XCTAssertEqual(r.status, "expired")
+        XCTAssertEqual(r.tier, "personal")
+    }
+}

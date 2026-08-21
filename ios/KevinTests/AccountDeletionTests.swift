@@ -102,3 +102,95 @@ final class AccountDeletionTests: XCTestCase {
         XCTAssertEqual(AccountDeletionResponseParser.parse(response: nil), .failed)
     }
 }
+
+/// The delete flow's first step: a user with an active auto-renewing
+/// subscription must be told deletion does not cancel it — deleting is a
+/// soft deactivate and Apple keeps charging — before any confirmation.
+final class AccountDeletionFlowTests: XCTestCase {
+    func testActiveSubscriptionWarnsBeforeConfirming() {
+        XCTAssertEqual(
+            AccountDeletionFlow.firstStep(subscriptionStatus: "active", subscriptionTier: "personal"),
+            .warnActiveSubscription
+        )
+    }
+
+    func testLapsedPurchasersStillWarn() {
+        // "expired" includes Apple's billing-retry window (DID_FAIL_TO_RENEW
+        // sets it while the subscription still exists and may yet renew), and
+        // "cancelled" subscriptions run to period end — both can still charge
+        // a deleted account, but only for someone who actually purchased.
+        for status in ["expired", "cancelled"] {
+            XCTAssertEqual(
+                AccountDeletionFlow.firstStep(subscriptionStatus: status, subscriptionTier: "personal"),
+                .warnActiveSubscription,
+                "status \(status)"
+            )
+        }
+    }
+
+    func testLapsedTrialWithoutPurchaseIsNotWarned() {
+        // The trial sweep marks never-subscribed accounts "expired" too;
+        // tier stays "none" for them. Warning those users about charges
+        // that cannot exist would be false and erode the real warning.
+        for tier in ["none", ""] {
+            XCTAssertEqual(
+                AccountDeletionFlow.firstStep(subscriptionStatus: "expired", subscriptionTier: tier),
+                .confirmDelete,
+                "tier \(tier)"
+            )
+        }
+    }
+
+    func testNeverSubscribedStatusesGoStraightToConfirmation() {
+        for status in ["trial", ""] {
+            XCTAssertEqual(
+                AccountDeletionFlow.firstStep(subscriptionStatus: status, subscriptionTier: "none"),
+                .confirmDelete,
+                "status \(status)"
+            )
+        }
+    }
+
+    func testActiveStatusWarnsEvenWithStaleTierCache() {
+        // status "active" implies a subscription regardless of what the
+        // cached tier says — never skip the warning on a tier cache miss.
+        XCTAssertEqual(
+            AccountDeletionFlow.firstStep(subscriptionStatus: "active", subscriptionTier: "none"),
+            .warnActiveSubscription
+        )
+    }
+}
+
+/// The cached Keychain status defaults to "trial" and can be stale; the
+/// server is the source of truth. At deletion time the flow fetches the
+/// authoritative status and falls back to the cache only when the fetch
+/// fails — otherwise an active subscriber on a fresh reinstall deletes
+/// without ever seeing the billing warning.
+final class AccountDeletionResolveTests: XCTestCase {
+    func testFreshServerValuesWin() {
+        let r = AccountDeletionFlow.resolve(
+            freshStatus: "active", freshTier: "personal",
+            cachedStatus: "trial", cachedTier: "none"
+        )
+        XCTAssertEqual(r.status, "active")
+        XCTAssertEqual(r.tier, "personal")
+    }
+
+    func testMissingFetchFallsBackToCache() {
+        let r = AccountDeletionFlow.resolve(
+            freshStatus: nil, freshTier: nil,
+            cachedStatus: "active", cachedTier: "business"
+        )
+        XCTAssertEqual(r.status, "active")
+        XCTAssertEqual(r.tier, "business")
+    }
+
+    func testPartialFetchFallsBackFieldwise() {
+        let r = AccountDeletionFlow.resolve(
+            freshStatus: "expired", freshTier: nil,
+            cachedStatus: "trial", cachedTier: "personal"
+        )
+        XCTAssertEqual(r.status, "expired")
+        XCTAssertEqual(r.tier, "personal")
+    }
+}

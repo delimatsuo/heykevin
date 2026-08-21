@@ -37,3 +37,43 @@ enum AccountDeletionResponseParser {
         return .deleted
     }
 }
+
+enum AccountDeletionFirstStep: Equatable {
+    case warnActiveSubscription
+    case confirmDelete
+}
+
+/// First step of the delete-account flow. Deletion is a server-side
+/// deactivation and does NOT cancel the user's auto-renewing App Store
+/// subscription, so a user with an active subscription must be warned (and
+/// offered Manage Subscription) before the deletion confirmation.
+enum AccountDeletionFlow {
+    /// Server truth first, Keychain cache as fallback (field-wise): the
+    /// cache defaults to "trial" and can be stale, and a stale skip of the
+    /// billing warning means an active subscriber deletes without it.
+    static func resolve(
+        freshStatus: String?, freshTier: String?,
+        cachedStatus: String, cachedTier: String
+    ) -> (status: String, tier: String) {
+        (freshStatus ?? cachedStatus, freshTier ?? cachedTier)
+    }
+
+    static func firstStep(subscriptionStatus: String, subscriptionTier: String) -> AccountDeletionFirstStep {
+        switch subscriptionStatus {
+        case "active":
+            // "active" implies a subscription regardless of the cached tier.
+            return .warnActiveSubscription
+        case "expired", "cancelled":
+            // "expired" includes Apple's billing-retry window and "cancelled"
+            // subscriptions run to period end — both can still charge a
+            // deleted account, but only for someone who actually purchased.
+            // The trial sweep marks never-subscribed accounts "expired" too;
+            // their tier stays "none", and warning them about charges that
+            // cannot exist would be false.
+            let purchased = !subscriptionTier.isEmpty && subscriptionTier != "none"
+            return purchased ? .warnActiveSubscription : .confirmDelete
+        default:
+            return .confirmDelete
+        }
+    }
+}

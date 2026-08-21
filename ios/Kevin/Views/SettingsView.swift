@@ -14,6 +14,13 @@ struct SettingsView: View {
     @State private var showDeleteAccountAlert = false
     @State private var showDeleteAccountError = false
     @State private var isDeletingAccount = false
+    @State private var showSubscriptionWarningAlert = false
+    @State private var confirmDeleteTask: Task<Void, Never>?
+
+    /// Delay before presenting a follow-up alert: flipping a second alert's
+    /// isPresented during another's ~300ms dismissal can silently drop it.
+    /// Shared by the continue-deleting and deletion-error paths.
+    private let alertRedismissalDelay: UInt64 = 700_000_000
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -474,7 +481,32 @@ struct SettingsView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        showDeleteAccountAlert = true
+                        // Fetch the authoritative subscription state before
+                        // deciding which alert to show — the cached status
+                        // defaults to "trial" and a stale cache would skip
+                        // the billing warning for an active subscriber.
+                        Task {
+                            let profile = await APIClient.shared.getContractorProfile(
+                                contractorId: appState.contractorId
+                            )
+                            let resolved = AccountDeletionFlow.resolve(
+                                freshStatus: profile?["subscription_status"] as? String,
+                                freshTier: profile?["subscription_tier"] as? String,
+                                cachedStatus: appState.subscriptionStatus,
+                                cachedTier: appState.subscriptionTier
+                            )
+                            await MainActor.run {
+                                switch AccountDeletionFlow.firstStep(
+                                    subscriptionStatus: resolved.status,
+                                    subscriptionTier: resolved.tier
+                                ) {
+                                case .warnActiveSubscription:
+                                    showSubscriptionWarningAlert = true
+                                case .confirmDelete:
+                                    showDeleteAccountAlert = true
+                                }
+                            }
+                        }
                     } label: {
                         if isDeletingAccount {
                             HStack {
@@ -486,7 +518,7 @@ struct SettingsView: View {
                             Text(String(localized: "Delete Account"))
                         }
                     }
-                    .disabled(isDeletingAccount)
+                    .disabled(isDeletingAccount || confirmDeleteTask != nil)
                 } footer: {
                     Text(String(localized: "Releases your Kevin number and deletes all data. You will need to disable call forwarding manually."))
                 }
@@ -497,6 +529,32 @@ struct SettingsView: View {
                     Button(String(localized: "Cancel"), role: .cancel) {}
                 } message: {
                     Text(String(localized: "This will permanently delete your Kevin account and release your Kevin number. Make sure to deactivate call forwarding first."))
+                }
+                .alert(String(localized: "Subscription Still Active"), isPresented: $showSubscriptionWarningAlert) {
+                    Button(String(localized: "Manage Subscription")) {
+                        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                    Button(String(localized: "Continue Deleting"), role: .destructive) {
+                        confirmDeleteTask?.cancel()
+                        confirmDeleteTask = Task {
+                            try? await Task.sleep(nanoseconds: alertRedismissalDelay)
+                            guard !Task.isCancelled else { return }
+                            await MainActor.run {
+                                // Re-check inside the MainActor hop: a cancel
+                                // landing during the suspension (onDisappear)
+                                // must not pop the destructive confirmation
+                                // on a later reappearance.
+                                guard !Task.isCancelled else { return }
+                                confirmDeleteTask = nil
+                                showDeleteAccountAlert = true
+                            }
+                        }
+                    }
+                    Button(String(localized: "Cancel"), role: .cancel) {}
+                } message: {
+                    Text(String(localized: "Deleting your account does not cancel your Apple subscription, and you would keep being charged. Cancel it under Manage Subscription first."))
                 }
                 .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
                     Button(String(localized: "OK"), role: .cancel) {}
@@ -563,6 +621,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle(String(localized: "Settings"))
+            .onDisappear { cancelPendingDeleteConfirmation() }
             .sheet(isPresented: $showKnowledgeEditor) {
                 KnowledgeEditorView(knowledgeText: $knowledgeText)
             }
@@ -1065,6 +1124,11 @@ struct SettingsView: View {
         isImporting = false
     }
 
+    private func cancelPendingDeleteConfirmation() {
+        confirmDeleteTask?.cancel()
+        confirmDeleteTask = nil
+    }
+
     private func deleteAccount() async {
         guard !appState.contractorId.isEmpty, !isDeletingAccount else { return }
         await MainActor.run { isDeletingAccount = true }
@@ -1089,7 +1153,7 @@ struct SettingsView: View {
             // the error alert — flipping a second alert's isPresented during
             // another's dismissal can silently drop it (fast failures like
             // airplane mode land inside the ~300ms dismissal window).
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: alertRedismissalDelay)
         }
         await MainActor.run {
             isDeletingAccount = false

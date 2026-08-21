@@ -90,12 +90,28 @@ def summarize_contractors(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     jobber_connected: Counter[str] = Counter()
     google_calendar_connected: Counter[str] = Counter()
     twilio_number_assigned: Counter[str] = Counter()
+    post_deletion_billing_types: Counter[str] = Counter()
+    post_deletion_charged_accounts = 0
+    post_deletion_rebound_accounts = 0
 
     total = 0
     active_or_trial_business_accounts = 0
 
     for record in records:
         total += 1
+        pdb = record.get("post_deletion_billing")
+        if isinstance(pdb, dict):
+            post_deletion_billing_types[str(pdb.get("last_type") or "unknown")] += 1
+            if pdb.get("rebound_contractor_id"):
+                # Rebound renewals are legitimate charges for an active
+                # customer — a separate bucket, not refund-chasing material.
+                post_deletion_rebound_accounts += 1
+            else:
+                try:
+                    if int(pdb.get("charges") or 0) > 0:
+                        post_deletion_charged_accounts += 1
+                except (TypeError, ValueError):
+                    pass
         sms_status = _safe_bucket(record.get("sms_compliance_status"), SMS_COMPLIANCE_STATUSES)
         integration_status = _safe_bucket(
             record.get("integration_write_status"),
@@ -138,6 +154,15 @@ def summarize_contractors(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "twilio_number_assigned": _sorted_counter(twilio_number_assigned),
         "subscription_status": _sorted_counter(subscription_statuses),
         "subscription_tier": _sorted_counter(subscription_tiers),
+        # Accounts whose App Store subscription produced notifications after
+        # deactivation — renewal types here mean an ex-customer is being
+        # charged for a dead account.
+        "post_deletion_billing_types": _sorted_counter(post_deletion_billing_types),
+        # Accounts actually CHARGED after deactivation (charges survives
+        # wind-down events; last_type alone would hide a charged-then-expired
+        # account).
+        "post_deletion_charged_accounts": post_deletion_charged_accounts,
+        "post_deletion_rebound_accounts": post_deletion_rebound_accounts,
     }
 
 

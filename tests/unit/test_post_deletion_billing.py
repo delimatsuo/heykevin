@@ -172,3 +172,138 @@ def test_account_audit_counts_post_deletion_billing():
         {"subscription_status": "active"},
     ])
     assert summary["post_deletion_billing_types"] == {"DID_RENEW": 1, "EXPIRED": 1}
+
+
+# ---------------------------------------------------------------------------
+# Review-round fixes (PR #193 findings)
+# ---------------------------------------------------------------------------
+
+
+def _wire_rebound(monkeypatch, calls, rebound_doc=None):
+    async def fake_by_apple(apple_user_id):
+        calls.setdefault("apple_lookups", []).append(apple_user_id)
+        return rebound_doc
+
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_apple_user_id", fake_by_apple
+    )
+
+
+@pytest.mark.asyncio
+async def test_fallback_requires_explicit_inactive(monkeypatch, wired):
+    """A doc without active=False (legacy doc missing the field, or a future
+    reactivation) is NOT a deleted account: fall through to not-found so
+    nothing is recorded and no paying customer's renewal is swallowed."""
+    no_active_field = {"contractor_id": "c1"}  # active missing entirely
+    _wire_lookup(monkeypatch, wired, inactive_doc=no_active_field)
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is False
+    assert wired["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_redelivered_transaction_not_double_counted(monkeypatch, wired):
+    """Apple redelivers on timeout; the same transactionId must not inflate
+    the charge count an operator refunds against."""
+    inactive = {
+        "contractor_id": "c1",
+        "active": False,
+        "post_deletion_billing": {
+            "count": 1, "last_type": "DID_RENEW", "last_at": 1,
+            "last_transaction_id": "tx-1",
+        },
+    }
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    assert wired["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_record_carries_transaction_id(monkeypatch, wired):
+    inactive = {"contractor_id": "c1", "active": False}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["last_transaction_id"] == "tx-1"
+
+
+@pytest.mark.asyncio
+async def test_poisoned_count_recovers_instead_of_raising(monkeypatch, wired):
+    """A corrupted count (bad manual write) must not permanently dead-letter
+    the account behind the webhook's 200-acking catch-all."""
+    inactive = {
+        "contractor_id": "c1",
+        "active": False,
+        "post_deletion_billing": {"count": "n/a", "last_type": "DID_RENEW", "last_at": 1},
+    }
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_non_dict_record_tolerated(monkeypatch, wired):
+    inactive = {"contractor_id": "c1", "active": False, "post_deletion_billing": True}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_write_failure_does_not_raise_into_the_200_ack(monkeypatch, wired):
+    """The webhook acks 200 on any exception, so a raised write error would be
+    a permanently lost record with no trace. The handler must swallow the
+    write failure after logging — the ERROR log line is the surviving trail."""
+    inactive = {"contractor_id": "c1", "active": False}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    async def failing_update(cid, fields):
+        raise RuntimeError("firestore blip")
+
+    monkeypatch.setattr("app.db.contractors.update_contractor", failing_update)
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True  # recorded in logs; nothing for Apple to retry into
+
+
+@pytest.mark.asyncio
+async def test_rebound_customer_recorded_without_alarm(monkeypatch, wired, caplog):
+    """A customer who deleted and re-signed up keeps their StoreKit
+    subscription bound to the OLD subscription_uuid forever. Their renewals
+    are not post-deletion charges — record them with the rebound pointer and
+    log INFO, or the operator chases refunds for an actively paying customer
+    every month."""
+    import logging
+
+    inactive = {"contractor_id": "c1", "active": False, "apple_user_id": "apple-1"}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired, rebound_doc={"contractor_id": "c2", "active": True})
+
+    with caplog.at_level(logging.INFO, logger="app.services.subscription"):
+        handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["rebound_contractor_id"] == "c2"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

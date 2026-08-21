@@ -801,7 +801,11 @@ async def handle_appstore_notification(payload: dict) -> bool:
     payload is the decoded signed payload (already JWT-verified by the webhook).
     Returns True if handled successfully.
     """
-    from app.db.contractors import get_contractor_by_subscription_uuid, update_contractor
+    from app.db.contractors import (
+        get_contractor_by_apple_user_id,
+        get_contractor_by_subscription_uuid,
+        update_contractor,
+    )
 
     notification_type = payload.get("notificationType", "")
 
@@ -828,16 +832,54 @@ async def handle_appstore_notification(payload: dict) -> bool:
         inactive = await get_contractor_by_subscription_uuid(
             app_account_token, include_inactive=True
         )
-        if inactive:
+        # Only an EXPLICIT active=False doc is a deleted account. A doc
+        # missing the field (legacy/manual create) or anything else falls
+        # through to not-found: recording it here would swallow a paying
+        # customer's renewal with a success ack.
+        if inactive and inactive.get("active") is False:
             cid = inactive["contractor_id"]
-            prior = inactive.get("post_deletion_billing") or {}
+            raw_prior = inactive.get("post_deletion_billing")
+            prior = raw_prior if isinstance(raw_prior, dict) else {}
+            tx_id = str(transaction_info.get("transactionId") or "")
+            if tx_id and prior.get("last_transaction_id") == tx_id:
+                # Apple redelivers on timeout; the same transaction must not
+                # inflate the charge count an operator refunds against.
+                logger.info(
+                    "Post-deletion notification redelivery ignored: contractor=%s type=%s",
+                    cid, notification_type,
+                )
+                return True
+            try:
+                prior_count = int(prior.get("count") or 0)
+            except (TypeError, ValueError):
+                # A corrupted count must not dead-letter the account behind
+                # the webhook's 200-acking catch-all.
+                prior_count = 0
             record = {
-                "count": int(prior.get("count") or 0) + 1,
+                "count": prior_count + 1,
                 "last_type": notification_type,
                 "last_at": int(time.time()),
+                "last_transaction_id": tx_id,
             }
-            await update_contractor(cid, {"post_deletion_billing": record})
-            if notification_type in ("DID_RENEW", "SUBSCRIBED"):
+            # A customer who deleted and re-signed up keeps their StoreKit
+            # subscription bound to the OLD subscription_uuid forever. Their
+            # renewals are not post-deletion charges — mark the rebound and
+            # keep the log at INFO, or the ERROR signal cries wolf monthly.
+            rebound = None
+            apple_uid = str(inactive.get("apple_user_id") or "")
+            if apple_uid:
+                rebound = await get_contractor_by_apple_user_id(apple_uid)
+            if rebound:
+                record["rebound_contractor_id"] = rebound["contractor_id"]
+            # Log BEFORE the write and never raise past it: the webhook acks
+            # 200 on any exception, so a raised write error would be a
+            # permanently lost record with no trace. The log line survives.
+            if rebound:
+                logger.info(
+                    "Post-deletion notification from rebound customer: contractor=%s now=%s type=%s",
+                    cid, rebound["contractor_id"], notification_type,
+                )
+            elif notification_type in ("DID_RENEW", "SUBSCRIBED"):
                 # Money was charged for a deactivated account.
                 logger.error(
                     "Post-deletion App Store charge recorded: contractor=%s type=%s count=%s",
@@ -847,6 +889,13 @@ async def handle_appstore_notification(payload: dict) -> bool:
                 logger.info(
                     "Post-deletion App Store notification recorded: contractor=%s type=%s",
                     cid, notification_type,
+                )
+            try:
+                await update_contractor(cid, {"post_deletion_billing": record})
+            except Exception as write_err:
+                logger.error(
+                    "Post-deletion billing record write failed: contractor=%s type=%s err=%s",
+                    cid, notification_type, write_err,
                 )
             return True
         # F-16: redact the appAccountToken UUID to prefix-only.

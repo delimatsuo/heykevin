@@ -307,3 +307,56 @@ async def test_rebound_customer_recorded_without_alarm(monkeypatch, wired, caplo
     _cid, fields = wired["updates"][0]
     assert fields["post_deletion_billing"]["rebound_contractor_id"] == "c2"
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+# ---------------------------------------------------------------------------
+# Sweep-round fixes (PR #193)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refund_referencing_same_transaction_is_recorded(monkeypatch, wired):
+    """Apple's REFUND carries the SAME transactionId as the renewal it refunds.
+    Deduping on transactionId alone would swallow it and leave the audit
+    claiming an outstanding charge Apple already refunded."""
+    inactive = {
+        "contractor_id": "c1",
+        "active": False,
+        "post_deletion_billing": {
+            "count": 1, "last_type": "DID_RENEW", "last_at": 1,
+            "last_transaction_id": "tx-1",
+        },
+    }
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    handled = await sub_service.handle_appstore_notification(_payload("REFUND"))
+
+    assert handled is True
+    assert len(wired["updates"]) == 1
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["last_type"] == "REFUND"
+    assert fields["post_deletion_billing"]["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_rebound_lookup_failure_does_not_lose_the_record(monkeypatch, wired):
+    """A Firestore blip in the rebound lookup must not skip the log and write
+    behind the webhook's 200-acking catch-all."""
+    inactive = {"contractor_id": "c1", "active": False, "apple_user_id": "apple-1"}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+
+    async def raising_by_apple(apple_user_id):
+        raise RuntimeError("firestore blip")
+
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_apple_user_id", raising_by_apple
+    )
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    assert len(wired["updates"]) == 1
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["count"] == 1
+    assert "rebound_contractor_id" not in fields["post_deletion_billing"]

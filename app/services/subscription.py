@@ -841,9 +841,16 @@ async def handle_appstore_notification(payload: dict) -> bool:
             raw_prior = inactive.get("post_deletion_billing")
             prior = raw_prior if isinstance(raw_prior, dict) else {}
             tx_id = str(transaction_info.get("transactionId") or "")
-            if tx_id and prior.get("last_transaction_id") == tx_id:
-                # Apple redelivers on timeout; the same transaction must not
-                # inflate the charge count an operator refunds against.
+            if (
+                tx_id
+                and prior.get("last_transaction_id") == tx_id
+                and prior.get("last_type") == notification_type
+            ):
+                # Apple redelivers on timeout; the same (transaction, type)
+                # must not inflate the charge count an operator refunds
+                # against. Type is part of the key because REFUND/EXPIRED
+                # reference the SAME transactionId as the renewal they wind
+                # down — those are distinct events, not redeliveries.
                 logger.info(
                     "Post-deletion notification redelivery ignored: contractor=%s type=%s",
                     cid, notification_type,
@@ -868,7 +875,15 @@ async def handle_appstore_notification(payload: dict) -> bool:
             rebound = None
             apple_uid = str(inactive.get("apple_user_id") or "")
             if apple_uid:
-                rebound = await get_contractor_by_apple_user_id(apple_uid)
+                try:
+                    rebound = await get_contractor_by_apple_user_id(apple_uid)
+                except Exception as rebound_err:
+                    # Best-effort classification only — a lookup failure must
+                    # not skip the log and write behind the webhook's
+                    # 200-acking catch-all.
+                    logger.warning(
+                        "Rebound lookup failed (recording without it): %s", rebound_err
+                    )
             if rebound:
                 record["rebound_contractor_id"] = rebound["contractor_id"]
             # Log BEFORE the write and never raise past it: the webhook acks

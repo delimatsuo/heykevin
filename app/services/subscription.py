@@ -801,8 +801,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
     payload is the decoded signed payload (already JWT-verified by the webhook).
     Returns True if handled successfully.
     """
-    from app.db.contractors import update_contractor
-    from app.db.firestore_client import get_firestore_client
+    from app.db.contractors import get_contractor_by_subscription_uuid, update_contractor
 
     notification_type = payload.get("notificationType", "")
 
@@ -819,27 +818,44 @@ async def handle_appstore_notification(payload: dict) -> bool:
         logger.warning(f"No appAccountToken in notification: type={notification_type}")
         return False
 
-    db = get_firestore_client()
-    loop = asyncio.get_event_loop()
     # subscription_uuid is stored in contractor document; look up by that field
-    docs = await loop.run_in_executor(
-        None,
-        lambda: list(
-            db.collection("contractors")
-            .where("subscription_uuid", "==", app_account_token)
-            .where("active", "==", True)
-            .limit(1)
-            .stream()
-        ),
-    )
-    if not docs:
+    contractor = await get_contractor_by_subscription_uuid(app_account_token)
+    if not contractor:
+        # Reconciliation: the account may exist but be deactivated (deleted).
+        # Apple keeps auto-renewing after deletion, so these notifications
+        # must be recorded, not silently dropped — an ex-customer may be
+        # paying for a dead account.
+        inactive = await get_contractor_by_subscription_uuid(
+            app_account_token, include_inactive=True
+        )
+        if inactive:
+            cid = inactive["contractor_id"]
+            prior = inactive.get("post_deletion_billing") or {}
+            record = {
+                "count": int(prior.get("count") or 0) + 1,
+                "last_type": notification_type,
+                "last_at": int(time.time()),
+            }
+            await update_contractor(cid, {"post_deletion_billing": record})
+            if notification_type in ("DID_RENEW", "SUBSCRIBED"):
+                # Money was charged for a deactivated account.
+                logger.error(
+                    "Post-deletion App Store charge recorded: contractor=%s type=%s count=%s",
+                    cid, notification_type, record["count"],
+                )
+            else:
+                logger.info(
+                    "Post-deletion App Store notification recorded: contractor=%s type=%s",
+                    cid, notification_type,
+                )
+            return True
         # F-16: redact the appAccountToken UUID to prefix-only.
         logger.warning(
             "Contractor not found for appAccountToken (subscription_uuid prefix=%s)",
             (app_account_token[:8] if app_account_token else "(empty)"),
         )
         return False
-    contractor_id = docs[0].id
+    contractor_id = contractor["contractor_id"]
 
     # F-06: global receipt-replay defense. The original_transaction_id is the
     # stable Apple receipt identity; reject if it has already been bound to a

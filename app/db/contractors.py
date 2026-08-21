@@ -34,6 +34,10 @@ PROTECTED_FIELDS = frozenset({
     # believed we owned; a client that could clear it could hide a billing
     # anomaly.
     "number_release_anomaly",
+    # App Store notifications that arrived for a deactivated account — an
+    # ex-customer may still be being charged. Server-only reconciliation
+    # record; a client that could clear it could hide the charges.
+    "post_deletion_billing",
     # Forwarding truth — derived from carrier signalling, never client-asserted.
     # A client that could write this would be able to fake an activated forward.
     "forwarding_last_seen_at",
@@ -128,6 +132,35 @@ async def get_contractor_by_api_token(token_hash: str) -> Optional[dict]:
         None,
         lambda: list(db.collection(COLLECTION).where(filter=FieldFilter("api_token_hash", "==", token_hash)).where(filter=FieldFilter("active", "==", True)).limit(1).stream())
     )
+    if docs:
+        data = docs[0].to_dict()
+        data["contractor_id"] = docs[0].id
+        return data
+    return None
+
+
+async def get_contractor_by_subscription_uuid(subscription_uuid: str, include_inactive: bool = False) -> Optional[dict]:
+    """Look up contractor by subscription_uuid (StoreKit appAccountToken).
+
+    By default only active contractors match. include_inactive=True is the
+    reconciliation path: App Store notifications for deactivated (deleted)
+    accounts must still be attributable, or an ex-customer's renewals are
+    silently dropped while Apple keeps charging them.
+    """
+    if not subscription_uuid:
+        return None
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+
+    def _query():
+        q = db.collection(COLLECTION).where(
+            filter=FieldFilter("subscription_uuid", "==", subscription_uuid)
+        )
+        if not include_inactive:
+            q = q.where(filter=FieldFilter("active", "==", True))
+        return list(q.limit(1).stream())
+
+    docs = await loop.run_in_executor(None, _query)
     if docs:
         data = docs[0].to_dict()
         data["contractor_id"] = docs[0].id

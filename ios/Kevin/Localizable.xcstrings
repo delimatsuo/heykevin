@@ -65,6 +65,22 @@
         }
       }
     },
+    "Releases your Kevin number. Your data is permanently deleted within 30 days. You will need to disable call forwarding manually." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Libera tu número de Kevin. Tus datos se eliminan permanentemente en un plazo de 30 días. Tendrás que desactivar el desvío de llamadas manualmente."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Libera seu número Kevin. Seus dados são excluídos permanentemente em até 30 dias. Você precisará desativar o encaminhamento de chamadas manualmente."
+          }
+        }
+      }
+    },
     "Subscription Still Active" : {
       "localizations" : {
         "es" : {
@@ -141,6 +157,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Não foi possível excluir a conta"
+          }
+        }
+      }
+    },
+    "This will delete your Kevin account and release your Kevin number. All your data is permanently deleted within 30 days. Make sure to deactivate call forwarding first." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esto eliminará tu cuenta de Kevin y liberará tu número de Kevin. Todos tus datos se eliminan permanentemente en un plazo de 30 días. Asegúrate de desactivar primero el desvío de llamadas."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Isso excluirá sua conta Kevin e liberará seu número Kevin. Todos os seus dados são excluídos permanentemente em até 30 dias. Desative primeiro o encaminhamento de chamadas."
           }
         }
       }

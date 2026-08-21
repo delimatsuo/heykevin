@@ -520,7 +520,7 @@ struct SettingsView: View {
                     }
                     .disabled(isDeletingAccount || confirmDeleteTask != nil)
                 } footer: {
-                    Text(String(localized: "Releases your Kevin number and deletes all data. You will need to disable call forwarding manually."))
+                    Text(String(localized: "Releases your Kevin number. Your data is permanently deleted within 30 days. You will need to disable call forwarding manually."))
                 }
                 .alert(String(localized: "Delete Account"), isPresented: $showDeleteAccountAlert) {
                     Button(String(localized: "Delete"), role: .destructive) {
@@ -528,7 +528,7 @@ struct SettingsView: View {
                     }
                     Button(String(localized: "Cancel"), role: .cancel) {}
                 } message: {
-                    Text(String(localized: "This will permanently delete your Kevin account and release your Kevin number. Make sure to deactivate call forwarding first."))
+                    Text(String(localized: "This will delete your Kevin account and release your Kevin number. All your data is permanently deleted within 30 days. Make sure to deactivate call forwarding first."))
                 }
                 .alert(String(localized: "Subscription Still Active"), isPresented: $showSubscriptionWarningAlert) {
                     Button(String(localized: "Manage Subscription")) {

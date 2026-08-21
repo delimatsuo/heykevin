@@ -232,6 +232,21 @@ async def _call_retention_sweep():
             logger.warning(f"Call retention sweep error: {e}")
 
 
+async def _data_purge_sweep():
+    """Purge accounts deactivated longer than the grace period ago.
+
+    No-op unless PURGE_ENABLED is set (owner-gated). Runs every 6 hours.
+    """
+    from app.db.purge import purge_sweep
+
+    while True:
+        try:
+            await purge_sweep()
+        except Exception as e:
+            logger.warning(f"Data purge sweep error: {type(e).__name__}")
+        await asyncio.sleep(6 * 3600)
+
+
 async def _lapsed_trial_sweep():
     """Transition lapsed trials from `trial` to `expired`. Runs every 6 hours.
 
@@ -411,6 +426,7 @@ async def startup():
     asyncio.create_task(_call_retention_sweep())
     asyncio.create_task(_lapsed_trial_sweep())
     asyncio.create_task(_expired_contractor_cleanup())
+    asyncio.create_task(_data_purge_sweep())
     from app.services.post_call_handoff import post_call_worker_loop
 
     if _post_call_worker_task is None or _post_call_worker_task.done():

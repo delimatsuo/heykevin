@@ -184,9 +184,6 @@ def summarize_estimates(records: Iterable[dict[str, Any]], *, now: float | None 
 
     for record in records:
         total += 1
-        pdb = record.get("post_deletion_billing")
-        if isinstance(pdb, dict):
-            post_deletion_billing_types[str(pdb.get("last_type") or "unknown")] += 1
         status = _safe_bucket(record.get("status"), ESTIMATE_STATUSES)
         statuses[status] += 1
         age_buckets[_age_bucket(record.get("created_at"), now)] += 1

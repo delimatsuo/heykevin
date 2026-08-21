@@ -323,7 +323,7 @@ async def test_purge_deletes_all_subcollections_and_by_contractor_collections(db
     for sub in ("contacts", "caller_contacts", "service_requests",
                 "inbound_messages", "devices", "settings", "knowledge_base"):
         db.docs[f"contractors/c1/{sub}/d1"] = {"x": 1}
-    for coll in ("calls", "jobs", "post_call_handoffs"):
+    for coll in ("calls", "jobs", "post_call_handoffs", "conference_bindings"):
         db.docs[f"{coll}/a"] = {"contractor_id": "c1"}
         db.docs[f"{coll}/keep"] = {"contractor_id": "OTHER"}
 
@@ -332,7 +332,7 @@ async def test_purge_deletes_all_subcollections_and_by_contractor_collections(db
     for sub in ("contacts", "caller_contacts", "service_requests",
                 "inbound_messages", "devices", "settings", "knowledge_base"):
         assert f"contractors/c1/{sub}/d1" not in db.docs
-    for coll in ("calls", "jobs", "post_call_handoffs"):
+    for coll in ("calls", "jobs", "post_call_handoffs", "conference_bindings"):
         assert f"{coll}/a" not in db.docs
         assert f"{coll}/keep" in db.docs, "other tenants' data must be untouched"
     assert result["deleted"]["contacts"] == 1
@@ -486,6 +486,26 @@ async def test_sweep_respects_grace_period(db, gcs, monkeypatch):
     assert purged == ["ripe"]
     assert "purged_at" in db.docs["contractors/ripe"]
     assert "purged_at" not in db.docs["contractors/fresh"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_worst_case_stays_inside_the_promised_window(db, gcs, monkeypatch):
+    """The UI promises deletion 'within 30 days'; the 6h sweep interval must
+    come out of the grace window, not extend it — eligibility begins at
+    30d minus one interval so the worst case lands exactly on day 30."""
+    from app.db import purge as purge_module
+
+    monkeypatch.setattr(purge_module.settings, "purge_enabled", True)
+    just_inside = _now() - (30 * 24 * 3600 - 5 * 3600)   # 29d19h ago
+    just_outside = _now() - (30 * 24 * 3600 - 7 * 3600)  # 29d17h ago
+    _seed_contractor(db, cid="due", deactivated_at=just_inside,
+                     deletion_requested_at=just_inside)
+    _seed_contractor(db, cid="not-yet", deactivated_at=just_outside,
+                     deletion_requested_at=just_outside)
+
+    purged = await purge_module.purge_sweep(now=_now())
+
+    assert purged == ["due"]
 
 
 @pytest.mark.asyncio

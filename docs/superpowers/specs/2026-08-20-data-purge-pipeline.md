@@ -34,6 +34,7 @@ sold product. Surfaced by the PR #192 review; recorded in memory
 | Estimate records | `estimates/*` (top-level, by `contractor_id`; holds `caller_phone`, descriptions, analysis results) | forever |
 | Settings prefs | `contractors/{id}/settings/preferences` (greeting name, text-reply message) | forever |
 | Estimate media | `gs://kevin-estimate-media/...` | 90-day lifecycle (existing) |
+| Conference bindings | `conference_bindings` (contractor_id + call_sid; 2h logical expiry never physically deleted) | forever |
 | Apple tx bindings | `apple_transactions` | forever |
 | RTDB live-call state | `active_calls/{call_sid}` | transient (already ephemeral) |
 
@@ -91,7 +92,7 @@ Two phases, reusing the existing lifecycle machinery:
    and Firestore does not cascade-delete subcollections — deleting the
    memory doc first orphans its receipts. Delete each memory doc's
    `command_receipts` collection, then the memory doc.
-2. Delete `calls`, `jobs`, `post_call_handoffs`, and `estimates` where
+2. Delete `calls`, `jobs`, `post_call_handoffs`, `conference_bindings`, and `estimates` where
    `contractor_id == {id}` (batched queries; `estimates` is top-level and
    holds `caller_phone` + analysis results).
 3. Delete `gs://$ESTIMATE_MEDIA_BUCKET` objects under the contractor's

@@ -21,7 +21,7 @@ SUBCOLLECTIONS = (
     "contacts", "caller_contacts", "service_requests", "inbound_messages",
     "devices", "settings", "knowledge_base", "customer_memory",
 )
-BY_CONTRACTOR = ("calls", "jobs", "post_call_handoffs", "estimates")
+BY_CONTRACTOR = ("calls", "jobs", "post_call_handoffs", "estimates", "conference_bindings")
 
 
 def count_query(q) -> int:
@@ -35,7 +35,8 @@ def main(argv: list[str] | None = None, client_factory=None) -> int:
     args = parser.parse_args(argv)
 
     client = (client_factory or (lambda: firestore.Client(project=args.project)))()
-    cutoff = time.time() - args.grace_days * 24 * 3600
+    # Mirror purge_sweep: the 6h sweep interval comes out of the window.
+    cutoff = time.time() - (args.grace_days * 24 * 3600 - 6 * 3600)
 
     candidates = list(
         client.collection("contractors")

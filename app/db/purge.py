@@ -41,8 +41,15 @@ _SUBCOLLECTIONS = (
     "knowledge_base",
 )
 
-# Top-level collections keyed by contractor_id.
-_BY_CONTRACTOR = ("calls", "jobs", "post_call_handoffs")
+# Top-level collections keyed by contractor_id. conference_bindings rows
+# (contractor_id + call_sid) have a 2h logical expiry that only readers
+# enforce — nothing ever deletes the documents, so the purge must.
+_BY_CONTRACTOR = ("calls", "jobs", "post_call_handoffs", "conference_bindings")
+
+# Keep in sync with _data_purge_sweep's sleep in app/main.py. The interval
+# comes OUT of the grace window so the worst-case purge lands exactly on the
+# promised day-30 boundary, never after it.
+_SWEEP_INTERVAL_SECONDS = 6 * 3600
 
 # The tombstone allowlist. Everything else on the document is PII or business
 # data and dies with the purge. Asserted as an allowlist in tests so a future
@@ -209,7 +216,7 @@ async def purge_sweep(now: float | None = None) -> list[str]:
     if not settings.purge_enabled:
         return []
     now = now if now is not None else time.time()
-    cutoff = now - settings.purge_grace_days * 24 * 3600
+    cutoff = now - (settings.purge_grace_days * 24 * 3600 - _SWEEP_INTERVAL_SECONDS)
 
     from google.cloud.firestore_v1.base_query import FieldFilter
 

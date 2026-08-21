@@ -48,13 +48,20 @@ enum AccountDeletionFirstStep: Equatable {
 /// subscription, so a user with an active subscription must be warned (and
 /// offered Manage Subscription) before the deletion confirmation.
 enum AccountDeletionFlow {
-    static func firstStep(subscriptionStatus: String) -> AccountDeletionFirstStep {
+    static func firstStep(subscriptionStatus: String, subscriptionTier: String) -> AccountDeletionFirstStep {
         switch subscriptionStatus {
-        case "active", "expired", "cancelled":
+        case "active":
+            // "active" implies a subscription regardless of the cached tier.
+            return .warnActiveSubscription
+        case "expired", "cancelled":
             // "expired" includes Apple's billing-retry window and "cancelled"
             // subscriptions run to period end — both can still charge a
-            // deleted account. Only never-subscribed states skip the warning.
-            return .warnActiveSubscription
+            // deleted account, but only for someone who actually purchased.
+            // The trial sweep marks never-subscribed accounts "expired" too;
+            // their tier stays "none", and warning them about charges that
+            // cannot exist would be false.
+            let purchased = !subscriptionTier.isEmpty && subscriptionTier != "none"
+            return purchased ? .warnActiveSubscription : .confirmDelete
         default:
             return .confirmDelete
         }

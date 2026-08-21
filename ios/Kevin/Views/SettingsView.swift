@@ -481,7 +481,7 @@ struct SettingsView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        switch AccountDeletionFlow.firstStep(subscriptionStatus: appState.subscriptionStatus) {
+                        switch AccountDeletionFlow.firstStep(subscriptionStatus: appState.subscriptionStatus, subscriptionTier: appState.subscriptionTier) {
                         case .warnActiveSubscription:
                             showSubscriptionWarningAlert = true
                         case .confirmDelete:
@@ -522,6 +522,11 @@ struct SettingsView: View {
                             try? await Task.sleep(nanoseconds: alertRedismissalDelay)
                             guard !Task.isCancelled else { return }
                             await MainActor.run {
+                                // Re-check inside the MainActor hop: a cancel
+                                // landing during the suspension (onDisappear)
+                                // must not pop the destructive confirmation
+                                // on a later reappearance.
+                                guard !Task.isCancelled else { return }
                                 confirmDeleteTask = nil
                                 showDeleteAccountAlert = true
                             }

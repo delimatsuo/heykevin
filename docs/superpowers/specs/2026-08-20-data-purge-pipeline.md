@@ -40,8 +40,13 @@ sold product. Surfaced by the PR #192 review; recorded in memory
    billing-reconciliation window where post-deletion renewals are recorded.
 2. **What survives as a tombstone.** Recommendation: replace
    `contractors/{id}` with a minimal tombstone document keeping ONLY:
-   `purged_at`, `deactivated_at`, `subscription_uuid`,
+   `active: False`, `purged_at`, `deactivated_at`, `subscription_uuid`,
    `post_deletion_billing`, `number_release_anomaly`, `deleted_app_detected_at`.
+   `active: False` is load-bearing: the reconciliation guard in
+   `handle_appstore_notification` requires an EXPLICIT `active is False`
+   (a missing field falls through to not-found), and the §4 sweep query
+   matches `active == False` — a tombstone without it would silently
+   re-create the dropped-notification hole and never re-match the sweep.
    Rationale: `subscription_uuid` is a random UUID (not PII) and is the ONLY
    key that lets the billing-after-deletion reconciliation (shipped
    2026-08-20) attribute App Store renewals for a purged account. Purging it

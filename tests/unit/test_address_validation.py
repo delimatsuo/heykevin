@@ -249,3 +249,15 @@ async def test_owner_sms_silent_on_resolved_address():
         contractor={"contractor_id": "c1"},
     )
     assert "may not resolve" not in body
+
+
+def test_business_post_call_flow_reaches_validation():
+    """Reachability pin: this project's recurring failure class is features
+    that exist but are never called (sms_compliance_status, gated_actions).
+    The enrichment must be wired into the business post-call flow, not just
+    importable."""
+    import inspect
+    from app.services import post_call
+
+    source = inspect.getsource(post_call)
+    assert "await _validate_job_address(job_data)" in source

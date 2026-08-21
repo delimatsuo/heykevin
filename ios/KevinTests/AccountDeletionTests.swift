@@ -16,9 +16,43 @@ final class AccountDeletionTests: XCTestCase {
         ))
     }
 
-    func testSuccessStatusMeansDeleted() throws {
+    func testBodylessSuccessStatusMeansFailed() throws {
+        // Fail-closed: a 200 whose body we cannot positively parse as the
+        // backend's {"status": "ok"} may be a middlebox or LB error page.
+        // Wiping credentials on it would strand a still-billing account.
         XCTAssertEqual(
             AccountDeletionResponseParser.parse(response: try httpResponse(status: 200)),
+            .failed
+        )
+    }
+
+    func testHTMLBodyOn200MeansFailed() throws {
+        let data = Data("<html>maintenance</html>".utf8)
+        XCTAssertEqual(
+            AccountDeletionResponseParser.parse(
+                response: try httpResponse(status: 200),
+                data: data
+            ),
+            .failed
+        )
+    }
+
+    func testUnauthorizedMeansAlreadyDeleted() throws {
+        // After a deletion commits server-side, the token stops authenticating
+        // (active==True filter). 401 on a deletion attempt is the only signal
+        // the app will ever get that the account is already gone — treating it
+        // as failure would strand the user in a permanent retry loop.
+        XCTAssertEqual(
+            AccountDeletionResponseParser.parse(response: try httpResponse(status: 401)),
+            .deleted
+        )
+    }
+
+    func testNotFoundMeansAlreadyDeleted() throws {
+        // 404 = the contractor document no longer exists; the desired end
+        // state already holds.
+        XCTAssertEqual(
+            AccountDeletionResponseParser.parse(response: try httpResponse(status: 404)),
             .deleted
         )
     }

@@ -436,7 +436,7 @@ async def _process_business(
     job_data["call_sid"] = call_sid
     job_data.setdefault("caller_phone", caller_phone)
     job_data = _normalize_job_callback_data(job_data)
-    await _validate_job_address(job_data)
+    await _validate_job_address(job_data, contractor)
 
     # Written mid-call by the booking tool when the owner has not enabled
     # automatic booking. Structured, so it beats re-reading a time out of the
@@ -800,15 +800,18 @@ async def _update_customer_memory(
         return False
 
 
-async def _validate_job_address(job_data: dict) -> None:
+async def _validate_job_address(job_data: dict, contractor: dict | None) -> None:
     """Best-effort enrichment: attach address_validation when an address was
     extracted and the Geocoding key is configured. Never raises, never blocks
     — an unvalidated address is simply passed through unflagged."""
     address = str(job_data.get("address") or "").strip()
     if not address or not settings.google_maps_api_key:
         return
+    region = str((contractor or {}).get("country_code") or "").strip().lower()
     try:
-        outcome = await validate_address(address, api_key=settings.google_maps_api_key)
+        outcome = await validate_address(
+            address, api_key=settings.google_maps_api_key, region=region
+        )
     except Exception:
         return
     if outcome is not None:

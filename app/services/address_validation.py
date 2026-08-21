@@ -30,10 +30,18 @@ _GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 _RESOLVED_LOCATION_TYPES = {"ROOFTOP", "RANGE_INTERPOLATED"}
 
 
-def interpret_geocode_response(payload: dict) -> dict:
-    """Pure interpretation of a Geocoding API response body."""
+def interpret_geocode_response(payload: dict) -> dict | None:
+    """Pure interpretation of a Geocoding API response body.
+
+    None means "no signal": quota exhaustion, a misconfigured key, or any
+    other API-side failure must never flag good addresses fleet-wide. Only
+    ZERO_RESULTS (and an OK with no results) is a genuine negative.
+    """
+    status = payload.get("status")
     results = payload.get("results") or []
-    if payload.get("status") != "OK" or not results:
+    if status not in ("OK", "ZERO_RESULTS"):
+        return None
+    if status != "OK" or not results:
         return {
             "resolved": False,
             "formatted_address": "",
@@ -51,35 +59,44 @@ def interpret_geocode_response(payload: dict) -> dict:
     }
 
 
-async def _fetch_geocode(address: str, api_key: str) -> dict:
+async def _fetch_geocode(address: str, api_key: str, region: str = "") -> dict:
+    params = {"address": address, "key": api_key}
+    if region:
+        # Bias toward the contractor's country: voice-extracted addresses
+        # often lack city/state, and an unbiased bare street can resolve
+        # confidently in the wrong country.
+        params["region"] = region
     async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.get(
-            _GEOCODE_URL,
-            params={"address": address, "key": api_key},
-        )
+        response = await client.get(_GEOCODE_URL, params=params)
         response.raise_for_status()
         return response.json()
 
 
-async def validate_address(address: str, api_key: str) -> dict | None:
+async def validate_address(address: str, api_key: str, region: str = "") -> dict | None:
     """Best-effort validation. None means "could not validate" — callers must
     treat that as no signal, never as invalid."""
     address = (address or "").strip()
     if not api_key or not address:
         return None
     try:
-        payload = await _fetch_geocode(address, api_key)
+        payload = await _fetch_geocode(address, api_key, region=region)
     except Exception as error:
-        # Never log the address itself (caller PII).
-        logger.warning(f"Address validation fetch failed (non-blocking): {error}")
+        # httpx error strings embed the full request URL — the caller's
+        # address and the API key. Log only the exception class.
+        logger.warning(
+            f"Address validation fetch failed (non-blocking): {type(error).__name__}"
+        )
         return None
     outcome = interpret_geocode_response(payload)
+    if outcome is None:
+        logger.warning(
+            f"Address validation API failure (no signal): status={payload.get('status')}"
+        )
+        return None
+    # Fields ride in the message: the JSONFormatter serializes only a
+    # whitelist of extras and would drop them. Never the address itself.
     logger.info(
-        "address_validation",
-        extra={
-            "resolved": outcome["resolved"],
-            "location_type": outcome["location_type"],
-            "partial_match": outcome["partial_match"],
-        },
+        f"address_validation resolved={outcome['resolved']} "
+        f"location_type={outcome['location_type']} partial_match={outcome['partial_match']}"
     )
     return outcome

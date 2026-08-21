@@ -57,6 +57,11 @@ def setup_logging(level: str = "INFO"):
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # httpx logs every request at INFO as 'HTTP Request: GET <full URL>' —
+    # outbound URLs can carry PII and API keys in query params (e.g. the
+    # Geocoding call). Same for httpcore's connection logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -89,9 +89,23 @@ def test_zero_results_does_not_resolve():
     assert out["formatted_address"] == ""
 
 
-def test_error_status_does_not_resolve():
-    out = av.interpret_geocode_response({"status": "OVER_QUERY_LIMIT", "results": []})
-    assert out["resolved"] is False
+@pytest.mark.parametrize(
+    "status", ["OVER_QUERY_LIMIT", "REQUEST_DENIED", "INVALID_REQUEST", "UNKNOWN_ERROR"]
+)
+def test_api_failure_status_is_no_signal(status):
+    """Quota exhaustion or a misconfigured key must never flag good
+    addresses fleet-wide: only ZERO_RESULTS is a genuine negative; every
+    other non-OK status is 'could not validate'."""
+    assert av.interpret_geocode_response({"status": status, "results": []}) is None
+
+
+@pytest.mark.asyncio
+async def test_api_failure_status_yields_none_from_validate(monkeypatch):
+    async def fake_fetch(address, api_key, region=""):
+        return {"status": "OVER_QUERY_LIMIT", "results": []}
+
+    monkeypatch.setattr(av, "_fetch_geocode", fake_fetch)
+    assert await av.validate_address("175 Fox Run Road", api_key="k") is None
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +117,7 @@ def test_error_status_does_not_resolve():
 async def test_no_api_key_returns_none_without_fetching(monkeypatch):
     calls = []
 
-    async def fake_fetch(address, api_key):
+    async def fake_fetch(address, api_key, region=""):
         calls.append(address)
         return _geocode_payload()
 
@@ -117,7 +131,7 @@ async def test_no_api_key_returns_none_without_fetching(monkeypatch):
 async def test_blank_address_returns_none_without_fetching(monkeypatch):
     calls = []
 
-    async def fake_fetch(address, api_key):
+    async def fake_fetch(address, api_key, region=""):
         calls.append(address)
         return _geocode_payload()
 
@@ -129,7 +143,7 @@ async def test_blank_address_returns_none_without_fetching(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_failure_returns_none_never_raises(monkeypatch):
-    async def failing_fetch(address, api_key):
+    async def failing_fetch(address, api_key, region=""):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(av, "_fetch_geocode", failing_fetch)
@@ -139,13 +153,63 @@ async def test_fetch_failure_returns_none_never_raises(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_successful_validation_returns_interpretation(monkeypatch):
-    async def fake_fetch(address, api_key):
+    async def fake_fetch(address, api_key, region=""):
         return _geocode_payload()
 
     monkeypatch.setattr(av, "_fetch_geocode", fake_fetch)
 
     out = await av.validate_address("175 Fox Run Road, Hudson NH", api_key="k")
     assert out["resolved"] is True
+
+
+@pytest.mark.asyncio
+async def test_region_bias_reaches_the_fetch(monkeypatch):
+    """Voice-extracted addresses often lack city/state; without a region
+    bias, a bare street can ROOFTOP-resolve in another country and
+    confidently suppress the warning."""
+    seen = []
+
+    async def fake_fetch(address, api_key, region=""):
+        seen.append(region)
+        return _geocode_payload()
+
+    monkeypatch.setattr(av, "_fetch_geocode", fake_fetch)
+    await av.validate_address("175 Fox Run Road", api_key="k", region="us")
+    assert seen == ["us"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_error_log_never_contains_address_or_url(monkeypatch, caplog):
+    """httpx error strings embed the full request URL — address + API key.
+    The failure log must carry only the exception class."""
+    import logging
+
+    class _LoudError(Exception):
+        def __str__(self):
+            return "GET https://maps.googleapis.com/json?address=175+Fox+Run&key=SECRET"
+
+    async def failing_fetch(address, api_key, region=""):
+        raise _LoudError()
+
+    monkeypatch.setattr(av, "_fetch_geocode", failing_fetch)
+    with caplog.at_level(logging.DEBUG, logger="app.services.address_validation"):
+        assert await av.validate_address("175 Fox Run Road", api_key="k") is None
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "Fox Run" not in joined
+    assert "SECRET" not in joined
+    assert "_LoudError" in joined
+
+
+def test_httpx_request_logging_is_silenced_by_setup():
+    """httpx logs 'HTTP Request: GET <full URL>' at INFO — the geocode URL
+    carries the caller's address and the API key as query params."""
+    import logging
+
+    from app.utils.logging import setup_logging
+
+    setup_logging()
+    assert logging.getLogger("httpx").level >= logging.WARNING
+    assert logging.getLogger("httpcore").level >= logging.WARNING
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +221,9 @@ async def test_successful_validation_returns_interpretation(monkeypatch):
 async def test_job_address_enrichment_attaches_validation(monkeypatch):
     from app.services import post_call
 
-    async def fake_validate(address, api_key):
+    async def fake_validate(address, api_key, region=""):
         assert address == "175 Foxburn Road"
+        assert region == "us"
         return {"resolved": False, "formatted_address": "Nashua, NH, USA",
                 "location_type": "APPROXIMATE", "partial_match": True}
 
@@ -166,7 +231,7 @@ async def test_job_address_enrichment_attaches_validation(monkeypatch):
     monkeypatch.setattr(post_call.settings, "google_maps_api_key", "k")
 
     job_data = {"address": "175 Foxburn Road"}
-    await post_call._validate_job_address(job_data)
+    await post_call._validate_job_address(job_data, {"country_code": "US"})
 
     assert job_data["address_validation"]["resolved"] is False
 
@@ -177,7 +242,7 @@ async def test_enrichment_skipped_without_key(monkeypatch):
 
     called = []
 
-    async def fake_validate(address, api_key):
+    async def fake_validate(address, api_key, region=""):
         called.append(address)
         return {"resolved": True}
 
@@ -185,7 +250,7 @@ async def test_enrichment_skipped_without_key(monkeypatch):
     monkeypatch.setattr(post_call.settings, "google_maps_api_key", "")
 
     job_data = {"address": "175 Foxburn Road"}
-    await post_call._validate_job_address(job_data)
+    await post_call._validate_job_address(job_data, {})
 
     assert called == []
     assert "address_validation" not in job_data
@@ -195,14 +260,14 @@ async def test_enrichment_skipped_without_key(monkeypatch):
 async def test_enrichment_tolerates_validator_none(monkeypatch):
     from app.services import post_call
 
-    async def fake_validate(address, api_key):
+    async def fake_validate(address, api_key, region=""):
         return None
 
     monkeypatch.setattr(post_call, "validate_address", fake_validate)
     monkeypatch.setattr(post_call.settings, "google_maps_api_key", "k")
 
     job_data = {"address": "175 Foxburn Road"}
-    await post_call._validate_job_address(job_data)
+    await post_call._validate_job_address(job_data, {})
 
     assert "address_validation" not in job_data
 
@@ -251,6 +316,25 @@ async def test_owner_sms_silent_on_resolved_address():
     assert "may not resolve" not in body
 
 
+@pytest.mark.asyncio
+async def test_outcome_log_carries_fields_in_the_message(monkeypatch, caplog):
+    """The JSONFormatter serializes only a whitelist of extras; fields must
+    ride in the message itself or the telemetry records nothing."""
+    import logging
+
+    async def fake_fetch(address, api_key, region=""):
+        return _geocode_payload(location_type="APPROXIMATE", partial_match=True,
+                                formatted="Nashua, NH, USA")
+
+    monkeypatch.setattr(av, "_fetch_geocode", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.address_validation"):
+        await av.validate_address("175 Fox Run Road", api_key="k")
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "resolved=False" in joined
+    assert "location_type=APPROXIMATE" in joined
+    assert "Fox Run" not in joined
+
+
 def test_business_post_call_flow_reaches_validation():
     """Reachability pin: this project's recurring failure class is features
     that exist but are never called (sms_compliance_status, gated_actions).
@@ -259,5 +343,9 @@ def test_business_post_call_flow_reaches_validation():
     import inspect
     from app.services import post_call
 
-    source = inspect.getsource(post_call)
-    assert "await _validate_job_address(job_data)" in source
+    source = inspect.getsource(post_call._process_business)
+    call = source.index("await _validate_job_address(job_data")
+    assert call >= 0
+    assert call < source.index("save_call"), (
+        "validation must land on job_data before the record is saved and the SMS is built"
+    )

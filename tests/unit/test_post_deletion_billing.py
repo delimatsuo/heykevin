@@ -304,8 +304,8 @@ async def test_rebound_customer_recorded_without_alarm(monkeypatch, wired, caplo
         handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
 
     assert handled is True
-    _cid, fields = wired["updates"][0]
-    assert fields["post_deletion_billing"]["rebound_contractor_id"] == "c2"
+    updates = dict((cid, fields) for cid, fields in wired["updates"])
+    assert updates["c1"]["post_deletion_billing"]["rebound_contractor_id"] == "c2"
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
@@ -360,3 +360,88 @@ async def test_rebound_lookup_failure_does_not_lose_the_record(monkeypatch, wire
     _cid, fields = wired["updates"][0]
     assert fields["post_deletion_billing"]["count"] == 1
     assert "rebound_contractor_id" not in fields["post_deletion_billing"]
+
+
+# ---------------------------------------------------------------------------
+# Review-thread fixes (PR #193)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rebound_entitlement_forwarded_when_new_account_not_active(monkeypatch, wired):
+    """The verify path rejects the old receipt for the new account
+    (OWNERSHIP_MISMATCH on the uuid check), so the webhook is the ONLY place
+    a rebound customer's renewal can reach their live account. Forward the
+    entitlement when their new account isn't already active."""
+    inactive = {"contractor_id": "c1", "active": False, "apple_user_id": "apple-1"}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(
+        monkeypatch, wired,
+        rebound_doc={"contractor_id": "c2", "active": True, "subscription_status": "trial"},
+    )
+
+    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    updates = dict((cid, fields) for cid, fields in wired["updates"])
+    assert "c1" in updates and "post_deletion_billing" in updates["c1"]
+    assert updates["c2"]["subscription_status"] == "active"
+    assert updates["c2"]["subscription_tier"] == "personal"
+    assert updates["c2"]["subscription_expires"]
+
+
+@pytest.mark.asyncio
+async def test_rebound_entitlement_not_stomped_when_new_account_active(monkeypatch, wired):
+    """If the new account already has its own active subscription, forwarding
+    the old sub's fields would stomp it — record only."""
+    inactive = {"contractor_id": "c1", "active": False, "apple_user_id": "apple-1"}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(
+        monkeypatch, wired,
+        rebound_doc={"contractor_id": "c2", "active": True, "subscription_status": "active"},
+    )
+
+    await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    cids = [cid for cid, _f in wired["updates"]]
+    assert cids == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_charge_evidence_survives_winddown(monkeypatch, wired):
+    """The audit classifies by the record; a wind-down EXPIRED after a
+    DID_RENEW must not erase the fact a charge happened."""
+    inactive = {
+        "contractor_id": "c1",
+        "active": False,
+        "post_deletion_billing": {
+            "count": 1, "charges": 1, "last_type": "DID_RENEW", "last_at": 1,
+            "last_transaction_id": "tx-0",
+        },
+    }
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    await sub_service.handle_appstore_notification(_payload("EXPIRED"))
+
+    _cid, fields = wired["updates"][0]
+    rec = fields["post_deletion_billing"]
+    assert rec["last_type"] == "EXPIRED"
+    assert rec["charges"] == 1, "charge evidence must survive wind-down"
+    assert rec["count"] == 2
+
+
+def test_account_audit_counts_charged_accounts():
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "phase0_account_audit_charged", root / "scripts" / "phase0_account_audit.py"
+    )
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+
+    summary = audit.summarize_contractors([
+        {"post_deletion_billing": {"count": 3, "charges": 2, "last_type": "EXPIRED"}},
+        {"post_deletion_billing": {"count": 1, "charges": 0, "last_type": "EXPIRED"}},
+        {"subscription_status": "active"},
+    ])
+    assert summary["post_deletion_charged_accounts"] == 1

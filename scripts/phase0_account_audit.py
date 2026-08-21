@@ -91,6 +91,7 @@ def summarize_contractors(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     google_calendar_connected: Counter[str] = Counter()
     twilio_number_assigned: Counter[str] = Counter()
     post_deletion_billing_types: Counter[str] = Counter()
+    post_deletion_charged_accounts = 0
 
     total = 0
     active_or_trial_business_accounts = 0
@@ -100,6 +101,11 @@ def summarize_contractors(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         pdb = record.get("post_deletion_billing")
         if isinstance(pdb, dict):
             post_deletion_billing_types[str(pdb.get("last_type") or "unknown")] += 1
+            try:
+                if int(pdb.get("charges") or 0) > 0:
+                    post_deletion_charged_accounts += 1
+            except (TypeError, ValueError):
+                pass
         sms_status = _safe_bucket(record.get("sms_compliance_status"), SMS_COMPLIANCE_STATUSES)
         integration_status = _safe_bucket(
             record.get("integration_write_status"),
@@ -146,6 +152,10 @@ def summarize_contractors(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         # deactivation — renewal types here mean an ex-customer is being
         # charged for a dead account.
         "post_deletion_billing_types": _sorted_counter(post_deletion_billing_types),
+        # Accounts actually CHARGED after deactivation (charges survives
+        # wind-down events; last_type alone would hide a charged-then-expired
+        # account).
+        "post_deletion_charged_accounts": post_deletion_charged_accounts,
     }
 
 

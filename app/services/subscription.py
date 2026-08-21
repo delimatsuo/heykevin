@@ -856,14 +856,20 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     cid, notification_type,
                 )
                 return True
-            try:
-                prior_count = int(prior.get("count") or 0)
-            except (TypeError, ValueError):
-                # A corrupted count must not dead-letter the account behind
-                # the webhook's 200-acking catch-all.
-                prior_count = 0
+            def _safe_int(value):
+                try:
+                    return int(value or 0)
+                except (TypeError, ValueError):
+                    # A corrupted counter must not dead-letter the account
+                    # behind the webhook's 200-acking catch-all.
+                    return 0
+
+            is_charge = notification_type in ("DID_RENEW", "SUBSCRIBED")
             record = {
-                "count": prior_count + 1,
+                "count": _safe_int(prior.get("count")) + 1,
+                # The audit classifies by this record; a wind-down EXPIRED
+                # after a DID_RENEW must not erase the fact a charge happened.
+                "charges": _safe_int(prior.get("charges")) + (1 if is_charge else 0),
                 "last_type": notification_type,
                 "last_at": int(time.time()),
                 "last_transaction_id": tx_id,
@@ -886,6 +892,32 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     )
             if rebound:
                 record["rebound_contractor_id"] = rebound["contractor_id"]
+                # The verify path rejects the old receipt for the new account
+                # (OWNERSHIP_MISMATCH on the uuid check), so this webhook is
+                # the ONLY place a rebound customer's renewal can reach their
+                # live account. Forward the entitlement when the new account
+                # is not already active — if it is, it has its own
+                # subscription and forwarding would stomp it.
+                if is_charge and rebound.get("subscription_status") != "active":
+                    product_id = transaction_info.get("productId", "")
+                    fwd_tier = PRODUCT_TO_TIER.get(product_id, "")
+                    fwd_expires = _active_subscription_expires_ts(transaction_info)
+                    if fwd_tier and fwd_expires:
+                        try:
+                            await update_contractor(rebound["contractor_id"], {
+                                "subscription_status": "active",
+                                "subscription_tier": fwd_tier,
+                                "subscription_expires": fwd_expires,
+                            })
+                            logger.info(
+                                "Rebound entitlement forwarded: %s -> %s tier=%s",
+                                cid, rebound["contractor_id"], fwd_tier,
+                            )
+                        except Exception as fwd_err:
+                            logger.error(
+                                "Rebound entitlement forward failed: %s -> %s err=%s",
+                                cid, rebound["contractor_id"], fwd_err,
+                            )
             # Log BEFORE the write and never raise past it: the webhook acks
             # 200 on any exception, so a raised write error would be a
             # permanently lost record with no trace. The log line survives.

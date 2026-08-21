@@ -445,3 +445,60 @@ def test_account_audit_counts_charged_accounts():
         {"subscription_status": "active"},
     ])
     assert summary["post_deletion_charged_accounts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_deactivation_renewal_is_not_a_post_deletion_charge(
+    monkeypatch, wired, caplog
+):
+    """A renewal PURCHASED while the account was still active (delivered late
+    or redelivered after deactivation) is a valid charge — flagging it would
+    send the operator refund-chasing a legitimate payment."""
+    import logging
+
+    inactive = {"contractor_id": "c1", "active": False, "deactivated_at": 1755600000}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+    monkeypatch.setattr(
+        sub_service, "_decode_jws_payload",
+        lambda _s: {**_transaction_info(), "purchaseDate": 1755599000 * 1000},
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.subscription"):
+        handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert handled is True
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["charges"] == 0
+    assert fields["post_deletion_billing"]["count"] == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_post_deactivation_renewal_is_a_charge(monkeypatch, wired):
+    inactive = {"contractor_id": "c1", "active": False, "deactivated_at": 1755600000}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+    monkeypatch.setattr(
+        sub_service, "_decode_jws_payload",
+        lambda _s: {**_transaction_info(), "purchaseDate": 1755601000 * 1000},
+    )
+
+    await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["charges"] == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_purchase_date_stays_conservative(monkeypatch, wired):
+    """Without a purchaseDate we cannot prove the charge predates deactivation
+    — count it, so a real post-deletion charge is never silently excused."""
+    inactive = {"contractor_id": "c1", "active": False, "deactivated_at": 1755600000}
+    _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
+    _wire_rebound(monkeypatch, wired)
+
+    await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    _cid, fields = wired["updates"][0]
+    assert fields["post_deletion_billing"]["charges"] == 1

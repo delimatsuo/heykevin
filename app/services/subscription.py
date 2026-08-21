@@ -865,11 +865,21 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     return 0
 
             is_charge = notification_type in ("DID_RENEW", "SUBSCRIBED")
+            # A renewal PURCHASED while the account was still active — merely
+            # delivered late or redelivered after deactivation — is a valid
+            # charge, not a post-deletion one. Without a purchaseDate (or a
+            # deactivated_at on legacy docs) stay conservative and count it,
+            # so a real post-deletion charge is never silently excused.
+            charged_after_deletion = is_charge
+            deactivated_ts = _safe_int(inactive.get("deactivated_at"))
+            purchase_ms = _safe_int(transaction_info.get("purchaseDate"))
+            if is_charge and deactivated_ts and purchase_ms:
+                charged_after_deletion = (purchase_ms / 1000.0) > deactivated_ts
             record = {
                 "count": _safe_int(prior.get("count")) + 1,
                 # The audit classifies by this record; a wind-down EXPIRED
                 # after a DID_RENEW must not erase the fact a charge happened.
-                "charges": _safe_int(prior.get("charges")) + (1 if is_charge else 0),
+                "charges": _safe_int(prior.get("charges")) + (1 if charged_after_deletion else 0),
                 "last_type": notification_type,
                 "last_at": int(time.time()),
                 "last_transaction_id": tx_id,
@@ -926,7 +936,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     "Post-deletion notification from rebound customer: contractor=%s now=%s type=%s",
                     cid, rebound["contractor_id"], notification_type,
                 )
-            elif notification_type in ("DID_RENEW", "SUBSCRIBED"):
+            elif charged_after_deletion:
                 # Money was charged for a deactivated account.
                 logger.error(
                     "Post-deletion App Store charge recorded: contractor=%s type=%s count=%s",

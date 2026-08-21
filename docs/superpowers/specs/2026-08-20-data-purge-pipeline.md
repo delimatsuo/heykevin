@@ -29,6 +29,8 @@ sold product. Surfaced by the PR #192 review; recorded in memory
 | Calls + transcripts | `calls` (by `contractor_id`) | 90 days / 100 calls (existing) |
 | Job cards | `jobs` (by `contractor_id`) | forever |
 | Post-call handoffs | `post_call_handoffs` | forever |
+| Estimate records | `estimates/*` (top-level, by `contractor_id`; holds `caller_phone`, descriptions, analysis results) | forever |
+| Settings prefs | `contractors/{id}/settings/preferences` (greeting name, text-reply message) | forever |
 | Estimate media | `gs://kevin-estimate-media/...` | 90-day lifecycle (existing) |
 | Apple tx bindings | `apple_transactions` | forever |
 | RTDB live-call state | `active_calls/{call_sid}` | transient (already ephemeral) |
@@ -71,10 +73,16 @@ Two phases, reusing the existing lifecycle machinery:
 
 `purge_contractor` (new, `app/db/purge.py`):
 1. Delete all documents in each subcollection (batched, 500/batch):
-   `contacts`, `caller_contacts`, `customer_memory`, `command_receipts`,
-   `service_requests`, `inbound_messages`, `devices`, knowledge subcollection.
-2. Delete `calls`, `jobs`, `post_call_handoffs` where
-   `contractor_id == {id}` (batched queries).
+   `contacts`, `caller_contacts`, `service_requests`, `inbound_messages`,
+   `devices`, `settings`, knowledge subcollection. For `customer_memory`,
+   traverse nested receipts FIRST: receipts live at
+   `contractors/{id}/customer_memory/{customer_key}/command_receipts/{command_key}`
+   and Firestore does not cascade-delete subcollections — deleting the
+   memory doc first orphans its receipts. Delete each memory doc's
+   `command_receipts` collection, then the memory doc.
+2. Delete `calls`, `jobs`, `post_call_handoffs`, and `estimates` where
+   `contractor_id == {id}` (batched queries; `estimates` is top-level and
+   holds `caller_phone` + analysis results).
 3. Delete `gs://$ESTIMATE_MEDIA_BUCKET` objects under the contractor's
    prefix (lifecycle would get them in ≤90d; explicit delete makes the
    promise honest).
@@ -107,6 +115,9 @@ account, sweep continues).
   (assert as an allowlist, so a future PII field can't leak through).
 - Idempotency: purge twice, second run is a no-op with zero errors.
 - Batched deletes handle >500 docs per subcollection.
+- Nested receipt traversal: a purge of a contractor with
+  `customer_memory/{key}/command_receipts/*` leaves zero orphaned receipt
+  docs (assert by listing the nested collection post-purge).
 - Reconciliation still works post-purge: an App Store notification for a
   purged account still records `post_deletion_billing` on the tombstone.
 - Sweep failure isolation: one poisoned account doesn't stop the sweep.

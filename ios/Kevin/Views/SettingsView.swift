@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var showDeleteAccountAlert = false
     @State private var showDeleteAccountError = false
     @State private var isDeletingAccount = false
+    @State private var showSubscriptionWarningAlert = false
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -474,7 +475,12 @@ struct SettingsView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        showDeleteAccountAlert = true
+                        switch AccountDeletionFlow.firstStep(subscriptionStatus: appState.subscriptionStatus) {
+                        case .warnActiveSubscription:
+                            showSubscriptionWarningAlert = true
+                        case .confirmDelete:
+                            showDeleteAccountAlert = true
+                        }
                     } label: {
                         if isDeletingAccount {
                             HStack {
@@ -497,6 +503,25 @@ struct SettingsView: View {
                     Button(String(localized: "Cancel"), role: .cancel) {}
                 } message: {
                     Text(String(localized: "This will permanently delete your Kevin account and release your Kevin number. Make sure to deactivate call forwarding first."))
+                }
+                .alert(String(localized: "Subscription Still Active"), isPresented: $showSubscriptionWarningAlert) {
+                    Button(String(localized: "Manage Subscription")) {
+                        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                    Button(String(localized: "Continue Deleting"), role: .destructive) {
+                        // Present the confirmation only after this alert's
+                        // dismissal completes — flipping a second alert's
+                        // isPresented during dismissal can silently drop it.
+                        Task {
+                            try? await Task.sleep(nanoseconds: 700_000_000)
+                            await MainActor.run { showDeleteAccountAlert = true }
+                        }
+                    }
+                    Button(String(localized: "Cancel"), role: .cancel) {}
+                } message: {
+                    Text(String(localized: "Deleting your account does not cancel your Apple subscription, and you would keep being charged. Cancel it under Manage Subscription first."))
                 }
                 .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
                     Button(String(localized: "OK"), role: .cancel) {}

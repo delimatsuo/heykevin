@@ -37,3 +37,18 @@ enum AccountDeletionResponseParser {
         return .deleted
     }
 }
+
+enum AccountDeletionFirstStep: Equatable {
+    case warnActiveSubscription
+    case confirmDelete
+}
+
+/// First step of the delete-account flow. Deletion is a server-side
+/// deactivation and does NOT cancel the user's auto-renewing App Store
+/// subscription, so a user with an active subscription must be warned (and
+/// offered Manage Subscription) before the deletion confirmation.
+enum AccountDeletionFlow {
+    static func firstStep(subscriptionStatus: String) -> AccountDeletionFirstStep {
+        subscriptionStatus == "active" ? .warnActiveSubscription : .confirmDelete
+    }
+}

@@ -114,8 +114,22 @@ final class AccountDeletionFlowTests: XCTestCase {
         )
     }
 
-    func testNonActiveStatusesGoStraightToConfirmation() {
-        for status in ["trial", "expired", "cancelled", ""] {
+    func testLapsedStatusesStillWarn() {
+        // "expired" includes Apple's billing-retry window (DID_FAIL_TO_RENEW
+        // sets it while the subscription still exists and may yet renew), and
+        // "cancelled" subscriptions run to period end — both can still charge
+        // a deleted account. Only never-subscribed states skip the warning.
+        for status in ["expired", "cancelled"] {
+            XCTAssertEqual(
+                AccountDeletionFlow.firstStep(subscriptionStatus: status),
+                .warnActiveSubscription,
+                "status \(status)"
+            )
+        }
+    }
+
+    func testNeverSubscribedStatusesGoStraightToConfirmation() {
+        for status in ["trial", ""] {
             XCTAssertEqual(
                 AccountDeletionFlow.firstStep(subscriptionStatus: status),
                 .confirmDelete,

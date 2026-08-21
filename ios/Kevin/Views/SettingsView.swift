@@ -15,6 +15,12 @@ struct SettingsView: View {
     @State private var showDeleteAccountError = false
     @State private var isDeletingAccount = false
     @State private var showSubscriptionWarningAlert = false
+    @State private var confirmDeleteTask: Task<Void, Never>?
+
+    /// Delay before presenting a follow-up alert: flipping a second alert's
+    /// isPresented during another's ~300ms dismissal can silently drop it.
+    /// Shared by the continue-deleting and deletion-error paths.
+    private let alertRedismissalDelay: UInt64 = 700_000_000
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -492,7 +498,7 @@ struct SettingsView: View {
                             Text(String(localized: "Delete Account"))
                         }
                     }
-                    .disabled(isDeletingAccount)
+                    .disabled(isDeletingAccount || confirmDeleteTask != nil)
                 } footer: {
                     Text(String(localized: "Releases your Kevin number and deletes all data. You will need to disable call forwarding manually."))
                 }
@@ -511,12 +517,14 @@ struct SettingsView: View {
                         }
                     }
                     Button(String(localized: "Continue Deleting"), role: .destructive) {
-                        // Present the confirmation only after this alert's
-                        // dismissal completes — flipping a second alert's
-                        // isPresented during dismissal can silently drop it.
-                        Task {
-                            try? await Task.sleep(nanoseconds: 700_000_000)
-                            await MainActor.run { showDeleteAccountAlert = true }
+                        confirmDeleteTask?.cancel()
+                        confirmDeleteTask = Task {
+                            try? await Task.sleep(nanoseconds: alertRedismissalDelay)
+                            guard !Task.isCancelled else { return }
+                            await MainActor.run {
+                                confirmDeleteTask = nil
+                                showDeleteAccountAlert = true
+                            }
                         }
                     }
                     Button(String(localized: "Cancel"), role: .cancel) {}
@@ -588,6 +596,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle(String(localized: "Settings"))
+            .onDisappear { cancelPendingDeleteConfirmation() }
             .sheet(isPresented: $showKnowledgeEditor) {
                 KnowledgeEditorView(knowledgeText: $knowledgeText)
             }
@@ -1090,6 +1099,11 @@ struct SettingsView: View {
         isImporting = false
     }
 
+    private func cancelPendingDeleteConfirmation() {
+        confirmDeleteTask?.cancel()
+        confirmDeleteTask = nil
+    }
+
     private func deleteAccount() async {
         guard !appState.contractorId.isEmpty, !isDeletingAccount else { return }
         await MainActor.run { isDeletingAccount = true }
@@ -1114,7 +1128,7 @@ struct SettingsView: View {
             // the error alert — flipping a second alert's isPresented during
             // another's dismissal can silently drop it (fast failures like
             // airplane mode land inside the ~300ms dismissal window).
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: alertRedismissalDelay)
         }
         await MainActor.run {
             isDeletingAccount = false

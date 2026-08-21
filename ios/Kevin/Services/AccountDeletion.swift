@@ -49,6 +49,14 @@ enum AccountDeletionFirstStep: Equatable {
 /// offered Manage Subscription) before the deletion confirmation.
 enum AccountDeletionFlow {
     static func firstStep(subscriptionStatus: String) -> AccountDeletionFirstStep {
-        subscriptionStatus == "active" ? .warnActiveSubscription : .confirmDelete
+        switch subscriptionStatus {
+        case "active", "expired", "cancelled":
+            // "expired" includes Apple's billing-retry window and "cancelled"
+            // subscriptions run to period end — both can still charge a
+            // deleted account. Only never-subscribed states skip the warning.
+            return .warnActiveSubscription
+        default:
+            return .confirmDelete
+        }
     }
 }

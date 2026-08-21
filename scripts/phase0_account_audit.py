@@ -31,8 +31,9 @@ KNOWN_ACTION_KEYS = {
     "twilio_call_redirect",
     "twilio_conference_mutation",
     "twilio_number_provision",
-    "twilio_number_release",
-    "account_delete",
+    # twilio_number_release / account_delete are flag-independent
+    # (requires_flag=False) — counting their flags here would imply a kill
+    # switch that check_gated_action never consults.
     "push_lock_screen_context",
 }
 

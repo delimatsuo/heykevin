@@ -28,6 +28,12 @@ PROTECTED_FIELDS = frozenset({
     "demo_profile_version",
     # App lifecycle — written only by backend
     "deleted_app_detected_at",
+    "deactivated_at",
+    "number_released_at",
+    # Reconciliation signal for a number Twilio no longer lists but we
+    # believed we owned; a client that could clear it could hide a billing
+    # anomaly.
+    "number_release_anomaly",
     # Forwarding truth — derived from carrier signalling, never client-asserted.
     # A client that could write this would be able to fake an activated forward.
     "forwarding_last_seen_at",
@@ -489,24 +495,54 @@ async def release_twilio_number(contractor_id: str) -> bool:
         lambda: client.incoming_phone_numbers.list(phone_number=twilio_number, limit=1)
     )
 
+    from twilio.base.exceptions import TwilioRestException
+
+    updates = {"twilio_number": "", "number_released_at": int(time.time())}
     if numbers:
-        await loop.run_in_executor(
-            None,
-            lambda: numbers[0].delete()
-        )
-        logger.info(f"Released Twilio number {redact_phone(twilio_number)} for contractor {contractor_id}")
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: numbers[0].delete()
+            )
+            logger.info(f"Released Twilio number {redact_phone(twilio_number)} for contractor {contractor_id}")
+        except TwilioRestException as e:
+            if e.status != 404:
+                raise
+            # A concurrent release (second device, retry racing a slow first
+            # request) already deleted it between our list and delete. The
+            # desired end state holds; this is not an anomaly.
+            logger.info(
+                f"Twilio number {redact_phone(twilio_number)} for contractor {contractor_id} "
+                f"already released by a concurrent request"
+            )
     else:
-        logger.warning(f"Twilio number {redact_phone(twilio_number)} not found in account")
+        # A number we believe we own but Twilio does not list is an anomaly,
+        # not a success: it may be a format mismatch on a number that still
+        # bills. Record it on the document so reconciliation can find it.
+        logger.error(
+            f"Twilio number {redact_phone(twilio_number)} for contractor {contractor_id} "
+            f"not found in Twilio account; clearing profile and recording anomaly"
+        )
+        # The doc clears the number and the log redacts it, so the anomaly
+        # record itself must carry the number or reconciliation has no key.
+        # Server-only field (PROTECTED_FIELDS), same sensitivity as the
+        # twilio_number field it replaces.
+        updates["number_release_anomaly"] = {"at": int(time.time()), "number": twilio_number}
 
     # Clear the number from the contractor profile
-    await update_contractor(contractor_id, {"twilio_number": ""})
+    await update_contractor(contractor_id, updates)
     return True
 
 
 async def deactivate_contractor(contractor_id: str) -> bool:
     """Deactivate a contractor account and release their Twilio number."""
     await release_twilio_number(contractor_id)
-    await update_contractor(contractor_id, {"active": False})
+    await update_contractor(contractor_id, {"active": False, "deactivated_at": int(time.time())})
+    # Drop this instance's cached token mappings so the deleted account's
+    # token stops authenticating here immediately. Other warm instances keep
+    # their entry until recycle — a bounded, documented residual.
+    from app.middleware.auth import invalidate_contractor_tokens
+    invalidate_contractor_tokens(contractor_id)
     logger.info(f"Contractor deactivated: {contractor_id}")
     return True
 

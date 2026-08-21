@@ -12,6 +12,8 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPaywall = false
     @State private var showDeleteAccountAlert = false
+    @State private var showDeleteAccountError = false
+    @State private var isDeletingAccount = false
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -474,8 +476,17 @@ struct SettingsView: View {
                     Button(role: .destructive) {
                         showDeleteAccountAlert = true
                     } label: {
-                        Text(String(localized: "Delete Account"))
+                        if isDeletingAccount {
+                            HStack {
+                                Text(String(localized: "Deleting Account…"))
+                                Spacer()
+                                ProgressView()
+                            }
+                        } else {
+                            Text(String(localized: "Delete Account"))
+                        }
                     }
+                    .disabled(isDeletingAccount)
                 } footer: {
                     Text(String(localized: "Releases your Kevin number and deletes all data. You will need to disable call forwarding manually."))
                 }
@@ -486,6 +497,11 @@ struct SettingsView: View {
                     Button(String(localized: "Cancel"), role: .cancel) {}
                 } message: {
                     Text(String(localized: "This will permanently delete your Kevin account and release your Kevin number. Make sure to deactivate call forwarding first."))
+                }
+                .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
+                    Button(String(localized: "OK"), role: .cancel) {}
+                } message: {
+                    Text(String(localized: "The server couldn't complete the deletion, so your account is unchanged. Please check your connection and try again."))
                 }
 
                 // MARK: - Legal
@@ -1050,7 +1066,9 @@ struct SettingsView: View {
     }
 
     private func deleteAccount() async {
-        guard !appState.contractorId.isEmpty else { return }
+        guard !appState.contractorId.isEmpty, !isDeletingAccount else { return }
+        await MainActor.run { isDeletingAccount = true }
+        var outcome = AccountDeletionOutcome.failed
         do {
             let encodedId = appState.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? appState.contractorId
             let url = URL(string: "\(appState.backendURL)/api/contractors/\(encodedId)")!
@@ -1058,16 +1076,32 @@ struct SettingsView: View {
             request.httpMethod = "DELETE"
             request.timeoutInterval = 15
             APIClient.shared.authorize(&request)
-            let (_, _) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            outcome = AccountDeletionResponseParser.parse(response: response, data: data)
         } catch {
             debugLog("Delete account failed: \(error)")
         }
-        // Clear local state regardless of server response
+        // Only clear local state when the server confirmed the deletion (or
+        // reported it already gone). Clearing it on failure strands the user:
+        // logged out locally while the account stays active and billing.
+        if outcome == .failed {
+            // Let the confirmation alert finish dismissing before presenting
+            // the error alert — flipping a second alert's isPresented during
+            // another's dismissal can silently drop it (fast failures like
+            // airplane mode land inside the ~300ms dismissal window).
+            try? await Task.sleep(nanoseconds: 700_000_000)
+        }
         await MainActor.run {
-            appState.contractorId = ""
-            appState.kevinNumber = ""
-            appState.isOnboarded = false
-            APIClient.shared.contractorToken = ""
+            isDeletingAccount = false
+            switch outcome {
+            case .deleted:
+                appState.contractorId = ""
+                appState.kevinNumber = ""
+                appState.isOnboarded = false
+                APIClient.shared.contractorToken = ""
+            case .failed:
+                showDeleteAccountError = true
+            }
         }
     }
 }

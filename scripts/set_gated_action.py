@@ -47,8 +47,11 @@ KNOWN_ACTIONS = (
     "twilio_call_redirect",
     "twilio_conference_mutation",
     "twilio_number_provision",
-    "twilio_number_release",
-    "account_delete",
+    # twilio_number_release and account_delete are deliberately absent:
+    # their GatePolicy sets requires_flag=False (deletion is an App Store
+    # requirement that must work for every account), so a gated_actions
+    # flag written here would never be consulted — offering them would
+    # fabricate a kill switch that does not exist.
     "push_lock_screen_context",
 )
 

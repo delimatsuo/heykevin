@@ -126,10 +126,13 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
     ActionKey.TWILIO_NUMBER_PROVISION: GatePolicy(requires_owner_confirmation=True),
     # Account deletion and number release must work for every account with no
     # per-contractor flag: deletion is an App Store requirement, and 0 of 113
-    # production contractors carry any gated_actions entry. The controls that
-    # remain are the real ones — the owner's own authenticated, explicitly
-    # confirmed request (requires_owner_confirmation) plus an idempotency key.
-    # Same shape as OWNER_CONFIRM_CALENDAR_EVENT above.
+    # production contractors carry any gated_actions entry. The control that
+    # remains is the owner's own authenticated, explicitly confirmed request
+    # (requires_owner_confirmation). The idempotency key labels retries for
+    # the audit trail; it is NOT an atomic claim — concurrent duplicates are
+    # instead safe by convergence (release tolerates already-gone numbers,
+    # deactivation writes are idempotent). Same shape as
+    # OWNER_CONFIRM_CALENDAR_EVENT above.
     ActionKey.TWILIO_NUMBER_RELEASE: GatePolicy(
         requires_flag=False,
         requires_owner_confirmation=True,

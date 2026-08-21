@@ -94,6 +94,10 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
+    # Geocoding API key for post-call address validation (F: two live calls
+    # heard the same job's street two different ways). Restricted to the
+    # Geocoding API; feature is inert while unset.
+    google_maps_api_key: str = ""
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4

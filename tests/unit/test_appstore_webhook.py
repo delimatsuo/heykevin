@@ -48,6 +48,15 @@ async def test_missing_signed_payload_returns_400():
 
 
 @pytest.mark.asyncio
+async def test_non_string_signed_payload_returns_400():
+    req = _FakeJsonRequest(data={"signedPayload": 12345})
+    response = await appstore_webhook.handle_appstore_notification(req)
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "missing signedPayload"}
+
+
+@pytest.mark.asyncio
 async def test_invalid_jws_payload_returns_400(monkeypatch):
     req = _FakeJsonRequest(data={"signedPayload": "invalid.jws.token"})
     monkeypatch.setattr(

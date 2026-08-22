@@ -205,9 +205,9 @@ async def handle_appstore_notification(request: Request):
             logger.warning("App Store notification body is not a JSON object")
             return JSONResponse(status_code=400, content={"error": "invalid json"})
 
-        signed_payload = body.get("signedPayload", "")
-        if not signed_payload:
-            logger.warning("Missing signedPayload in App Store notification")
+        signed_payload = body.get("signedPayload")
+        if not isinstance(signed_payload, str) or not signed_payload:
+            logger.warning("Missing or non-string signedPayload in App Store notification")
             return JSONResponse(status_code=400, content={"error": "missing signedPayload"})
 
         try:

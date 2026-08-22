@@ -250,19 +250,32 @@ async def test_utc_booking_args_are_stored_as_contractor_local_iso(
     }
     pipeline = _pipeline(contractor, call_sid="CAzulu")
 
+    # Dynamic future date: this call goes through slot_is_bookable, which
+    # (correctly) refuses past slots — a hardcoded date detonated here the
+    # day after it was written. The behavior under test: a Z-stamped time is
+    # local wall clock, kept verbatim and re-stamped with the contractor's
+    # own offset for that date (computed, so DST changes can't rot it).
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/New_York")
+    future_day = (datetime.now(tz) + timedelta(days=3)).date()
+    offset = datetime(future_day.year, future_day.month, future_day.day,
+                      12, tzinfo=tz).strftime("%z")
+    offset = f"{offset[:3]}:{offset[3:]}"
+
     await pipeline._execute_tool(
         "book_appointment",
         {
             **BOOKING_ARGS,
-            "start_time": "2026-08-21T12:00:00Z",
-            "end_time": "2026-08-21T13:00:00Z",
+            "start_time": f"{future_day}T12:00:00Z",
+            "end_time": f"{future_day}T13:00:00Z",
         },
     )
 
     request = saved_calls[0][1]["appointment_request"]
-    assert request["start_time"].startswith("2026-08-21T12:00:00")
-    assert request["start_time"].endswith("-04:00")
-    assert request["end_time"].endswith("-04:00")
+    assert request["start_time"].startswith(f"{future_day}T12:00:00")
+    assert request["start_time"].endswith(offset)
+    assert request["end_time"].endswith(offset)
 
 
 @pytest.mark.asyncio

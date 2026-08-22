@@ -195,11 +195,19 @@ async def handle_appstore_notification(request: Request):
     Apple sends signed JWS payloads when subscription lifecycle events occur.
     """
     try:
-        body = await request.json()
-        signed_payload = body.get("signedPayload", "")
+        try:
+            body = await request.json()
+        except Exception as e:
+            logger.warning(f"App Store notification invalid JSON body: {e}")
+            return JSONResponse(status_code=400, content={"error": "invalid json"})
 
-        if not signed_payload:
-            logger.warning("Missing signedPayload in App Store notification")
+        if not isinstance(body, dict):
+            logger.warning("App Store notification body is not a JSON object")
+            return JSONResponse(status_code=400, content={"error": "invalid json"})
+
+        signed_payload = body.get("signedPayload")
+        if not isinstance(signed_payload, str) or not signed_payload:
+            logger.warning("Missing or non-string signedPayload in App Store notification")
             return JSONResponse(status_code=400, content={"error": "missing signedPayload"})
 
         try:
@@ -218,5 +226,6 @@ async def handle_appstore_notification(request: Request):
 
     except Exception as e:
         logger.error(f"App Store webhook error: {e}", exc_info=True)
-        # Return 200 to prevent Apple from retrying
-        return {"status": "ok"}
+        # Return HTTP 500 so Apple's retry mechanism will re-deliver the notification
+        # rather than dropping lifecycle events on transient infrastructure failures.
+        return JSONResponse(status_code=500, content={"error": "internal processing error"})

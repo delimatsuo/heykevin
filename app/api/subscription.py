@@ -115,19 +115,26 @@ async def verify_subscription(body: VerifyRequest, request: Request):
     """
     require_contractor_access(request, body.contractor_id)
 
-    from app.db.apple_transactions import get_transaction_binding
+    from app.db.apple_transactions import claim_transaction, get_transaction_binding
+    from app.db.contractors import (
+        BindingBackfillOutcome,
+        conditionally_backfill_subscription_binding,
+        get_contractor,
+        is_missing_or_malformed_binding,
+    )
     from app.services.subscription import (
+        PRODUCT_TO_TIER,
         CrossContractorReceiptError,
         SubscriptionUpdateOutcome,
         get_processed_transaction,
         mark_transaction_seen,
+        parse_revocation_date,
+        update_processed_transaction_outcome,
         update_subscription_from_transaction,
         verify_transaction_strict,
     )
 
     # Per-contractor dedup (cheap idempotency for retries from this same client).
-    # This must happen before the rate limit so legitimate StoreKit retries do
-    # not turn a successful purchase into noisy 429s.
     processed = await get_processed_transaction(body.contractor_id, body.transaction_id)
     if processed:
         outcome = processed.get("outcome", SubscriptionUpdateOutcome.ACTIVE.value)
@@ -146,20 +153,357 @@ async def verify_subscription(body: VerifyRequest, request: Request):
                 status_code=500,
                 detail="invalid_processed_transaction_outcome",
             )
-        logger.info(
-            "subscription_verify outcome=already_processed entitlement=%s contractor_hash=%s "
-            "transaction_hash=%s source=%s build=%s",
-            outcome,
-            _telemetry_hash(body.contractor_id),
-            _telemetry_hash(body.transaction_id),
-            _telemetry_label(body.source),
-            _telemetry_label(body.app_build, fallback="legacy"),
+
+        if outcome == SubscriptionUpdateOutcome.INACTIVE.value:
+            # Processed inactive: zero-Apple, zero-limiter, zero-write fast path
+            logger.info(
+                "subscription_verify outcome=already_processed entitlement=inactive contractor_hash=%s "
+                "transaction_hash=%s source=%s build=%s",
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+                _telemetry_label(body.source),
+                _telemetry_label(body.app_build, fallback="legacy"),
+            )
+            return {
+                "status": "ok",
+                "message": "already_processed",
+                "outcome": outcome,
+                "entitlement_active": False,
+            }
+
+        # Processed active: check live contractor binding
+        contractor = await get_contractor(body.contractor_id)
+        if contractor is None:
+            # Contractor document disappeared between processed lookup and live read (state race)
+            logger.info(
+                "subscription_verify contractor disappeared after processed lookup contractor_hash=%s",
+                _telemetry_hash(body.contractor_id),
+            )
+            return {
+                "status": "ok",
+                "message": "already_processed",
+                "outcome": outcome,
+                "entitlement_active": True,
+            }
+
+        current_binding = contractor.get("subscription_original_transaction_id")
+        if not is_missing_or_malformed_binding(current_binding):
+            # Canonical valid binding: zero-Apple, zero-limiter, zero-write fast path
+            logger.info(
+                "subscription_verify outcome=already_processed entitlement=active contractor_hash=%s "
+                "transaction_hash=%s source=%s build=%s",
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+                _telemetry_label(body.source),
+                _telemetry_label(body.app_build, fallback="legacy"),
+            )
+            return {
+                "status": "ok",
+                "message": "already_processed",
+                "outcome": outcome,
+                "entitlement_active": True,
+            }
+
+        # Processed active with missing/malformed binding: enter Lazy Repair path
+        # 1. Apply rate limiter
+        allowed, retry_after = _check_rate_limit_with_retry(
+            body.contractor_id,
+            VERIFY_RATE_LIMIT,
+            ":verify",
+            VERIFY_RATE_WINDOW_SECONDS,
         )
+        if not allowed:
+            logger.warning(
+                "subscription_verify outcome=rate_limited contractor_hash=%s source=%s build=%s "
+                "retry_after=%s",
+                _telemetry_hash(body.contractor_id),
+                _telemetry_label(body.source),
+                _telemetry_label(body.app_build, fallback="legacy"),
+                retry_after,
+            )
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+                content={
+                    "status": "retryable",
+                    "reason": "rate_limited",
+                    "retry_after_seconds": retry_after,
+                },
+            )
+
+        # 2. Strictly reverify transaction with Apple
+        result = await verify_transaction_strict(body.transaction_id)
+        if result.unreachable:
+            logger.warning(
+                "Apple verification unreachable during repair for %s reason=%s — failing closed",
+                _telemetry_hash(body.transaction_id),
+                result.reason,
+            )
+            return JSONResponse(
+                status_code=502,
+                headers={"Retry-After": "30"},
+                content={
+                    "status": "verification_failed",
+                    "reason": result.reason or "apple_unreachable",
+                    "retry_after_seconds": 30,
+                },
+            )
+
+        if not result.ok or not result.transaction:
+            logger.warning(
+                "Apple verification authoritatively rejected %s during repair reason=%s",
+                _telemetry_hash(body.transaction_id),
+                result.reason,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"verification_rejected:{result.reason or 'invalid'}",
+            )
+
+        tx_info = result.transaction
+
+        # 3. Validation - Strict identity and payload shape checks:
+        # a) exact transactionId equality
+        verified_tx_id = tx_info.get("transactionId")
+        if (
+            not isinstance(verified_tx_id, str)
+            or not verified_tx_id.strip()
+            or verified_tx_id != body.transaction_id
+        ):
+            logger.warning(
+                "subscription_verify transaction_id_mismatch verified=%s requested=%s contractor_hash=%s",
+                _telemetry_hash(str(verified_tx_id)),
+                _telemetry_hash(body.transaction_id),
+                _telemetry_hash(body.contractor_id),
+            )
+            return JSONResponse(
+                status_code=502,
+                headers={"Retry-After": "30"},
+                content={
+                    "status": "retryable",
+                    "reason": "transaction_id_mismatch",
+                    "retry_after_seconds": 30,
+                },
+            )
+
+        # b) explicit originalTransactionId presence
+        has_canonical = "originalTransactionId" in tx_info
+        has_alias = "original_transaction_id" in tx_info
+        if not has_canonical and not has_alias:
+            raise HTTPException(status_code=422, detail="missing_transaction_id")
+
+        s_canon = None
+        if has_canonical:
+            v = tx_info["originalTransactionId"]
+            if not isinstance(v, str) or not v.strip():
+                raise HTTPException(status_code=422, detail="missing_transaction_id")
+            s_canon = v.strip()
+
+        s_alias = None
+        if has_alias:
+            v = tx_info["original_transaction_id"]
+            if not isinstance(v, str) or not v.strip():
+                raise HTTPException(status_code=422, detail="missing_transaction_id")
+            s_alias = v.strip()
+
+        if has_canonical and has_alias:
+            if s_canon != s_alias:
+                raise HTTPException(status_code=422, detail="missing_transaction_id")
+            original_id = s_canon
+        elif has_canonical:
+            original_id = s_canon
+        else:
+            original_id = s_alias
+
+        # c) known product mapping to a tier (strict string shape check before lookup)
+        product_id = tx_info.get("productId")
+        if not isinstance(product_id, str) or not product_id.strip():
+            raise HTTPException(status_code=422, detail="unknown_product")
+        product_id = product_id.strip()
+        tier = PRODUCT_TO_TIER.get(product_id)
+        if not tier:
+            raise HTTPException(status_code=422, detail="unknown_product")
+
+        # d) appAccountToken matches live contractor subscription_uuid
+        app_account_token = tx_info.get("appAccountToken")
+        if not isinstance(app_account_token, str) or not app_account_token.strip():
+            raise HTTPException(status_code=409, detail="missing_app_account_token")
+
+        expected_uuid = (contractor or {}).get("subscription_uuid", "")
+        if not expected_uuid or app_account_token != expected_uuid:
+            raise HTTPException(status_code=409, detail="app_account_token_mismatch")
+
+        # e) finite positive expiresDate validation (MUST happen before durable claim)
+        raw_exp = tx_info.get("expiresDate")
+        if (
+            raw_exp is None
+            or isinstance(raw_exp, bool)
+            or not isinstance(raw_exp, (int, float))
+            or not math.isfinite(raw_exp)
+            or raw_exp <= 0
+        ):
+            raise HTTPException(status_code=422, detail="missing_or_invalid_expiry")
+
+        expires_ts = float(raw_exp) / 1000.0
+
+        # f) strict optional revocation parsing (MUST happen before durable claim)
+        is_revoked, rev_ts, rev_err = parse_revocation_date(tx_info)
+        if rev_err is not None:
+            raise HTTPException(status_code=422, detail=rev_err)
+
+        is_expired = (expires_ts <= time.time())
+
+        # 4. Terminal vs Active candidate handling:
+        if is_revoked or is_expired:
+            # Terminal candidate: claim receipt first
+            ok, owner = await claim_transaction(
+                original_transaction_id=original_id,
+                contractor_id=body.contractor_id,
+                transaction_id=body.transaction_id,
+                product_id=product_id,
+                environment=str(tx_info.get("environment", "")),
+            )
+            if not ok:
+                logger.error(
+                    "verify_subscription repair cross-contractor reject: tx_hash=%s owner_hash=%s",
+                    _telemetry_hash(body.transaction_id),
+                    _telemetry_hash(owner or "unknown"),
+                )
+                raise HTTPException(status_code=409, detail="receipt_already_bound")
+
+            await update_processed_transaction_outcome(
+                body.contractor_id,
+                body.transaction_id,
+                SubscriptionUpdateOutcome.INACTIVE,
+            )
+            logger.info(
+                "subscription_verify repair detected terminal inactive: revoked=%s expired=%s contractor_hash=%s",
+                is_revoked,
+                is_expired,
+                _telemetry_hash(body.contractor_id),
+            )
+            return {
+                "status": "ok",
+                "message": "terminal_processed",
+                "outcome": SubscriptionUpdateOutcome.INACTIVE.value,
+                "entitlement_active": False,
+            }
+
+        # Active future candidate:
+        # If initial binding is a padded different identity, return safe 200 no-op without claim or write (A3)
+        if (
+            isinstance(current_binding, str)
+            and current_binding.strip()
+            and current_binding.strip() != original_id
+        ):
+            logger.info(
+                "subscription_verify repair detected padded different binding contractor_hash=%s tx_hash=%s",
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+            )
+            return {
+                "status": "ok",
+                "message": "already_processed",
+                "outcome": SubscriptionUpdateOutcome.ACTIVE.value,
+                "entitlement_active": True,
+            }
+
+        # Validate initial live contractor fingerprint BEFORE claiming receipt globally (A4)
+        stored_exp = (contractor or {}).get("subscription_expires")
+        is_fingerprint_match = (
+            contractor is not None
+            and contractor.get("active") is True
+            and contractor.get("subscription_status") == "active"
+            and contractor.get("subscription_tier") == tier
+            and stored_exp is not None
+            and not isinstance(stored_exp, bool)
+            and isinstance(stored_exp, (int, float))
+            and math.isfinite(stored_exp)
+            and abs(float(stored_exp) - expires_ts) < 1.0
+        )
+        if not is_fingerprint_match:
+            logger.info(
+                "subscription_verify repair detected contractor/state/tier/expiry drift: "
+                "live_active=%s live_status=%s live_tier=%s tx_tier=%s contractor_hash=%s tx_hash=%s",
+                (contractor or {}).get("active"),
+                _telemetry_label(str((contractor or {}).get("subscription_status"))),
+                _telemetry_label(str((contractor or {}).get("subscription_tier"))),
+                _telemetry_label(str(tier)),
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+            )
+            return {
+                "status": "ok",
+                "message": "already_processed",
+                "outcome": SubscriptionUpdateOutcome.ACTIVE.value,
+                "entitlement_active": True,
+            }
+
+        # Fingerprint matched: atomically claim verified original transaction globally (same-owner check)
+        ok, owner = await claim_transaction(
+            original_transaction_id=original_id,
+            contractor_id=body.contractor_id,
+            transaction_id=body.transaction_id,
+            product_id=product_id,
+            environment=str(tx_info.get("environment", "")),
+        )
+        if not ok:
+            logger.error(
+                "verify_subscription repair cross-contractor reject: tx_hash=%s owner_hash=%s",
+                _telemetry_hash(body.transaction_id),
+                _telemetry_hash(owner or "unknown"),
+            )
+            raise HTTPException(status_code=409, detail="receipt_already_bound")
+
+        # 5. In Firestore transaction, re-read and re-check full fingerprint, then backfill
+        backfill_outcome = await conditionally_backfill_subscription_binding(
+            contractor_id=body.contractor_id,
+            expected_subscription_uuid=app_account_token,
+            original_transaction_id=original_id,
+            expected_tier=tier,
+            expected_expires_ts=expires_ts,
+        )
+
+        if backfill_outcome is BindingBackfillOutcome.REPAIRED:
+            logger.info(
+                "subscription_verify repair successful: contractor_hash=%s tx_hash=%s",
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+            )
+            return {
+                "status": "ok",
+                "message": "updated",
+                "outcome": SubscriptionUpdateOutcome.ACTIVE.value,
+                "entitlement_active": True,
+            }
+
+        if backfill_outcome in (
+            BindingBackfillOutcome.IDEMPOTENT_SAME,
+            BindingBackfillOutcome.SUPERSEDED,
+            BindingBackfillOutcome.FINGERPRINT_MISMATCH,
+            BindingBackfillOutcome.NOT_FOUND_OR_INACTIVE,
+        ):
+            logger.info(
+                "subscription_verify repair outcome=%s contractor_hash=%s tx_hash=%s",
+                backfill_outcome.value,
+                _telemetry_hash(body.contractor_id),
+                _telemetry_hash(body.transaction_id),
+            )
+            return {
+                "status": "ok",
+                "message": "already_processed",
+                "outcome": SubscriptionUpdateOutcome.ACTIVE.value,
+                "entitlement_active": True,
+            }
+
+        if backfill_outcome is BindingBackfillOutcome.UUID_MISMATCH:
+            raise HTTPException(status_code=409, detail="ownership_mismatch")
+
         return {
             "status": "ok",
             "message": "already_processed",
-            "outcome": outcome,
-            "entitlement_active": outcome == SubscriptionUpdateOutcome.ACTIVE.value,
+            "outcome": SubscriptionUpdateOutcome.ACTIVE.value,
+            "entitlement_active": True,
         }
 
     # Global receipt-replay defense (F-06): even before calling Apple, if this

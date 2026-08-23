@@ -7,6 +7,7 @@ Apple Server Notifications V2 webhook processing.
 import asyncio
 import base64
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -249,6 +250,60 @@ PRODUCT_TO_TIER = {
     "com.kevin.callscreen.businesspro.monthly": "businessPro",
 }
 
+
+def parse_revocation_date(transaction_info: dict) -> tuple[bool, Optional[float], Optional[str]]:
+    """Parse optional revocationDate / revokedDate from transaction payload.
+
+    Returns (is_revoked, revocation_ts_seconds, error_reason).
+    - If neither key present: (False, None, None) -> not revoked
+    - If valid and revoked: (True, float_seconds, None)
+    - If malformed: (False, None, error_description)
+    """
+    if not isinstance(transaction_info, dict):
+        return False, None, "malformed_revocation_date"
+
+    has_canon = "revocationDate" in transaction_info
+    has_alias = "revokedDate" in transaction_info
+    if not has_canon and not has_alias:
+        return False, None, None
+
+    val_canon = None
+    if has_canon:
+        val = transaction_info["revocationDate"]
+        if (
+            val is None
+            or isinstance(val, bool)
+            or not isinstance(val, (int, float))
+            or not math.isfinite(val)
+            or val <= 0
+        ):
+            return False, None, "malformed_revocation_date"
+        val_canon = val
+
+    val_alias = None
+    if has_alias:
+        val = transaction_info["revokedDate"]
+        if (
+            val is None
+            or isinstance(val, bool)
+            or not isinstance(val, (int, float))
+            or not math.isfinite(val)
+            or val <= 0
+        ):
+            return False, None, "malformed_revocation_date"
+        val_alias = val
+
+    if has_canon and has_alias:
+        if val_canon != val_alias:
+            return False, None, "conflicting_revocation_date"
+        return True, float(val_canon) / 1000.0, None
+
+    if has_canon:
+        return True, float(val_canon) / 1000.0, None
+
+    return True, float(val_alias) / 1000.0, None
+
+
 PROMO_COUNTER_DOC = "subscription/promo_counter"
 PROMO_MAX = 1000
 
@@ -343,11 +398,11 @@ def _extract_transaction_info(response_body: dict) -> Optional[dict]:
 
 def _active_subscription_expires_ts(transaction_info: dict) -> Optional[float]:
     """Return a future expiry timestamp for an active transaction, else None."""
-    if transaction_info.get("revocationDate") or transaction_info.get("revokedDate"):
+    is_revoked, rev_ts, rev_err = parse_revocation_date(transaction_info)
+    if is_revoked or rev_err is not None:
         logger.warning(
-            "Rejecting revoked App Store transaction: product=%s revocationDate=%s",
+            "Rejecting revoked or malformed App Store transaction: product=%s",
             transaction_info.get("productId", ""),
-            transaction_info.get("revocationDate") or transaction_info.get("revokedDate"),
         )
         return None
 
@@ -565,6 +620,26 @@ async def mark_transaction_seen(
     )
 
 
+async def update_processed_transaction_outcome(
+    contractor_id: str,
+    transaction_id: str,
+    outcome: SubscriptionUpdateOutcome,
+):
+    """Update only outcome on an existing processed transaction record."""
+    from app.db.firestore_client import get_firestore_client
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+    doc_path = f"contractors/{contractor_id}/transactions/{transaction_id}"
+    await loop.run_in_executor(
+        None,
+        lambda: db.document(doc_path).update(
+            {
+                "outcome": outcome.value,
+            }
+        ),
+    )
+
+
 def _resolve_original_transaction_id(transaction_info: dict) -> str:
     """Extract the stable original_transaction_id, falling back to transaction_id."""
     original = transaction_info.get("originalTransactionId") or transaction_info.get("original_transaction_id")
@@ -602,6 +677,13 @@ async def update_subscription_from_transaction(
     from app.db.apple_transactions import claim_transaction
 
     product_id = transaction_info.get("productId", "")
+    if not isinstance(product_id, str) or not product_id.strip():
+        logger.error(f"Unknown product ID shape: {product_id}")
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.UNKNOWN_PRODUCT,
+            reason="unknown_product",
+        )
+    product_id = product_id.strip()
     tier = PRODUCT_TO_TIER.get(product_id)
     if not tier:
         logger.error(f"Unknown product ID: {product_id}")
@@ -613,7 +695,7 @@ async def update_subscription_from_transaction(
     # Validate ownership: appAccountToken must match contractor's subscription_uuid
     from app.db.contractors import get_contractor
     app_account_token = transaction_info.get("appAccountToken", "")
-    if not app_account_token:
+    if not app_account_token or not isinstance(app_account_token, str):
         logger.error(f"appAccountToken missing in transaction for contractor {contractor_id}")
         return SubscriptionUpdateResult(
             SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH,
@@ -637,7 +719,6 @@ async def update_subscription_from_transaction(
 
     # Reject malformed subscription payloads before claiming their receipt.
     # Apple auto-renewable subscription transactions always carry an expiry.
-    import math
     raw_exp = transaction_info.get("expiresDate")
     if (
         raw_exp is None
@@ -701,6 +782,15 @@ async def update_subscription_from_transaction(
     else:
         original_id = s_alias
 
+    # Validate revocationDate / revokedDate shape before claim
+    is_revoked, rev_ts, rev_err = parse_revocation_date(transaction_info)
+    if rev_err is not None:
+        logger.error("Verified App Store transaction has malformed revocation date: %s", rev_err)
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+            reason=rev_err,
+        )
+
     ok, owner = await claim_transaction(
         original_transaction_id=original_id,
         contractor_id=contractor_id,
@@ -711,7 +801,7 @@ async def update_subscription_from_transaction(
     if not ok:
         raise CrossContractorReceiptError(original_id, owner or "unknown")
 
-    if transaction_info.get("revocationDate") or transaction_info.get("revokedDate"):
+    if is_revoked:
         logger.warning(
             "Acknowledging revoked App Store transaction without entitlement: product=%s",
             product_id,
@@ -896,8 +986,10 @@ async def handle_appstore_notification(payload: dict) -> bool:
     """
     from app.db.apple_transactions import claim_transaction
     from app.db.contractors import (
+        conditionally_backfill_subscription_binding,
         get_contractor_by_apple_user_id,
         get_contractor_by_subscription_uuid,
+        is_missing_or_malformed_binding,
         record_active_renewal_status,
         record_inactive_notification,
         update_contractor,
@@ -975,9 +1067,16 @@ async def handle_appstore_notification(payload: dict) -> bool:
             return False
         env = env or ""
 
+        # Validate revocation date shape before contractor lookup or writes (A2)
+        is_revoked, rev_ts, rev_err = parse_revocation_date(transaction_info)
+        if rev_err is not None:
+            logger.error("App Store notification has malformed revocation date: %s", rev_err)
+            return False
+
         contractor = await get_contractor_by_subscription_uuid(app_account_token)
         if contractor and contractor.get("active") is True:
             contractor_id = contractor["contractor_id"]
+
             tx_id = str(transaction_info.get("transactionId", "") or "")
             ok, owner = await claim_transaction(
                 original_transaction_id=original_id,
@@ -992,6 +1091,44 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     original_id, contractor_id, owner, notification_type,
                 )
                 return False
+
+            # Conditional binding backfill for legacy active subscribers missing binding
+            live_binding = contractor.get("subscription_original_transaction_id")
+            if is_missing_or_malformed_binding(live_binding) and not is_revoked:
+                tx_raw_exp = transaction_info.get("expiresDate")
+                if (
+                    tx_raw_exp is not None
+                    and not isinstance(tx_raw_exp, bool)
+                    and isinstance(tx_raw_exp, (int, float))
+                    and math.isfinite(tx_raw_exp)
+                    and tx_raw_exp > 0
+                ):
+                    tx_expires_ts = float(tx_raw_exp) / 1000.0
+                    tx_tier = PRODUCT_TO_TIER.get(product_id, "")
+                    if (
+                        tx_expires_ts > time.time()
+                        and tx_tier
+                        and contractor.get("subscription_status") == "active"
+                        and contractor.get("subscription_tier") == tx_tier
+                    ):
+                        stored_exp = contractor.get("subscription_expires")
+                        if (
+                            stored_exp is not None
+                            and isinstance(stored_exp, (int, float))
+                            and not isinstance(stored_exp, bool)
+                            and abs(float(stored_exp) - tx_expires_ts) < 1.0
+                        ):
+                            backfill_res = await conditionally_backfill_subscription_binding(
+                                contractor_id=contractor_id,
+                                expected_subscription_uuid=app_account_token,
+                                original_transaction_id=original_id,
+                                expected_tier=tx_tier,
+                                expected_expires_ts=tx_expires_ts,
+                            )
+                            logger.info(
+                                "Renewal notification conditional binding backfill outcome=%s",
+                                backfill_res.value,
+                            )
 
             auto_renews = (auto_renew_status == 1)
             ok_active = await record_active_renewal_status(
@@ -1080,8 +1217,18 @@ async def handle_appstore_notification(payload: dict) -> bool:
     signed_transaction = renewal_info.get("signedTransactionInfo", "")
     transaction_info = _decode_jws_payload(signed_transaction) if signed_transaction else {}
 
+    if not isinstance(transaction_info, dict):
+        logger.warning(f"Invalid transaction payload in notification: type={notification_type}")
+        return False
+
+    # Strict optional revocation validation before contractor lookup, inactive recording, global claim, forwarding, or update
+    is_revoked, rev_ts, rev_err = parse_revocation_date(transaction_info)
+    if rev_err is not None:
+        logger.error("App Store notification has malformed revocation date: %s", rev_err)
+        return False
+
     app_account_token = transaction_info.get("appAccountToken", "")
-    if not app_account_token:
+    if not app_account_token or not isinstance(app_account_token, str):
         logger.warning(f"No appAccountToken in notification: type={notification_type}")
         return False
 

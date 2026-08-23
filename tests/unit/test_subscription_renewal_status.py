@@ -10,6 +10,7 @@ Comprehensive test coverage covering all verifier round-2 requirements:
 """
 
 import asyncio
+import copy
 import json
 import os
 import threading
@@ -1211,7 +1212,8 @@ async def test_appstore_webhook_http_500_on_real_transaction_update_failure(monk
         "subscription_original_transaction_id": "otx-1",
         "post_deletion_billing": None,
     }
-    doc_ref = FakeDocRef(inactive_doc)
+    doc_ref = FakeDocRef(dict(inactive_doc))
+    snapshot_before = copy.deepcopy(inactive_doc)
 
     def failing_update(ref, fields):
         raise RuntimeError("firestore write error")
@@ -1248,6 +1250,7 @@ async def test_appstore_webhook_http_500_on_real_transaction_update_failure(monk
     assert resp.status_code == 500
     body = json.loads(resp.body)
     assert body["error"] == "internal processing error"
+    assert doc_ref.data == snapshot_before
 
 
 # ===========================================================================
@@ -2983,3 +2986,634 @@ async def test_service_outcomes_and_failure_boundaries(monkeypatch, caplog):
     monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_lookup_none)
     caplog.clear()
     assert await sub_service.handle_appstore_notification(_renewal_payload("AUTO_RENEW_DISABLED")) is False
+
+
+# ---------------------------------------------------------------------------
+# Acceptance tests: Missing binding backfill on active renewal webhook
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_renewal_webhook_missing_binding_backfills_and_records_truth_in_one_delivery(monkeypatch, caplog):
+    """Active renewal webhook on contractor with missing binding backfills binding and records renewal status."""
+    import logging
+    caplog.set_level(logging.INFO)
+    fake_contractor = {
+        "contractor_id": "c1",
+        "subscription_uuid": "uuid-c1",
+        "subscription_status": "active",
+        "subscription_tier": "business",
+        "subscription_expires": 1770000000.0,
+        "subscription_original_transaction_id": None,
+        "subscription_auto_renews": None,
+        "subscription_renewal_status_signed_at_ms": None,
+        "subscription_forwarded_from": "old-c",
+        "business_name": "Acme Electric",
+        "created_at": 500,
+        "active": True,
+    }
+
+    # In-memory mock for get_contractor, get_contractor_by_subscription_uuid,
+    # conditionally_backfill_subscription_binding, and record_active_renewal_status
+    class _InMemoryFirestore:
+        def __init__(self):
+            self._docs: dict[str, dict] = {}
+            self._lock = asyncio.Lock()
+
+        def collection(self, name: str):
+            class _Col:
+                def __init__(self, fs, col_name):
+                    self._fs = fs
+                    self._name = col_name
+                def document(self, doc_id: str):
+                    return _DocRef(self._fs, f"{self._name}/{doc_id}")
+            return _Col(self, name)
+
+        def document(self, path: str):
+            return _DocRef(self, path)
+
+        def transaction(self):
+            return _FakeTx(self)
+
+    class _DocRef:
+        def __init__(self, fs: _InMemoryFirestore, path: str):
+            self._fs = fs
+            self._path = path
+
+        def get(self, transaction=None):
+            data = self._fs._docs.get(self._path)
+            doc_id = self._path.split("/")[-1]
+            class _Snap:
+                def __init__(self, exists, d, did):
+                    self.exists = exists
+                    self._d = d or {}
+                    self.id = did
+                def to_dict(self):
+                    return dict(self._d)
+            return _Snap(data is not None, data, doc_id)
+
+        def set(self, value: dict, merge: bool = False):
+            if merge and self._path in self._fs._docs:
+                self._fs._docs[self._path].update(value)
+            else:
+                self._fs._docs[self._path] = dict(value)
+
+        def update(self, value: dict):
+            if self._path in self._fs._docs:
+                self._fs._docs[self._path].update(value)
+            else:
+                self._fs._docs[self._path] = dict(value)
+
+    class _FakeTx:
+        def __init__(self, fs: _InMemoryFirestore):
+            self._fs = fs
+
+        def set(self, doc_ref: _DocRef, value: dict, merge: bool = False):
+            doc_ref.set(value, merge=merge)
+
+        def update(self, doc_ref: _DocRef, value: dict):
+            doc_ref.update(value)
+
+    fake = _InMemoryFirestore()
+    fake._docs["contractors/c1"] = dict(fake_contractor)
+
+    monkeypatch.setattr("app.db.firestore_client.get_firestore_client", lambda: fake)
+    monkeypatch.setattr("app.db.contractors.get_firestore_client", lambda: fake)
+
+    async def fake_lookup(uuid, include_inactive=False):
+        if uuid == "uuid-c1":
+            return dict(fake._docs.get("contractors/c1", {}))
+        return None
+
+    async def fake_get(cid):
+        return dict(fake._docs.get(f"contractors/{cid}", {}))
+
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_lookup)
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get)
+
+    rn_dict = _rn_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        auto_renew_status=0,
+        signed_date=1780000000000,
+        product_id="com.kevin.callscreen.business.monthly",
+    )
+    tx_dict = _tx_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        transaction_id="tx-1",
+        product_id="com.kevin.callscreen.business.monthly",
+        expires_date=1770000000000,
+    )
+
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda jwt: tx_dict if jwt == "signed-tx-jwt" else rn_dict,
+    )
+    monkeypatch.setattr(sub_service.time, "time", lambda: 1700000000)
+
+    payload = _renewal_payload("AUTO_RENEW_DISABLED")
+    ok = await sub_service.handle_appstore_notification(payload)
+
+    assert ok is True
+    # Binding backfilled and renewal status persisted in same delivery
+    doc = fake._docs["contractors/c1"]
+    assert doc["subscription_original_transaction_id"] == "orig-1"
+    assert doc["subscription_auto_renews"] is False
+    assert doc["subscription_renewal_status_signed_at_ms"] == 1780000000000
+    # Other contractor fields intact
+    assert doc["business_name"] == "Acme Electric"
+    assert doc["created_at"] == 500
+    assert doc["subscription_tier"] == "business"
+    assert doc["subscription_status"] == "active"
+    assert doc["subscription_expires"] == 1770000000.0
+    assert doc["subscription_uuid"] == "uuid-c1"
+    assert doc["subscription_forwarded_from"] == "old-c"
+    assert doc["active"] is True
+    # Receipt claimed globally
+    claim_binding = fake._docs.get("apple_transactions/orig-1")
+    assert claim_binding is not None
+    assert claim_binding["contractor_id"] == "c1"
+
+    # Privacy-safe log assertion per B7
+    assert "Renewal notification conditional binding backfill outcome=repaired" in caplog.text
+    backfill_logs = [r.message for r in caplog.records if "conditional binding backfill outcome" in r.message]
+    assert len(backfill_logs) == 1
+    assert "c1" not in backfill_logs[0]
+    assert "orig-1" not in backfill_logs[0]
+    assert "tx-1" not in backfill_logs[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch_reason", ["different_tier", "different_expiry", "different_valid_binding"])
+async def test_renewal_webhook_mismatches_do_not_backfill(monkeypatch, mismatch_reason):
+    """Old receipts or different valid bindings do not backfill or mutate contractor."""
+    fake_contractor = {
+        "contractor_id": "c1",
+        "subscription_uuid": "uuid-c1",
+        "subscription_status": "active",
+        "subscription_tier": "business",
+        "subscription_expires": 1770000000.0,
+        "subscription_original_transaction_id": "orig-existing" if mismatch_reason == "different_valid_binding" else None,
+        "subscription_auto_renews": None,
+        "subscription_renewal_status_signed_at_ms": None,
+        "active": True,
+    }
+
+    async def fake_lookup(uuid, include_inactive=False):
+        return dict(fake_contractor)
+
+    async def fake_get(cid):
+        return dict(fake_contractor)
+
+    async def fake_claim(**kwargs):
+        return True, "c1"
+
+    async def fake_record_renewal(contractor_id, expected_subscription_uuid, original_transaction_id, auto_renews, signed_at_ms):
+        if fake_contractor.get("subscription_original_transaction_id") != original_transaction_id:
+            return False
+        fake_contractor["subscription_auto_renews"] = auto_renews
+        fake_contractor["subscription_renewal_status_signed_at_ms"] = signed_at_ms
+        return True
+
+    from app.db import contractors as contractors_db
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_lookup)
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get)
+    monkeypatch.setattr("app.db.apple_transactions.claim_transaction", fake_claim)
+    monkeypatch.setattr(contractors_db, "record_active_renewal_status", fake_record_renewal)
+
+    tx_product = "com.kevin.callscreen.personal.monthly" if mismatch_reason == "different_tier" else "com.kevin.callscreen.business.monthly"
+    tx_exp = 1710000000000 if mismatch_reason == "different_expiry" else 1770000000000
+    tx_orig = "orig-different" if mismatch_reason == "different_valid_binding" else "orig-old"
+
+    rn_dict = _rn_info(
+        uuid="uuid-c1",
+        original_id=tx_orig,
+        auto_renew_status=0,
+        signed_date=1780000000000,
+        product_id=tx_product,
+    )
+    tx_dict = _tx_info(
+        uuid="uuid-c1",
+        original_id=tx_orig,
+        transaction_id="tx-1",
+        product_id=tx_product,
+        expires_date=tx_exp,
+    )
+
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda jwt: tx_dict if jwt == "signed-tx-jwt" else rn_dict,
+    )
+    monkeypatch.setattr(sub_service.time, "time", lambda: 1700000000)
+
+    payload = _renewal_payload("AUTO_RENEW_DISABLED")
+    ok = await sub_service.handle_appstore_notification(payload)
+
+    assert ok is True
+    # Binding remains unchanged
+    if mismatch_reason == "different_valid_binding":
+        assert fake_contractor["subscription_original_transaction_id"] == "orig-existing"
+    else:
+        assert fake_contractor["subscription_original_transaction_id"] is None
+    assert fake_contractor["subscription_auto_renews"] is None
+
+
+@pytest.mark.asyncio
+async def test_renewal_webhook_backfill_storage_failure_propagates(monkeypatch):
+    """Storage failure during backfill in webhook propagates so webhook returns 500."""
+    fake_contractor = {
+        "contractor_id": "c1",
+        "subscription_uuid": "uuid-c1",
+        "subscription_status": "active",
+        "subscription_tier": "business",
+        "subscription_expires": 1770000000.0,
+        "subscription_original_transaction_id": None,
+        "active": True,
+    }
+
+    async def fake_lookup(uuid, include_inactive=False):
+        return dict(fake_contractor)
+
+    async def fake_get(cid):
+        return dict(fake_contractor)
+
+    async def fail_backfill(**kwargs):
+        raise RuntimeError("firestore_storage_unavailable")
+
+    async def fake_claim(**kwargs):
+        return True, "c1"
+
+    from app.db import contractors as contractors_db
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_lookup)
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get)
+    monkeypatch.setattr(contractors_db, "conditionally_backfill_subscription_binding", fail_backfill)
+    monkeypatch.setattr("app.db.apple_transactions.claim_transaction", fake_claim)
+
+    rn_dict = _rn_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        auto_renew_status=0,
+        signed_date=1780000000000,
+        product_id="com.kevin.callscreen.business.monthly",
+    )
+    tx_dict = _tx_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        transaction_id="tx-1",
+        product_id="com.kevin.callscreen.business.monthly",
+        expires_date=1770000000000,
+    )
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda jwt: tx_dict if jwt == "signed-tx-jwt" else rn_dict,
+    )
+    monkeypatch.setattr(sub_service.time, "time", lambda: 1700000000)
+
+    payload = _renewal_payload("AUTO_RENEW_DISABLED")
+    with pytest.raises(RuntimeError, match="firestore_storage_unavailable"):
+        await sub_service.handle_appstore_notification(payload)
+
+
+@pytest.mark.asyncio
+async def test_renewal_webhook_real_transaction_update_failure_propagates_500(monkeypatch):
+    """Real transaction.update failure during webhook backfill returns HTTP 500 through the webhook endpoint."""
+    class _InMemoryFirestore:
+        def __init__(self):
+            self._docs: dict[str, dict] = {}
+            self._lock = asyncio.Lock()
+
+        def collection(self, name: str):
+            class _Col:
+                def __init__(self, fs, col_name):
+                    self._fs = fs
+                    self._name = col_name
+                def document(self, doc_id: str):
+                    return _DocRef(self._fs, f"{self._name}/{doc_id}")
+            return _Col(self, name)
+
+        def document(self, path: str):
+            return _DocRef(self, path)
+
+        def transaction(self):
+            return _FakeTx(self)
+
+    class _DocRef:
+        def __init__(self, fs: _InMemoryFirestore, path: str):
+            self._fs = fs
+            self._path = path
+
+        def get(self, transaction=None):
+            data = self._fs._docs.get(self._path)
+            doc_id = self._path.split("/")[-1]
+            class _Snap:
+                def __init__(self, exists, d, did):
+                    self.exists = exists
+                    self._d = d or {}
+                    self.id = did
+                def to_dict(self):
+                    return dict(self._d)
+            return _Snap(data is not None, data, doc_id)
+
+        def set(self, value: dict, merge: bool = False):
+            if merge and self._path in self._fs._docs:
+                self._fs._docs[self._path].update(value)
+            else:
+                self._fs._docs[self._path] = dict(value)
+
+        def update(self, value: dict):
+            if self._path in self._fs._docs:
+                self._fs._docs[self._path].update(value)
+            else:
+                self._fs._docs[self._path] = dict(value)
+
+    class _FakeTx:
+        def __init__(self, fs: _InMemoryFirestore):
+            self._fs = fs
+
+        def set(self, doc_ref: _DocRef, value: dict, merge: bool = False):
+            doc_ref.set(value, merge=merge)
+
+        def update(self, doc_ref: _DocRef, value: dict):
+            raise RuntimeError("firestore_storage_unavailable")
+
+    fake = _InMemoryFirestore()
+    fake_contractor = {
+        "contractor_id": "c1",
+        "subscription_uuid": "uuid-c1",
+        "subscription_status": "active",
+        "subscription_tier": "business",
+        "subscription_expires": 1770000000.0,
+        "subscription_original_transaction_id": None,
+        "active": True,
+    }
+    fake._docs["contractors/c1"] = dict(fake_contractor)
+    snapshot_before = copy.deepcopy(fake._docs["contractors/c1"])
+
+    monkeypatch.setattr("app.db.firestore_client.get_firestore_client", lambda: fake)
+    monkeypatch.setattr("app.db.contractors.get_firestore_client", lambda: fake)
+
+    async def fake_lookup(uuid, include_inactive=False):
+        return dict(fake._docs.get("contractors/c1", {}))
+
+    async def fake_get(cid):
+        return dict(fake._docs.get(f"contractors/{cid}", {}))
+
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_lookup)
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get)
+
+    rn_dict = _rn_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        auto_renew_status=0,
+        signed_date=1780000000000,
+        product_id="com.kevin.callscreen.business.monthly",
+    )
+    tx_dict = _tx_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        transaction_id="tx-1",
+        product_id="com.kevin.callscreen.business.monthly",
+        expires_date=1770000000000,
+    )
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda jwt: tx_dict if jwt == "signed-tx-jwt" else rn_dict,
+    )
+    monkeypatch.setattr(sub_service.time, "time", lambda: 1700000000)
+
+    from app.webhooks import appstore as appstore_webhook
+    class FakeRequest:
+        async def json(self):
+            return {"signedPayload": "signed-payload-jwt"}
+    monkeypatch.setattr(appstore_webhook, "_decode_notification_payload", lambda s: _renewal_payload("AUTO_RENEW_DISABLED"))
+
+    response = await appstore_webhook.handle_appstore_notification(FakeRequest())
+    assert getattr(response, "status_code", None) == 500
+    import json as _json
+    content = _json.loads(bytes(response.body).decode())
+    assert content == {"error": "internal processing error"}
+    assert fake._docs["contractors/c1"] == snapshot_before
+
+
+@pytest.mark.parametrize(
+    ("scenario", "tx_dict", "expected_is_revoked", "expected_ts", "expected_err"),
+    [
+        ("absent", {}, False, None, None),
+        ("valid_canon", {"revocationDate": 1650000000000}, True, 1650000000.0, None),
+        ("valid_alias", {"revokedDate": 1650000000000}, True, 1650000000.0, None),
+        ("both_equal_int", {"revocationDate": 1650000000000, "revokedDate": 1650000000000}, True, 1650000000.0, None),
+        ("both_equal_float", {"revocationDate": 1650000000000, "revokedDate": 1650000000000.0}, True, 1650000000.0, None),
+        ("both_disagree_1ms", {"revocationDate": 1650000000001, "revokedDate": 1650000000000}, False, None, "conflicting_revocation_date"),
+        ("both_disagree_large", {"revocationDate": 1650000000000, "revokedDate": 1660000000000}, False, None, "conflicting_revocation_date"),
+        ("malformed_canon_str", {"revocationDate": "bad"}, False, None, "malformed_revocation_date"),
+        ("malformed_alias_str", {"revokedDate": "bad"}, False, None, "malformed_revocation_date"),
+        ("malformed_none", {"revocationDate": None}, False, None, "malformed_revocation_date"),
+        ("malformed_true", {"revocationDate": True}, False, None, "malformed_revocation_date"),
+        ("malformed_false", {"revocationDate": False}, False, None, "malformed_revocation_date"),
+        ("malformed_zero", {"revocationDate": 0}, False, None, "malformed_revocation_date"),
+        ("malformed_neg", {"revocationDate": -100}, False, None, "malformed_revocation_date"),
+        ("malformed_nan", {"revocationDate": float("nan")}, False, None, "malformed_revocation_date"),
+        ("malformed_inf", {"revocationDate": float("inf")}, False, None, "malformed_revocation_date"),
+        ("malformed_list", {"revocationDate": [123]}, False, None, "malformed_revocation_date"),
+        ("malformed_dict", {"revocationDate": {"date": 123}}, False, None, "malformed_revocation_date"),
+        ("malformed_empty_str", {"revocationDate": ""}, False, None, "malformed_revocation_date"),
+        ("malformed_empty_list", {"revocationDate": []}, False, None, "malformed_revocation_date"),
+        ("malformed_empty_dict", {"revocationDate": {}}, False, None, "malformed_revocation_date"),
+    ],
+)
+def test_parse_revocation_date_unit_matrix(scenario, tx_dict, expected_is_revoked, expected_ts, expected_err):
+    """Unit test for parse_revocation_date across all canonical/alias combinations and invalid types."""
+    is_rev, ts, err = sub_service.parse_revocation_date(tx_dict)
+    assert is_rev == expected_is_revoked
+    assert ts == expected_ts
+    assert err == expected_err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scenario", "patch", "contractor_active"),
+    [
+        ("malformed_true_active", {"revocationDate": True}, True),
+        ("malformed_false_active", {"revocationDate": False}, True),
+        ("malformed_zero_active", {"revocationDate": 0}, True),
+        ("malformed_neg_active", {"revocationDate": -1}, True),
+        ("malformed_str_active", {"revocationDate": "2026"}, True),
+        ("malformed_nan_active", {"revocationDate": float("nan")}, True),
+        ("malformed_inf_active", {"revocationDate": float("inf")}, True),
+        ("malformed_list_active", {"revocationDate": ["123"]}, True),
+        ("malformed_dict_active", {"revocationDate": {"date": 123}}, True),
+        ("malformed_empty_str_active", {"revocationDate": ""}, True),
+        ("malformed_empty_list_active", {"revocationDate": []}, True),
+        ("malformed_empty_dict_active", {"revocationDate": {}}, True),
+        ("disagree_1ms_active", {"revocationDate": 1650000000001, "revokedDate": 1650000000000}, True),
+        ("malformed_true_inactive", {"revocationDate": True}, False),
+        ("malformed_false_inactive", {"revocationDate": False}, False),
+        ("malformed_zero_inactive", {"revocationDate": 0}, False),
+        ("malformed_neg_inactive", {"revocationDate": -1}, False),
+        ("disagree_1ms_inactive", {"revocationDate": 1650000000001, "revokedDate": 1650000000000}, False),
+    ],
+)
+async def test_renewal_webhook_malformed_revocation_returns_false_and_zero_writes(
+    monkeypatch, scenario, patch, contractor_active
+):
+    """Webhook rejects malformed revocation or 1ms disagreement before claiming receipt or writing."""
+    initial_contractor = {
+        "contractor_id": "c1",
+        "subscription_uuid": "uuid-c1",
+        "subscription_status": "active" if contractor_active else "expired",
+        "subscription_tier": "business",
+        "subscription_expires": 1770000000.0,
+        "subscription_original_transaction_id": None,
+        "active": contractor_active,
+    }
+    fake_contractor = dict(initial_contractor)
+    snapshot_before = dict(initial_contractor)
+
+    def forbidden(name):
+        def _fail(*_a, **_kw):
+            raise AssertionError(f"malformed revocation in renewal webhook must not call {name}")
+        return _fail
+
+    from app.db import apple_transactions as apple_tx_db
+    from app.db import contractors as contractors_db
+
+    monkeypatch.setattr(contractors_db, "get_contractor_by_subscription_uuid", forbidden("get_contractor_by_subscription_uuid"))
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", forbidden("get_contractor_by_apple_user_id"))
+    monkeypatch.setattr(contractors_db, "get_contractor", forbidden("get_contractor"))
+    monkeypatch.setattr(apple_tx_db, "claim_transaction", forbidden("claim_transaction"))
+    monkeypatch.setattr(contractors_db, "conditionally_backfill_subscription_binding", forbidden("conditionally_backfill_subscription_binding"))
+    monkeypatch.setattr(contractors_db, "record_active_renewal_status", forbidden("record_active_renewal_status"))
+    monkeypatch.setattr(contractors_db, "record_inactive_notification", forbidden("record_inactive_notification"))
+    monkeypatch.setattr(contractors_db, "update_contractor", forbidden("update_contractor"))
+
+    rn_dict = _rn_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        auto_renew_status=0,
+        signed_date=1780000000000,
+        product_id="com.kevin.callscreen.business.monthly",
+    )
+    tx_dict = _tx_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        transaction_id="tx-1",
+        product_id="com.kevin.callscreen.business.monthly",
+        expires_date=1770000000000,
+    )
+    tx_dict.update(patch)
+
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda jwt: tx_dict if jwt == "signed-tx-jwt" else rn_dict,
+    )
+    monkeypatch.setattr(sub_service.time, "time", lambda: 1700000000)
+
+    payload = _renewal_payload("AUTO_RENEW_DISABLED")
+    ok = await sub_service.handle_appstore_notification(payload)
+
+    assert ok is False
+    assert fake_contractor == snapshot_before
+
+    # For one inactive malformed DID_CHANGE case (prefer revocationDate=False), exercise real webhook router
+    if scenario == "malformed_false_inactive":
+        from fastapi import FastAPI
+        import httpx
+        from app.webhooks.appstore import router as appstore_router
+
+        test_app = FastAPI()
+        test_app.include_router(appstore_router)
+
+        monkeypatch.setattr(
+            "app.webhooks.appstore._decode_notification_payload",
+            lambda _s: payload,
+        )
+
+        transport = httpx.ASGITransport(app=test_app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            resp = await client.post(
+                "/webhooks/appstore/notifications",
+                json={"signedPayload": "signed-payload-jwt"},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"status": "ok"}
+        assert fake_contractor == snapshot_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("notif_type", "patch", "contractor_active"),
+    [
+        ("DID_RENEW", {"revocationDate": True}, True),
+        ("DID_RENEW", {"revocationDate": 0}, True),
+        ("DID_RENEW", {"revocationDate": 1650000000001, "revokedDate": 1650000000000}, True),
+        ("SUBSCRIBED", {"revocationDate": False}, True),
+        ("DID_RENEW", {"revocationDate": "bad"}, False),
+        ("SUBSCRIBED", {"revocationDate": 1650000000001, "revokedDate": 1650000000000}, False),
+    ],
+)
+async def test_generic_webhook_malformed_revocation_returns_false_and_zero_writes(
+    monkeypatch, notif_type, patch, contractor_active
+):
+    """Generic notification types reject malformed revocation before contractor lookup, claims, or writes."""
+    initial_contractor = {
+        "contractor_id": "c1",
+        "subscription_uuid": "uuid-c1",
+        "subscription_status": "active" if contractor_active else "expired",
+        "subscription_tier": "business",
+        "subscription_expires": 1770000000.0,
+        "subscription_original_transaction_id": None,
+        "active": contractor_active,
+    }
+    fake_contractor = dict(initial_contractor)
+    snapshot_before = dict(initial_contractor)
+
+    def forbidden(name):
+        def _fail(*_a, **_kw):
+            raise AssertionError(f"malformed revocation in generic webhook must not call {name}")
+        return _fail
+
+    from app.db import apple_transactions as apple_tx_db
+    from app.db import contractors as contractors_db
+
+    monkeypatch.setattr(contractors_db, "get_contractor_by_subscription_uuid", forbidden("get_contractor_by_subscription_uuid"))
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", forbidden("get_contractor_by_apple_user_id"))
+    monkeypatch.setattr(contractors_db, "get_contractor", forbidden("get_contractor"))
+    monkeypatch.setattr(apple_tx_db, "claim_transaction", forbidden("claim_transaction"))
+    monkeypatch.setattr(contractors_db, "conditionally_backfill_subscription_binding", forbidden("conditionally_backfill_subscription_binding"))
+    monkeypatch.setattr(contractors_db, "record_active_renewal_status", forbidden("record_active_renewal_status"))
+    monkeypatch.setattr(contractors_db, "record_inactive_notification", forbidden("record_inactive_notification"))
+    monkeypatch.setattr(contractors_db, "update_contractor", forbidden("update_contractor"))
+
+    tx_dict = _tx_info(
+        uuid="uuid-c1",
+        original_id="orig-1",
+        transaction_id="tx-1",
+        product_id="com.kevin.callscreen.business.monthly",
+        expires_date=1770000000000,
+    )
+    tx_dict.update(patch)
+
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda jwt: tx_dict,
+    )
+    monkeypatch.setattr(sub_service.time, "time", lambda: 1700000000)
+
+    payload = {
+        "notificationType": notif_type,
+        "subtype": "INITIAL_BUY",
+        "notificationUUID": "test-uuid-generic",
+        "data": {
+            "signedTransactionInfo": "signed-tx-jwt",
+        },
+    }
+    ok = await sub_service.handle_appstore_notification(payload)
+
+    assert ok is False
+    assert fake_contractor == snapshot_before

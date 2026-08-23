@@ -1,10 +1,12 @@
 """Contractor profile management in Firestore."""
 
 import asyncio
+import math
 import secrets
 import time
 import uuid as _uuid
-from typing import Optional
+from enum import Enum
+from typing import Any, Optional
 from google.cloud.firestore_v1.base_query import FieldFilter
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
@@ -672,6 +674,139 @@ async def activate_subscription_entitlement(
 
         transaction.update(doc_ref, updates)
         return True
+
+    transaction = db.transaction()
+    return await loop.run_in_executor(None, lambda: _txn(transaction))
+
+
+class BindingBackfillOutcome(str, Enum):
+    REPAIRED = "repaired"
+    IDEMPOTENT_SAME = "idempotent_same"
+    SUPERSEDED = "superseded"
+    FINGERPRINT_MISMATCH = "fingerprint_mismatch"
+    UUID_MISMATCH = "uuid_mismatch"
+    NOT_FOUND_OR_INACTIVE = "not_found_or_inactive"
+
+
+def is_missing_or_malformed_binding(binding: Any) -> bool:
+    """Return True if binding is missing, None, whitespace-only, padded, or not a string."""
+    if not isinstance(binding, str):
+        return True
+    if not binding.strip():
+        return True
+    if binding != binding.strip():
+        return True
+    return False
+
+
+async def conditionally_backfill_subscription_binding(
+    contractor_id: str,
+    expected_subscription_uuid: str,
+    original_transaction_id: str,
+    expected_tier: str,
+    expected_expires_ts: float,
+) -> BindingBackfillOutcome:
+    """Atomically backfill subscription_original_transaction_id for an active contractor.
+
+    Inside the transaction:
+    - re-read the contractor document;
+    - require document exists, active is True, subscription_status == 'active';
+    - require exact subscription_uuid matches expected_subscription_uuid;
+    - require exact subscription_tier matches expected_tier;
+    - require subscription_expires matches expected_expires_ts (within 1.0s tolerance
+      for float/int ms normalization);
+    - if live subscription_original_transaction_id is missing, non-string, empty, or whitespace-only:
+        atomically writes ONLY canonical subscription_original_transaction_id,
+        and sets subscription_auto_renews=None, subscription_renewal_status_signed_at_ms=None;
+        returns BindingBackfillOutcome.REPAIRED;
+    - if live subscription_original_transaction_id is a padded string whose stripped value equals verified ID:
+        atomically rewrites to canonical form with renewal fields reset to None;
+        returns BindingBackfillOutcome.REPAIRED;
+    - if live subscription_original_transaction_id is canonical and equals original_transaction_id:
+        idempotent success with zero writes;
+        returns BindingBackfillOutcome.IDEMPOTENT_SAME;
+    - if live subscription_original_transaction_id (padded or canonical) has a different stripped identity:
+        superseded safe no-op with zero writes (never overwritten);
+        returns BindingBackfillOutcome.SUPERSEDED;
+    - never modifies status, tier, expires, subscription_forwarded_from, uuid, active state,
+      or unrelated fields.
+    """
+    if (
+        not contractor_id
+        or not isinstance(contractor_id, str)
+        or not expected_subscription_uuid
+        or not isinstance(expected_subscription_uuid, str)
+        or not original_transaction_id
+        or not isinstance(original_transaction_id, str)
+        or not original_transaction_id.strip()
+        or not expected_tier
+        or not isinstance(expected_tier, str)
+        or not isinstance(expected_expires_ts, (int, float))
+        or isinstance(expected_expires_ts, bool)
+        or not math.isfinite(expected_expires_ts)
+        or expected_expires_ts <= 0
+    ):
+        return BindingBackfillOutcome.FINGERPRINT_MISMATCH
+
+    from google.cloud import firestore as fs
+
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_event_loop()
+
+    @fs.transactional
+    def _txn(transaction) -> BindingBackfillOutcome:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return BindingBackfillOutcome.NOT_FOUND_OR_INACTIVE
+        data = snapshot.to_dict() or {}
+        if data.get("active") is not True:
+            return BindingBackfillOutcome.NOT_FOUND_OR_INACTIVE
+        if data.get("subscription_status") != "active":
+            return BindingBackfillOutcome.FINGERPRINT_MISMATCH
+        if data.get("subscription_uuid") != expected_subscription_uuid:
+            return BindingBackfillOutcome.UUID_MISMATCH
+        if data.get("subscription_tier") != expected_tier:
+            return BindingBackfillOutcome.FINGERPRINT_MISMATCH
+
+        stored_expires = data.get("subscription_expires")
+        if (
+            stored_expires is None
+            or isinstance(stored_expires, bool)
+            or not isinstance(stored_expires, (int, float))
+            or not math.isfinite(stored_expires)
+            or abs(float(stored_expires) - float(expected_expires_ts)) >= 1.0
+        ):
+            return BindingBackfillOutcome.FINGERPRINT_MISMATCH
+
+        current_original = data.get("subscription_original_transaction_id")
+        clean_orig = original_transaction_id.strip()
+
+        if not isinstance(current_original, str) or not current_original.strip():
+            transaction.update(
+                doc_ref,
+                {
+                    "subscription_original_transaction_id": clean_orig,
+                    "subscription_auto_renews": None,
+                    "subscription_renewal_status_signed_at_ms": None,
+                },
+            )
+            return BindingBackfillOutcome.REPAIRED
+
+        if current_original.strip() == clean_orig:
+            if current_original == clean_orig:
+                return BindingBackfillOutcome.IDEMPOTENT_SAME
+            transaction.update(
+                doc_ref,
+                {
+                    "subscription_original_transaction_id": clean_orig,
+                    "subscription_auto_renews": None,
+                    "subscription_renewal_status_signed_at_ms": None,
+                },
+            )
+            return BindingBackfillOutcome.REPAIRED
+
+        return BindingBackfillOutcome.SUPERSEDED
 
     transaction = db.transaction()
     return await loop.run_in_executor(None, lambda: _txn(transaction))

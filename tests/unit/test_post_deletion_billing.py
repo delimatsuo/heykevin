@@ -51,7 +51,12 @@ def _transaction_info():
 @pytest.fixture
 def wired(monkeypatch):
     """Wire the handler's seams; returns dicts capturing calls."""
-    calls = {"updates": [], "lookups": [], "claims": []}
+    calls = {
+        "updates": [],
+        "lookups": [],
+        "claims": [],
+        "inactive_docs": {},
+    }
 
     monkeypatch.setattr(sub_service, "_decode_jws_payload", lambda _s: _transaction_info())
 
@@ -66,10 +71,59 @@ def wired(monkeypatch):
         return True
 
     monkeypatch.setattr("app.db.contractors.update_contractor", fake_update)
+
+    class StatefulFakeDoc:
+        def __init__(self, data_dict):
+            self._data = data_dict
+
+        @property
+        def exists(self):
+            return self._data is not None
+
+        def to_dict(self):
+            return dict(self._data) if self._data else {}
+
+    class StatefulFakeDB:
+        def __init__(self, store):
+            self.store = store
+
+        def collection(self, _name):
+            return self
+
+        def document(self, doc_id):
+            return StatefulDocRef(self.store, doc_id)
+
+        def transaction(self):
+            return StatefulTransaction(self.store)
+
+    class StatefulDocRef:
+        def __init__(self, store, doc_id):
+            self.store = store
+            self.doc_id = doc_id
+
+        def get(self, transaction=None):
+            return StatefulFakeDoc(self.store.get(self.doc_id))
+
+    class StatefulTransaction:
+        def __init__(self, store):
+            self.store = store
+
+        def update(self, doc_ref, fields):
+            if doc_ref.doc_id in self.store:
+                self.store[doc_ref.doc_id].update(fields)
+                calls["updates"].append((doc_ref.doc_id, fields))
+
+    monkeypatch.setattr("google.cloud.firestore.transactional", lambda fn: fn)
+    monkeypatch.setattr("app.db.contractors.get_firestore_client", lambda: StatefulFakeDB(calls["inactive_docs"]))
     return calls
 
 
 def _wire_lookup(monkeypatch, calls, active_doc=None, inactive_doc=None):
+    if inactive_doc and "contractor_id" in inactive_doc:
+        calls["inactive_docs"][inactive_doc["contractor_id"]] = dict(inactive_doc)
+        if "subscription_uuid" not in calls["inactive_docs"][inactive_doc["contractor_id"]]:
+            calls["inactive_docs"][inactive_doc["contractor_id"]]["subscription_uuid"] = "uuid-1"
+
     async def fake_lookup(subscription_uuid, include_inactive=False):
         calls["lookups"].append((subscription_uuid, include_inactive))
         if not include_inactive:
@@ -269,22 +323,20 @@ async def test_non_dict_record_tolerated(monkeypatch, wired):
 
 
 @pytest.mark.asyncio
-async def test_write_failure_does_not_raise_into_the_200_ack(monkeypatch, wired):
-    """The webhook acks 200 on any exception, so a raised write error would be
-    a permanently lost record with no trace. The handler must swallow the
-    write failure after logging — the ERROR log line is the surviving trail."""
+async def test_write_failure_propagates_for_webhook_500(monkeypatch, wired):
+    """Storage failures during inactive notification write must raise so the webhook
+    returns HTTP 500 and Apple retries."""
     inactive = {"contractor_id": "c1", "active": False}
     _wire_lookup(monkeypatch, wired, inactive_doc=inactive)
     _wire_rebound(monkeypatch, wired)
 
-    async def failing_update(cid, fields):
+    async def failing_record(*args, **kwargs):
         raise RuntimeError("firestore blip")
 
-    monkeypatch.setattr("app.db.contractors.update_contractor", failing_update)
+    monkeypatch.setattr("app.db.contractors.record_inactive_notification", failing_record)
 
-    handled = await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
-
-    assert handled is True  # recorded in logs; nothing for Apple to retry into
+    with pytest.raises(RuntimeError, match="firestore blip"):
+        await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
 
 
 @pytest.mark.asyncio

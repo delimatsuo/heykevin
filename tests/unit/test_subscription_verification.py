@@ -124,18 +124,25 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
         return {
             "contractor_id": contractor_id,
             "subscription_uuid": "subscription-uuid",
+            "active": True,
         }
 
-    async def fake_update_contractor(contractor_id, body):
+    async def fake_activate_subscription_entitlement(contractor_id, tier, expires_ts, original_transaction_id, expected_subscription_uuid):
         updates["contractor_id"] = contractor_id
-        updates["body"] = body
+        updates["body"] = {
+            "subscription_tier": tier,
+            "subscription_status": "active",
+            "subscription_expires": expires_ts,
+            "subscription_original_transaction_id": original_transaction_id,
+            "expected_subscription_uuid": expected_subscription_uuid,
+        }
         return True
 
     async def fake_claim_transaction(**_kwargs):
         return True, "contractor-1"
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(contractors_db, "activate_subscription_entitlement", fake_activate_subscription_entitlement)
     monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
@@ -151,14 +158,12 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
     )
 
     assert updated.outcome is subscription.SubscriptionUpdateOutcome.ACTIVE
-    assert updates == {
-        "contractor_id": "contractor-1",
-        "body": {
-            "subscription_tier": "businessPro",
-            "subscription_status": "active",
-            "subscription_expires": 1770000000.0,
-        },
-    }
+    assert updates["contractor_id"] == "contractor-1"
+    assert updates["body"]["subscription_tier"] == "businessPro"
+    assert updates["body"]["subscription_status"] == "active"
+    assert updates["body"]["subscription_expires"] == 1770000000.0
+    assert updates["body"]["subscription_original_transaction_id"] == "orig-1"
+    assert updates["body"]["expected_subscription_uuid"] == "subscription-uuid"
 
 
 @pytest.mark.asyncio
@@ -169,14 +174,14 @@ async def test_update_subscription_rejects_expired_transaction(monkeypatch):
             "subscription_uuid": "subscription-uuid",
         }
 
-    async def fail_update(*args, **kwargs):
-        raise AssertionError("expired transaction must not activate subscription")
+    async def fail_activate(*args, **kwargs):
+        raise AssertionError("expired transaction must not activate subscription entitlement")
 
     async def fake_claim_transaction(**_kwargs):
         return True, "contractor-1"
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(contractors_db, "activate_subscription_entitlement", fail_activate)
     monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
@@ -203,14 +208,14 @@ async def test_update_subscription_rejects_revoked_transaction(monkeypatch):
             "subscription_uuid": "subscription-uuid",
         }
 
-    async def fail_update(*args, **kwargs):
-        raise AssertionError("revoked transaction must not activate subscription")
+    async def fail_activate(*args, **kwargs):
+        raise AssertionError("revoked transaction must not activate subscription entitlement")
 
     async def fake_claim_transaction(**_kwargs):
         return True, "contractor-1"
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(contractors_db, "activate_subscription_entitlement", fail_activate)
     monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
@@ -238,14 +243,14 @@ async def test_update_subscription_rejects_missing_expiry(monkeypatch):
             "subscription_uuid": "subscription-uuid",
         }
 
-    async def fail_update(*args, **kwargs):
-        raise AssertionError("transaction without expiry must not activate subscription")
+    async def fail_activate(*args, **kwargs):
+        raise AssertionError("transaction without expiry must not activate subscription entitlement")
 
     async def fail_claim(**_kwargs):
         raise AssertionError("transaction without expiry must not claim a receipt")
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "update_contractor", fail_update)
+    monkeypatch.setattr(contractors_db, "activate_subscription_entitlement", fail_activate)
     monkeypatch.setattr(apple_transactions_db, "claim_transaction", fail_claim)
 
     updated = await subscription.update_subscription_from_transaction(

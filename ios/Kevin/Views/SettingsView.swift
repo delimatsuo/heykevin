@@ -530,7 +530,7 @@ struct SettingsView: View {
                 } message: {
                     Text(String(localized: "This will delete your Kevin account and release your Kevin number. All your data is permanently deleted within 30 days. Make sure to deactivate call forwarding first."))
                 }
-                .alert(String(localized: "Subscription Still Active"), isPresented: $showSubscriptionWarningAlert) {
+                .alert(String(localized: AccountDeletionFlow.warningTitle), isPresented: $showSubscriptionWarningAlert) {
                     Button(String(localized: "Manage Subscription")) {
                         if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
                             UIApplication.shared.open(url)
@@ -554,7 +554,7 @@ struct SettingsView: View {
                     }
                     Button(String(localized: "Cancel"), role: .cancel) {}
                 } message: {
-                    Text(String(localized: "Deleting your account does not cancel your Apple subscription, and you would keep being charged. Cancel it under Manage Subscription first."))
+                    Text(String(localized: AccountDeletionFlow.warningBody))
                 }
                 .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
                     Button(String(localized: "OK"), role: .cancel) {}

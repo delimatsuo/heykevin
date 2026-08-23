@@ -103,9 +103,10 @@ final class AccountDeletionTests: XCTestCase {
     }
 }
 
-/// The delete flow's first step: a user with an active auto-renewing
-/// subscription must be told deletion does not cancel it — deleting is a
-/// soft deactivate and Apple keeps charging — before any confirmation.
+/// The delete flow's first step: a user with an active or purchased
+/// subscription must be told deletion does not cancel their Apple
+/// subscription — deleting is a soft deactivate and Apple may keep renewing —
+/// before any confirmation.
 final class AccountDeletionFlowTests: XCTestCase {
     func testActiveSubscriptionWarnsBeforeConfirming() {
         XCTAssertEqual(
@@ -157,6 +158,17 @@ final class AccountDeletionFlowTests: XCTestCase {
         XCTAssertEqual(
             AccountDeletionFlow.firstStep(subscriptionStatus: "active", subscriptionTier: "none"),
             .warnActiveSubscription
+        )
+    }
+
+    func testWarningTitleAndBodyConstantsMatchExactApprovedCopy() {
+        XCTAssertEqual(
+            String(localized: AccountDeletionFlow.warningTitle, locale: Locale(identifier: "en")),
+            "Check Apple Subscription"
+        )
+        XCTAssertEqual(
+            String(localized: AccountDeletionFlow.warningBody, locale: Locale(identifier: "en")),
+            "Deleting your Hey Kevin account does not cancel your Apple subscription. Check Manage Subscription first to make sure automatic renewal is off."
         )
     }
 }

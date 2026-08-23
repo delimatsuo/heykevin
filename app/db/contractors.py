@@ -20,6 +20,10 @@ PROTECTED_FIELDS = frozenset({
     "subscription_expires",
     "trial_start",
     "subscription_uuid",
+    "subscription_original_transaction_id",
+    "subscription_auto_renews",
+    "subscription_renewal_status_signed_at_ms",
+    "subscription_forwarded_from",
     "twilio_number",
     # Public-demo identity is a server-owned routing boundary. A client must
     # never be able to turn an ordinary tenant into a public ingress target.
@@ -600,3 +604,336 @@ async def list_contractors() -> list:
         lambda: list(db.collection(COLLECTION).where("active", "==", True).stream())
     )
     return [{"contractor_id": d.id, **d.to_dict()} for d in docs]
+
+
+async def activate_subscription_entitlement(
+    contractor_id: str,
+    tier: str,
+    expires_ts: float,
+    original_transaction_id: str,
+    expected_subscription_uuid: str,
+) -> bool:
+    """Atomically set direct verified entitlement on an active contractor.
+
+    Inside the transaction:
+    - re-read the contractor document;
+    - require active is True and exact expected subscription_uuid;
+    - atomically set tier/status/expiry, the current subscription_original_transaction_id,
+      and clear stale subscription_forwarded_from provenance;
+    - if the live current original ID differs from the new original ID, reset
+      subscription_auto_renews and subscription_renewal_status_signed_at_ms to None;
+    - if it is the same receipt chain, preserve its renewal observation and clock.
+    """
+    import math
+    if (
+        not contractor_id
+        or not isinstance(contractor_id, str)
+        or not expected_subscription_uuid
+        or not isinstance(expected_subscription_uuid, str)
+        or not original_transaction_id
+        or not isinstance(original_transaction_id, str)
+        or not tier
+        or not isinstance(tier, str)
+        or not isinstance(expires_ts, (int, float))
+        or isinstance(expires_ts, bool)
+        or not math.isfinite(expires_ts)
+        or expires_ts <= 0
+    ):
+        return False
+
+    from google.cloud import firestore as fs
+
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_event_loop()
+
+    @fs.transactional
+    def _txn(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if data.get("active") is not True:
+            return False
+        if data.get("subscription_uuid") != expected_subscription_uuid:
+            return False
+
+        current_original_id = data.get("subscription_original_transaction_id")
+        updates = {
+            "subscription_tier": tier,
+            "subscription_status": "active",
+            "subscription_expires": float(expires_ts),
+            "subscription_original_transaction_id": original_transaction_id,
+            "subscription_forwarded_from": None,
+        }
+        if current_original_id != original_transaction_id:
+            updates["subscription_auto_renews"] = None
+            updates["subscription_renewal_status_signed_at_ms"] = None
+
+        transaction.update(doc_ref, updates)
+        return True
+
+    transaction = db.transaction()
+    return await loop.run_in_executor(None, lambda: _txn(transaction))
+
+
+async def record_active_renewal_status(
+    contractor_id: str,
+    expected_subscription_uuid: str,
+    original_transaction_id: str,
+    auto_renews: bool,
+    signed_at_ms: int,
+) -> bool:
+    """Atomically record renewal observation for an active contractor.
+
+    Inside the transaction:
+    - require doc exists, active is True, expected subscription_uuid;
+    - require protected current subscription_original_transaction_id equals original_transaction_id;
+    - equal or older signed_at_ms for that same receipt chain is an atomic no-op;
+    - malformed stored clock is treated as safe no-op;
+    - updates subscription_auto_renews and subscription_renewal_status_signed_at_ms without touching entitlement.
+    """
+    if (
+        not contractor_id
+        or not isinstance(contractor_id, str)
+        or not expected_subscription_uuid
+        or not isinstance(expected_subscription_uuid, str)
+        or not original_transaction_id
+        or not isinstance(original_transaction_id, str)
+        or type(auto_renews) is not bool
+        or type(signed_at_ms) is not int
+        or isinstance(signed_at_ms, bool)
+        or signed_at_ms <= 0
+    ):
+        return False
+
+    from google.cloud import firestore as fs
+
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_event_loop()
+
+    @fs.transactional
+    def _txn(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if data.get("active") is not True:
+            return False
+        if data.get("subscription_uuid") != expected_subscription_uuid:
+            return False
+
+        current_original = data.get("subscription_original_transaction_id")
+        if not current_original or not isinstance(current_original, str) or current_original != original_transaction_id:
+            return False
+
+        stored_clock = data.get("subscription_renewal_status_signed_at_ms")
+        if stored_clock is not None:
+            if type(stored_clock) is not int or isinstance(stored_clock, bool) or stored_clock <= 0:
+                return False
+            if signed_at_ms <= stored_clock:
+                return False
+
+        transaction.update(doc_ref, {
+            "subscription_auto_renews": auto_renews,
+            "subscription_renewal_status_signed_at_ms": signed_at_ms,
+        })
+        return True
+
+    transaction = db.transaction()
+    return await loop.run_in_executor(None, lambda: _txn(transaction))
+
+
+async def record_inactive_notification(
+    contractor_id: str,
+    expected_subscription_uuid: str,
+    notification_type: str,
+    subtype: Optional[str] = None,
+    transaction_id: str = "",
+    purchase_date_ms: Optional[int] = None,
+    rebound_contractor_id: Optional[str] = None,
+    renewal_observation: Optional[dict] = None,
+) -> dict:
+    """Atomically record notification evidence on an inactive contractor.
+
+    Guards:
+    - requires doc exists, active is False, expected subscription_uuid matches;
+    - performs monotonic renewal clock updates only within the matching receipt chain;
+    - handles same-chain duplicate delivery vs distinct renewal events;
+    - preserves existing post-deletion evidence across sequential notifications.
+    """
+    if (
+        not contractor_id
+        or not isinstance(contractor_id, str)
+        or not expected_subscription_uuid
+        or not isinstance(expected_subscription_uuid, str)
+        or not notification_type
+        or not isinstance(notification_type, str)
+    ):
+        return {"outcome": "invalid_input"}
+
+    import math
+    from google.cloud import firestore as fs
+
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_event_loop()
+
+    @fs.transactional
+    def _txn(transaction) -> dict:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return {"outcome": "not_found"}
+        data = snapshot.to_dict() or {}
+        if data.get("active") is not False:
+            return {"outcome": "not_inactive"}
+        if data.get("subscription_uuid") != expected_subscription_uuid:
+            return {"outcome": "uuid_mismatch"}
+
+        prior = data.get("post_deletion_billing") or {}
+        if not isinstance(prior, dict):
+            prior = {}
+
+        norm_tx_id = str(transaction_id or "")
+        norm_type = str(notification_type or "")
+        norm_subtype = str(subtype or "")
+
+        prior_tx_id = str(prior.get("last_transaction_id") or "")
+        prior_type = str(prior.get("last_type") or "")
+        prior_subtype = str(prior.get("last_subtype") or "")
+
+        is_dup = bool(
+            norm_tx_id
+            and prior_tx_id == norm_tx_id
+            and prior_type == norm_type
+            and prior_subtype == norm_subtype
+        )
+
+        valid_renewal = False
+        renewal_to_apply = None
+        if isinstance(renewal_observation, dict):
+            event_orig = renewal_observation.get("original_transaction_id")
+            event_auto = renewal_observation.get("auto_renews")
+            event_signed = renewal_observation.get("signed_at_ms")
+            if (
+                isinstance(event_orig, str)
+                and event_orig.strip()
+                and type(event_auto) is bool
+                and type(event_signed) is int
+                and not isinstance(event_signed, bool)
+                and event_signed > 0
+            ):
+                event_orig_str = event_orig.strip()
+                top_orig = data.get("subscription_original_transaction_id")
+                top_orig_str = str(top_orig).strip() if (isinstance(top_orig, str) and top_orig.strip()) else ""
+                nested_orig = prior.get("renewal_original_transaction_id")
+                nested_orig_str = str(nested_orig).strip() if (isinstance(nested_orig, str) and nested_orig.strip()) else ""
+
+                matches_nested = bool(nested_orig_str and event_orig_str == nested_orig_str)
+                matches_top = bool(top_orig_str and event_orig_str == top_orig_str)
+
+                if matches_nested:
+                    # Same receipt chain as existing nested observation: strictly compare against nested clock
+                    prior_signed_at = prior.get("renewal_status_signed_at_ms")
+                    if prior_signed_at is None:
+                        valid_renewal = True
+                        renewal_to_apply = {
+                            "renewal_original_transaction_id": event_orig_str,
+                            "renewal_auto_renews": event_auto,
+                            "renewal_status_signed_at_ms": event_signed,
+                        }
+                    elif (
+                        type(prior_signed_at) is int
+                        and not isinstance(prior_signed_at, bool)
+                        and prior_signed_at > 0
+                        and event_signed > prior_signed_at
+                    ):
+                        valid_renewal = True
+                        renewal_to_apply = {
+                            "renewal_original_transaction_id": event_orig_str,
+                            "renewal_auto_renews": event_auto,
+                            "renewal_status_signed_at_ms": event_signed,
+                        }
+                elif matches_top:
+                    # Matches top-level current receipt but nested belongs to a different receipt (or unset).
+                    # Treat this as first observation for top-level receipt and atomically replace.
+                    valid_renewal = True
+                    renewal_to_apply = {
+                        "renewal_original_transaction_id": event_orig_str,
+                        "renewal_auto_renews": event_auto,
+                        "renewal_status_signed_at_ms": event_signed,
+                    }
+
+        if is_dup:
+            if valid_renewal and renewal_to_apply:
+                merged = dict(prior)
+                merged.update(renewal_to_apply)
+                transaction.update(doc_ref, {"post_deletion_billing": merged})
+                return {
+                    "outcome": "renewal_update",
+                    "post_deletion_billing": merged,
+                    "count": prior.get("count", 0),
+                    "charges": prior.get("charges", 0),
+                    "charged_after_deletion": False,
+                }
+            return {
+                "outcome": "duplicate",
+                "post_deletion_billing": prior,
+                "count": prior.get("count", 0),
+                "charges": prior.get("charges", 0),
+                "charged_after_deletion": False,
+            }
+
+        def _safe_int(v):
+            try:
+                if isinstance(v, (int, float)) and not math.isfinite(v):
+                    return 0
+                return int(v or 0)
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        is_charge = notification_type in ("DID_RENEW", "SUBSCRIBED")
+        charged_after_deletion = is_charge
+
+        raw_deact = data.get("deactivated_at")
+        deactivated_ts = None
+        if isinstance(raw_deact, (int, float)) and not isinstance(raw_deact, bool):
+            if math.isfinite(raw_deact) and raw_deact > 0:
+                deactivated_ts = float(raw_deact)
+
+        purchase_ms_val = None
+        if isinstance(purchase_date_ms, (int, float)) and not isinstance(purchase_date_ms, bool):
+            if math.isfinite(purchase_date_ms) and purchase_date_ms > 0:
+                purchase_ms_val = float(purchase_date_ms)
+
+        if is_charge and deactivated_ts is not None and purchase_ms_val is not None:
+            charged_after_deletion = (purchase_ms_val / 1000.0) > deactivated_ts
+
+        new_count = _safe_int(prior.get("count")) + 1
+        new_charges = _safe_int(prior.get("charges")) + (1 if charged_after_deletion else 0)
+
+        merged = dict(prior)
+        merged["count"] = new_count
+        merged["charges"] = new_charges
+        merged["last_type"] = notification_type
+        merged["last_subtype"] = norm_subtype
+        merged["last_at"] = int(time.time())
+        merged["last_transaction_id"] = norm_tx_id
+        if rebound_contractor_id:
+            merged["rebound_contractor_id"] = rebound_contractor_id
+
+        if valid_renewal and renewal_to_apply:
+            merged.update(renewal_to_apply)
+
+        transaction.update(doc_ref, {"post_deletion_billing": merged})
+        return {
+            "outcome": "recorded",
+            "post_deletion_billing": merged,
+            "count": new_count,
+            "charges": new_charges,
+            "charged_after_deletion": charged_after_deletion,
+        }
+
+    transaction = db.transaction()
+    return await loop.run_in_executor(None, lambda: _txn(transaction))

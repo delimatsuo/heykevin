@@ -600,7 +600,6 @@ async def update_subscription_from_transaction(
     defense).
     """
     from app.db.apple_transactions import claim_transaction
-    from app.db.contractors import update_contractor
 
     product_id = transaction_info.get("productId", "")
     tier = PRODUCT_TO_TIER.get(product_id)
@@ -638,29 +637,69 @@ async def update_subscription_from_transaction(
 
     # Reject malformed subscription payloads before claiming their receipt.
     # Apple auto-renewable subscription transactions always carry an expiry.
-    try:
-        expires_ms = float(transaction_info.get("expiresDate") or 0)
-    except (TypeError, ValueError):
-        expires_ms = 0
-    if expires_ms <= 0:
+    import math
+    raw_exp = transaction_info.get("expiresDate")
+    if (
+        raw_exp is None
+        or isinstance(raw_exp, bool)
+        or not isinstance(raw_exp, (int, float))
+        or not math.isfinite(raw_exp)
+        or raw_exp <= 0
+    ):
         logger.warning(
-            "Rejecting App Store subscription transaction without expiresDate: product=%s",
+            "Rejecting App Store subscription transaction without finite positive expiresDate: product=%s",
             product_id,
         )
         return SubscriptionUpdateResult(
             SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
             reason="missing_or_invalid_expiry",
         )
+    expires_ms = float(raw_exp)
 
-    # Global receipt-replay defense (F-06): bind original_transaction_id to this
-    # contractor atomically. If a different contractor already claimed it, fail.
-    original_id = _resolve_original_transaction_id(transaction_info)
-    if not original_id:
-        logger.error("Verified App Store transaction missing transaction identity")
+    # Direct verified entitlement requires an explicit originalTransactionId (F-06).
+    has_canonical = "originalTransactionId" in transaction_info
+    has_alias = "original_transaction_id" in transaction_info
+    if not has_canonical and not has_alias:
+        logger.error("Verified App Store transaction missing explicit originalTransactionId")
         return SubscriptionUpdateResult(
             SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
             reason="missing_transaction_id",
         )
+
+    s_canon = None
+    if has_canonical:
+        v = transaction_info["originalTransactionId"]
+        if not isinstance(v, str) or not v.strip():
+            logger.error("Verified App Store transaction has invalid canonical originalTransactionId")
+            return SubscriptionUpdateResult(
+                SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+                reason="missing_transaction_id",
+            )
+        s_canon = v.strip()
+
+    s_alias = None
+    if has_alias:
+        v = transaction_info["original_transaction_id"]
+        if not isinstance(v, str) or not v.strip():
+            logger.error("Verified App Store transaction has invalid alias original_transaction_id")
+            return SubscriptionUpdateResult(
+                SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+                reason="missing_transaction_id",
+            )
+        s_alias = v.strip()
+
+    if has_canonical and has_alias:
+        if s_canon != s_alias:
+            logger.error("Verified App Store transaction has conflicting originalTransactionId aliases")
+            return SubscriptionUpdateResult(
+                SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+                reason="missing_transaction_id",
+            )
+        original_id = s_canon
+    elif has_canonical:
+        original_id = s_canon
+    else:
+        original_id = s_alias
 
     ok, owner = await claim_transaction(
         original_transaction_id=original_id,
@@ -693,11 +732,21 @@ async def update_subscription_from_transaction(
             reason="expired",
         )
 
-    await update_contractor(contractor_id, {
-        "subscription_tier": tier,
-        "subscription_status": "active",
-        "subscription_expires": expires_ts,
-    })
+    from app.db.contractors import activate_subscription_entitlement
+
+    ok = await activate_subscription_entitlement(
+        contractor_id=contractor_id,
+        tier=tier,
+        expires_ts=expires_ts,
+        original_transaction_id=original_id,
+        expected_subscription_uuid=app_account_token,
+    )
+    if not ok:
+        logger.error(f"Failed to activate subscription entitlement for contractor {contractor_id}")
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
+            reason="activation_failed",
+        )
     logger.info(f"Subscription updated: contractor={contractor_id} tier={tier}")
     return SubscriptionUpdateResult(SubscriptionUpdateOutcome.ACTIVE)
 
@@ -795,119 +844,291 @@ def sign_promotional_offer(
         return None
 
 
+def _validate_cross_payload_field(
+    d1: dict, d2: dict, field: str, required: bool = False
+) -> tuple[bool, Optional[str]]:
+    """Validate and extract a string field across transaction and renewal payloads.
+
+    Rules (verifier round 2 defect 1.2):
+    - If a key is present in either payload, it MUST be a non-empty string.
+      Present null, bool, number, list, dict, or whitespace-only is malformed -> (False, None).
+    - If present in both, stripped values must agree exactly.
+    - If required=True, at least one payload must contain a valid value.
+    - If required=False and absent in both, returns (True, None).
+    """
+    has1 = field in d1
+    has2 = field in d2
+    v1 = d1.get(field)
+    v2 = d2.get(field)
+
+    s1 = None
+    if has1:
+        if not isinstance(v1, str) or not v1.strip():
+            return False, None
+        s1 = v1.strip()
+
+    s2 = None
+    if has2:
+        if not isinstance(v2, str) or not v2.strip():
+            return False, None
+        s2 = v2.strip()
+
+    if has1 and has2:
+        if s1 != s2:
+            return False, None
+        return True, s1
+
+    if has1:
+        return True, s1
+    if has2:
+        return True, s2
+
+    if required:
+        return False, None
+    return True, None
+
+
 async def handle_appstore_notification(payload: dict) -> bool:
     """Process an App Store Server Notification V2 payload.
 
     payload is the decoded signed payload (already JWT-verified by the webhook).
     Returns True if handled successfully.
     """
+    from app.db.apple_transactions import claim_transaction
     from app.db.contractors import (
         get_contractor_by_apple_user_id,
         get_contractor_by_subscription_uuid,
+        record_active_renewal_status,
+        record_inactive_notification,
         update_contractor,
     )
 
     notification_type = payload.get("notificationType", "")
-
-    # Extract transaction info from signed renewal info
+    subtype = payload.get("subtype", "")
     renewal_info = payload.get("data", {})
-    signed_transaction = renewal_info.get("signedTransactionInfo", "")
 
-    # Decode the signed JWTs from Apple (trust after signature verified upstream)
-    transaction_info = _decode_jws_payload(signed_transaction) if signed_transaction else {}
+    if notification_type == "DID_CHANGE_RENEWAL_STATUS":
+        if subtype not in ("AUTO_RENEW_DISABLED", "AUTO_RENEW_ENABLED"):
+            logger.warning(f"Invalid subtype for DID_CHANGE_RENEWAL_STATUS: {subtype}")
+            return False
 
-    # Look up contractor by app account token (= subscription_uuid stored at purchase)
-    app_account_token = transaction_info.get("appAccountToken", "")
-    if not app_account_token:
-        logger.warning(f"No appAccountToken in notification: type={notification_type}")
-        return False
+        if not isinstance(renewal_info, dict):
+            logger.warning("Missing or non-dict data in DID_CHANGE_RENEWAL_STATUS")
+            return False
 
-    # subscription_uuid is stored in contractor document; look up by that field
-    contractor = await get_contractor_by_subscription_uuid(app_account_token)
-    if not contractor:
-        # Reconciliation: the account may exist but be deactivated (deleted).
-        # Apple keeps auto-renewing after deletion, so these notifications
-        # must be recorded, not silently dropped — an ex-customer may be
-        # paying for a dead account.
+        signed_transaction = renewal_info.get("signedTransactionInfo")
+        signed_renewal = renewal_info.get("signedRenewalInfo")
+        if (
+            not isinstance(signed_transaction, str)
+            or not signed_transaction.strip()
+            or not isinstance(signed_renewal, str)
+            or not signed_renewal.strip()
+        ):
+            logger.warning("Missing or non-string signedTransactionInfo/signedRenewalInfo in DID_CHANGE_RENEWAL_STATUS")
+            return False
+
+        transaction_info = _decode_jws_payload(signed_transaction)
+        if not isinstance(transaction_info, dict):
+            logger.warning("Decoded signedTransactionInfo is not a dict")
+            return False
+
+        rn_info = _decode_jws_payload(signed_renewal)
+        if not isinstance(rn_info, dict):
+            logger.warning("Decoded signedRenewalInfo is not a dict")
+            return False
+
+        auto_renew_status = rn_info.get("autoRenewStatus")
+        if type(auto_renew_status) is not int or auto_renew_status not in (0, 1):
+            logger.warning("Invalid autoRenewStatus (must be int 0 or 1): %s", type(auto_renew_status))
+            return False
+        if subtype == "AUTO_RENEW_DISABLED" and auto_renew_status != 0:
+            logger.warning("autoRenewStatus %s disagrees with subtype %s", auto_renew_status, subtype)
+            return False
+        if subtype == "AUTO_RENEW_ENABLED" and auto_renew_status != 1:
+            logger.warning("autoRenewStatus %s disagrees with subtype %s", auto_renew_status, subtype)
+            return False
+
+        signed_date = rn_info.get("signedDate")
+        if type(signed_date) is not int or isinstance(signed_date, bool) or signed_date <= 0:
+            logger.warning("Invalid signedDate (must be positive int): %s", signed_date)
+            return False
+
+        ok, app_account_token = _validate_cross_payload_field(transaction_info, rn_info, "appAccountToken", required=True)
+        if not ok or not app_account_token:
+            logger.warning("Invalid or missing appAccountToken across payloads")
+            return False
+
+        ok, original_id = _validate_cross_payload_field(transaction_info, rn_info, "originalTransactionId", required=True)
+        if not ok or not original_id:
+            logger.warning("Invalid or missing originalTransactionId across payloads")
+            return False
+
+        ok, product_id = _validate_cross_payload_field(transaction_info, rn_info, "productId", required=False)
+        if not ok:
+            logger.warning("Invalid or mismatched productId across payloads")
+            return False
+        product_id = product_id or ""
+
+        ok, env = _validate_cross_payload_field(transaction_info, rn_info, "environment", required=False)
+        if not ok:
+            logger.warning("Invalid or mismatched environment across payloads")
+            return False
+        env = env or ""
+
+        contractor = await get_contractor_by_subscription_uuid(app_account_token)
+        if contractor and contractor.get("active") is True:
+            contractor_id = contractor["contractor_id"]
+            tx_id = str(transaction_info.get("transactionId", "") or "")
+            ok, owner = await claim_transaction(
+                original_transaction_id=original_id,
+                contractor_id=contractor_id,
+                transaction_id=tx_id,
+                product_id=product_id,
+                environment=env,
+            )
+            if not ok:
+                logger.error(
+                    "App Store notification cross-contractor reject: original_tx=%s contractor=%s already_bound_to=%s type=%s",
+                    original_id, contractor_id, owner, notification_type,
+                )
+                return False
+
+            auto_renews = (auto_renew_status == 1)
+            ok_active = await record_active_renewal_status(
+                contractor_id=contractor_id,
+                expected_subscription_uuid=app_account_token,
+                original_transaction_id=original_id,
+                auto_renews=auto_renews,
+                signed_at_ms=signed_date,
+            )
+            if ok_active:
+                logger.info(f"Active renewal status recorded: contractor={contractor_id} auto_renews={auto_renews}")
+            else:
+                logger.info(f"Active renewal status no-op (stale/mismatched): contractor={contractor_id}")
+            return True
+
         inactive = await get_contractor_by_subscription_uuid(
             app_account_token, include_inactive=True
         )
-        # Only an EXPLICIT active=False doc is a deleted account. A doc
-        # missing the field (legacy/manual create) or anything else falls
-        # through to not-found: recording it here would swallow a paying
-        # customer's renewal with a success ack.
         if inactive and inactive.get("active") is False:
-            cid = inactive["contractor_id"]
-            raw_prior = inactive.get("post_deletion_billing")
-            prior = raw_prior if isinstance(raw_prior, dict) else {}
-            tx_id = str(transaction_info.get("transactionId") or "")
-            if (
-                tx_id
-                and prior.get("last_transaction_id") == tx_id
-                and prior.get("last_type") == notification_type
-            ):
-                # Apple redelivers on timeout; the same (transaction, type)
-                # must not inflate the charge count an operator refunds
-                # against. Type is part of the key because REFUND/EXPIRED
-                # reference the SAME transactionId as the renewal they wind
-                # down — those are distinct events, not redeliveries.
-                logger.info(
-                    "Post-deletion notification redelivery ignored: contractor=%s type=%s",
-                    cid, notification_type,
-                )
-                return True
-            def _safe_int(value):
-                try:
-                    return int(value or 0)
-                except (TypeError, ValueError):
-                    # A corrupted counter must not dead-letter the account
-                    # behind the webhook's 200-acking catch-all.
-                    return 0
-
-            is_charge = notification_type in ("DID_RENEW", "SUBSCRIBED")
-            # A renewal PURCHASED while the account was still active — merely
-            # delivered late or redelivered after deactivation — is a valid
-            # charge, not a post-deletion one. Without a purchaseDate (or a
-            # deactivated_at on legacy docs) stay conservative and count it,
-            # so a real post-deletion charge is never silently excused.
-            charged_after_deletion = is_charge
-            deactivated_ts = _safe_int(inactive.get("deactivated_at"))
-            purchase_ms = _safe_int(transaction_info.get("purchaseDate"))
-            if is_charge and deactivated_ts and purchase_ms:
-                charged_after_deletion = (purchase_ms / 1000.0) > deactivated_ts
-            record = {
-                "count": _safe_int(prior.get("count")) + 1,
-                # The audit classifies by this record; a wind-down EXPIRED
-                # after a DID_RENEW must not erase the fact a charge happened.
-                "charges": _safe_int(prior.get("charges")) + (1 if charged_after_deletion else 0),
-                "last_type": notification_type,
-                "last_at": int(time.time()),
-                "last_transaction_id": tx_id,
-            }
-            # A customer who deleted and re-signed up keeps their StoreKit
-            # subscription bound to the OLD subscription_uuid forever. Their
-            # renewals are not post-deletion charges — mark the rebound and
-            # keep the log at INFO, or the ERROR signal cries wolf monthly.
+            cid = inactive.get("contractor_id")
+            if not cid or not isinstance(cid, str):
+                return False
+            tx_id = str(transaction_info.get("transactionId", "") or "")
             rebound = None
             apple_uid = str(inactive.get("apple_user_id") or "")
             if apple_uid:
                 try:
                     rebound = await get_contractor_by_apple_user_id(apple_uid)
                 except Exception as rebound_err:
-                    # Best-effort classification only — a lookup failure must
-                    # not skip the log and write behind the webhook's
-                    # 200-acking catch-all.
                     logger.warning(
                         "Rebound lookup failed (recording without it): %s", rebound_err
                     )
+            rebound_cid = rebound.get("contractor_id") if (isinstance(rebound, dict) and rebound.get("contractor_id")) else None
+            renewal_obs = {
+                "original_transaction_id": original_id,
+                "auto_renews": (auto_renew_status == 1),
+                "signed_at_ms": signed_date,
+            }
+            res = await record_inactive_notification(
+                contractor_id=cid,
+                expected_subscription_uuid=app_account_token,
+                notification_type=notification_type,
+                subtype=subtype,
+                transaction_id=tx_id,
+                purchase_date_ms=None,
+                rebound_contractor_id=rebound_cid,
+                renewal_observation=renewal_obs,
+            )
+            outcome = res.get("outcome")
+            if outcome == "duplicate":
+                logger.info(
+                    "Post-deletion notification redelivery ignored: contractor=%s type=%s",
+                    cid, notification_type,
+                )
+            elif outcome == "renewal_update":
+                logger.info(
+                    "Post-deletion renewal clock advanced for duplicate notification: contractor=%s type=%s signed_at=%s",
+                    cid, notification_type, signed_date,
+                )
+            elif outcome == "recorded":
+                if rebound:
+                    logger.info(
+                        "Post-deletion notification from rebound customer: contractor=%s now=%s type=%s",
+                        cid, rebound["contractor_id"], notification_type,
+                    )
+                else:
+                    logger.info(
+                        "Post-deletion App Store notification recorded: contractor=%s type=%s",
+                        cid, notification_type,
+                    )
+            else:
+                logger.warning(
+                    "Post-deletion notification write skipped due to state mismatch (%s): contractor=%s type=%s",
+                    outcome, cid, notification_type,
+                )
+                return False
+            return True
+
+        logger.warning(
+            "Contractor not found for appAccountToken (subscription_uuid prefix=%s)",
+            (app_account_token[:8] if app_account_token else "(empty)"),
+        )
+        return False
+
+    # Other notification types (DID_RENEW, SUBSCRIBED, EXPIRED, etc.)
+    signed_transaction = renewal_info.get("signedTransactionInfo", "")
+    transaction_info = _decode_jws_payload(signed_transaction) if signed_transaction else {}
+
+    app_account_token = transaction_info.get("appAccountToken", "")
+    if not app_account_token:
+        logger.warning(f"No appAccountToken in notification: type={notification_type}")
+        return False
+
+    contractor = await get_contractor_by_subscription_uuid(app_account_token)
+    if not contractor:
+        inactive = await get_contractor_by_subscription_uuid(
+            app_account_token, include_inactive=True
+        )
+        if inactive and inactive.get("active") is False:
+            cid = inactive["contractor_id"]
+            tx_id = str(transaction_info.get("transactionId") or "")
+            purchase_ms = transaction_info.get("purchaseDate")
+            rebound = None
+            apple_uid = str(inactive.get("apple_user_id") or "")
+            if apple_uid:
+                try:
+                    rebound = await get_contractor_by_apple_user_id(apple_uid)
+                except Exception as rebound_err:
+                    logger.warning(
+                        "Rebound lookup failed (recording without it): %s", rebound_err
+                    )
+            rebound_cid = rebound["contractor_id"] if rebound else None
+            res = await record_inactive_notification(
+                contractor_id=cid,
+                expected_subscription_uuid=app_account_token,
+                notification_type=notification_type,
+                subtype=subtype,
+                transaction_id=tx_id,
+                purchase_date_ms=purchase_ms,
+                rebound_contractor_id=rebound_cid,
+            )
+            outcome = res.get("outcome")
+            if outcome == "duplicate":
+                logger.info(
+                    "Post-deletion notification redelivery ignored: contractor=%s type=%s",
+                    cid, notification_type,
+                )
+                return True
+            elif outcome != "recorded":
+                logger.warning(
+                    "Post-deletion notification write skipped due to state mismatch (%s): contractor=%s type=%s",
+                    outcome, cid, notification_type,
+                )
+                return False
+
             if rebound:
-                record["rebound_contractor_id"] = rebound["contractor_id"]
-                # The verify path rejects the old receipt for the new account
-                # (OWNERSHIP_MISMATCH on the uuid check), so this webhook is
-                # the ONLY place a rebound customer's renewal can reach their
-                # live account. Forward the entitlement when the new account
-                # is not already active — if it is, it has its own
-                # subscription and forwarding would stomp it.
+                is_charge = notification_type in ("DID_RENEW", "SUBSCRIBED")
                 if is_charge and rebound.get("subscription_status") != "active":
                     product_id = transaction_info.get("productId", "")
                     fwd_tier = PRODUCT_TO_TIER.get(product_id, "")
@@ -918,10 +1139,6 @@ async def handle_appstore_notification(payload: dict) -> bool:
                                 "subscription_status": "active",
                                 "subscription_tier": fwd_tier,
                                 "subscription_expires": fwd_expires,
-                                # Provenance: lets a later terminal event for
-                                # the OLD subscription end this entitlement
-                                # without ever touching one the rebound
-                                # account bought independently.
                                 "subscription_forwarded_from": cid,
                             })
                             logger.info(
@@ -937,9 +1154,6 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE")
                     and rebound.get("subscription_forwarded_from") == cid
                 ):
-                    # The old subscription this entitlement was forwarded
-                    # from has ended — end the forwarded entitlement too, or
-                    # the rebound account stays active on a dead sub.
                     try:
                         await update_contractor(rebound["contractor_id"], {
                             "subscription_status": "expired",
@@ -953,34 +1167,23 @@ async def handle_appstore_notification(payload: dict) -> bool:
                             "Forwarded entitlement expiry failed: %s -> %s err=%s",
                             cid, rebound["contractor_id"], fwd_err,
                         )
-            # Log BEFORE the write and never raise past it: the webhook acks
-            # 200 on any exception, so a raised write error would be a
-            # permanently lost record with no trace. The log line survives.
-            if rebound:
+
                 logger.info(
                     "Post-deletion notification from rebound customer: contractor=%s now=%s type=%s",
                     cid, rebound["contractor_id"], notification_type,
                 )
-            elif charged_after_deletion:
-                # Money was charged for a deactivated account.
+            elif res.get("charged_after_deletion"):
                 logger.error(
                     "Post-deletion App Store charge recorded: contractor=%s type=%s count=%s",
-                    cid, notification_type, record["count"],
+                    cid, notification_type, res.get("count"),
                 )
             else:
                 logger.info(
                     "Post-deletion App Store notification recorded: contractor=%s type=%s",
                     cid, notification_type,
                 )
-            try:
-                await update_contractor(cid, {"post_deletion_billing": record})
-            except Exception as write_err:
-                logger.error(
-                    "Post-deletion billing record write failed: contractor=%s type=%s err=%s",
-                    cid, notification_type, write_err,
-                )
             return True
-        # F-16: redact the appAccountToken UUID to prefix-only.
+
         logger.warning(
             "Contractor not found for appAccountToken (subscription_uuid prefix=%s)",
             (app_account_token[:8] if app_account_token else "(empty)"),
@@ -988,10 +1191,6 @@ async def handle_appstore_notification(payload: dict) -> bool:
         return False
     contractor_id = contractor["contractor_id"]
 
-    # F-06: global receipt-replay defense. The original_transaction_id is the
-    # stable Apple receipt identity; reject if it has already been bound to a
-    # different contractor than the one that owns this appAccountToken.
-    from app.db.apple_transactions import claim_transaction
     original_id = _resolve_original_transaction_id(transaction_info)
     if original_id:
         ok, owner = await claim_transaction(

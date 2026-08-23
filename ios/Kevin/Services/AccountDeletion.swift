@@ -44,10 +44,14 @@ enum AccountDeletionFirstStep: Equatable {
 }
 
 /// First step of the delete-account flow. Deletion is a server-side
-/// deactivation and does NOT cancel the user's auto-renewing App Store
-/// subscription, so a user with an active subscription must be warned (and
-/// offered Manage Subscription) before the deletion confirmation.
+/// deactivation and does NOT cancel the user's Apple subscription (which may
+/// continue auto-renewing if not turned off), so a user with an active or
+/// purchased subscription is directed to check Manage Subscription before
+/// account deletion.
 enum AccountDeletionFlow {
+    static let warningTitle: String.LocalizationValue = "Check Apple Subscription"
+    static let warningBody: String.LocalizationValue = "Deleting your Hey Kevin account does not cancel your Apple subscription. Check Manage Subscription first to make sure automatic renewal is off."
+
     /// Server truth first, Keychain cache as fallback (field-wise): the
     /// cache defaults to "trial" and can be stale, and a stale skip of the
     /// billing warning means an active subscriber deletes without it.

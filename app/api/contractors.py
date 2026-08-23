@@ -38,6 +38,10 @@ _SENSITIVE_KEYS = frozenset({
     "google_calendar_access_token",
     "google_calendar_refresh_token",
     "stripe_secret_key",
+    "subscription_original_transaction_id",
+    "subscription_auto_renews",
+    "subscription_renewal_status_signed_at_ms",
+    "subscription_forwarded_from",
 })
 
 

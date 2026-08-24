@@ -65,6 +65,10 @@ def _safe_bucket(value: Any, allowed: set[str]) -> str:
 
 
 def _presence(value: Any) -> str:
+    if value is None or value == "":
+        return "false"
+    if isinstance(value, dict):
+        return "true" if bool(value) else "false"
     return "true" if bool(str(value or "").strip()) else "false"
 
 
@@ -140,6 +144,7 @@ def summarize_contractors(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         subscription_statuses[subscription_status] += 1
         subscription_tiers[subscription_tier] += 1
         auto_reply_sms[_bool_bucket(record, "auto_reply_sms")] += 1
+
         jobber_connected[_presence(record.get("jobber_access_token"))] += 1
         google_calendar_connected[_presence(record.get("google_calendar_access_token"))] += 1
         twilio_number_assigned[_presence(record.get("twilio_number"))] += 1

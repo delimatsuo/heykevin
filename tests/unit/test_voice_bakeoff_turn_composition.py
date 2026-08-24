@@ -106,10 +106,9 @@ _BASELINE_HASHES = {
     # change to main.py, never to silence a diff.
     "app/main.py":
         "ef0822b399b292cf56345dd8f73adf13b9c33ec3877bf806a38bbbcf793555f9",
-    # Re-pinned 2026-08-12: authenticated media streams now load the shared,
-    # default-off customer-memory and service-request context.
+    # Re-pinned 2026-08-24 for integration token envelope enablement checks.
     "app/webhooks/media_stream.py":
-        "d614e95370aa91af90a754ac0f213fa312b017eceb73c72ff6958d6636455fe7",
+        "cce7f37acd144358d22a03bb1a43ce46f80075eeeedfcf7e1134fc94b9eedff9",
 }
 
 

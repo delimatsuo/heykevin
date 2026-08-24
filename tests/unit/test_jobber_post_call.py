@@ -226,6 +226,7 @@ async def test_process_business_awaits_jobber_lead_capture_when_enabled(monkeypa
     contractor = {
         "contractor_id": "contractor-1",
         "jobber_access_token": "jobber-token",
+        "jobber_refresh_token": "jobber-refresh",
         "jobber_lead_capture_enabled": True,
     }
 
@@ -343,7 +344,12 @@ async def test_capture_jobber_lead_success_existing_customer(monkeypatch):
     monkeypatch.setattr(post_call.jobber_service, "create_request_note", fake_create_request_note)
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -413,7 +419,12 @@ async def test_capture_jobber_lead_success_creates_customer_when_lookup_misses(m
     monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return(None))
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -459,7 +470,12 @@ async def test_capture_jobber_lead_treats_lookup_timeout_as_miss(monkeypatch):
     monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return("note-new"))
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -500,7 +516,12 @@ async def test_capture_jobber_lead_call_mirror_failure_does_not_mark_failed(monk
     monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return(None))
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -537,7 +558,12 @@ async def test_capture_jobber_lead_call_mirror_cancel_does_not_mark_failed(monke
     monkeypatch.setattr(post_call.jobber_service, "create_request_note", lambda *args, **kwargs: _async_return(None))
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -564,7 +590,11 @@ async def test_capture_jobber_lead_disabled_flag_does_not_claim_or_sync(monkeypa
     )
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token"},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -583,7 +613,12 @@ async def test_capture_jobber_lead_claim_false_skips_jobber_api(monkeypatch):
     )
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )
@@ -604,7 +639,12 @@ async def test_capture_jobber_lead_failure_after_claim_marks_job_failed(monkeypa
     monkeypatch.setattr(post_call.jobber_service, "create_client", lambda *args, **kwargs: _async_return(None))
 
     await post_call._capture_jobber_lead(
-        {"jobber_access_token": "jobber-token", "jobber_lead_capture_enabled": True},
+        {
+            "contractor_id": "contractor-1",
+            "jobber_access_token": "jobber-token",
+            "jobber_refresh_token": "jobber-refresh",
+            "jobber_lead_capture_enabled": True,
+        },
         _lead_job_data(),
         "job-1",
     )

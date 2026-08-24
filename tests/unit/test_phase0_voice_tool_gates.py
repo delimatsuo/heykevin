@@ -78,6 +78,7 @@ async def test_jobber_book_appointment_is_unknown_tool_and_does_not_create_job(m
     pipeline = _pipeline({
         "contractor_id": "c1",
         "jobber_access_token": "token",
+        "jobber_refresh_token": "token-refresh",
         "integration_write_status": "approved",
         "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
     })
@@ -100,6 +101,7 @@ async def test_jobber_check_availability_is_unknown_tool_and_does_not_query_avai
     config = {
         "contractor_id": "c1",
         "jobber_access_token": "token",
+        "jobber_refresh_token": "token-refresh",
         "integration_write_status": "approved",
         "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
         "automation_approvals": {"jobber_create_job": True, "jobber_create_quote": True},
@@ -123,6 +125,7 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "token",
+        "google_calendar_refresh_token": "token-refresh",
         "integration_write_status": "approved",
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
@@ -160,6 +163,7 @@ async def test_google_book_appointment_calls_managed_saga_when_gate_allows(monke
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
         "integration_write_status": "approved",
         "service_request_mutations_enabled": True,
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
@@ -202,6 +206,7 @@ async def test_google_booking_requires_literal_tenant_mutation_flag(
     config = {
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
         "integration_write_status": "approved",
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
         "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
@@ -242,6 +247,7 @@ async def test_google_booking_stays_request_only_until_recovery_is_ready(monkeyp
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
         "integration_write_status": "approved",
         "service_request_mutations_enabled": True,
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
@@ -299,7 +305,11 @@ async def test_google_calendar_create_error_logging_omits_response_text(monkeypa
 
     with caplog.at_level(logging.ERROR):
         result = await calendar.book_appointment(
-            {"contractor_id": "c1", "google_calendar_access_token": "gcal-token"},
+            {
+                "contractor_id": "c1",
+                "google_calendar_access_token": "gcal-token",
+                "google_calendar_refresh_token": "gcal-refresh",
+            },
             title="Jane Private repair",
             start_time=_upcoming(13),
             end_time=_upcoming(14),
@@ -333,6 +343,7 @@ async def test_jobber_book_appointment_unknown_tool_does_not_call_create_job_or_
     pipeline = _pipeline({
         "contractor_id": "c1",
         "jobber_access_token": "token",
+        "jobber_refresh_token": "token-refresh",
         "integration_write_status": "approved",
         "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
         "automation_approvals": {"jobber_create_job": True, "jobber_create_quote": True},
@@ -369,6 +380,7 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
         "integration_write_status": "approved",
         "service_request_mutations_enabled": True,
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
@@ -433,6 +445,7 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
         contractor_config={
             "contractor_id": "c1",
             "jobber_access_token": "token",
+            "jobber_refresh_token": "token-refresh",
             "integration_write_status": "approved",
             "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
         },
@@ -610,6 +623,7 @@ async def test_voice_tool_error_result_logging_does_not_include_sensitive_payloa
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
     })
     await pipeline._http_client.aclose()
     pipeline._http_client = FakeClaudeClient()
@@ -681,6 +695,7 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
     })
     await pipeline._http_client.aclose()
     pipeline._http_client = FakeClaudeClient()
@@ -779,7 +794,9 @@ async def test_gemini_staging_disables_model_tools_and_denies_calls_without_payl
         contractor_config={
             "contractor_id": "c1",
             "jobber_access_token": "private-jobber-token",
+            "jobber_refresh_token": "private-jobber-refresh",
             "google_calendar_access_token": "private-calendar-token",
+            "google_calendar_refresh_token": "private-calendar-refresh",
         },
     )
     pipeline._ws = FakeWebSocket()
@@ -827,7 +844,11 @@ def test_gemini_nonstaging_retains_configured_model_tools(monkeypatch):
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
         on_transcript=_noop,
-        contractor_config={"jobber_access_token": "configured"},
+        contractor_config={
+            "contractor_id": "c1",
+            "jobber_access_token": "configured",
+            "jobber_refresh_token": "configured-refresh",
+        },
     )
 
     declarations = pipeline._build_gemini_tools()

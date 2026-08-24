@@ -40,6 +40,17 @@ def _set_common(monkeypatch):
         "transcript_encryption_key",
         base64.b64encode(b"k" * 32).decode("ascii"),
     )
+    dummy_key = base64.b64encode(b"i" * 32).decode("ascii")
+    monkeypatch.setattr(
+        config.settings,
+        "integration_token_encryption_keys",
+        f'{{"1": "{dummy_key}"}}',
+    )
+    monkeypatch.setattr(
+        config.settings,
+        "integration_token_active_key_version",
+        "1",
+    )
 
 
 def test_staging_rejects_production_data_resources(monkeypatch):
@@ -311,3 +322,48 @@ def test_production_requires_explicit_twilio_account_boundary(monkeypatch):
 
     with pytest.raises(RuntimeError, match="PRODUCTION_TWILIO_ACCOUNT_SID is required"):
         config.validate_runtime_safety()
+
+
+def test_staging_rejects_missing_or_invalid_integration_token_keys(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setattr(config.settings, "environment", "staging")
+    monkeypatch.setattr(config.settings, "cloud_run_url", "https://kevin-api-staging.example.run.app")
+    monkeypatch.setattr(config.settings, "firestore_project_id", "kevin-staging")
+    monkeypatch.setattr(
+        config.settings,
+        "firebase_database_url",
+        "https://kevin-staging-rtdb.firebaseio.com",
+    )
+    monkeypatch.setattr(config.settings, "twilio_account_sid", "AC_STAGING")
+
+    # Missing keyring
+    monkeypatch.setattr(config.settings, "integration_token_encryption_keys", "")
+    with pytest.raises(RuntimeError, match="INTEGRATION_TOKEN_ENCRYPTION_KEYS"):
+        config.validate_runtime_safety()
+
+    # Invalid JSON in keyring
+    monkeypatch.setattr(config.settings, "integration_token_encryption_keys", "{not-json}")
+    with pytest.raises(RuntimeError, match="INTEGRATION_TOKEN_ENCRYPTION_KEYS"):
+        config.validate_runtime_safety()
+
+    # Active version not in keyring
+    dummy_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setattr(config.settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}')
+    monkeypatch.setattr(config.settings, "integration_token_active_key_version", "2")
+    with pytest.raises(RuntimeError, match="INTEGRATION_TOKEN_ACTIVE_KEY_VERSION"):
+        config.validate_runtime_safety()
+
+    # Missing active version
+    monkeypatch.setattr(config.settings, "integration_token_active_key_version", None)
+    with pytest.raises(RuntimeError, match="INTEGRATION_TOKEN_ACTIVE_KEY_VERSION"):
+        config.validate_runtime_safety()
+
+
+def test_development_allows_missing_integration_token_keys(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setattr(config.settings, "environment", "development")
+    monkeypatch.setattr(config.settings, "allow_production_resources_in_non_production", True)
+    monkeypatch.setattr(config.settings, "integration_token_encryption_keys", "")
+    monkeypatch.setattr(config.settings, "integration_token_active_key_version", None)
+
+    config.validate_runtime_safety()

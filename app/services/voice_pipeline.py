@@ -11,14 +11,14 @@ Full-duplex architecture based on Deepgram best practices:
 
 import asyncio
 import base64
-from datetime import UTC, datetime
 import hashlib
 import json
 import logging
 import re
 import time
 import unicodedata
-from typing import Callable, Awaitable, Optional
+from datetime import UTC, datetime
+from typing import Awaitable, Callable, Optional
 
 import httpx
 import websockets
@@ -34,6 +34,8 @@ from app.services.receptionist_context import (
 from app.services.side_effect_audit import record_gate_decision
 from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
+)
+from app.services.urgency import (
     find_urgent_signal,
 )
 from app.utils.logging import get_logger
@@ -1218,6 +1220,8 @@ class VoicePipeline:
         return anthropic_tool_declarations()
 
     def _has_service_request_context(self) -> bool:
+        from app.services.integration_tokens import has_usable_token
+
         context = self._contractor_config.get("service_request_context")
         return (
             isinstance(context, dict)
@@ -1226,17 +1230,18 @@ class VoicePipeline:
             and provider_mutation_infrastructure_ready()
             and self._contractor_config.get("service_request_mutations_enabled") is True
             and self._contractor_config.get("integration_write_status") == "approved"
-            and bool(self._contractor_config.get("google_calendar_access_token"))
+            and has_usable_token(self._contractor_config, "google_calendar", "access")
         )
 
     def _managed_provider_create_enabled(self) -> bool:
         """Fail closed unless this tenant is enrolled in durable provider writes."""
+        from app.services.integration_tokens import has_usable_token
 
         return (
             provider_mutation_infrastructure_ready()
             and self._contractor_config.get("service_request_mutations_enabled") is True
             and self._contractor_config.get("integration_write_status") == "approved"
-            and bool(self._contractor_config.get("google_calendar_access_token"))
+            and has_usable_token(self._contractor_config, "google_calendar", "access")
         )
 
     def _service_request_executor(self):
@@ -1391,17 +1396,25 @@ class VoicePipeline:
 
     def _has_jobber(self) -> bool:
         """Check if the contractor has Jobber connected."""
-        return bool(self._contractor_config.get("jobber_access_token"))
+        from app.services.integration_tokens import has_usable_token
+
+        return has_usable_token(self._contractor_config, "jobber")
 
     def _has_google_calendar(self) -> bool:
         """Check if the contractor has Google Calendar connected (fallback)."""
-        return bool(self._contractor_config.get("google_calendar_access_token"))
+        from app.services.integration_tokens import has_usable_token
+
+        return has_usable_token(self._contractor_config, "google_calendar")
 
     def _get_jobber_token(self) -> str:
-        return self._contractor_config.get("jobber_access_token", "")
+        from app.services.integration_tokens import resolve_usable_token
+
+        return resolve_usable_token(self._contractor_config, "jobber") or ""
 
     def _get_google_calendar_token(self) -> str:
-        return self._contractor_config.get("google_calendar_access_token", "")
+        from app.services.integration_tokens import resolve_usable_token
+
+        return resolve_usable_token(self._contractor_config, "google_calendar") or ""
 
     def _check_tool_write_gate(self, action: ActionKey):
         call_sid = getattr(self, "_call_sid", "")
@@ -1575,6 +1588,8 @@ class VoicePipeline:
         if self._has_google_calendar() and not self._has_jobber():
             from app.services.calendar import (
                 GoogleCalendarUnavailableError,
+            )
+            from app.services.calendar import (
                 get_available_slots as gcal_slots,
             )
 
@@ -1984,8 +1999,9 @@ class VoicePipeline:
         if not self._call_sid:
             return
         try:
-            from app.db.cache import _init_firebase
             from firebase_admin import db as rtdb
+
+            from app.db.cache import _init_firebase
 
             _init_firebase()
             ref = rtdb.reference(f"/call_commands/{self._call_sid}")

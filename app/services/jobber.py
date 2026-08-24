@@ -6,8 +6,10 @@ import asyncio
 import base64
 import json
 import time
-import httpx
 from typing import Optional
+
+import httpx
+
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -15,7 +17,17 @@ logger = get_logger(__name__)
 JOBBER_GRAPHQL_URL = "https://api.getjobber.com/api/graphql"
 JOBBER_TOKEN_URL = "https://api.getjobber.com/api/oauth/token"
 JOBBER_GRAPHQL_VERSION = "2025-04-16"
+REFRESH_BUFFER_SECONDS = 120
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _get_refresh_lock(contractor_id: str) -> asyncio.Lock:
+    """Return a deterministic per-contractor asyncio.Lock from _REFRESH_LOCKS."""
+    if hasattr(_REFRESH_LOCKS, "setdefault"):
+        return _REFRESH_LOCKS.setdefault(contractor_id, asyncio.Lock())
+    if contractor_id not in _REFRESH_LOCKS:
+        _REFRESH_LOCKS[contractor_id] = asyncio.Lock()
+    return _REFRESH_LOCKS[contractor_id]
 
 
 class JobberAuthError(Exception):
@@ -29,122 +41,366 @@ def _token_expires_soon(access_token: str, leeway_seconds: int = 120) -> bool:
         payload_segment += "=" * (-len(payload_segment) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_segment.encode()).decode())
         exp = payload.get("exp")
-        return isinstance(exp, (int, float)) and exp <= time.time() + leeway_seconds
+        return (type(exp) in (int, float) and type(exp) is not bool) and exp <= time.time() + leeway_seconds
     except Exception:
         return False
 
 
-async def _write_jobber_tokens(contractor_id: str, updates: dict):
-    """Persist refreshed Jobber tokens on the contractor document."""
-    if not contractor_id:
-        return
-    from app.db.firestore_client import get_firestore_client
+def _extract_exp_from_jwt(access_token: str) -> Optional[float]:
+    """Extract exp timestamp from Jobber JWT payload if valid numeric exp present."""
+    try:
+        payload_segment = access_token.split(".")[1]
+        payload_segment += "=" * (-len(payload_segment) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_segment.encode()).decode())
+        exp = payload.get("exp")
+        if (type(exp) in (int, float) and type(exp) is not bool) and exp > 0:
+            return float(exp)
+        return None
+    except Exception:
+        return None
 
-    db = get_firestore_client()
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: db.collection("contractors").document(contractor_id).update(updates),
+
+def _timestamp_expires_soon(expires_at: float, leeway_seconds: int = 120) -> bool:
+    """Return True when an explicit expiration timestamp is expired or close to expiring."""
+    return (type(expires_at) in (int, float) and type(expires_at) is not bool) and expires_at <= time.time() + leeway_seconds
+
+
+async def _read_jobber_tokens(contractor_id: str) -> Optional[dict]:
+    """Read latest stored Jobber tokens, decrypting envelopes to memory strings.
+
+    Returns None if reading fails, document is missing, provider is disconnected,
+    generation is malformed, or stored refresh token is corrupt/missing.
+    """
+    from app.services.integration_tokens import (
+        MAX_KEY_VERSION,
+        determine_write_format,
+        resolve_usable_token_pair,
+        validate_token_expires_at,
+        validate_token_string,
     )
 
+    try:
+        valid_cid = validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return None
+    if valid_cid is None:
+        return None
 
-async def _read_jobber_tokens(contractor_id: str) -> dict:
-    """Read latest stored Jobber tokens to avoid reusing rotated refresh tokens."""
-    if not contractor_id:
-        return {}
-    from app.db.firestore_client import get_firestore_client
+    try:
+        from app.db.firestore_client import get_firestore_client
 
-    db = get_firestore_client()
-    loop = asyncio.get_event_loop()
-    doc = await loop.run_in_executor(
-        None,
-        lambda: db.collection("contractors").document(contractor_id).get(),
+        db = get_firestore_client()
+        if db is None:
+            return None
+        loop = asyncio.get_event_loop()
+        doc = await loop.run_in_executor(
+            None,
+            lambda: db.collection("contractors").document(valid_cid).get(),
+        )
+        if not getattr(doc, "exists", False):
+            return None
+        data = doc.to_dict() or {}
+    except Exception:
+        return None
+
+    cur_gen_raw = data.get("jobber_generation")
+    if cur_gen_raw is None:
+        cur_gen = 0
+    elif type(cur_gen_raw) is int and type(cur_gen_raw) is not bool and 0 <= cur_gen_raw <= MAX_KEY_VERSION:
+        cur_gen = cur_gen_raw
+    else:
+        return None
+
+    connected = data.get("jobber_connected")
+    if connected is False:
+        return None
+    if connected is not None and type(connected) is not bool:
+        return None
+
+    access_token, refresh_token = resolve_usable_token_pair(
+        data,
+        provider="jobber",
+        contractor_id=valid_cid,
     )
-    if not doc.exists:
-        return {}
-    data = doc.to_dict() or {}
+    if not access_token or not refresh_token:
+        return None
+
+    raw_access = data.get("jobber_access_token")
+    raw_refresh = data.get("jobber_refresh_token")
+
+    try:
+        determine_write_format(
+            contractor_id=valid_cid,
+            provider="jobber",
+            stored_access=raw_access,
+            stored_refresh=raw_refresh,
+            envelope_required=data.get("jobber_token_envelope_required"),
+        )
+    except Exception:
+        return None
+
+    exp = data.get("jobber_token_expires_at")
+    if exp is not None:
+        try:
+            validate_token_expires_at(exp)
+        except Exception:
+            return None
+
     return {
-        "jobber_access_token": data.get("jobber_access_token", ""),
-        "jobber_refresh_token": data.get("jobber_refresh_token", ""),
+        "generation": cur_gen,
+        "access_token_raw": raw_access,
+        "refresh_token_raw": raw_refresh,
+        "jobber_access_token": access_token,
+        "jobber_refresh_token": refresh_token,
+        "jobber_token_expires_at": exp,
+        "connected": True,
     }
 
 
 async def refresh_access_token(contractor: dict, *, force: bool = False) -> Optional[str]:
-    """Refresh and persist Jobber OAuth tokens for a contractor."""
+    """Refresh and persist Jobber OAuth tokens for a contractor with durable CAS."""
     from app.config import settings
+    from app.services.integration_token_mutations import (
+        IntegrationTokenLeaseError,
+        acquire_refresh_claim_cas,
+        persist_refreshed_tokens_cas,
+        release_refresh_claim_cas,
+    )
+    from app.services.integration_tokens import (
+        validate_token_expires_at,
+        validate_token_expires_in,
+        validate_token_string,
+    )
 
-    contractor_id = contractor.get("contractor_id", "")
-    lock_key = contractor_id or contractor.get("jobber_refresh_token", "")
-    lock = _REFRESH_LOCKS.setdefault(lock_key, asyncio.Lock())
+    if type(contractor) is not dict:
+        return None
 
-    async with lock:
-        stale_token = contractor.get("jobber_access_token", "")
-        latest = await _read_jobber_tokens(contractor_id)
-        if latest:
-            contractor.update({k: v for k, v in latest.items() if v})
+    if "contractor_id" in contractor:
+        raw_id = contractor.get("contractor_id")
+    elif "id" in contractor:
+        raw_id = contractor.get("id")
+    else:
+        raw_id = None
 
-        current_token = contractor.get("jobber_access_token", "")
-        if current_token and current_token != stale_token and not _token_expires_soon(current_token):
-            return current_token
-        if current_token and not force and not _token_expires_soon(current_token):
-            return current_token
+    try:
+        valid_cid = validate_token_string(raw_id, name="contractor_id")
+    except Exception:
+        return None
+    if valid_cid is None:
+        return None
 
-        refresh_token = contractor.get("jobber_refresh_token", "")
-        if not refresh_token or not settings.jobber_client_id:
+    snapshot = await _read_jobber_tokens(valid_cid)
+    if not snapshot:
+        return None
+
+    def _hydrate_and_return(s: dict) -> str:
+        contractor["jobber_access_token"] = s.get("access_token_raw")
+        contractor["jobber_refresh_token"] = s.get("refresh_token_raw")
+        contractor["jobber_generation"] = s.get("generation", 0)
+        if s.get("jobber_token_expires_at") is not None:
+            contractor["jobber_token_expires_at"] = s["jobber_token_expires_at"]
+        else:
+            contractor.pop("jobber_token_expires_at", None)
+        return s["jobber_access_token"]
+
+    # Check expiration unless force is requested
+    if not force and snapshot.get("jobber_token_expires_at") is not None:
+        expires_at = snapshot["jobber_token_expires_at"]
+        if time.time() < expires_at - REFRESH_BUFFER_SECONDS:
+            return _hydrate_and_return(snapshot)
+    elif not force and snapshot.get("jobber_access_token"):
+        # Fallback to decoding JWT exp if token_expires_at was not stored
+        exp = _extract_exp_from_jwt(snapshot["jobber_access_token"])
+        if exp and time.time() < exp - REFRESH_BUFFER_SECONDS:
+            return _hydrate_and_return(snapshot)
+
+    async with _get_refresh_lock(valid_cid):
+        # Double check after acquiring in-process lock
+        snapshot = await _read_jobber_tokens(valid_cid)
+        if not snapshot:
+            return None
+
+        if not force and snapshot.get("jobber_token_expires_at") is not None:
+            expires_at = snapshot["jobber_token_expires_at"]
+            if time.time() < expires_at - REFRESH_BUFFER_SECONDS:
+                return _hydrate_and_return(snapshot)
+        elif not force and snapshot.get("jobber_access_token"):
+            exp = _extract_exp_from_jwt(snapshot["jobber_access_token"])
+            if exp and time.time() < exp - REFRESH_BUFFER_SECONDS:
+                return _hydrate_and_return(snapshot)
+
+        # Acquire multi-instance cross-process refresh lease before provider HTTP call
+        claim_id: Optional[str] = None
+        try:
+            claim_id, _ = await acquire_refresh_claim_cas(
+                contractor_id=valid_cid,
+                provider="jobber",
+                observed_generation=snapshot["generation"],
+                observed_access_raw=snapshot["access_token_raw"],
+                observed_refresh_raw=snapshot["refresh_token_raw"],
+            )
+        except IntegrationTokenLeaseError:
+            # Contender instance: another worker is actively refreshing this contractor.
+            # Re-read durable store: if winner already advanced generation, reload winner's tokens!
+            latest_snap = await _read_jobber_tokens(valid_cid)
+            if latest_snap and latest_snap["generation"] > snapshot["generation"]:
+                winner_token = latest_snap.get("jobber_access_token")
+                if winner_token:
+                    contractor["jobber_access_token"] = latest_snap.get("access_token_raw")
+                    contractor["jobber_refresh_token"] = latest_snap.get("refresh_token_raw")
+                    contractor["jobber_generation"] = latest_snap["generation"]
+                    if latest_snap.get("jobber_token_expires_at") is not None:
+                        contractor["jobber_token_expires_at"] = latest_snap["jobber_token_expires_at"]
+                    else:
+                        contractor.pop("jobber_token_expires_at", None)
+                    return winner_token
+            logger.warning("Jobber token refresh actively locked by concurrent lease")
+            return None
+        except Exception:
+            logger.error("Failed to acquire Jobber refresh lease")
             return None
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    JOBBER_TOKEN_URL,
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh_token,
-                        "client_id": settings.jobber_client_id,
-                        "client_secret": settings.jobber_client_secret,
-                    },
-                    timeout=10.0,
-                )
-            if response.status_code != 200:
-                logger.error(f"Jobber token refresh failed: {response.status_code} {response.text[:200]}")
-                return None
-
-            tokens = response.json()
-            access_token = tokens.get("access_token", "")
-            new_refresh_token = tokens.get("refresh_token", refresh_token)
-            if not access_token:
-                logger.error("Jobber token refresh returned no access token")
-                return None
-
-            updates = {
-                "jobber_access_token": access_token,
-                "jobber_refresh_token": new_refresh_token,
-                "jobber_token_refreshed_at": time.time(),
-            }
-            if tokens.get("expires_at"):
-                updates["jobber_token_expires_at"] = tokens["expires_at"]
-
-            contractor.update(updates)
             try:
-                await _write_jobber_tokens(contractor_id, updates)
-            except Exception as e:
-                logger.error(f"Jobber token persistence failed after refresh: {e}")
-            logger.info(f"Jobber token refreshed for contractor {contractor_id[:8] or 'unknown'}")
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        JOBBER_TOKEN_URL,
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": snapshot["jobber_refresh_token"],
+                            "client_id": settings.jobber_client_id,
+                            "client_secret": settings.jobber_client_secret,
+                        },
+                        timeout=10.0,
+                    )
+            except Exception:
+                logger.error(
+                    "Jobber token refresh failed: provider=jobber operation=refresh result=error"
+                )
+                return None
+
+            if response.status_code != 200:
+                logger.error(
+                    "Jobber token refresh failed: provider=jobber operation=refresh status_code=%s",
+                    response.status_code,
+                )
+                return None
+
+            try:
+                tokens = response.json()
+            except Exception:
+                logger.error(
+                    "Jobber token refresh invalid payload: provider=jobber operation=refresh result=invalid_json"
+                )
+                return None
+
+            if type(tokens) is not dict:
+                logger.error(
+                    "Jobber token refresh invalid payload: provider=jobber operation=refresh result=invalid_type"
+                )
+                return None
+
+            access_token = tokens.get("access_token")
+            if not isinstance(access_token, str) or not access_token:
+                logger.error(
+                    "Jobber token refresh returned no access token: provider=jobber operation=refresh"
+                )
+                return None
+
+            try:
+                validate_token_string(access_token, name="access_token")
+            except Exception:
+                logger.error("Jobber token refresh returned invalid access token")
+                return None
+
+            new_refresh_token = tokens.get("refresh_token")
+            if not isinstance(new_refresh_token, str) or not new_refresh_token:
+                logger.error(
+                    "Jobber token refresh returned no new refresh token: provider=jobber operation=refresh"
+                )
+                return None
+
+            try:
+                validate_token_string(new_refresh_token, name="refresh_token")
+            except Exception:
+                logger.error("Jobber token refresh returned invalid new refresh token")
+                return None
+
+            expires_in = tokens.get("expires_in")
+            expires_at = tokens.get("expires_at")
+            token_expires_at = None
+            if expires_at is not None:
+                try:
+                    token_expires_at = validate_token_expires_at(expires_at)
+                except Exception:
+                    logger.error("Jobber token refresh invalid expires_at: provider=jobber")
+                    return None
+            elif expires_in is not None:
+                try:
+                    exp_duration = validate_token_expires_in(expires_in)
+                    token_expires_at = time.time() + exp_duration if exp_duration is not None else None
+                except Exception:
+                    logger.error("Jobber token refresh invalid expires_in: provider=jobber")
+                    return None
+
+            # Persist first with durable CAS; do NOT mutate contractor if persistence fails
+            try:
+                updates, next_gen = await persist_refreshed_tokens_cas(
+                    contractor_id=valid_cid,
+                    provider="jobber",
+                    new_access_token=access_token,
+                    new_refresh_token=new_refresh_token,
+                    observed_generation=snapshot["generation"],
+                    observed_access_raw=snapshot["access_token_raw"],
+                    observed_refresh_raw=snapshot["refresh_token_raw"],
+                    expires_at=token_expires_at,
+                    claim_id=claim_id,
+                )
+                claim_id = None  # Cleared by atomic CAS commit!
+            except Exception:
+                logger.error(
+                    "Jobber token persistence failed after refresh: provider=jobber operation=persist result=error"
+                )
+                return None
+
+            # Mutate in-memory contractor only on verified durable success
+            contractor["jobber_access_token"] = updates["jobber_access_token"]
+            contractor["jobber_refresh_token"] = updates["jobber_refresh_token"]
+            contractor["jobber_generation"] = next_gen
+            from google.cloud.firestore_v1 import DELETE_FIELD
+            if "jobber_token_expires_at" in updates and updates["jobber_token_expires_at"] is not DELETE_FIELD:
+                contractor["jobber_token_expires_at"] = updates["jobber_token_expires_at"]
+            else:
+                contractor.pop("jobber_token_expires_at", None)
+
+            logger.info("Jobber token refreshed for contractor %s", valid_cid[:8] or "unknown")
             return access_token
-        except Exception as e:
-            logger.error(f"Jobber token refresh error: {e}")
-            return None
+        finally:
+            if claim_id is not None:
+                await release_refresh_claim_cas(
+                    contractor_id=valid_cid,
+                    provider="jobber",
+                    claim_id=claim_id,
+                )
 
 
 async def _resolve_access_token(auth: str | dict) -> str:
-    if isinstance(auth, dict):
-        access_token = auth.get("jobber_access_token", "")
-        if access_token and _token_expires_soon(access_token):
-            refreshed = await refresh_access_token(auth)
-            if refreshed:
-                return refreshed
-        return access_token
-    return auth
+    if not isinstance(auth, dict):
+        return ""
+
+    from app.services.integration_tokens import resolve_usable_token
+
+    access_token = resolve_usable_token(
+        auth,
+        provider="jobber",
+        token_kind="access",
+    ) or ""
+
+    if access_token and _token_expires_soon(access_token):
+        refreshed = await refresh_access_token(auth)
+        if refreshed:
+            return refreshed
+    return access_token
 
 
 async def _graphql_request(access_token: str, query: str, variables: dict = None) -> Optional[dict]:
@@ -183,6 +439,9 @@ async def _graphql_request(access_token: str, query: str, variables: dict = None
 
 async def _graphql_request_with_refresh(auth: str | dict, query: str, variables: dict = None) -> Optional[dict]:
     """Execute a Jobber request, refreshing contractor tokens once on 401."""
+    if not isinstance(auth, dict):
+        return None
+
     access_token = await _resolve_access_token(auth)
     if not access_token:
         return None
@@ -190,9 +449,7 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
     try:
         return await _graphql_request(access_token, query, variables)
     except JobberAuthError:
-        if not isinstance(auth, dict):
-            logger.error("Jobber API error: 401")
-            return None
+        pass
 
     refreshed = await refresh_access_token(auth, force=True)
     if not refreshed:

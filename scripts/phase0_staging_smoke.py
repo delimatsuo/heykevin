@@ -170,17 +170,41 @@ def seed_contractor(db: firestore.Client, contractor_id: str) -> str:
     }
     doc_ref.set(data, merge=True)
 
-    # Reset safety gates to the default-off release posture on every run.
+    # Reset safety gates and integration lifecycles to default-off release posture on every run.
     doc_ref.update(
         {
             "automation_approvals": firestore.DELETE_FIELD,
             "gated_actions": firestore.DELETE_FIELD,
-            "google_calendar_access_token": firestore.DELETE_FIELD,
-            "google_calendar_refresh_token": firestore.DELETE_FIELD,
             "integration_write_status": firestore.DELETE_FIELD,
+            "sms_compliance_status": firestore.DELETE_FIELD,
+            # Jobber lifecycle reset
+            "jobber_connected": firestore.DELETE_FIELD,
+            "jobber_generation": firestore.DELETE_FIELD,
             "jobber_access_token": firestore.DELETE_FIELD,
             "jobber_refresh_token": firestore.DELETE_FIELD,
-            "sms_compliance_status": firestore.DELETE_FIELD,
+            "jobber_connected_at": firestore.DELETE_FIELD,
+            "jobber_disconnected_at": firestore.DELETE_FIELD,
+            "jobber_token_refreshed_at": firestore.DELETE_FIELD,
+            "jobber_token_expires_at": firestore.DELETE_FIELD,
+            "jobber_refresh_claim_id": firestore.DELETE_FIELD,
+            "jobber_refresh_claim_expires_at": firestore.DELETE_FIELD,
+            "jobber_refresh_claim_generation": firestore.DELETE_FIELD,
+            "jobber_lead_capture_enabled": firestore.DELETE_FIELD,
+            "jobber_token_envelope_required": firestore.DELETE_FIELD,
+            # Google Calendar lifecycle reset
+            "google_calendar_connected": firestore.DELETE_FIELD,
+            "google_calendar_generation": firestore.DELETE_FIELD,
+            "google_calendar_access_token": firestore.DELETE_FIELD,
+            "google_calendar_refresh_token": firestore.DELETE_FIELD,
+            "google_calendar_scope": firestore.DELETE_FIELD,
+            "google_calendar_connected_at": firestore.DELETE_FIELD,
+            "google_calendar_disconnected_at": firestore.DELETE_FIELD,
+            "google_calendar_token_refreshed_at": firestore.DELETE_FIELD,
+            "google_calendar_token_expires_at": firestore.DELETE_FIELD,
+            "google_calendar_refresh_claim_id": firestore.DELETE_FIELD,
+            "google_calendar_refresh_claim_expires_at": firestore.DELETE_FIELD,
+            "google_calendar_refresh_claim_generation": firestore.DELETE_FIELD,
+            "google_calendar_token_envelope_required": firestore.DELETE_FIELD,
         }
     )
     return raw_token

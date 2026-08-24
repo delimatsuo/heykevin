@@ -46,6 +46,8 @@ SECRET_CONTRACTOR_FIELDS = {
     "contractor_token",
     "jobber_access_token",
     "jobber_refresh_token",
+    "google_calendar_access_token",
+    "google_calendar_refresh_token",
     "token_hash",
 }
 
@@ -121,8 +123,12 @@ def _sanitize_contractor_profile(contractor_id: str, data: dict) -> dict:
     return sanitized
 
 
-def _jobber_summary(data: dict) -> dict:
-    connected = bool(data.get("jobber_access_token"))
+def _jobber_summary(data: dict, *, contractor_id: str = "") -> dict:
+    from app.services.integration_tokens import has_usable_token
+
+    effective_id = contractor_id or data.get("contractor_id", "")
+    connected = has_usable_token(data, "jobber", contractor_id=effective_id)
+
     return {
         "connected": connected,
         "connected_at": data.get("jobber_connected_at"),
@@ -434,7 +440,7 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
         return {
             "contractor": contractor,
             "device": device,
-            "jobber": _jobber_summary(contractor_data),
+            "jobber": _jobber_summary(contractor_data, contractor_id=contractor_id),
             "recent_calls": recent_calls,
             "diagnostics": diagnose_contractor(contractor, device, recent_calls),
             "audit_events": [],

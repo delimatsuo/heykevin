@@ -90,6 +90,7 @@ async def test_google_check_availability_distinguishes_provider_failure_from_no_
     pipeline = _pipeline({
         "contractor_id": "contractor-1",
         "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
     })
 
     result = json.loads(await pipeline._execute_tool("check_availability", {"days_ahead": 5}))

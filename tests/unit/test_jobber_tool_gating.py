@@ -22,7 +22,11 @@ def test_voice_pipeline_jobber_tools_do_not_expose_booking():
 
 def test_gemini_pipeline_jobber_tools_do_not_expose_booking():
     pipeline = GeminiPipeline.__new__(GeminiPipeline)
-    pipeline._contractor_config = {"jobber_access_token": "jobber-token"}
+    pipeline._contractor_config = {
+        "contractor_id": "c1",
+        "jobber_access_token": "jobber-token",
+        "jobber_refresh_token": "jobber-refresh",
+    }
 
     tools = pipeline._build_gemini_tools()
     declarations = tools[0]["function_declarations"]

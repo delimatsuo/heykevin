@@ -1,3 +1,4 @@
+
 """Google Calendar client for contractors without Jobber.
 
 Provides free/busy lookup and event creation via Google Calendar API.
@@ -41,6 +42,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
+from typing import Optional
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -93,39 +95,89 @@ class GoogleCalendarUnavailableError(Exception):
     """
 
 
-async def _write_google_calendar_tokens(contractor_id: str, updates: dict):
-    """Persist refreshed Google Calendar tokens on the contractor document."""
-    if not contractor_id:
-        return
-    from app.db.firestore_client import get_firestore_client
+async def _read_google_calendar_tokens(contractor_id: str) -> Optional[dict]:
+    """Read latest stored Google Calendar tokens, decrypting envelopes to memory strings.
 
-    db = get_firestore_client()
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: db.collection("contractors").document(contractor_id).update(updates),
+    Returns None if reading fails, document is missing, provider is disconnected,
+    generation is malformed, or stored refresh token is corrupt/missing.
+    """
+    from app.services.integration_tokens import (
+        MAX_KEY_VERSION,
+        determine_write_format,
+        resolve_usable_token_pair,
+        validate_token_expires_at,
+        validate_token_string,
     )
 
+    try:
+        valid_cid = validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return None
+    if valid_cid is None:
+        return None
 
-async def _read_google_calendar_tokens(contractor_id: str) -> dict:
-    """Read latest stored Google Calendar tokens to avoid racing concurrent refreshes."""
-    if not contractor_id:
-        return {}
-    from app.db.firestore_client import get_firestore_client
+    try:
+        from app.db.firestore_client import get_firestore_client
 
-    db = get_firestore_client()
-    loop = asyncio.get_event_loop()
-    doc = await loop.run_in_executor(
-        None,
-        lambda: db.collection("contractors").document(contractor_id).get(),
+        db = get_firestore_client()
+        if db is None:
+            return None
+        loop = asyncio.get_event_loop()
+        doc = await loop.run_in_executor(
+            None,
+            lambda: db.collection("contractors").document(valid_cid).get(),
+        )
+        if not getattr(doc, "exists", False):
+            return None
+        data = doc.to_dict() or {}
+    except Exception:
+        return None
+
+    cur_gen_raw = data.get("google_calendar_generation")
+    if cur_gen_raw is None:
+        cur_gen = 0
+    elif type(cur_gen_raw) is int and type(cur_gen_raw) is not bool and 0 <= cur_gen_raw <= MAX_KEY_VERSION:
+        cur_gen = cur_gen_raw
+    else:
+        return None
+
+    access_token, refresh_token = resolve_usable_token_pair(
+        data,
+        provider="google_calendar",
+        contractor_id=valid_cid,
     )
-    if not doc.exists:
-        return {}
-    data = doc.to_dict() or {}
+    if not access_token or not refresh_token:
+        return None
+
+    raw_access = data.get("google_calendar_access_token")
+    raw_refresh = data.get("google_calendar_refresh_token")
+
+    try:
+        determine_write_format(
+            contractor_id=valid_cid,
+            provider="google_calendar",
+            stored_access=raw_access,
+            stored_refresh=raw_refresh,
+            envelope_required=data.get("google_calendar_token_envelope_required"),
+        )
+    except Exception:
+        return None
+
+    exp = data.get("google_calendar_token_expires_at")
+    if exp is not None:
+        try:
+            validate_token_expires_at(exp)
+        except Exception:
+            return None
+
     return {
-        "google_calendar_access_token": data.get("google_calendar_access_token", ""),
-        "google_calendar_refresh_token": data.get("google_calendar_refresh_token", ""),
-        "google_calendar_token_expires_at": data.get("google_calendar_token_expires_at"),
+        "generation": cur_gen,
+        "access_token_raw": raw_access,
+        "refresh_token_raw": raw_refresh,
+        "google_calendar_access_token": access_token,
+        "google_calendar_refresh_token": refresh_token,
+        "google_calendar_token_expires_at": exp,
+        "connected": True,
     }
 
 
@@ -138,7 +190,7 @@ def _token_expires_soon(contractor: dict, leeway_seconds: int = 120) -> bool:
     401-retry path is what actually protects those contractors.
     """
     expires_at = contractor.get("google_calendar_token_expires_at")
-    return isinstance(expires_at, (int, float)) and expires_at <= _epoch_now() + leeway_seconds
+    return (type(expires_at) in (int, float) and type(expires_at) is not bool) and expires_at <= _epoch_now() + leeway_seconds
 
 
 def _refresh_lock_key(contractor: dict) -> str:
@@ -152,84 +204,252 @@ def _refresh_lock_key(contractor: dict) -> str:
 
 
 async def refresh_access_token(contractor: dict, *, force: bool = False) -> str | None:
-    """Refresh and persist Google Calendar OAuth tokens for a contractor.
-
-    Mutates `contractor` in place with the refreshed values (mirrors
-    app/services/jobber.py::refresh_access_token) so callers holding the
-    same dict see the fresh token without re-reading Firestore.
-    """
+    """Refresh and persist Google Calendar OAuth tokens for a contractor with durable CAS."""
     from app.config import settings
+    from app.services.integration_token_mutations import (
+        IntegrationTokenLeaseError,
+        acquire_refresh_claim_cas,
+        persist_refreshed_tokens_cas,
+        release_refresh_claim_cas,
+    )
+    from app.services.integration_tokens import (
+        validate_token_expires_at,
+        validate_token_expires_in,
+        validate_token_string,
+    )
 
-    lock = _REFRESH_LOCKS.setdefault(_refresh_lock_key(contractor), asyncio.Lock())
+    if type(contractor) is not dict:
+        return None
+
+    if "contractor_id" in contractor:
+        raw_id = contractor.get("contractor_id")
+    elif "id" in contractor:
+        raw_id = contractor.get("id")
+    else:
+        raw_id = None
+
+    try:
+        valid_cid = validate_token_string(raw_id, name="contractor_id")
+    except Exception:
+        return None
+    if valid_cid is None:
+        return None
+
+    if not settings.google_calendar_client_id:
+        return None
+
+    lock = _REFRESH_LOCKS.setdefault(valid_cid, asyncio.Lock())
 
     async with lock:
-        stale_token = contractor.get("google_calendar_access_token", "")
-        contractor_id = contractor.get("contractor_id", "")
-        latest = await _read_google_calendar_tokens(contractor_id)
-        if latest:
-            contractor.update({k: v for k, v in latest.items() if v})
+        snapshot = await _read_google_calendar_tokens(valid_cid)
+        if snapshot is None:
+            logger.error(
+                "Google Calendar token refresh aborted: durable snapshot invalid or unavailable"
+            )
+            return None
 
-        current_token = contractor.get("google_calendar_access_token", "")
-        if current_token and current_token != stale_token and not _token_expires_soon(contractor):
-            return current_token
-        if current_token and not force and not _token_expires_soon(contractor):
+        current_token = snapshot.get("google_calendar_access_token")
+        snapshot_expires_at = snapshot.get("google_calendar_token_expires_at")
+
+        # If durable snapshot is already fresh (a concurrent winner refreshed and committed),
+        # hydrate contractor and return the fresh token without making a redundant provider call.
+        if (
+            current_token
+            and not force
+            and type(snapshot_expires_at) in (int, float)
+            and snapshot_expires_at > _epoch_now() + 120
+        ):
+            contractor["google_calendar_access_token"] = snapshot.get("access_token_raw")
+            contractor["google_calendar_refresh_token"] = snapshot.get("refresh_token_raw")
+            contractor["google_calendar_generation"] = snapshot.get("generation", 0)
+            if snapshot_expires_at is not None:
+                contractor["google_calendar_token_expires_at"] = snapshot_expires_at
+            else:
+                contractor.pop("google_calendar_token_expires_at", None)
             return current_token
 
-        refresh_token = contractor.get("google_calendar_refresh_token", "")
-        if not refresh_token or not settings.google_calendar_client_id:
+        token_is_expiring = (
+            (type(snapshot_expires_at) in (int, float) and snapshot_expires_at <= _epoch_now() + 120)
+            or _token_expires_soon(contractor)
+        )
+        if current_token and not force and not token_is_expiring:
+            # Verified winner already committed; hydrate contractor and return
+            contractor["google_calendar_access_token"] = snapshot.get("access_token_raw")
+            contractor["google_calendar_refresh_token"] = snapshot.get("refresh_token_raw")
+            contractor["google_calendar_generation"] = snapshot["generation"]
+            if snapshot_expires_at is not None:
+                contractor["google_calendar_token_expires_at"] = snapshot_expires_at
+            else:
+                contractor.pop("google_calendar_token_expires_at", None)
+            return current_token
+
+        # Acquire multi-instance cross-process refresh lease before provider HTTP call
+        claim_id: Optional[str] = None
+        try:
+            claim_id, _ = await acquire_refresh_claim_cas(
+                contractor_id=valid_cid,
+                provider="google_calendar",
+                observed_generation=snapshot["generation"],
+                observed_access_raw=snapshot["access_token_raw"],
+                observed_refresh_raw=snapshot["refresh_token_raw"],
+            )
+        except IntegrationTokenLeaseError:
+            # Contender instance: another worker is actively refreshing this contractor.
+            # Re-read durable store: if winner already advanced generation, reload winner's tokens!
+            latest_snap = await _read_google_calendar_tokens(valid_cid)
+            if latest_snap and latest_snap["generation"] > snapshot["generation"]:
+                winner_token = latest_snap.get("google_calendar_access_token")
+                if winner_token:
+                    contractor["google_calendar_access_token"] = latest_snap.get("access_token_raw")
+                    contractor["google_calendar_refresh_token"] = latest_snap.get("refresh_token_raw")
+                    contractor["google_calendar_generation"] = latest_snap["generation"]
+                    if latest_snap.get("google_calendar_token_expires_at") is not None:
+                        contractor["google_calendar_token_expires_at"] = latest_snap["google_calendar_token_expires_at"]
+                    else:
+                        contractor.pop("google_calendar_token_expires_at", None)
+                    return winner_token
+            logger.warning("Google Calendar token refresh actively locked by concurrent lease")
+            return None
+        except Exception:
+            logger.error("Failed to acquire Google Calendar refresh lease")
             return None
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    TOKEN_URL,
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh_token,
-                        "client_id": settings.google_calendar_client_id,
-                        "client_secret": settings.google_calendar_client_secret,
-                    },
-                    timeout=10.0,
-                )
-            if resp.status_code != 200:
-                logger.error(f"Google token refresh failed: status_code={resp.status_code}")
-                return None
-
-            tokens = resp.json()
-            access_token = tokens.get("access_token", "")
-            if not access_token:
-                logger.error("Google token refresh returned no access token")
-                return None
-            # Google typically omits refresh_token on refresh (the original stays valid).
-            new_refresh_token = tokens.get("refresh_token") or refresh_token
-            expires_in = tokens.get("expires_in", 3300)
-
-            updates = {
-                "google_calendar_access_token": access_token,
-                "google_calendar_refresh_token": new_refresh_token,
-                "google_calendar_token_expires_at": _epoch_now() + expires_in,
-                "google_calendar_token_refreshed_at": _epoch_now(),
-            }
-
-            contractor.update(updates)
             try:
-                await _write_google_calendar_tokens(contractor_id, updates)
-            except Exception as e:
-                logger.error(f"Google Calendar token persistence failed after refresh: {e}")
-            logger.info(f"Google Calendar token refreshed for contractor {contractor_id[:8] or 'unknown'}")
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        TOKEN_URL,
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": snapshot["google_calendar_refresh_token"],
+                            "client_id": settings.google_calendar_client_id,
+                            "client_secret": settings.google_calendar_client_secret,
+                        },
+                        timeout=10.0,
+                    )
+            except Exception:
+                logger.error(
+                    "Google token refresh failed: provider=google_calendar operation=refresh result=error"
+                )
+                return None
+
+            if resp.status_code != 200:
+                logger.error(
+                    "Google token refresh failed: provider=google_calendar operation=refresh status_code=%s",
+                    resp.status_code,
+                )
+                return None
+
+            try:
+                tokens = resp.json()
+            except Exception:
+                logger.error(
+                    "Google token refresh invalid payload: provider=google_calendar operation=refresh result=invalid_json"
+                )
+                return None
+
+            if type(tokens) is not dict:
+                logger.error(
+                    "Google token refresh invalid payload: provider=google_calendar operation=refresh result=invalid_type"
+                )
+                return None
+
+            access_token = tokens.get("access_token")
+            if not isinstance(access_token, str) or not access_token:
+                logger.error(
+                    "Google token refresh returned no access token: provider=google_calendar operation=refresh"
+                )
+                return None
+
+            try:
+                validate_token_string(access_token, name="access_token")
+            except Exception:
+                logger.error("Google token refresh returned invalid access token")
+                return None
+
+            if "refresh_token" in tokens:
+                new_refresh_token = tokens["refresh_token"]
+                try:
+                    validate_token_string(new_refresh_token, name="refresh_token")
+                    effective_refresh_token = new_refresh_token
+                except Exception:
+                    logger.error("Google token refresh returned malformed refresh_token")
+                    return None
+            else:
+                effective_refresh_token = snapshot["google_calendar_refresh_token"]
+
+            token_expires_at = None
+            if "expires_in" in tokens and tokens["expires_in"] is not None:
+                try:
+                    exp_duration = validate_token_expires_in(tokens["expires_in"])
+                    if exp_duration is not None:
+                        token_expires_at = _epoch_now() + exp_duration
+                except Exception:
+                    logger.error("Google token refresh invalid expires_in: provider=google_calendar")
+                    return None
+            elif "expires_at" in tokens and tokens["expires_at"] is not None:
+                try:
+                    token_expires_at = validate_token_expires_at(tokens["expires_at"])
+                except Exception:
+                    logger.error("Google token refresh invalid expires_at: provider=google_calendar")
+                    return None
+
+            try:
+                updates, next_gen = await persist_refreshed_tokens_cas(
+                    contractor_id=valid_cid,
+                    provider="google_calendar",
+                    new_access_token=access_token,
+                    new_refresh_token=effective_refresh_token,
+                    observed_generation=snapshot["generation"],
+                    observed_access_raw=snapshot["access_token_raw"],
+                    observed_refresh_raw=snapshot["refresh_token_raw"],
+                    expires_at=token_expires_at,
+                    claim_id=claim_id,
+                )
+                claim_id = None  # Cleared by atomic CAS commit!
+            except Exception:
+                logger.error(
+                    "Google Calendar token persistence failed after refresh: provider=google_calendar operation=persist result=error"
+                )
+                return None
+
+            # Mutate in-memory contractor only on verified durable success
+            contractor["google_calendar_access_token"] = updates["google_calendar_access_token"]
+            contractor["google_calendar_refresh_token"] = updates["google_calendar_refresh_token"]
+            contractor["google_calendar_generation"] = next_gen
+            from google.cloud.firestore_v1 import DELETE_FIELD
+            if "google_calendar_token_expires_at" in updates and updates["google_calendar_token_expires_at"] is not DELETE_FIELD:
+                contractor["google_calendar_token_expires_at"] = updates["google_calendar_token_expires_at"]
+            else:
+                contractor.pop("google_calendar_token_expires_at", None)
+
+            logger.info("Google Calendar token refreshed for contractor %s", valid_cid[:8] or "unknown")
             return access_token
-        except Exception as e:
-            logger.error(f"Google token refresh error: {e}")
-            return None
+        finally:
+            if claim_id is not None:
+                await release_refresh_claim_cas(
+                    contractor_id=valid_cid,
+                    provider="google_calendar",
+                    claim_id=claim_id,
+                )
 
 
 async def _resolve_access_token(contractor: dict) -> str:
-    access_token = contractor.get("google_calendar_access_token", "")
-    if access_token and _token_expires_soon(contractor):
-        refreshed = await refresh_access_token(contractor)
-        if refreshed:
-            return refreshed
-    return access_token
+    if isinstance(contractor, dict):
+        from app.services.integration_tokens import resolve_usable_token
+
+        access_token = resolve_usable_token(
+            contractor,
+            provider="google_calendar",
+            token_kind="access",
+        ) or ""
+
+        if access_token and _token_expires_soon(contractor):
+            refreshed = await refresh_access_token(contractor)
+            if refreshed:
+                return refreshed
+        return access_token
+    return ""
 
 
 async def _with_token_refresh(contractor: dict, call):

@@ -21,7 +21,6 @@ import logging
 import os
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 
 import pytest
@@ -33,6 +32,19 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("USER_PHONE", "+15555550123")
 
 from app.services import calendar
+
+
+@pytest.fixture(autouse=True)
+def _configure_keys(monkeypatch):
+    import base64
+
+    from app.config import settings
+
+    dummy_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setattr(
+        settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}'
+    )
+    monkeypatch.setattr(settings, "integration_token_active_key_version", "1")
 
 
 def test_packaged_tzdata_resolves_iana_zone_without_system_database():
@@ -129,7 +141,9 @@ async def test_availability_uses_contractor_timezone_hours_and_dst_offset(monkey
         ],
     )
     contractor = {
+        "contractor_id": "c1",
         "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
         "timezone": "America/New_York",
         "business_hours_start": "08:30",
         "business_hours_end": "11:30",
@@ -168,7 +182,11 @@ async def test_missing_schedule_falls_back_to_default_utc_business_hours(monkeyp
     fixed_now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(calendar, "_utc_now", lambda: fixed_now)
     calls = _patch_client(monkeypatch, [_FakeResponse(200, {"calendars": {"primary": {"busy": []}}})])
-    contractor = {"google_calendar_access_token": "access-token"}
+    contractor = {
+        "contractor_id": "c1",
+        "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
+    }
 
     slots = await calendar.get_available_slots(contractor, days_ahead=1)
 
@@ -188,7 +206,9 @@ async def test_partial_schedule_also_falls_back_to_defaults(monkeypatch):
     """
     calls = _patch_client(monkeypatch, [_FakeResponse(200, {"calendars": {"primary": {"busy": []}}})])
     contractor = {
+        "contractor_id": "c1",
         "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
         "timezone": "America/New_York",
         # business_hours_start / business_hours_end intentionally absent
     }
@@ -198,8 +218,160 @@ async def test_partial_schedule_also_falls_back_to_defaults(monkeypatch):
     assert len(calls) == 1
 
 
+class _FakeDocRef:
+    def __init__(self, data=None):
+        self.data = dict(data) if data is not None else None
+        self.deleted = False
+        self.updates = []
+
+    def get(self, *args, **kwargs):
+        class _Snap:
+            def __init__(self, d, deleted):
+                self._d = d
+                self.exists = (d is not None) and (not deleted)
+
+            def to_dict(self):
+                return dict(self._d) if self.exists else {}
+
+        return _Snap(self.data, self.deleted)
+
+    def update(self, updates, *args, **kwargs):
+        if self.data is None:
+            self.data = {}
+        self.updates.append(dict(updates))
+        for k, v in updates.items():
+            if str(type(v).__name__) == "Sentinel" or "DELETE" in str(v):
+                self.data.pop(k, None)
+            else:
+                self.data[k] = v
+
+    def delete(self, *args, **kwargs):
+        self.deleted = True
+        self.data = None
+
+    def set(self, data, *args, **kwargs):
+        self.data = dict(data)
+        self.deleted = False
+
+
+class _FakeTransaction:
+    def __init__(self, db):
+        self._db = db
+        self._staged_updates = []
+        self._staged_sets = []
+        self._staged_deletes = []
+        self.committed = False
+        self._read_only = False
+        self._id = b"fake-tx-id"
+        self._max_attempts = 5
+        self.in_progress = True
+
+    def get(self, doc_ref):
+        return doc_ref.get()
+
+    def update(self, doc_ref, updates):
+        self._staged_updates.append((doc_ref, dict(updates)))
+
+    def delete(self, doc_ref):
+        self._staged_deletes.append(doc_ref)
+
+    def set(self, doc_ref, data):
+        self._staged_sets.append((doc_ref, dict(data)))
+
+    def commit(self):
+        for doc_ref, data in self._staged_sets:
+            doc_ref.set(data)
+        for doc_ref, updates in self._staged_updates:
+            doc_ref.update(updates)
+        for doc_ref in self._staged_deletes:
+            doc_ref.delete()
+        self.committed = True
+
+    def _begin(self, *args, **kwargs):
+        pass
+
+    def _clean_up(self):
+        pass
+
+    def _rollback(self):
+        self._staged_updates.clear()
+        self._staged_sets.clear()
+        self._staged_deletes.clear()
+
+    def _commit(self):
+        self.commit()
+        return []
+
+
+class _FakeFirestore:
+    def __init__(self, collections=None):
+        self.collections = collections or {}
+        self.last_transaction = None
+
+    def collection(self, name):
+        class _Coll:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def document(self, doc_id):
+                return self.docs.setdefault(doc_id, _FakeDocRef({"contractor_id": doc_id, "active": True}))
+
+        return _Coll(self.collections.setdefault(name, {}))
+
+    def transaction(self):
+        tx = _FakeTransaction(self)
+        self.last_transaction = tx
+        return tx
+
+
+@pytest.fixture(autouse=True)
+def _setup_firestore(monkeypatch):
+    import base64
+    import app.db.firestore_client as firestore_module
+    import app.services.integration_token_mutations as mutations_module
+    from app.config import settings
+
+    dummy_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setattr(
+        settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}'
+    )
+    monkeypatch.setattr(settings, "integration_token_active_key_version", "1")
+
+    db = _FakeFirestore({
+        "contractors": {
+            "contractor-1": _FakeDocRef({
+                "contractor_id": "contractor-1",
+                "active": True,
+                "google_calendar_access_token": "old-access",
+                "google_calendar_refresh_token": "refresh-token",
+                "google_calendar_generation": 0,
+                "google_calendar_connected": True,
+            }),
+            "contractor-2": _FakeDocRef({
+                "contractor_id": "contractor-2",
+                "active": True,
+                "google_calendar_access_token": "old-access",
+                "google_calendar_refresh_token": "refresh-token",
+                "google_calendar_generation": 0,
+                "google_calendar_connected": True,
+            }),
+            "contractor-concurrent": _FakeDocRef({
+                "contractor_id": "contractor-concurrent",
+                "active": True,
+                "google_calendar_access_token": "old-access",
+                "google_calendar_refresh_token": "refresh-token",
+                "google_calendar_generation": 0,
+                "google_calendar_connected": True,
+            }),
+        }
+    })
+    monkeypatch.setattr(firestore_module, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(mutations_module, "get_firestore_client", lambda: db)
+    return db
+
+
 @pytest.mark.asyncio
-async def test_expiring_access_token_refreshes_and_persists_before_freebusy(monkeypatch):
+async def test_expiring_access_token_refreshes_and_persists_before_freebusy(monkeypatch, _setup_firestore):
     from app import config
 
     monkeypatch.setattr(config.settings, "google_calendar_client_id", "client-id")
@@ -212,16 +384,6 @@ async def test_expiring_access_token_refreshes_and_persists_before_freebusy(monk
             _FakeResponse(200, {"calendars": {"primary": {"busy": []}}}),
         ],
     )
-    persisted = []
-
-    async def fake_read(_contractor_id):
-        return {}
-
-    async def fake_write(contractor_id, updates):
-        persisted.append((contractor_id, updates))
-
-    monkeypatch.setattr(calendar, "_read_google_calendar_tokens", fake_read)
-    monkeypatch.setattr(calendar, "_write_google_calendar_tokens", fake_write)
     contractor = {
         "contractor_id": "contractor-1",
         "google_calendar_access_token": "old-access",
@@ -236,23 +398,16 @@ async def test_expiring_access_token_refreshes_and_persists_before_freebusy(monk
     assert calls[1][1]["headers"]["Authorization"] == "Bearer new-access"
     assert contractor["google_calendar_access_token"] == "new-access"
     assert contractor["google_calendar_token_expires_at"] == 4_600.0
-    assert persisted == [
-        (
-            "contractor-1",
-            {
-                "google_calendar_access_token": "new-access",
-                "google_calendar_refresh_token": "refresh-token",
-                "google_calendar_token_expires_at": 4_600.0,
-                "google_calendar_token_refreshed_at": 1_000.0,
-            },
-        )
-    ]
+    doc = _setup_firestore.collection("contractors").document("contractor-1")
+    assert doc.data["google_calendar_generation"] == 1
+    assert doc.data["google_calendar_token_expires_at"] == 4_600.0
 
 
 @pytest.mark.asyncio
-async def test_concurrent_expiry_refreshes_once_per_contractor(monkeypatch):
-    from app import config
+async def test_concurrent_expiry_refreshes_once_per_contractor(monkeypatch, _setup_firestore):
     import asyncio
+
+    from app import config
 
     monkeypatch.setattr(config.settings, "google_calendar_client_id", "client-id")
     monkeypatch.setattr(config.settings, "google_calendar_client_secret", "client-secret")
@@ -267,14 +422,6 @@ async def test_concurrent_expiry_refreshes_once_per_contractor(monkeypatch):
         "google_calendar_token_expires_at": 1_030.0,
     }
 
-    async def fake_read(_contractor_id):
-        return dict(stored)
-
-    async def fake_write(_contractor_id, updates):
-        stored.update(updates)
-
-    monkeypatch.setattr(calendar, "_read_google_calendar_tokens", fake_read)
-    monkeypatch.setattr(calendar, "_write_google_calendar_tokens", fake_write)
     first = {"contractor_id": "contractor-concurrent", **stored}
     second = {"contractor_id": "contractor-concurrent", **stored}
 
@@ -288,7 +435,7 @@ async def test_concurrent_expiry_refreshes_once_per_contractor(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_freebusy_401_refreshes_once_and_omits_provider_payload_from_logs(monkeypatch, caplog):
+async def test_freebusy_401_refreshes_once_and_omits_provider_payload_from_logs(monkeypatch, caplog, _setup_firestore):
     from app import config
 
     sensitive_payload = "private-provider-detail-do-not-log"
@@ -303,8 +450,6 @@ async def test_freebusy_401_refreshes_once_and_omits_provider_payload_from_logs(
             _FakeResponse(200, {"calendars": {"primary": {"busy": []}}}),
         ],
     )
-    monkeypatch.setattr(calendar, "_read_google_calendar_tokens", lambda cid: _noop_async())
-    monkeypatch.setattr(calendar, "_write_google_calendar_tokens", lambda cid, updates: _noop_async())
     contractor = {
         "contractor_id": "contractor-2",
         "google_calendar_access_token": "old-access",
@@ -324,7 +469,11 @@ async def test_freebusy_401_refreshes_once_and_omits_provider_payload_from_logs(
 async def test_freebusy_error_logging_uses_status_only(monkeypatch, caplog):
     sensitive_payload = "private-calendar-response-do-not-log"
     _patch_client(monkeypatch, [_FakeResponse(403, {}, text=sensitive_payload)])
-    contractor = {"google_calendar_access_token": "access-token"}
+    contractor = {
+        "contractor_id": "c1",
+        "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
+    }
 
     with caplog.at_level(logging.ERROR):
         with pytest.raises(calendar.GoogleCalendarUnavailableError):
@@ -354,7 +503,11 @@ async def test_freebusy_calendar_error_fails_closed_without_logging_payload(monk
             )
         ],
     )
-    contractor = {"google_calendar_access_token": "access-token"}
+    contractor = {
+        "contractor_id": "c1",
+        "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
+    }
 
     with caplog.at_level(logging.ERROR):
         with pytest.raises(calendar.GoogleCalendarUnavailableError):
@@ -369,7 +522,9 @@ async def test_freebusy_calendar_error_fails_closed_without_logging_payload(monk
 async def test_invalid_timezone_fails_closed_before_provider_request(monkeypatch, caplog):
     calls = _patch_client(monkeypatch, [_FakeResponse(200, {"calendars": {"primary": {"busy": []}}})])
     contractor = {
+        "contractor_id": "c1",
         "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
         "timezone": "Not/A-Timezone",
         "business_hours_start": "08:00",
         "business_hours_end": "17:00",
@@ -391,7 +546,9 @@ async def test_inverted_business_hours_fails_closed(monkeypatch):
     """
     calls = _patch_client(monkeypatch, [_FakeResponse(200, {"calendars": {"primary": {"busy": []}}})])
     contractor = {
+        "contractor_id": "c1",
         "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
         "timezone": "UTC",
         "business_hours_start": "17:00",
         "business_hours_end": "09:00",
@@ -418,10 +575,21 @@ async def test_token_refresh_failure_logging_uses_status_only(monkeypatch, caplo
     monkeypatch.setattr(config.settings, "google_calendar_client_id", "client-id")
     monkeypatch.setattr(config.settings, "google_calendar_client_secret", "client-secret")
     _patch_client(monkeypatch, [_FakeResponse(400, {}, text=sensitive_payload)])
-    monkeypatch.setattr(calendar, "_read_google_calendar_tokens", lambda cid: _noop_async())
-    monkeypatch.setattr(calendar, "_write_google_calendar_tokens", lambda cid, updates: _noop_async())
+    async def _valid_snapshot(cid):
+        return {
+            "google_calendar_access_token": "old-access",
+            "google_calendar_refresh_token": "refresh-token",
+            "google_calendar_generation": 0,
+            "google_calendar_connected": True,
+            "access_token_raw": "old-access",
+            "refresh_token_raw": "refresh-token",
+            "generation": 0,
+            "google_calendar_token_expires_at": 1000.0,
+        }
+    monkeypatch.setattr(calendar, "_read_google_calendar_tokens", _valid_snapshot)
     contractor = {
         "contractor_id": "contractor-1",
+        "google_calendar_access_token": "old-access",
         "google_calendar_refresh_token": "refresh-token",
     }
 
@@ -448,7 +616,9 @@ async def test_slots_span_the_whole_window_not_just_the_earliest_days(monkeypatc
         [_FakeResponse(200, {"calendars": {"primary": {"busy": []}}})],
     )
     contractor = {
+        "contractor_id": "c1",
         "google_calendar_access_token": "access-token",
+        "google_calendar_refresh_token": "refresh-token",
         "timezone": "America/New_York",
         "business_hours_start": "09:00",
         "business_hours_end": "17:00",

@@ -154,3 +154,28 @@ def test_main_reports_firestore_failure_without_traceback(capsys):
     assert "Audit failed while reading Firestore" in captured.err
     assert "Traceback" not in captured.err
     assert "abc123" not in captured.err
+
+
+def test_phase0_account_audit_counts_envelope_map_present_without_keys():
+    """Proves Phase 0 account audit metric is token field PRESENCE, not decryptability, counting envelopes without keys."""
+    audit = _load_audit_module()
+    envelope = {
+        "schema_version": 1,
+        "key_version": 99,
+        "iv": "dGVzdC1pdi0xMjM0",
+        "ciphertext": "dGVzdC1jaXBoZXJ0ZXh0",
+        "tag": "dGVzdC10YWctMTIzNA==",
+    }
+    summary = audit.summarize_contractors([
+        {
+            "jobber_access_token": envelope,
+            "google_calendar_access_token": {"schema_version": 1, "ciphertext": "abc"},
+            "twilio_number": "+15551234567",
+        },
+        {
+            "jobber_access_token": "",
+            "google_calendar_access_token": None,
+        },
+    ])
+    assert summary["jobber_connected"] == {"false": 1, "true": 1}
+    assert summary["google_calendar_connected"] == {"false": 1, "true": 1}

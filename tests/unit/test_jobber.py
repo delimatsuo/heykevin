@@ -23,6 +23,15 @@ def _jwt(exp: int) -> str:
     return f"{header}.{payload}."
 
 
+def _contractor_auth(cid: str = "test-contractor") -> dict:
+    return {
+        "contractor_id": cid,
+        "jobber_connected": True,
+        "jobber_access_token": "valid-jobber-access",
+        "jobber_refresh_token": "valid-jobber-refresh",
+    }
+
+
 class _FakeResponse:
     def __init__(self, status_code: int, body: dict):
         self.status_code = status_code
@@ -65,25 +74,170 @@ class _RaisingAsyncClient:
         raise self.exc
 
 
+class _FakeDocRef:
+    def __init__(self, data=None):
+        self.data = dict(data) if data is not None else None
+        self.deleted = False
+        self.updates = []
+
+    def get(self, *args, transaction=None, **kwargs):
+        class _Snap:
+            def __init__(self, d, deleted):
+                self._d = dict(d) if d is not None else None
+                self.exists = (d is not None) and (not deleted)
+
+            def to_dict(self):
+                return dict(self._d) if self.exists else {}
+
+        return _Snap(self.data, self.deleted)
+
+    def update(self, updates, *args, **kwargs):
+        if self.data is None:
+            self.data = {}
+        self.updates.append(dict(updates))
+        for k, v in updates.items():
+            if str(type(v).__name__) == "Sentinel" or "DELETE" in str(v):
+                self.data.pop(k, None)
+            else:
+                self.data[k] = v
+
+    def set(self, data, *args, **kwargs):
+        self.data = dict(data)
+        self.deleted = False
+
+    def delete(self, *args, **kwargs):
+        self.deleted = True
+        self.data = None
+
+
+class _FakeTransaction:
+    def __init__(self, db):
+        self._db = db
+        self._staged_updates = []
+        self._staged_sets = []
+        self._staged_deletes = []
+        self.committed = False
+        self._read_only = False
+        self._id = b"fake-tx-id"
+        self._max_attempts = 5
+        self.in_progress = True
+
+    def get(self, doc_ref):
+        return doc_ref.get()
+
+    def update(self, doc_ref, updates):
+        self._staged_updates.append((doc_ref, dict(updates)))
+
+    def set(self, doc_ref, data):
+        self._staged_sets.append((doc_ref, dict(data)))
+
+    def delete(self, doc_ref):
+        self._staged_deletes.append(doc_ref)
+
+    def commit(self):
+        for doc_ref, data in self._staged_sets:
+            doc_ref.set(data)
+        for doc_ref, updates in self._staged_updates:
+            doc_ref.update(updates)
+        for doc_ref in self._staged_deletes:
+            doc_ref.delete()
+        self.committed = True
+
+    def _begin(self, *args, **kwargs):
+        pass
+
+    def _clean_up(self):
+        pass
+
+    def _rollback(self):
+        self._staged_sets.clear()
+        self._staged_updates.clear()
+        self._staged_deletes.clear()
+
+    def _commit(self):
+        self.commit()
+        return []
+
+
+class _FakeFirestore:
+    def __init__(self, collections=None):
+        self.collections = collections or {}
+        self.last_transaction = None
+
+    def collection(self, name):
+        class _Coll:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def document(self, doc_id):
+                return self.docs.setdefault(doc_id, _FakeDocRef({"contractor_id": doc_id, "active": True}))
+
+        return _Coll(self.collections.setdefault(name, {}))
+
+    def transaction(self):
+        tx = _FakeTransaction(self)
+        self.last_transaction = tx
+        return tx
+
+
+@pytest.fixture(autouse=True)
+def _setup_firestore(monkeypatch):
+    import base64
+    import app.db.firestore_client as firestore_module
+    import app.services.integration_token_mutations as mutations_module
+    from app.config import settings
+
+    dummy_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setattr(
+        settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}'
+    )
+    monkeypatch.setattr(settings, "integration_token_active_key_version", "1")
+
+    db = _FakeFirestore({
+        "contractors": {
+            "c1": _FakeDocRef({
+                "contractor_id": "c1",
+                "active": True,
+                "jobber_access_token": "old-token",
+                "jobber_refresh_token": "old-refresh",
+                "jobber_generation": 0,
+                "jobber_connected": True,
+            })
+        }
+    })
+    monkeypatch.setattr(firestore_module, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(mutations_module, "get_firestore_client", lambda: db)
+    return db
+
+
 @pytest.mark.asyncio
-async def test_refreshes_expiring_token_before_graphql(monkeypatch):
+async def test_refreshes_expiring_token_before_graphql(monkeypatch, _setup_firestore):
     calls = []
     new_token = _jwt(int(time.time()) + 3600)
+    initial_access = _jwt(int(time.time()) - 10)
     responses = [
         _FakeResponse(200, {"access_token": new_token, "refresh_token": "new-refresh"}),
         _FakeResponse(200, {"data": {"clients": {"nodes": [{"id": "client-1"}]}}}),
     ]
 
+    _setup_firestore.collection("contractors").document("c1").data.update({
+        "contractor_id": "c1",
+        "active": True,
+        "jobber_access_token": initial_access,
+        "jobber_refresh_token": "old-refresh",
+        "jobber_generation": 0,
+        "jobber_connected": True,
+    })
+
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
-    monkeypatch.setattr(jobber, "_write_jobber_tokens", lambda contractor_id, updates: _noop_async())
 
     from app import config
     monkeypatch.setattr(config.settings, "jobber_client_id", "client-id")
     monkeypatch.setattr(config.settings, "jobber_client_secret", "client-secret")
 
     contractor = {
-        "contractor_id": "",
-        "jobber_access_token": _jwt(int(time.time()) - 10),
+        "contractor_id": "c1",
+        "jobber_access_token": initial_access,
         "jobber_refresh_token": "old-refresh",
     }
 
@@ -98,9 +252,13 @@ async def test_refreshes_expiring_token_before_graphql(monkeypatch):
     assert contractor["jobber_access_token"] == new_token
     assert contractor["jobber_refresh_token"] == "new-refresh"
 
+    # Confirm durable record updated with CAS
+    doc = _setup_firestore.collection("contractors").document("c1")
+    assert doc.data["jobber_generation"] == 1
+
 
 @pytest.mark.asyncio
-async def test_retries_once_after_jobber_401(monkeypatch):
+async def test_retries_once_after_jobber_401(monkeypatch, _setup_firestore):
     calls = []
     old_token = _jwt(int(time.time()) + 3600)
     new_token = _jwt(int(time.time()) + 7200)
@@ -110,15 +268,23 @@ async def test_retries_once_after_jobber_401(monkeypatch):
         _FakeResponse(200, {"data": {"jobCreate": {"job": {"id": "job-1"}}}}),
     ]
 
+    _setup_firestore.collection("contractors").document("c1").data.update({
+        "contractor_id": "c1",
+        "active": True,
+        "jobber_access_token": old_token,
+        "jobber_refresh_token": "old-refresh",
+        "jobber_generation": 0,
+        "jobber_connected": True,
+    })
+
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
-    monkeypatch.setattr(jobber, "_write_jobber_tokens", lambda contractor_id, updates: _noop_async())
 
     from app import config
     monkeypatch.setattr(config.settings, "jobber_client_id", "client-id")
     monkeypatch.setattr(config.settings, "jobber_client_secret", "client-secret")
 
     contractor = {
-        "contractor_id": "",
+        "contractor_id": "c1",
         "jobber_access_token": old_token,
         "jobber_refresh_token": "old-refresh",
     }
@@ -131,6 +297,71 @@ async def test_retries_once_after_jobber_401(monkeypatch):
     assert calls[1][0] == jobber.JOBBER_TOKEN_URL
     assert calls[2][0] == jobber.JOBBER_GRAPHQL_URL
     assert calls[2][1]["headers"]["Authorization"] == f"Bearer {new_token}"
+
+
+@pytest.mark.asyncio
+async def test_jobber_refresh_fails_closed_when_generation_mismatched(monkeypatch, _setup_firestore):
+    """If durable generation advances while refresh is in-flight, CAS fails closed."""
+    doc = _setup_firestore.collection("contractors").document("c1")
+    old_tok = _jwt(int(time.time()) - 10)
+    new_tok = _jwt(int(time.time()) + 3600)
+    doc.data.update({
+        "contractor_id": "c1",
+        "active": True,
+        "jobber_access_token": old_tok,
+        "jobber_refresh_token": "old-refresh",
+        "jobber_generation": 0,
+        "jobber_connected": True,
+    })
+
+    class _RacingAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            # Concurrent reconnect advances generation
+            doc.data["jobber_generation"] = 5
+            return _FakeResponse(200, {"access_token": new_tok, "refresh_token": "new-refresh"})
+
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _RacingAsyncClient())
+
+    from app import config
+    monkeypatch.setattr(config.settings, "jobber_client_id", "client-id")
+    monkeypatch.setattr(config.settings, "jobber_client_secret", "client-secret")
+
+    contractor = {
+        "contractor_id": "c1",
+        "jobber_access_token": old_tok,
+        "jobber_refresh_token": "old-refresh",
+    }
+
+    res = await jobber.refresh_access_token(contractor, force=True)
+    assert res is None
+    assert contractor["jobber_access_token"] == old_tok
+    assert doc.data["jobber_generation"] == 5
+
+
+@pytest.mark.asyncio
+async def test_jobber_refresh_fails_closed_when_disconnected_concurrently(monkeypatch, _setup_firestore):
+    """If provider was marked disconnected in Firestore, refresh aborts."""
+    doc = _setup_firestore.collection("contractors").document("c1")
+    doc.data.update({
+        "contractor_id": "c1",
+        "jobber_connected": False,
+    })
+
+    contractor = {
+        "contractor_id": "c1",
+        "jobber_access_token": _jwt(int(time.time()) - 10),
+        "jobber_refresh_token": "old-refresh",
+    }
+
+    res = await jobber.refresh_access_token(contractor, force=True)
+    assert res is None
+    assert contractor["jobber_access_token"] == contractor["jobber_access_token"]
 
 
 @pytest.mark.asyncio
@@ -272,7 +503,7 @@ async def test_create_job_logs_sanitized_user_errors(monkeypatch, caplog):
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient([], responses))
 
     with caplog.at_level(logging.WARNING):
-        job_id = await jobber.create_job("jobber-token", {"title": "Phone inquiry"})
+        job_id = await jobber.create_job(_contractor_auth(), {"title": "Phone inquiry"})
 
     assert job_id is None
     assert "Jobber mutation returned user errors" in caplog.text
@@ -299,7 +530,7 @@ async def test_create_quote_logs_sanitized_user_errors(monkeypatch, caplog):
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient([], responses))
 
     with caplog.at_level(logging.WARNING):
-        quote_id = await jobber.create_quote("jobber-token", {"title": "Phone inquiry"})
+        quote_id = await jobber.create_quote(_contractor_auth(), {"title": "Phone inquiry"})
 
     assert quote_id is None
     assert "Jobber mutation returned user errors" in caplog.text
@@ -336,7 +567,7 @@ async def test_lookup_customer_searches_phone_fields(monkeypatch):
     ]
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
 
-    customer = await jobber.lookup_customer("jobber-token", "+15551234567")
+    customer = await jobber.lookup_customer(_contractor_auth(), "+15551234567")
 
     assert customer["id"] == "client-1"
     assert calls[0][1]["variables"] == {"phone": "+15551234567"}
@@ -380,7 +611,7 @@ async def test_lookup_customer_preserves_billing_address_street_compatibility(mo
     ]
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
 
-    customer = await jobber.lookup_customer("jobber-token", "+15551234567")
+    customer = await jobber.lookup_customer(_contractor_auth(), "+15551234567")
 
     assert customer["billingAddress"]["street"] == "123 Main Street Suite 4"
     assert customer["billingAddress"]["street1"] == "123 Main Street"
@@ -410,7 +641,7 @@ async def test_create_client_builds_jobber_client_payload(monkeypatch):
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
 
     result = await jobber.create_client(
-        "jobber-token",
+        _contractor_auth(),
         {
             "caller_name": "Jane Private",
             "caller_phone": "+15551234567",
@@ -458,7 +689,7 @@ async def test_create_request_and_note(monkeypatch):
     monkeypatch.setattr(jobber.httpx, "AsyncClient", lambda: _FakeAsyncClient(calls, responses))
 
     request = await jobber.create_request(
-        "jobber-token",
+        _contractor_auth(),
         {
             "client_id": "client-1",
             "property_id": "property-1",
@@ -467,7 +698,7 @@ async def test_create_request_and_note(monkeypatch):
     )
     long_message = "Call summary " + ("x" * 6000)
     expected_note_message = long_message[:5000]
-    note_id = await jobber.create_request_note("jobber-token", "request-1", long_message)
+    note_id = await jobber.create_request_note(_contractor_auth(), "request-1", long_message)
 
     assert request == {"id": "request-1", "title": "Leaking sink", "jobberWebUri": "https://example.test/request"}
     assert note_id == "note-1"
@@ -483,6 +714,75 @@ async def test_create_request_and_note(monkeypatch):
         "requestId": "request-1",
         "input": {"message": expected_note_message, "pinned": False},
     }
+
+
+@pytest.mark.asyncio
+async def test_jobber_raw_string_auth_refused_with_zero_http(monkeypatch):
+    """Proves raw-string auth passed to Jobber APIs is rejected with zero provider HTTP calls."""
+    http_called = False
+
+    class _FailHttp:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, *args, **kwargs):
+            nonlocal http_called
+            http_called = True
+            return _FakeResponse(200, {})
+
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", _FailHttp)
+
+    # 1. create_job with raw string auth
+    assert await jobber.create_job("raw-string-token", {"title": "Test"}) is None
+    assert not http_called
+
+    # 2. _graphql_request_with_refresh with raw string auth
+    assert await jobber._graphql_request_with_refresh("raw-string-token", "query { viewer { id } }") is None
+    assert not http_called
+
+    # 3. _resolve_access_token with raw string auth
+    assert await jobber._resolve_access_token("raw-string-token") == ""
+    assert not http_called
+
+
+@pytest.mark.asyncio
+async def test_jobber_envelope_floor_enforcement_with_zero_http(monkeypatch):
+    """Proves jobber_token_envelope_required=True with plaintext pair fails closed with zero HTTP calls."""
+    http_called = False
+
+    class _FailHttp:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, *args, **kwargs):
+            nonlocal http_called
+            http_called = True
+            return _FakeResponse(200, {})
+
+    monkeypatch.setattr(jobber.httpx, "AsyncClient", _FailHttp)
+
+    contractor_downgraded = {
+        "contractor_id": "c-floor-downgrade",
+        "jobber_connected": True,
+        "jobber_token_envelope_required": True,
+        "jobber_access_token": "plaintext-access",
+        "jobber_refresh_token": "plaintext-refresh",
+    }
+
+    # API call must fail closed without making HTTP calls
+    assert await jobber.create_job(contractor_downgraded, {"title": "Test"}) is None
+    assert not http_called
+
+    # Malformed floor value must also fail closed with zero HTTP calls
+    contractor_bad_floor = dict(contractor_downgraded, jobber_token_envelope_required="not-a-bool")
+    assert await jobber.create_job(contractor_bad_floor, {"title": "Test"}) is None
+    assert not http_called
 
 
 async def _noop_async():

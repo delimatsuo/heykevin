@@ -176,6 +176,13 @@ class Settings(BaseSettings):
     # valid key; development and tests retain legacy plaintext compatibility.
     transcript_encryption_key: str = ""
 
+    # Application-level encryption for integration tokens at rest (Jobber, Google Calendar).
+    # Raw JSON object string mapping positive decimal version strings to 32-byte standard base64 keys.
+    # Staging and production require a valid keyring and active key version.
+    integration_token_encryption_keys: str = ""
+    integration_token_active_key_version: str | None = None
+    integration_token_encrypted_writes_enabled: bool = False
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
@@ -322,6 +329,29 @@ def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
             "TRANSCRIPT_ENCRYPTION_KEY must be valid 32-byte base64 in staging, "
             "production, and demo"
         )
+
+    if env in {"staging", "production"} or settings.integration_token_encrypted_writes_enabled:
+        from app.services.integration_tokens import (
+            IntegrationTokenConfigError,
+            parse_active_key_version,
+            parse_keyring,
+        )
+
+        try:
+            keyring = parse_keyring(settings.integration_token_encryption_keys)
+            active_ver = parse_active_key_version(settings.integration_token_active_key_version)
+            if not keyring:
+                errors.append(
+                    "INTEGRATION_TOKEN_ENCRYPTION_KEYS must contain a valid 32-byte key"
+                )
+            elif active_ver is None or active_ver not in keyring:
+                errors.append(
+                    "INTEGRATION_TOKEN_ACTIVE_KEY_VERSION must match a key in INTEGRATION_TOKEN_ENCRYPTION_KEYS"
+                )
+        except IntegrationTokenConfigError as exc:
+            errors.append(
+                f"INTEGRATION_TOKEN_ENCRYPTION_KEYS configuration invalid: {exc}"
+            )
 
     if env == "production":
         if settings.appstore_environment != "production":

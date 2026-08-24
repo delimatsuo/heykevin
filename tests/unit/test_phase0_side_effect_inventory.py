@@ -57,3 +57,19 @@ def test_voip_inventory_distinguishes_core_call_controls_from_text_reply_gate():
     assert "text_reply requires the caller-text backend gate" in surface.required_gate
     assert "disabled-gate tests for text_reply" in surface.required_evidence
     assert "disabled-gate tests for accept" not in surface.required_evidence
+
+
+def test_jobber_inventory_pins_post_call_request_semantics_and_no_voice_tool():
+    grouped = surfaces_by_path()
+    post_call_surface = grouped["app/services/post_call.py"][0]
+    voice_surface = grouped["app/services/voice_pipeline.py"][0]
+
+    assert "create a Jobber client when lookup misses" in post_call_surface.current_behavior
+    assert "creates a Request and attempts to add a note" in post_call_surface.current_behavior
+    assert "never calls create_job or create_quote" in post_call_surface.current_behavior
+    assert "jobber_lead_capture_enabled and claim idempotency" in post_call_surface.required_gate
+    assert "duplicate-prevention claim tests" in post_call_surface.required_evidence
+
+    assert "expose no Jobber write tool" in voice_surface.current_behavior
+    assert "Jobber exposes no write tool" in voice_surface.required_gate
+    assert "Jobber write tool attempts are rejected as unknown tools" in voice_surface.required_evidence

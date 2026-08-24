@@ -239,6 +239,20 @@ def test_unknown_action_is_rejected():
     assert client.writes == []
 
 
+@pytest.mark.parametrize("retired_action", ["jobber_create_job", "jobber_create_quote"])
+def test_retired_jobber_actions_rejected_at_parse_time(retired_action):
+    module = _load_module()
+
+    def fail_factory(**_kwargs):
+        pytest.fail("client_factory must not be called for retired actions")
+
+    with pytest.raises(SystemExit):
+        module.main(
+            ["--project", "p", "--action", retired_action, "--contractor-id", "electus"],
+            client_factory=fail_factory,
+        )
+
+
 def test_there_is_no_bulk_mode():
     module = _load_module()
     source = (

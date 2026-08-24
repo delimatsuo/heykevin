@@ -41,8 +41,6 @@ KNOWN_ACTIONS = (
     "caller_vcard_mms",
     "estimate_token_create",
     "estimate_result_sms",
-    "jobber_create_job",
-    "jobber_create_quote",
     "google_create_event",
     "twilio_call_redirect",
     "twilio_conference_mutation",

@@ -17,8 +17,6 @@ class ActionKey(str, Enum):
     CALLER_VCARD_MMS = "caller_vcard_mms"
     ESTIMATE_TOKEN_CREATE = "estimate_token_create"
     ESTIMATE_RESULT_SMS = "estimate_result_sms"
-    JOBBER_CREATE_JOB = "jobber_create_job"
-    JOBBER_CREATE_QUOTE = "jobber_create_quote"
     GOOGLE_CREATE_EVENT = "google_create_event"
     OWNER_CONFIRM_CALENDAR_EVENT = "owner_confirm_calendar_event"
     TWILIO_CALL_REDIRECT = "twilio_call_redirect"
@@ -84,8 +82,6 @@ SMS_ACTIONS = {
 }
 
 INTEGRATION_WRITE_ACTIONS = {
-    ActionKey.JOBBER_CREATE_JOB,
-    ActionKey.JOBBER_CREATE_QUOTE,
     ActionKey.GOOGLE_CREATE_EVENT,
 }
 
@@ -112,8 +108,6 @@ GATE_POLICIES: dict[ActionKey, GatePolicy] = {
     ActionKey.CALLER_VCARD_MMS: GatePolicy(requires_sms_compliance=True),
     ActionKey.ESTIMATE_TOKEN_CREATE: GatePolicy(requires_owner_confirmation=True),
     ActionKey.ESTIMATE_RESULT_SMS: GatePolicy(requires_sms_compliance=True),
-    ActionKey.JOBBER_CREATE_JOB: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
-    ActionKey.JOBBER_CREATE_QUOTE: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
     ActionKey.GOOGLE_CREATE_EVENT: GatePolicy(requires_integration_approval=True, requires_owner_confirmation=True),
     ActionKey.OWNER_CONFIRM_CALENDAR_EVENT: GatePolicy(
         requires_flag=False,

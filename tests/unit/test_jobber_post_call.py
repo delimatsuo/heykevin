@@ -219,6 +219,9 @@ async def test_process_business_awaits_jobber_lead_capture_when_enabled(monkeypa
         "_update_caller_contact",
         lambda *_args, **_kwargs: _async_return(None),
     )
+    monkeypatch.setattr(post_call, "_load_appointment_request", lambda *args, **kwargs: _async_return({}))
+    monkeypatch.setattr(post_call, "_validate_job_address", lambda *args, **kwargs: _async_return(None))
+    monkeypatch.setattr(post_call, "_update_customer_memory", lambda *args, **kwargs: _async_return(None))
 
     contractor = {
         "contractor_id": "contractor-1",
@@ -268,6 +271,9 @@ async def test_process_business_mirrors_summary_and_call_type_to_call(monkeypatc
         "_update_caller_contact",
         lambda *_args, **_kwargs: _async_return(None),
     )
+    monkeypatch.setattr(post_call, "_load_appointment_request", lambda *args, **kwargs: _async_return({}))
+    monkeypatch.setattr(post_call, "_validate_job_address", lambda *args, **kwargs: _async_return(None))
+    monkeypatch.setattr(post_call, "_update_customer_memory", lambda *args, **kwargs: _async_return(None))
 
     await post_call._process_business(
         "Caller: My kitchen sink is leaking.",
@@ -310,6 +316,16 @@ async def test_capture_jobber_lead_success_existing_customer(monkeypatch):
         post_call.jobber_service,
         "create_client",
         lambda *args, **kwargs: pytest.fail("existing customers should not create a Jobber client"),
+    )
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "create_job",
+        lambda *args, **kwargs: pytest.fail("lead capture must not call create_job"),
+    )
+    monkeypatch.setattr(
+        post_call.jobber_service,
+        "create_quote",
+        lambda *args, **kwargs: pytest.fail("lead capture must not call create_quote"),
     )
 
     async def fake_create_request(contractor, request_data):

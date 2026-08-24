@@ -138,7 +138,7 @@ Use this table to decide account state before release.
 | `caller_vcard_mms` | Disabled | A2P/10DLC is approved and public vCard fields have been reviewed. |
 | `estimate_token_create` | Disabled | Estimate links are approved for production and owner/automation approval is recorded. |
 | `estimate_result_sms` | Disabled | Estimate SMS is approved for production and A2P/10DLC is approved. |
-| `jobber_create_job` / `jobber_create_quote` | Disabled | The integration is connected, write approval is recorded, and duplicate-prevention behavior is accepted. |
+| `jobber_lead_capture_enabled` | Disabled | The integration is connected, server-protected flag is enabled only after duplicate/retry/operator acceptance. Note: legacy `jobber_create_job` and `jobber_create_quote` action keys are retired/tombstoned and not writable by `set_gated_action.py`. |
 | `google_create_event` | Disabled | Calendar write approval is recorded and booking conflict/retry behavior is accepted. |
 
 Owner-facing SMS notifications remain outside these caller-facing gates by
@@ -155,7 +155,7 @@ Run these after a staging deploy and before production release:
 | Let Kevin take message / voicemail | Owner can send the caller to message capture; this must not require `gated_actions` flags. |
 | Text reply with gate disabled | Request is blocked with a clear backend response and no SMS send. |
 | Text reply with gate enabled and SMS compliance approved | SMS send path is attempted and gate audit logs contain only safe metadata. |
-| Post-call service request with gates disabled | Job card and owner notification still work; caller confirmation SMS/MMS, vCard MMS, estimate link, and integration writes are skipped. |
+| Post-call service request with gates disabled | Applicable caller-facing `gated_actions` flags are disabled and `jobber_lead_capture_enabled` is false. Job card and owner notification still work; caller confirmation SMS/MMS, vCard MMS, estimate link, and Jobber client/Request writes are skipped. |
 | Post-call service request with selected gates enabled | Only the explicitly enabled side effects run. |
 | Urgent call push | Visible push copy is generic and lock-screen safe. |
 | Known contact route | Existing trusted/known caller routing still works. |

@@ -28,16 +28,16 @@ class SideEffectSurface:
 SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
     SideEffectSurface(
         path="app/services/post_call.py",
-        current_behavior="Extracts job cards, saves jobs, can auto-create Jobber jobs, sends contractor SMS, sends caller SMS/MMS, sends vCard MMS, and can send auto-reply SMS.",
-        required_gate="Caller-facing SMS/MMS and integration writes require backend gated actions that default off.",
-        required_evidence="Disabled-gate tests for caller SMS/MMS, Jobber writes, vCard MMS, estimate links, and auto-replies.",
+        current_behavior="Extracts job cards, saves jobs, sends contractor SMS, sends caller SMS/MMS, sends vCard MMS, and can send auto-reply SMS. Behind jobber_lead_capture_enabled and duplicate prevention, lead capture may create a Jobber client when lookup misses, then creates a Request and attempts to add a note; it never calls create_job or create_quote.",
+        required_gate="Caller-facing SMS/MMS require backend gated actions that default off. Jobber lead capture requires jobber_lead_capture_enabled and claim idempotency.",
+        required_evidence="Disabled-gate tests for caller SMS/MMS, vCard MMS, estimate links, auto-replies, and Jobber disabled-flag / duplicate-prevention claim tests.",
         risk="user_contact",
     ),
     SideEffectSurface(
         path="app/services/voice_pipeline.py",
-        current_behavior="Voice tools can check Jobber and Google Calendar, and can create Jobber jobs or Google Calendar events.",
-        required_gate="Write tools require backend gates, idempotency, and owner confirmation or explicit automation approval.",
-        required_evidence="Tests proving model tool calls cannot write integrations while gates are disabled.",
+        current_behavior="Voice tools can check Jobber but expose no Jobber write tool; Google event creation remains separately gated.",
+        required_gate="Write tools require backend gates, idempotency, and owner confirmation or explicit automation approval. Google Calendar event creation remains separately gated; Jobber exposes no write tool.",
+        required_evidence="Tests proving model tool calls cannot write integrations while gates are disabled, and Jobber write tool attempts are rejected as unknown tools.",
         risk="external_write",
     ),
     SideEffectSurface(
@@ -119,9 +119,9 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
     ),
     SideEffectSurface(
         path="app/services/jobber.py",
-        current_behavior="Refreshes and persists Jobber tokens, reads customer/calendar data, creates jobs, and creates quotes.",
-        required_gate="Jobber writes are gated actions; token persistence must use encrypted storage and payload-safe audit logs.",
-        required_evidence="Disabled Jobber write tests, duplicate-prevention tests, token refresh tests, and log redaction tests.",
+        current_behavior="Refreshes and persists Jobber tokens, reads customer/calendar data, and contains the active Request adapter. Dormant create_job/create_quote helpers are not runtime-exposed and are out of scope for deletion here.",
+        required_gate="Jobber Request lead capture requires jobber_lead_capture_enabled; token persistence must use encrypted storage and payload-safe audit logs.",
+        required_evidence="Disabled Jobber lead capture flag tests, duplicate-prevention claim tests, token refresh tests, and log redaction tests.",
         risk="external_write",
     ),
     SideEffectSurface(

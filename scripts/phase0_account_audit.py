@@ -17,7 +17,15 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 
-KNOWN_ACTION_KEYS = {
+# Retired action keys that are no longer supported or registered in check_gated_action.
+# Preserved for aggregate audit reporting of legacy persisted document state.
+RETIRED_ACTION_KEYS = {
+    "jobber_create_job",
+    "jobber_create_quote",
+}
+
+# Currently active gated action keys that correspond to valid ActionKey members.
+ACTIVE_ACTION_KEYS = {
     "caller_text_reply",
     "caller_auto_reply",
     "caller_confirmation_sms",
@@ -25,8 +33,6 @@ KNOWN_ACTION_KEYS = {
     "caller_vcard_mms",
     "estimate_token_create",
     "estimate_result_sms",
-    "jobber_create_job",
-    "jobber_create_quote",
     "google_create_event",
     "twilio_call_redirect",
     "twilio_conference_mutation",
@@ -36,6 +42,12 @@ KNOWN_ACTION_KEYS = {
     # switch that check_gated_action never consults.
     "push_lock_screen_context",
 }
+
+# WARNING: Any future reuse of either string in RETIRED_ACTION_KEYS requires
+# fresh authorization/design plus a legacy-state audit. This script performs
+# no Firestore cleanup or migration, but reports legacy tombstoned keys under
+# their safe aggregate action names rather than collapsing them to "other".
+KNOWN_ACTION_KEYS = ACTIVE_ACTION_KEYS | RETIRED_ACTION_KEYS
 
 SMS_COMPLIANCE_STATUSES = {"approved", "pending", "rejected", "missing"}
 INTEGRATION_WRITE_STATUSES = {"approved", "pending", "rejected", "missing"}

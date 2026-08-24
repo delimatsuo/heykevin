@@ -128,20 +128,27 @@ def test_sms_action_allows_when_flag_compliance_confirmation_and_idempotency_pre
     assert decision.reason == gated_actions.GateReason.ALLOWED
 
 
+def test_action_key_values_do_not_include_retired_jobber_actions(monkeypatch):
+    gated_actions = import_gated_actions_without_config_env(monkeypatch)
+    retired = {"jobber_create_job", "jobber_create_quote"}
+    current_keys = {key.value for key in gated_actions.ActionKey}
+    assert current_keys.isdisjoint(retired)
+
+
 def test_integration_write_requires_integration_approval(monkeypatch):
     gated_actions = import_gated_actions_without_config_env(monkeypatch)
     contractor = {
         "contractor_id": "c1",
-        "gated_actions": {gated_actions.ActionKey.JOBBER_CREATE_JOB.value: True},
+        "gated_actions": {gated_actions.ActionKey.GOOGLE_CREATE_EVENT.value: True},
         "integration_write_status": "pending",
     }
     decision = gated_actions.check_gated_action(
         contractor=contractor,
-        action=gated_actions.ActionKey.JOBBER_CREATE_JOB,
+        action=gated_actions.ActionKey.GOOGLE_CREATE_EVENT,
         context=gated_actions.GateContext(
             source="voice_tool",
             actor="automation",
-            idempotency_key="job-1",
+            idempotency_key="event-1",
             owner_confirmed=True,
         ),
     )
@@ -154,16 +161,16 @@ def test_integration_write_requires_owner_confirmation_or_automation_approval(mo
     gated_actions = import_gated_actions_without_config_env(monkeypatch)
     contractor = {
         "contractor_id": "c1",
-        "gated_actions": {gated_actions.ActionKey.JOBBER_CREATE_JOB.value: True},
+        "gated_actions": {gated_actions.ActionKey.GOOGLE_CREATE_EVENT.value: True},
         "integration_write_status": "approved",
     }
     decision = gated_actions.check_gated_action(
         contractor=contractor,
-        action=gated_actions.ActionKey.JOBBER_CREATE_JOB,
+        action=gated_actions.ActionKey.GOOGLE_CREATE_EVENT,
         context=gated_actions.GateContext(
             source="voice_tool",
             actor="automation",
-            idempotency_key="job-1",
+            idempotency_key="event-1",
             owner_confirmed=False,
         ),
     )
@@ -176,17 +183,17 @@ def test_automation_approval_allows_integration_write_when_status_and_flag_appro
     gated_actions = import_gated_actions_without_config_env(monkeypatch)
     contractor = {
         "contractor_id": "c1",
-        "gated_actions": {gated_actions.ActionKey.JOBBER_CREATE_JOB.value: True},
-        "automation_approvals": {gated_actions.ActionKey.JOBBER_CREATE_JOB.value: True},
+        "gated_actions": {gated_actions.ActionKey.GOOGLE_CREATE_EVENT.value: True},
+        "automation_approvals": {gated_actions.ActionKey.GOOGLE_CREATE_EVENT.value: True},
         "integration_write_status": "approved",
     }
     decision = gated_actions.check_gated_action(
         contractor=contractor,
-        action=gated_actions.ActionKey.JOBBER_CREATE_JOB,
+        action=gated_actions.ActionKey.GOOGLE_CREATE_EVENT,
         context=gated_actions.GateContext(
             source="voice_tool",
             actor="automation",
-            idempotency_key="job-1",
+            idempotency_key="event-1",
             owner_confirmed=False,
         ),
     )

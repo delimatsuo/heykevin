@@ -17,10 +17,20 @@ def test_contractor_summary_counts_release_gate_fields_without_raw_unknown_value
     summary = audit.summarize_contractors(
         [
             {
-                "gated_actions": {"caller_text_reply": True, "leak_+15551234567": True},
+                "gated_actions": {
+                    "caller_text_reply": True,
+                    "jobber_create_job": True,
+                    "jobber_create_quote": True,
+                    "leak_+15551234567": True,
+                },
                 "sms_compliance_status": "approved",
                 "integration_write_status": "pending",
-                "automation_approvals": {"jobber_create_job": True, "custom_secret_value": True},
+                "automation_approvals": {
+                    "google_create_event": True,
+                    "jobber_create_job": True,
+                    "jobber_create_quote": True,
+                    "custom_secret_value": True,
+                },
                 "auto_reply_sms": True,
                 "jobber_access_token": "secret-token",
                 "google_calendar_access_token": "",
@@ -40,10 +50,20 @@ def test_contractor_summary_counts_release_gate_fields_without_raw_unknown_value
     )
 
     assert summary["total_contractors"] == 3
-    assert summary["gated_action_keys"] == {"caller_text_reply": 1, "other": 1}
+    assert summary["gated_action_keys"] == {
+        "caller_text_reply": 1,
+        "jobber_create_job": 1,
+        "jobber_create_quote": 1,
+        "other": 1,
+    }
     assert summary["sms_compliance_status"] == {"approved": 1, "missing": 1, "other": 1}
     assert summary["integration_write_status"] == {"approved": 1, "missing": 1, "pending": 1}
-    assert summary["automation_approval_keys"] == {"jobber_create_job": 1, "other": 1}
+    assert summary["automation_approval_keys"] == {
+        "google_create_event": 1,
+        "jobber_create_job": 1,
+        "jobber_create_quote": 1,
+        "other": 1,
+    }
     assert summary["auto_reply_sms"] == {"false": 1, "missing": 1, "true": 1}
     assert summary["jobber_connected"] == {"false": 2, "true": 1}
     assert summary["google_calendar_connected"] == {"false": 3}
@@ -55,6 +75,13 @@ def test_contractor_summary_counts_release_gate_fields_without_raw_unknown_value
     assert "secret-token" not in encoded
     assert "freeform" not in encoded
     assert "custom_secret_value" not in encoded
+
+
+def test_audit_defines_retired_and_active_action_keys():
+    audit = _load_audit_module()
+    assert audit.RETIRED_ACTION_KEYS == {"jobber_create_job", "jobber_create_quote"}
+    assert audit.RETIRED_ACTION_KEYS.isdisjoint(audit.ACTIVE_ACTION_KEYS)
+    assert audit.KNOWN_ACTION_KEYS == audit.ACTIVE_ACTION_KEYS | audit.RETIRED_ACTION_KEYS
 
 
 def test_estimate_summary_counts_status_and_age_buckets_without_token_data():

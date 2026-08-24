@@ -34,6 +34,11 @@ async def _noop(*_args, **_kwargs):
     return None
 
 
+class _DummyAsyncClient:
+    async def aclose(self):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _provider_recovery_ready(monkeypatch):
     from app.services import voice_pipeline
@@ -42,6 +47,11 @@ def _provider_recovery_ready(monkeypatch):
         voice_pipeline.settings,
         "service_request_recovery_enabled",
         True,
+    )
+    monkeypatch.setattr(
+        voice_pipeline.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _DummyAsyncClient(),
     )
 
 
@@ -69,7 +79,7 @@ async def test_jobber_book_appointment_is_unknown_tool_and_does_not_create_job(m
         "contractor_id": "c1",
         "jobber_access_token": "token",
         "integration_write_status": "approved",
-        "gated_actions": {ActionKey.JOBBER_CREATE_JOB.value: True},
+        "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
     })
     result = json.loads(await pipeline._execute_tool("book_appointment", {"title": "Repair"}))
 
@@ -91,8 +101,8 @@ async def test_jobber_check_availability_is_unknown_tool_and_does_not_query_avai
         "contractor_id": "c1",
         "jobber_access_token": "token",
         "integration_write_status": "approved",
-        "gated_actions": {ActionKey.JOBBER_CREATE_JOB.value: True},
-        "automation_approvals": {ActionKey.JOBBER_CREATE_JOB.value: True},
+        "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
+        "automation_approvals": {"jobber_create_job": True, "jobber_create_quote": True},
     }
     pipeline = _pipeline(config)
     tool_input = {"days_ahead": 7}
@@ -324,8 +334,8 @@ async def test_jobber_book_appointment_unknown_tool_does_not_call_create_job_or_
         "contractor_id": "c1",
         "jobber_access_token": "token",
         "integration_write_status": "approved",
-        "gated_actions": {ActionKey.JOBBER_CREATE_JOB.value: True},
-        "automation_approvals": {ActionKey.JOBBER_CREATE_JOB.value: True},
+        "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
+        "automation_approvals": {"jobber_create_job": True, "jobber_create_quote": True},
     })
 
     with caplog.at_level(logging.ERROR):
@@ -424,7 +434,7 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
             "contractor_id": "c1",
             "jobber_access_token": "token",
             "integration_write_status": "approved",
-            "gated_actions": {ActionKey.JOBBER_CREATE_JOB.value: True},
+            "gated_actions": {"jobber_create_job": True, "jobber_create_quote": True},
         },
     )
     pipeline._ws = FakeWebSocket()

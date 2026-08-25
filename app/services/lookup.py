@@ -67,22 +67,27 @@ async def _lookup_nomorobo(phone: str, twilio_addon_data: Optional[dict] = None)
     return {"spam_score": 0}
 
 
-async def _lookup_contact(phone: str) -> Optional[dict]:
+async def _lookup_contact(phone: str, *, contractor_id: str) -> Optional[dict]:
     """Local contact database lookup."""
+    if type(contractor_id) is not str or not contractor_id.strip():
+        raise ValueError("contractor_id is required")
     try:
-        return await asyncio.wait_for(get_contact(phone), timeout=LOOKUP_TIMEOUT)
+        return await asyncio.wait_for(
+            get_contact(phone, contractor_id=contractor_id),
+            timeout=LOOKUP_TIMEOUT,
+        )
     except asyncio.TimeoutError:
         logger.warning("Contact lookup timed out")
         return None
-    except Exception as e:
-        logger.warning(f"Contact lookup failed: {e}")
+    except Exception:
+        logger.warning("Contact lookup failed")
         return None
 
 
-async def _lookup_history(phone: str, *, contractor_id: str = "") -> dict:
+async def _lookup_history(phone: str, *, contractor_id: str) -> dict:
     """Call history lookup — how many times picked up, ignored, etc."""
-    if not contractor_id:
-        return {}
+    if type(contractor_id) is not str or not contractor_id.strip():
+        raise ValueError("contractor_id is required")
     try:
         calls = await asyncio.wait_for(
             get_call_history(phone, contractor_id=contractor_id, limit=20),
@@ -102,8 +107,8 @@ async def _lookup_history(phone: str, *, contractor_id: str = "") -> dict:
     except asyncio.TimeoutError:
         logger.warning("History lookup timed out")
         return {}
-    except Exception as e:
-        logger.warning(f"History lookup failed: {e}")
+    except Exception:
+        logger.warning("History lookup failed")
         return {}
 
 
@@ -111,13 +116,16 @@ async def run_lookups(
     phone: str,
     twilio_addon_data: Optional[dict] = None,
     *,
-    contractor_id: str = "",
+    contractor_id: str,
 ) -> dict:
     """Run all lookups in parallel. Returns partial results if some fail."""
+    if type(contractor_id) is not str or not contractor_id.strip():
+        raise ValueError("contractor_id is required")
+
     results = await asyncio.gather(
         _lookup_twilio(phone),
         _lookup_nomorobo(phone, twilio_addon_data),
-        _lookup_contact(phone),
+        _lookup_contact(phone, contractor_id=contractor_id),
         _lookup_history(phone, contractor_id=contractor_id),
         return_exceptions=True,
     )

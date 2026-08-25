@@ -5,6 +5,7 @@ import binascii as _binascii
 import json as _json
 import re as _re
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 PRODUCTION_GCP_PROJECT_ID = "kevin-491315"
@@ -182,6 +183,20 @@ class Settings(BaseSettings):
     integration_token_encryption_keys: str = ""
     integration_token_active_key_version: str | None = None
     integration_token_encrypted_writes_enabled: bool = False
+
+    @field_validator("integration_token_encrypted_writes_enabled", mode="before")
+    @classmethod
+    def _validate_encrypted_writes_enabled(cls, v: object) -> bool:
+        if type(v) is bool:
+            return v
+        if type(v) is str:
+            if v == "true":
+                return True
+            if v == "false":
+                return False
+        raise ValueError(
+            "INTEGRATION_TOKEN_ENCRYPTED_WRITES_ENABLED must be exact bool or lowercase 'true'/'false'"
+        )
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -1,19 +1,21 @@
 """OAuth integration endpoints for Jobber and Google Calendar."""
 
 import secrets
-import time
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
-from app.db.admin_audit import write_admin_audit_event
 from app.middleware.auth import require_contractor_access, verify_api_token
+from app.services.calendar import (
+    CANONICAL_GOOGLE_CALENDAR_SCOPE,
+    validate_and_normalize_google_calendar_scope,
+)
 from app.services.integration_tokens import (
-    has_usable_token,
     safe_decrypt_integration_token,
     validate_token_expires_at,
     validate_token_expires_in,
@@ -33,11 +35,8 @@ GOOGLE_CALENDAR_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_CALENDAR_REDIRECT_URI = f"{settings.cloud_run_url}/api/integrations/google-calendar/callback"
 GOOGLE_REDIRECT_URI = GOOGLE_CALENDAR_REDIRECT_URI
-GOOGLE_CALENDAR_SCOPES = [
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/calendar.freebusy",
-]
-GOOGLE_CALENDAR_SCOPE = " ".join(GOOGLE_CALENDAR_SCOPES)
+GOOGLE_CALENDAR_SCOPE = CANONICAL_GOOGLE_CALENDAR_SCOPE
+GOOGLE_CALENDAR_SCOPES = GOOGLE_CALENDAR_SCOPE.split(" ")
 
 
 def _success_page(service_name: str) -> str:
@@ -114,25 +113,37 @@ class JobberLeadCaptureUpdate(BaseModel):
     enabled: bool
     reason: str = Field(default="", max_length=500)
 
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def validate_exact_bool(cls, v: Any) -> bool:
+        if type(v) is not bool:
+            raise ValueError("enabled must be an exact boolean (true or false)")
+        return v
+
 
 # ── Connect (start OAuth flow) ──────────────────────────────────────
 
 @router.get("/jobber/connect", dependencies=[Depends(verify_api_token)])
 async def jobber_connect(contractor_id: str = Query(...), request: Request = None):
     """Generate a Jobber OAuth authorize URL for the contractor."""
+    from app.services.integration_token_mutations import create_oauth_state
+
     require_contractor_access(request, contractor_id)
     if not settings.jobber_client_id:
         raise HTTPException(status_code=501, detail="Jobber integration not configured")
 
     state = secrets.token_urlsafe(32)
 
-    # Store state → contractor mapping in Firestore with 10-min TTL
+    # Store state → contractor mapping bound to lifecycle epoch, generation, and credentials fingerprint
     db = _get_firestore()
-    db.collection("jobber_oauth_states").document(state).set({
-        "contractor_id": contractor_id,
-        "created_at": time.time(),
-        "expires_at": time.time() + 600,
-    })
+    await create_oauth_state(
+        db=db,
+        collection_name="jobber_oauth_states",
+        state=state,
+        contractor_id=contractor_id,
+        provider="jobber",
+        ttl_seconds=600.0,
+    )
 
     authorize_url = JOBBER_AUTH_URL + "?" + urlencode({
         "client_id": settings.jobber_client_id,
@@ -152,9 +163,12 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
     from app.services.integration_token_mutations import (
         connect_provider_cas,
         consume_oauth_state,
+        terminalize_provider_operation_intent_cas,
+        terminalize_provider_reauthorization_attempt_cas,
+        transition_provider_operation_intent_to_started_cas,
+        transition_provider_reauthorization_attempt_to_started_cas,
     )
     from app.services.integration_tokens import (
-        MAX_KEY_VERSION,
         IntegrationTokenConfigError,
         IntegrationTokenDecryptionError,
         determine_write_format,
@@ -162,7 +176,7 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
     )
 
     if settings.integration_token_encrypted_writes_enabled and not is_encryption_configured():
-        logger.error("Jobber OAuth callback aborted: integration token encryption is not configured")
+        logger.error("Jobber OAuth callback aborted: provider=jobber operation=encryption_check result=unconfigured")
         raise HTTPException(
             status_code=500,
             detail="Integration token encryption is not configured",
@@ -171,39 +185,18 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
     db = _get_firestore()
 
     # Atomically validate and consume state (one-time use, deletes even if expired/malformed)
-    state_data = await consume_oauth_state(
+    state_data, contractor_obs = await consume_oauth_state(
         db=db,
         collection_name="jobber_oauth_states",
         state=state,
     )
-    raw_cid = state_data.get("contractor_id")
-    try:
-        contractor_id = validate_token_string(raw_cid, name="contractor_id")
-        assert contractor_id is not None
-    except Exception:
-        logger.error("Jobber OAuth callback invalid contractor_id in state")
-        raise HTTPException(status_code=400, detail="Invalid contractor in OAuth state") from None
-
-    # Pre-exchange contractor precondition check
-    contractor_ref = db.collection("contractors").document(contractor_id)
-    contractor_doc = contractor_ref.get()
-    if not getattr(contractor_doc, "exists", False):
-        raise HTTPException(status_code=404, detail="Contractor not found") from None
-    contractor_data = contractor_doc.to_dict() or {}
-    if contractor_data.get("active") is not True:
-        raise HTTPException(status_code=403, detail="Contractor account is inactive") from None
-
-    raw_generation = contractor_data.get("jobber_generation")
-    if raw_generation is None:
-        observed_generation = 0
-    elif type(raw_generation) is int and type(raw_generation) is not bool and 0 <= raw_generation <= MAX_KEY_VERSION:
-        observed_generation = raw_generation
-    else:
-        logger.error("Jobber OAuth callback aborted: invalid stored generation")
-        raise HTTPException(status_code=409, detail="Invalid contractor generation") from None
-
-    observed_access_raw = contractor_data.get("jobber_access_token")
-    observed_refresh_raw = contractor_data.get("jobber_refresh_token")
+    contractor_id = contractor_obs["contractor_id"]
+    observed_generation = contractor_obs["generation"]
+    observed_epoch = contractor_obs["lifecycle_epoch"]
+    observed_access_raw = contractor_obs["observed_access_raw"]
+    observed_refresh_raw = contractor_obs["observed_refresh_raw"]
+    claim_id = contractor_obs.get("claim_id")
+    is_quarantined = contractor_obs.get("is_quarantined", False)
 
     # Validate that eventual write format is possible BEFORE exchanging the authorization code
     try:
@@ -212,14 +205,54 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
             provider="jobber",
             stored_access=observed_access_raw,
             stored_refresh=observed_refresh_raw,
-            envelope_required=contractor_data.get("jobber_token_envelope_required"),
+            envelope_required=contractor_obs["envelope_required"],
         )
-    except (IntegrationTokenConfigError, IntegrationTokenDecryptionError) as exc:
-        logger.error("Jobber OAuth callback aborted: integration token encryption unconfigured or historical key missing: %s", exc)
+    except (IntegrationTokenConfigError, IntegrationTokenDecryptionError):
+        if claim_id:
+            if is_quarantined:
+                await terminalize_provider_reauthorization_attempt_cas(contractor_id=contractor_id, provider="jobber", claim_id=claim_id, db=db)
+            else:
+                await terminalize_provider_operation_intent_cas(contractor_id=contractor_id, provider="jobber", claim_id=claim_id, kind="connect", db=db)
+        logger.error("Jobber OAuth callback aborted: provider=jobber operation=write_format_check result=unconfigured")
         raise HTTPException(status_code=500, detail="Integration token encryption configuration unavailable") from None
-    except Exception as exc:
-        logger.error("Jobber OAuth callback aborted: invalid stored credential state: %s", exc)
+    except Exception:
+        if claim_id:
+            if is_quarantined:
+                await terminalize_provider_reauthorization_attempt_cas(contractor_id=contractor_id, provider="jobber", claim_id=claim_id, db=db)
+            else:
+                await terminalize_provider_operation_intent_cas(contractor_id=contractor_id, provider="jobber", claim_id=claim_id, kind="connect", db=db)
+        logger.error("Jobber OAuth callback aborted: provider=jobber operation=write_format_check result=invalid_credential_state")
         raise HTTPException(status_code=409, detail="Contractor credentials in conflicted or malformed state") from None
+
+    # Transition connect/reconnect intent to started immediately before provider token exchange
+    if claim_id:
+        try:
+            if is_quarantined:
+                await transition_provider_reauthorization_attempt_to_started_cas(
+                    contractor_id=contractor_id,
+                    provider="jobber",
+                    claim_id=claim_id,
+                    observed_generation=observed_generation,
+                    observed_lifecycle_epoch=observed_epoch,
+                    observed_access_raw=observed_access_raw,
+                    observed_refresh_raw=observed_refresh_raw,
+                    db=db,
+                )
+            else:
+                await transition_provider_operation_intent_to_started_cas(
+                    contractor_id=contractor_id,
+                    provider="jobber",
+                    claim_id=claim_id,
+                    kind="connect",
+                    observed_generation=observed_generation,
+                    observed_lifecycle_epoch=observed_epoch,
+                    observed_access_raw=observed_access_raw,
+                    observed_refresh_raw=observed_refresh_raw,
+                    db=db,
+                )
+        except Exception:
+            logger.error("Jobber OAuth callback aborted: provider=jobber operation=transition_started result=lock_failed")
+            raise HTTPException(status_code=409, detail="Failed to acquire live connect lock") from None
 
     # Exchange code for tokens
     try:
@@ -236,12 +269,19 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
                 timeout=10.0,
             )
     except Exception:
+        # Provider ambiguity (timeout / connection / network failure): do NOT terminalize intent; retain claim-bound started intent
         logger.error(
             "Jobber token exchange failed: provider=jobber operation=token_exchange result=error"
         )
         raise HTTPException(status_code=502, detail="Failed to exchange code with Jobber") from None
 
     if resp.status_code != 200:
+        if resp.status_code == 400 and claim_id:
+            # 400 Bad Request is an explicit terminal rejection proving authorization code was invalid / not exchanged
+            if is_quarantined:
+                await terminalize_provider_reauthorization_attempt_cas(contractor_id=contractor_id, provider="jobber", claim_id=claim_id, db=db)
+            else:
+                await terminalize_provider_operation_intent_cas(contractor_id=contractor_id, provider="jobber", claim_id=claim_id, kind="connect", db=db)
         logger.error(
             "Jobber token exchange failed: provider=jobber operation=token_exchange status_code=%s",
             resp.status_code,
@@ -263,7 +303,7 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
         raise HTTPException(status_code=502, detail="Invalid response from Jobber") from None
 
     access_token = tokens.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
+    if type(access_token) is not str or len(access_token) == 0:
         logger.error(
             "Jobber token exchange returned no access token: provider=jobber operation=token_exchange"
         )
@@ -276,7 +316,7 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
         raise HTTPException(status_code=502, detail="Malformed access token in Jobber response") from None
 
     refresh_token = tokens.get("refresh_token")
-    if not isinstance(refresh_token, str) or not refresh_token:
+    if type(refresh_token) is not str or len(refresh_token) == 0:
         logger.error(
             "Jobber token exchange returned no refresh token: provider=jobber operation=token_exchange"
         )
@@ -305,9 +345,11 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
             provider="jobber",
             access_token=access_token,
             refresh_token=refresh_token,
+            claim_id=claim_id,
             expires_in=expires_in,
             expires_at=expires_at,
             observed_generation=observed_generation,
+            observed_lifecycle_epoch=observed_epoch,
             observed_access_raw=observed_access_raw,
             observed_refresh_raw=observed_refresh_raw,
             db=db,
@@ -318,7 +360,7 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
         )
         raise HTTPException(status_code=500, detail="Failed to securely persist Jobber integration") from None
 
-    logger.info("Jobber connected for contractor %s (generation=%s)", contractor_id[:8] or "unknown", new_gen)
+    logger.info("Jobber connected successfully: provider=jobber operation=connect result=success generation=%s", new_gen)
 
     return HTMLResponse(_success_page("Jobber"))
 
@@ -328,18 +370,26 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
 @router.get("/jobber/status", dependencies=[Depends(verify_api_token)])
 async def jobber_status(contractor_id: str = Query(...), request: Request = None):
     """Check whether a contractor has Jobber connected."""
+    from app.services.integration_token_mutations import (
+        extract_safe_connected_at,
+        is_durable_provider_connected,
+    )
+
     require_contractor_access(request, contractor_id)
     db = _get_firestore()
     doc = db.collection("contractors").document(contractor_id).get()
     if not getattr(doc, "exists", False):
         raise HTTPException(status_code=404, detail="Contractor not found")
 
-    data = doc.to_dict() or {}
-    connected = has_usable_token(data, "jobber", "access", contractor_id=contractor_id)
+    data = doc.to_dict()
+    if type(data) is not dict:
+        raise HTTPException(status_code=500, detail="Contractor document is not an exact dict")
+    connected = is_durable_provider_connected(data, "jobber", contractor_id=contractor_id)
+    connected_at = extract_safe_connected_at(data, "jobber") if connected else None
 
     return {
         "connected": connected,
-        "connected_at": data.get("jobber_connected_at"),
+        "connected_at": connected_at,
         "lead_capture_enabled": connected and data.get("jobber_lead_capture_enabled") is True,
     }
 
@@ -354,47 +404,47 @@ async def jobber_update_lead_capture(
 ):
     """Enable or disable Jobber Request lead capture for a connected contractor."""
     _require_admin(request)
+    from app.services.integration_token_mutations import (
+        IntegrationTokenCASConflict,
+        IntegrationTokenContractorNotFound,
+        update_jobber_lead_capture_cas,
+    )
+
     db = _get_firestore()
-    doc_ref = db.collection("contractors").document(contractor_id)
-    doc = doc_ref.get()
-    if not getattr(doc, "exists", False):
-        raise HTTPException(status_code=404, detail="Contractor not found")
+    req_meta = {}
+    if request is not None:
+        from app.db.admin_audit import _client_ip_hash
+        req_meta["ip_hash"] = _client_ip_hash(request)
+        headers = getattr(request, "headers", {}) or {}
+        if isinstance(headers, dict):
+            req_meta["user_agent"] = headers.get("user-agent", "")
 
-    data = doc.to_dict() or {}
-    connected = has_usable_token(data, "jobber", "access", contractor_id=contractor_id)
+    try:
+        result = await update_jobber_lead_capture_cas(
+            contractor_id=contractor_id,
+            enabled=body.enabled,
+            actor="global_admin_token",
+            reason=body.reason or "admin toggled Jobber lead capture",
+            request_metadata=req_meta,
+            db=db,
+        )
+    except IntegrationTokenContractorNotFound:
+        raise HTTPException(status_code=404, detail="Contractor not found") from None
+    except IntegrationTokenCASConflict:
+        raise HTTPException(status_code=409, detail="Jobber lead capture update conflict") from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Failed to update Jobber lead capture: provider=jobber operation=lead_capture result=error")
+        raise HTTPException(status_code=500, detail="Failed to update Jobber lead capture") from None
 
-    if body.enabled and not connected:
-        raise HTTPException(status_code=409, detail="Connect Jobber before enabling lead capture")
-
-    previous_enabled = data.get("jobber_lead_capture_enabled") is True
-    now = time.time()
-    updates = {
-        "jobber_lead_capture_enabled": body.enabled,
-        "jobber_lead_capture_updated_at": now,
-    }
-    doc_ref.update(updates)
-    await write_admin_audit_event(
-        request=request,
-        action="jobber_lead_capture_update",
-        target_type="contractor",
-        target_id=contractor_id,
-        reason=body.reason or "admin toggled Jobber lead capture",
-        before={"jobber_lead_capture_enabled": previous_enabled},
-        after={"jobber_lead_capture_enabled": body.enabled},
-        metadata={"jobber_connected": connected},
-    )
-
-    logger.info(
-        "Jobber lead capture updated: contractor_id=%s enabled=%s",
-        contractor_id[:8] or "unknown",
-        body.enabled,
-    )
+    logger.info("Jobber lead capture updated: provider=jobber operation=lead_capture result=success")
     return {
         "status": "ok",
-        "contractor_id": contractor_id,
-        "connected": connected,
-        "lead_capture_enabled": body.enabled,
-        "updated_at": now,
+        "contractor_id": result.contractor_id,
+        "connected": result.connected,
+        "lead_capture_enabled": result.enabled,
+        "updated_at": result.updated_at,
     }
 
 
@@ -403,61 +453,34 @@ async def jobber_update_lead_capture(
 @router.post("/jobber/disconnect", dependencies=[Depends(verify_api_token)])
 async def jobber_disconnect(contractor_id: str = Query(...), request: Request = None):
     """Revoke Jobber tokens and atomically remove from contractor doc."""
-    from app.db.integration_lifecycle_audit import AUDIT_COLLECTION
-    from app.services.integration_token_mutations import disconnect_provider_cas
+    from app.services.integration_token_mutations import (
+        IntegrationTokenCASConflict,
+        IntegrationTokenContractorNotFound,
+        IntegrationTokenError,
+        disconnect_and_revoke_provider_orchestration,
+    )
 
     require_contractor_access(request, contractor_id)
 
-    db = _get_firestore()
-
-    # Durable CAS disconnect: advances generation, deletes fields, records audit event
-    tombstone_gen, access_token, audit_id = await disconnect_provider_cas(
-        contractor_id=contractor_id,
-        provider="jobber",
-        db=db,
-    )
-
-    # Best-effort revoke with Jobber (failure never prevents durable deletion)
-    revocation_status = "pending"
-    if not access_token:
-        revocation_status = "not_attempted_unavailable_token"
-    else:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://api.getjobber.com/api/oauth/revoke",
-                    data={
-                        "token": access_token,
-                        "client_id": settings.jobber_client_id,
-                        "client_secret": settings.jobber_client_secret,
-                    },
-                    timeout=5.0,
-                )
-            if resp.status_code == 200:
-                revocation_status = "revoked_provider_confirmed"
-            else:
-                revocation_status = "revocation_rejected_provider"
-        except Exception:
-            revocation_status = "revocation_network_error"
-
-    # Async patch revocation status to audit document and exact-postverify
     try:
-        db.collection(AUDIT_COLLECTION).document(audit_id).update({
-            "revocation_status": revocation_status,
-            "revocation_completed_at": time.time(),
-        })
-        audit_snap = db.collection(AUDIT_COLLECTION).document(audit_id).get()
-        if not getattr(audit_snap, "exists", False) or (audit_snap.to_dict() or {}).get("revocation_status") != revocation_status:
-            logger.warning("Audit document revocation status postcondition mismatch: provider=jobber")
+        db = _get_firestore()
+        result = await disconnect_and_revoke_provider_orchestration(
+            contractor_id=contractor_id,
+            provider="jobber",
+            db=db,
+        )
+    except IntegrationTokenContractorNotFound:
+        logger.warning("Provider disconnect failed: provider=jobber operation=disconnect result=contractor_not_found")
+        raise HTTPException(status_code=404, detail="Contractor not found") from None
+    except (IntegrationTokenCASConflict, IntegrationTokenError):
+        logger.warning("Provider disconnect failed: provider=jobber operation=disconnect result=conflict")
+        raise HTTPException(status_code=409, detail="Integration transaction conflict") from None
     except Exception:
-        pass
+        logger.error("Provider disconnect failed: provider=jobber operation=disconnect result=internal_error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
-    return {
-        "status": "disconnected",
-        "contractor_id": contractor_id,
-        "generation": tombstone_gen,
-        "revocation_status": revocation_status,
-    }
+    logger.info("Provider disconnected: provider=jobber operation=disconnect result=success")
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,6 +490,8 @@ async def jobber_disconnect(contractor_id: str = Query(...), request: Request = 
 @router.get("/google-calendar/connect", dependencies=[Depends(verify_api_token)])
 async def google_calendar_connect(contractor_id: str = Query(...), request: Request = None):
     """Generate Google Calendar OAuth consent URL and store state in Firestore."""
+    from app.services.integration_token_mutations import create_oauth_state
+
     require_contractor_access(request, contractor_id)
     if not settings.google_calendar_client_id:
         raise HTTPException(
@@ -476,13 +501,16 @@ async def google_calendar_connect(contractor_id: str = Query(...), request: Requ
 
     db = _get_firestore()
 
-    # Generate a random state token, store in Firestore with 10-min TTL
+    # Generate a random state token, store in Firestore bound to lifecycle epoch, generation, and credentials fingerprint
     state = secrets.token_urlsafe(32)
-    db.collection("google_oauth_states").document(state).set({
-        "contractor_id": contractor_id,
-        "created_at": time.time(),
-        "expires_at": time.time() + 600,
-    })
+    await create_oauth_state(
+        db=db,
+        collection_name="google_oauth_states",
+        state=state,
+        contractor_id=contractor_id,
+        provider="google_calendar",
+        ttl_seconds=600.0,
+    )
 
     params = {
         "client_id": settings.google_calendar_client_id,
@@ -503,9 +531,12 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
     from app.services.integration_token_mutations import (
         connect_provider_cas,
         consume_oauth_state,
+        terminalize_provider_operation_intent_cas,
+        terminalize_provider_reauthorization_attempt_cas,
+        transition_provider_operation_intent_to_started_cas,
+        transition_provider_reauthorization_attempt_to_started_cas,
     )
     from app.services.integration_tokens import (
-        MAX_KEY_VERSION,
         IntegrationTokenConfigError,
         IntegrationTokenDecryptionError,
         determine_write_format,
@@ -513,7 +544,7 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
     )
 
     if settings.integration_token_encrypted_writes_enabled and not is_encryption_configured():
-        logger.error("Google Calendar OAuth callback aborted: integration token encryption is not configured")
+        logger.error("Google Calendar OAuth callback aborted: provider=google_calendar operation=encryption_check result=unconfigured")
         raise HTTPException(
             status_code=500,
             detail="Integration token encryption is not configured",
@@ -522,39 +553,18 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
     db = _get_firestore()
 
     # Atomically validate and consume state (one-time use, deletes even if expired/malformed)
-    state_data = await consume_oauth_state(
+    state_data, contractor_obs = await consume_oauth_state(
         db=db,
         collection_name="google_oauth_states",
         state=state,
     )
-    raw_cid = state_data.get("contractor_id")
-    try:
-        contractor_id = validate_token_string(raw_cid, name="contractor_id")
-        assert contractor_id is not None
-    except Exception:
-        logger.error("Google Calendar OAuth callback invalid contractor_id in state")
-        raise HTTPException(status_code=400, detail="Invalid contractor in OAuth state") from None
-
-    # Pre-exchange contractor precondition check
-    contractor_ref = db.collection("contractors").document(contractor_id)
-    contractor_doc = contractor_ref.get()
-    if not getattr(contractor_doc, "exists", False):
-        raise HTTPException(status_code=404, detail="Contractor not found") from None
-    contractor_data = contractor_doc.to_dict() or {}
-    if contractor_data.get("active") is not True:
-        raise HTTPException(status_code=403, detail="Contractor account is inactive") from None
-
-    raw_generation = contractor_data.get("google_calendar_generation")
-    if raw_generation is None:
-        observed_generation = 0
-    elif type(raw_generation) is int and type(raw_generation) is not bool and 0 <= raw_generation <= MAX_KEY_VERSION:
-        observed_generation = raw_generation
-    else:
-        logger.error("Google Calendar OAuth callback aborted: invalid stored generation")
-        raise HTTPException(status_code=409, detail="Invalid contractor generation") from None
-
-    observed_access_raw = contractor_data.get("google_calendar_access_token")
-    observed_refresh_raw = contractor_data.get("google_calendar_refresh_token")
+    contractor_id = contractor_obs["contractor_id"]
+    observed_generation = contractor_obs["generation"]
+    observed_epoch = contractor_obs["lifecycle_epoch"]
+    observed_access_raw = contractor_obs["observed_access_raw"]
+    observed_refresh_raw = contractor_obs["observed_refresh_raw"]
+    claim_id = contractor_obs.get("claim_id")
+    is_quarantined = contractor_obs.get("is_quarantined", False)
 
     # Validate that eventual write format is possible BEFORE exchanging the authorization code
     try:
@@ -563,14 +573,54 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
             provider="google_calendar",
             stored_access=observed_access_raw,
             stored_refresh=observed_refresh_raw,
-            envelope_required=contractor_data.get("google_calendar_token_envelope_required"),
+            envelope_required=contractor_obs["envelope_required"],
         )
-    except (IntegrationTokenConfigError, IntegrationTokenDecryptionError) as exc:
-        logger.error("Google Calendar OAuth callback aborted: integration token encryption unconfigured or historical key missing: %s", exc)
+    except (IntegrationTokenConfigError, IntegrationTokenDecryptionError):
+        if claim_id:
+            if is_quarantined:
+                await terminalize_provider_reauthorization_attempt_cas(contractor_id=contractor_id, provider="google_calendar", claim_id=claim_id, db=db)
+            else:
+                await terminalize_provider_operation_intent_cas(contractor_id=contractor_id, provider="google_calendar", claim_id=claim_id, kind="connect", db=db)
+        logger.error("Google Calendar OAuth callback aborted: provider=google_calendar operation=write_format_check result=unconfigured")
         raise HTTPException(status_code=500, detail="Integration token encryption configuration unavailable") from None
-    except Exception as exc:
-        logger.error("Google Calendar OAuth callback aborted: invalid stored credential state: %s", exc)
+    except Exception:
+        if claim_id:
+            if is_quarantined:
+                await terminalize_provider_reauthorization_attempt_cas(contractor_id=contractor_id, provider="google_calendar", claim_id=claim_id, db=db)
+            else:
+                await terminalize_provider_operation_intent_cas(contractor_id=contractor_id, provider="google_calendar", claim_id=claim_id, kind="connect", db=db)
+        logger.error("Google Calendar OAuth callback aborted: provider=google_calendar operation=write_format_check result=invalid_credential_state")
         raise HTTPException(status_code=409, detail="Contractor credentials in conflicted or malformed state") from None
+
+    # Transition connect/reconnect intent to started immediately before provider token exchange
+    if claim_id:
+        try:
+            if is_quarantined:
+                await transition_provider_reauthorization_attempt_to_started_cas(
+                    contractor_id=contractor_id,
+                    provider="google_calendar",
+                    claim_id=claim_id,
+                    observed_generation=observed_generation,
+                    observed_lifecycle_epoch=observed_epoch,
+                    observed_access_raw=observed_access_raw,
+                    observed_refresh_raw=observed_refresh_raw,
+                    db=db,
+                )
+            else:
+                await transition_provider_operation_intent_to_started_cas(
+                    contractor_id=contractor_id,
+                    provider="google_calendar",
+                    claim_id=claim_id,
+                    kind="connect",
+                    observed_generation=observed_generation,
+                    observed_lifecycle_epoch=observed_epoch,
+                    observed_access_raw=observed_access_raw,
+                    observed_refresh_raw=observed_refresh_raw,
+                    db=db,
+                )
+        except Exception:
+            logger.error("Google Calendar OAuth callback aborted: provider=google_calendar operation=transition_started result=lock_failed")
+            raise HTTPException(status_code=409, detail="Failed to acquire live connect lock") from None
 
     try:
         async with httpx.AsyncClient() as client:
@@ -586,12 +636,19 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
                 timeout=10.0,
             )
     except Exception:
+        # Provider ambiguity (timeout / connection / network failure): do NOT terminalize intent; retain claim-bound started intent
         logger.error(
             "Google token exchange failed: provider=google_calendar operation=token_exchange result=error"
         )
         raise HTTPException(status_code=502, detail="Failed to exchange code with Google") from None
 
     if resp.status_code != 200:
+        if resp.status_code == 400 and claim_id:
+            # 400 Bad Request is an explicit terminal rejection proving authorization code was invalid / not exchanged
+            if is_quarantined:
+                await terminalize_provider_reauthorization_attempt_cas(contractor_id=contractor_id, provider="google_calendar", claim_id=claim_id, db=db)
+            else:
+                await terminalize_provider_operation_intent_cas(contractor_id=contractor_id, provider="google_calendar", claim_id=claim_id, kind="connect", db=db)
         logger.error(
             "Google token exchange failed: provider=google_calendar operation=token_exchange status_code=%s",
             resp.status_code,
@@ -613,7 +670,7 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
         raise HTTPException(status_code=502, detail="Invalid response from Google") from None
 
     access_token = tokens.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
+    if type(access_token) is not str or len(access_token) == 0:
         logger.error(
             "Google token exchange returned no access token: provider=google_calendar operation=token_exchange"
         )
@@ -627,6 +684,9 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
 
     if "refresh_token" in tokens:
         new_refresh_token = tokens["refresh_token"]
+        if type(new_refresh_token) is not str or len(new_refresh_token) == 0:
+            logger.error("Google token exchange returned malformed refresh_token")
+            raise HTTPException(status_code=502, detail="Malformed refresh token in Google response") from None
         try:
             validate_token_string(new_refresh_token, name="refresh_token")
             effective_refresh_token = new_refresh_token
@@ -634,7 +694,12 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
             logger.error("Google token exchange returned malformed refresh_token")
             raise HTTPException(status_code=502, detail="Malformed refresh token in Google response") from None
     else:
-        # Fallback to existing stored refresh token only when refresh_token key is ABSENT
+        if is_quarantined:
+            logger.error(
+                "Google Calendar OAuth callback failed: provider=google_calendar operation=quarantine_recovery result=missing_fresh_refresh_token"
+            )
+            raise HTTPException(status_code=502, detail="Missing fresh refresh token in Google response during quarantine recovery") from None
+        # Fallback to existing stored refresh token only when refresh_token key is ABSENT on non-quarantined contractor
         existing_refresh_token = (
             safe_decrypt_integration_token(
                 observed_refresh_raw,
@@ -660,15 +725,29 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
             logger.error("Google token exchange returned invalid expires_in")
             raise HTTPException(status_code=502, detail="Invalid token expiry in Google response") from None
 
+    if "scope" in tokens:
+        scope_raw = tokens["scope"]
+        valid_scope_ok, effective_scope = validate_and_normalize_google_calendar_scope(
+            scope_raw,
+            allow_none=False,
+        )
+        if not valid_scope_ok or effective_scope is None or type(effective_scope) is not str:
+            logger.error("Google token exchange returned invalid or reduced scope")
+            raise HTTPException(status_code=400, detail="Invalid or reduced scope in Google response")
+    else:
+        effective_scope = CANONICAL_GOOGLE_CALENDAR_SCOPE
+
     try:
         updates, new_gen, audit_id = await connect_provider_cas(
             contractor_id=contractor_id,
             provider="google_calendar",
             access_token=access_token,
             refresh_token=effective_refresh_token,
+            claim_id=claim_id,
             expires_in=expires_in,
-            scope=tokens.get("scope") or GOOGLE_CALENDAR_SCOPE,
+            scope=effective_scope,
             observed_generation=observed_generation,
+            observed_lifecycle_epoch=observed_epoch,
             observed_access_raw=observed_access_raw,
             observed_refresh_raw=observed_refresh_raw,
             db=db,
@@ -679,7 +758,7 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
         )
         raise HTTPException(status_code=500, detail="Failed to securely persist Google Calendar integration") from None
 
-    logger.info("Google Calendar connected for contractor %s (generation=%s)", contractor_id[:8] or "unknown", new_gen)
+    logger.info("Google Calendar connected successfully: provider=google_calendar operation=connect result=success generation=%s", new_gen)
 
     return HTMLResponse(_success_page("Google Calendar"))
 
@@ -689,18 +768,26 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
 @router.get("/google-calendar/status", dependencies=[Depends(verify_api_token)])
 async def google_calendar_status(contractor_id: str = Query(...), request: Request = None):
     """Check whether a contractor has Google Calendar connected."""
+    from app.services.integration_token_mutations import (
+        extract_safe_connected_at,
+        is_durable_provider_connected,
+    )
+
     require_contractor_access(request, contractor_id)
     db = _get_firestore()
     doc = db.collection("contractors").document(contractor_id).get()
     if not getattr(doc, "exists", False):
         raise HTTPException(status_code=404, detail="Contractor not found")
 
-    data = doc.to_dict() or {}
-    connected = has_usable_token(data, "google_calendar", "access", contractor_id=contractor_id)
+    data = doc.to_dict()
+    if type(data) is not dict:
+        raise HTTPException(status_code=500, detail="Contractor document is not an exact dict")
+    connected = is_durable_provider_connected(data, "google_calendar", contractor_id=contractor_id)
+    connected_at = extract_safe_connected_at(data, "google_calendar") if connected else None
 
     return {
         "connected": connected,
-        "connected_at": data.get("google_calendar_connected_at"),
+        "connected_at": connected_at,
     }
 
 
@@ -709,50 +796,31 @@ async def google_calendar_status(contractor_id: str = Query(...), request: Reque
 @router.post("/google-calendar/disconnect", dependencies=[Depends(verify_api_token)])
 async def google_calendar_disconnect(contractor_id: str = Query(...), request: Request = None):
     """Revoke Google tokens and atomically remove from contractor doc."""
-    from app.db.integration_lifecycle_audit import AUDIT_COLLECTION
-    from app.services.integration_token_mutations import disconnect_provider_cas
+    from app.services.integration_token_mutations import (
+        IntegrationTokenCASConflict,
+        IntegrationTokenContractorNotFound,
+        IntegrationTokenError,
+        disconnect_and_revoke_provider_orchestration,
+    )
 
     require_contractor_access(request, contractor_id)
 
-    db = _get_firestore()
-
-    # Durable CAS disconnect: advances generation, deletes fields, records audit event
-    tombstone_gen, access_token, audit_id = await disconnect_provider_cas(
-        contractor_id=contractor_id,
-        provider="google_calendar",
-        db=db,
-    )
-
-    # Best-effort revoke with Google (failure never prevents durable deletion)
-    revocation_status = "pending"
-    if not access_token:
-        revocation_status = "not_attempted_unavailable_token"
-    else:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://oauth2.googleapis.com/revoke",
-                    params={"token": access_token},
-                    timeout=5.0,
-                )
-            if resp.status_code in (200, 204):
-                revocation_status = "succeeded"
-            else:
-                revocation_status = "provider_rejected"
-        except Exception:
-            revocation_status = "transport_error"
-
-    # Async patch revocation status to audit document and exact-postverify
     try:
-        db.collection(AUDIT_COLLECTION).document(audit_id).update({
-            "revocation_status": revocation_status,
-            "revocation_completed_at": time.time(),
-        })
-        audit_snap = db.collection(AUDIT_COLLECTION).document(audit_id).get()
-        if not getattr(audit_snap, "exists", False) or (audit_snap.to_dict() or {}).get("revocation_status") != revocation_status:
-            logger.warning("Audit document revocation status postcondition mismatch: provider=google_calendar")
+        db = _get_firestore()
+        result = await disconnect_and_revoke_provider_orchestration(
+            contractor_id=contractor_id,
+            provider="google_calendar",
+            db=db,
+        )
+    except IntegrationTokenContractorNotFound:
+        logger.warning("Provider disconnect failed: provider=google_calendar operation=disconnect result=contractor_not_found")
+        raise HTTPException(status_code=404, detail="Contractor not found") from None
+    except (IntegrationTokenCASConflict, IntegrationTokenError):
+        logger.warning("Provider disconnect failed: provider=google_calendar operation=disconnect result=conflict")
+        raise HTTPException(status_code=409, detail="Integration transaction conflict") from None
     except Exception:
-        pass
+        logger.error("Provider disconnect failed: provider=google_calendar operation=disconnect result=internal_error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
-    logger.info("Google Calendar disconnected for contractor %s (generation=%s)", contractor_id[:8] or "unknown", tombstone_gen)
-    return {"status": "disconnected"}
+    logger.info("Provider disconnected: provider=google_calendar operation=disconnect result=success")
+    return result

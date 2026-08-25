@@ -21,8 +21,8 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "test-user-number")
 
 import pytest
-from app.config import settings
 
+from app.config import settings
 from app.services.integration_tokens import (
     VALID_PROVIDERS,
     VALID_TOKEN_KINDS,
@@ -44,7 +44,6 @@ from app.services.integration_tokens import (
     validate_token_expires_in,
     validate_token_string,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -400,6 +399,8 @@ def test_resolve_usable_token_with_encrypted_and_legacy(monkeypatch):
     contractor_enc = {
         "contractor_id": cid,
         "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
         "jobber_access_token": enc_acc,
         "jobber_refresh_token": enc_ref,
     }
@@ -412,6 +413,8 @@ def test_resolve_usable_token_with_encrypted_and_legacy(monkeypatch):
     contractor_leg = {
         "contractor_id": cid,
         "jobber_connected": True,
+        "jobber_generation": 0,
+        "jobber_lifecycle_epoch": 0,
         "jobber_access_token": "legacy-access",
         "jobber_refresh_token": "legacy-refresh",
     }
@@ -448,9 +451,13 @@ def test_representative_downstream_consumer_gates(monkeypatch):
     full_contractor = {
         "contractor_id": cid,
         "google_calendar_connected": True,
+        "google_calendar_generation": 1,
+        "google_calendar_lifecycle_epoch": 1,
         "google_calendar_access_token": g_acc,
         "google_calendar_refresh_token": g_ref,
         "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
         "jobber_access_token": j_acc,
         "jobber_refresh_token": j_ref,
     }

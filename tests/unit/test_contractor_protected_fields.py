@@ -24,6 +24,7 @@ def test_integration_fields_in_protected_fields():
         "jobber_refresh_token",
         "jobber_connected",
         "jobber_generation",
+        "jobber_lifecycle_epoch",
         "jobber_connected_at",
         "jobber_disconnected_at",
         "jobber_token_refreshed_at",
@@ -31,14 +32,27 @@ def test_integration_fields_in_protected_fields():
         "jobber_refresh_claim_id",
         "jobber_refresh_claim_expires_at",
         "jobber_refresh_claim_generation",
+        "jobber_refresh_phase",
+        "jobber_refresh_claim_phase",
+        "jobber_refresh_outcome_unknown",
+        "jobber_reauthorization_required",
         "jobber_lead_capture_enabled",
         "jobber_lead_capture_updated_at",
         "jobber_token_envelope_required",
+        "jobber_operation_intent_id",
+        "jobber_operation_intent_kind",
+        "jobber_operation_intent_phase",
+        "jobber_operation_intent_expires_at",
+        "jobber_operation_intent_acquired_at",
+        "jobber_operation_intent_generation",
+        "jobber_operation_intent_lifecycle_epoch",
+        "jobber_operation_intent_credentials_fingerprint",
         # Google Calendar credentials & lifecycle
         "google_calendar_access_token",
         "google_calendar_refresh_token",
         "google_calendar_connected",
         "google_calendar_generation",
+        "google_calendar_lifecycle_epoch",
         "google_calendar_scope",
         "google_calendar_connected_at",
         "google_calendar_disconnected_at",
@@ -47,7 +61,19 @@ def test_integration_fields_in_protected_fields():
         "google_calendar_refresh_claim_id",
         "google_calendar_refresh_claim_expires_at",
         "google_calendar_refresh_claim_generation",
+        "google_calendar_refresh_phase",
+        "google_calendar_refresh_claim_phase",
+        "google_calendar_refresh_outcome_unknown",
+        "google_calendar_reauthorization_required",
         "google_calendar_token_envelope_required",
+        "google_calendar_operation_intent_id",
+        "google_calendar_operation_intent_kind",
+        "google_calendar_operation_intent_phase",
+        "google_calendar_operation_intent_expires_at",
+        "google_calendar_operation_intent_acquired_at",
+        "google_calendar_operation_intent_generation",
+        "google_calendar_operation_intent_lifecycle_epoch",
+        "google_calendar_operation_intent_credentials_fingerprint",
     }
     missing = required_fields - PROTECTED_FIELDS
     assert not missing, f"Missing integration fields in PROTECTED_FIELDS: {missing}"
@@ -96,3 +122,17 @@ async def test_patch_contractor_strips_protected_integration_fields(monkeypatch)
     assert "google_calendar_scope" not in captured_updates
     assert "google_calendar_token_envelope_required" not in captured_updates
     assert "jobber_lead_capture_enabled" not in captured_updates
+
+
+def test_18j_dynamic_operation_intent_keys_subset_of_protected_fields():
+    """Dynamically assert get_provider_operation_intent_keys(provider) is a subset of PROTECTED_FIELDS for jobber and google_calendar, covering aliases without a hand-maintained duplicate list."""
+    from app.services.integration_tokens import get_provider_operation_intent_keys, VALID_PROVIDERS
+
+    for provider in ["jobber", "google_calendar"]:
+        intent_keys = get_provider_operation_intent_keys(provider)
+        missing = intent_keys - PROTECTED_FIELDS
+        assert not missing, f"Operation intent keys for provider '{provider}' missing from PROTECTED_FIELDS: {missing}"
+
+    for provider in VALID_PROVIDERS:
+        intent_keys = get_provider_operation_intent_keys(provider)
+        assert intent_keys.issubset(PROTECTED_FIELDS), f"Provider '{provider}' intent keys dynamically violate PROTECTED_FIELDS contract"

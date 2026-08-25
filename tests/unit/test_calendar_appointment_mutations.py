@@ -69,10 +69,14 @@ class _FakeDocRef:
         self.updates = []
 
     def get(self, *args, transaction=None, **kwargs):
+        import datetime
+        import time
+
         class _Snap:
             def __init__(self, d, deleted):
                 self._d = dict(d) if d is not None else None
                 self.exists = (d is not None) and (not deleted)
+                self.read_time = datetime.datetime.fromtimestamp(time.time(), datetime.timezone.utc)
 
             def to_dict(self):
                 return dict(self._d) if self.exists else {}
@@ -111,6 +115,8 @@ class _FakeTransaction:
         self.in_progress = True
 
     def get(self, doc_ref):
+        if self._staged_updates or self._staged_sets or self._staged_deletes:
+            raise RuntimeError("Firestore transaction read-after-write violation: all reads must occur before writes/deletes/creates")
         return doc_ref.get()
 
     def update(self, doc_ref, updates):
@@ -201,6 +207,7 @@ def _calendar_state(monkeypatch):
         "google_calendar_access_token": "access-token",
         "google_calendar_refresh_token": "refresh-token",
         "google_calendar_generation": 0,
+        "google_calendar_lifecycle_epoch": 0,
         "google_calendar_connected": True,
     })
     db = _FakeFirestore({"contractors": {"contractor-1": doc_ref}})
@@ -644,7 +651,7 @@ async def test_appointment_mutation_without_access_token_is_false_without_http(
 ):
     calls = _patch_client(monkeypatch, [])
     contractor = {
-        "contractor_id": "contractor-1",
+        "contractor_id": "contractor-unauthenticated",
         "google_calendar_access_token": "",
         "google_calendar_refresh_token": "",
     }

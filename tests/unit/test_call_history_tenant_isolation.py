@@ -159,8 +159,11 @@ async def test_lookup_history_does_not_read_calls_without_contractor(monkeypatch
 
     monkeypatch.setattr(lookup_service, "get_call_history", _should_not_run)
 
-    assert await lookup_service._lookup_history("+15551230000") == {}
-    assert await lookup_service._lookup_history("+15551230000", contractor_id="") == {}
+    with pytest.raises(TypeError):
+        await lookup_service._lookup_history("+15551230000")
+
+    with pytest.raises(ValueError, match="^contractor_id is required$"):
+        await lookup_service._lookup_history("+15551230000", contractor_id="")
 
 
 @pytest.mark.asyncio

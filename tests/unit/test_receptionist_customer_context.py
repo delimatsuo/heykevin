@@ -154,6 +154,7 @@ def test_memory_prompt_supplies_internal_request_refs_and_normal_call_policy(mon
         service_request_mutations_enabled=True,
         integration_write_status="approved",
         google_calendar_access_token="test-token",
+        google_calendar_refresh_token="test-refresh",
         customer_memory={
             "display_name": "Jonathan Smith",
         },
@@ -218,6 +219,7 @@ def test_request_context_can_be_enabled_without_name_personalization(monkeypatch
             service_request_mutations_enabled=True,
             integration_write_status="approved",
             google_calendar_access_token="test-token",
+            google_calendar_refresh_token="test-refresh",
         )
     )
 

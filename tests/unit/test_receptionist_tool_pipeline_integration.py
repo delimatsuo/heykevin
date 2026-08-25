@@ -87,6 +87,7 @@ async def test_normal_voice_pipeline_applies_returning_customer_changes():
             "service_request_mutations_enabled": True,
             "integration_write_status": "approved",
             "google_calendar_access_token": "test-token",
+            "google_calendar_refresh_token": "test-refresh",
         },
     )
     await pipeline._http_client.aclose()
@@ -157,6 +158,7 @@ def test_gemini_declarations_include_shared_request_tools_for_loaded_context(mon
             "service_request_mutations_enabled": True,
             "integration_write_status": "approved",
             "google_calendar_access_token": "test-token",
+            "google_calendar_refresh_token": "test-refresh",
         },
         caller_phone="+16175550123",
     )
@@ -187,6 +189,7 @@ def test_request_mutation_tools_fail_closed_when_integration_write_is_revoked(mo
             "service_request_mutations_enabled": True,
             "integration_write_status": "revoked",
             "google_calendar_access_token": "test-token",
+            "google_calendar_refresh_token": "test-refresh",
         },
         caller_phone="+16175550123",
     )
@@ -212,6 +215,7 @@ async def test_undeclared_request_mutation_still_fails_closed_when_write_is_revo
         "service_request_mutations_enabled": True,
         "integration_write_status": "revoked",
         "google_calendar_access_token": "test-token",
+        "google_calendar_refresh_token": "test-refresh",
     }
     pipeline._caller_phone = "+16175550123"
     pipeline._call_sid = "CA-revoked"
@@ -257,6 +261,7 @@ async def test_confirmed_google_booking_atomically_creates_bound_service_request
         "service_request_mutations_enabled": True,
         "integration_write_status": "approved",
         "google_calendar_access_token": "test-token",
+        "google_calendar_refresh_token": "test-refresh",
     }
     pipeline._caller_phone = "+16175550123"
     pipeline._call_sid = "CA-booking"
@@ -313,6 +318,7 @@ async def test_managed_google_booking_rechecks_tenant_enrollment():
         "service_request_command_service": command_service,
         "integration_write_status": "approved",
         "google_calendar_access_token": "test-token",
+        "google_calendar_refresh_token": "test-refresh",
         # service_request_mutations_enabled deliberately absent.
     }
     pipeline._caller_phone = "+16175550123"

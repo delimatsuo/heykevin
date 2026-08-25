@@ -62,6 +62,7 @@ def _unauthorized_contractor():
     return {
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
     }
 
 
@@ -142,6 +143,7 @@ async def test_owner_confirmation_gate_also_produces_a_request(no_calendar_write
     pipeline = _pipeline({
         "contractor_id": "c1",
         "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
         "integration_write_status": "approved",
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
@@ -155,7 +157,11 @@ async def test_owner_confirmation_gate_also_produces_a_request(no_calendar_write
 @pytest.mark.asyncio
 async def test_genuine_gate_failures_stay_errors(no_calendar_write, saved_calls):
     """A missing contractor is a bug, not a booking request — do not paper over it."""
-    pipeline = _pipeline({"google_calendar_access_token": "gcal-token"})
+    pipeline = _pipeline({
+        "id": "c1",
+        "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
+    })
 
     result = json.loads(await pipeline._execute_tool("book_appointment", BOOKING_ARGS))
 

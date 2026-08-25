@@ -144,8 +144,10 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
                         ),
                     )
                 )
-            if contractor_config_loaded.get("customer_memory") or contractor_config_loaded.get(
-                "google_calendar_access_token"
+            from app.services.integration_tokens import has_usable_token
+
+            if contractor_config_loaded.get("customer_memory") or has_usable_token(
+                contractor_config_loaded, "google_calendar"
             ):
                 from app.db.service_requests import FirestoreServiceRequestRepository
                 from app.services.google_calendar_request_provider import (
@@ -157,7 +159,7 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
 
                 provider_adapter = (
                     GoogleCalendarRequestProvider(contractor_config_loaded)
-                    if contractor_config_loaded.get("google_calendar_access_token")
+                    if has_usable_token(contractor_config_loaded, "google_calendar")
                     else None
                 )
                 contractor_config_loaded["service_request_command_service"] = (

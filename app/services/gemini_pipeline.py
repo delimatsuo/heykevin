@@ -1456,8 +1456,11 @@ class GeminiPipeline:
         if staging_native_live_safety_controls_enabled():
             self._log_voice_timing("live_tools_disabled", reason="staging_native_safety")
             return []
-        has_jobber = bool(self._contractor_config.get("jobber_access_token"))
-        has_gcal = bool(self._contractor_config.get("google_calendar_access_token"))
+
+        from app.services.integration_tokens import has_usable_token
+
+        has_jobber = has_usable_token(self._contractor_config, "jobber")
+        has_gcal = has_usable_token(self._contractor_config, "google_calendar")
 
         declarations = []
 
@@ -1523,7 +1526,7 @@ class GeminiPipeline:
             and settings.service_request_recovery_enabled is True
             and self._contractor_config.get("service_request_mutations_enabled") is True
             and self._contractor_config.get("integration_write_status") == "approved"
-            and bool(self._contractor_config.get("google_calendar_access_token"))
+            and has_usable_token(self._contractor_config, "google_calendar")
         ):
             from app.services.receptionist_tools import gemini_tool_declarations
 

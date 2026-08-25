@@ -154,6 +154,7 @@ def _live_pipeline(call_sid="CAwire"):
         contractor_config={
             "contractor_id": "c1",
             "google_calendar_access_token": "gcal-token",
+            "google_calendar_refresh_token": "gcal-refresh",
             "timezone": "America/New_York",
         },
     )

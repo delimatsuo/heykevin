@@ -314,10 +314,10 @@ async def test_allowed_auto_reply_sends_with_caller_auto_reply_action_and_contex
 @pytest.mark.parametrize(
     ("contractor", "expected"),
     [
-        (_contractor(jobber_access_token="token"), False),
+        (_contractor(jobber_access_token="token", jobber_refresh_token="ref"), False),
         (_contractor(jobber_lead_capture_enabled=True), False),
-        (_contractor(jobber_access_token="token", jobber_lead_capture_enabled=False), False),
-        (_contractor(jobber_access_token="token", jobber_lead_capture_enabled=True), True),
+        (_contractor(jobber_access_token="token", jobber_refresh_token="ref", jobber_lead_capture_enabled=False), False),
+        (_contractor(jobber_access_token="token", jobber_refresh_token="ref", jobber_lead_capture_enabled=True), True),
     ],
 )
 async def test_jobber_lead_capture_is_awaited_only_when_feature_flag_enabled(

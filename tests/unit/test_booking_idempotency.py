@@ -71,6 +71,155 @@ def _patch_client(monkeypatch, responses):
     return calls
 
 
+import datetime
+import time
+
+class _FakeDocRef:
+    def __init__(self, data=None, doc_id=None):
+        self.id = doc_id
+        self.data = dict(data) if data is not None else None
+        self.deleted = False
+        self.updates = []
+
+    def get(self, *args, transaction=None, **kwargs):
+        class _Snap:
+            def __init__(self, d, deleted):
+                self._d = dict(d) if d is not None else None
+                self.exists = (d is not None) and (not deleted)
+                self.read_time = datetime.datetime.fromtimestamp(time.time(), datetime.timezone.utc)
+
+            def to_dict(self):
+                return dict(self._d) if self.exists else {}
+
+        return _Snap(self.data, self.deleted)
+
+    def update(self, updates, *args, **kwargs):
+        if self.data is None:
+            self.data = {}
+        self.updates.append(dict(updates))
+        for k, v in updates.items():
+            if str(type(v).__name__) == "Sentinel" or "DELETE" in str(v):
+                self.data.pop(k, None)
+            else:
+                self.data[k] = v
+
+    def set(self, data, *args, **kwargs):
+        self.data = dict(data)
+        self.deleted = False
+
+    def delete(self, *args, **kwargs):
+        self.deleted = True
+        self.data = None
+
+
+class _FakeTransaction:
+    def __init__(self, db):
+        self._db = db
+        self._staged_updates = []
+        self._staged_sets = []
+        self._staged_deletes = []
+        self.committed = False
+        self._read_only = False
+        self._id = b"fake-tx-id"
+        self._max_attempts = 5
+        self.in_progress = True
+
+    def get(self, doc_ref):
+        if self._staged_updates or self._staged_sets or self._staged_deletes:
+            raise RuntimeError("Firestore transaction read-after-write violation: all reads must occur before writes/deletes/creates")
+        return doc_ref.get()
+
+    def update(self, doc_ref, updates):
+        self._staged_updates.append((doc_ref, dict(updates)))
+
+    def delete(self, doc_ref):
+        self._staged_deletes.append(doc_ref)
+
+    def set(self, doc_ref, data):
+        self._staged_sets.append((doc_ref, dict(data)))
+
+    def commit(self):
+        for doc_ref, data in self._staged_sets:
+            doc_ref.set(data)
+        for doc_ref, updates in self._staged_updates:
+            doc_ref.update(updates)
+        for doc_ref in self._staged_deletes:
+            doc_ref.delete()
+        self.committed = True
+
+    def _begin(self, *args, **kwargs):
+        pass
+
+    def _clean_up(self):
+        pass
+
+    def _rollback(self):
+        self._staged_sets.clear()
+        self._staged_updates.clear()
+        self._staged_deletes.clear()
+
+    def _commit(self):
+        self.commit()
+        return []
+
+
+class _FakeFirestore:
+    def __init__(self, collections=None):
+        self.collections = collections or {}
+
+    def collection(self, name):
+        class _Coll:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def document(self, doc_id):
+                return self.docs.setdefault(doc_id, _FakeDocRef({
+                    "contractor_id": doc_id,
+                    "active": True,
+                    "google_calendar_connected": True,
+                    "google_calendar_generation": 0,
+                    "google_calendar_lifecycle_epoch": 0,
+                    "google_calendar_access_token": "access-token",
+                    "google_calendar_refresh_token": "refresh-token",
+                }))
+
+        return _Coll(self.collections.setdefault(name, {}))
+
+    def transaction(self):
+        return _FakeTransaction(self)
+
+
+@pytest.fixture(autouse=True)
+def _setup_firestore(monkeypatch):
+    import base64
+    import app.db.firestore_client as firestore_module
+    import app.services.integration_token_mutations as mutations_module
+    from app.config import settings
+
+    dummy_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setattr(
+        settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}'
+    )
+    monkeypatch.setattr(settings, "integration_token_active_key_version", "1")
+
+    db = _FakeFirestore({
+        "contractors": {
+            "contractor-1": _FakeDocRef({
+                "contractor_id": "contractor-1",
+                "active": True,
+                "google_calendar_access_token": "access-token",
+                "google_calendar_refresh_token": "refresh-token",
+                "google_calendar_generation": 0,
+                "google_calendar_lifecycle_epoch": 0,
+                "google_calendar_connected": True,
+            })
+        }
+    })
+    monkeypatch.setattr(firestore_module, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(mutations_module, "get_firestore_client", lambda: db)
+    return db
+
+
 @pytest.fixture(autouse=True)
 def _reset_locks():
     calendar._REFRESH_LOCKS.clear()

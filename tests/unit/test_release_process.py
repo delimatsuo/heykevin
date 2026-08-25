@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -160,6 +161,7 @@ fi
     sleep = fake_bin / "sleep"
     sleep.write_text("#!/bin/sh\nexit 0\n")
     sleep.chmod(0o755)
+    (fake_bin / "python").symlink_to(sys.executable)
 
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GCP_PROJECT_ID", "project")
@@ -236,6 +238,7 @@ def test_traffic_split_rollback_refuses_revision_without_disabled_promo_flag(
         "]}]}}'\n"
     )
     gcloud.chmod(0o755)
+    (fake_bin / "python").symlink_to(sys.executable)
 
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("ROLLBACK_METHOD", "traffic-split")

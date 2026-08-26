@@ -117,6 +117,29 @@ uncertain provider state. Atomic finalization restores the canonical 90-day
 retention timestamp. Operators must explicitly resolve reviewed proposals; they
 are not retention-swept automatically.
 
+### Google Calendar reschedule optimistic fencing
+
+Rescheduling a provider-bound Google Calendar appointment uses read-before-write
+optimistic fencing rather than blind overwrites:
+
+- Every reschedule attempt and recovery pass fetches a fresh event resource via
+  the token-refresh wrapper. ETags are never stored in Firestore.
+- Datetimes are validated as timezone-aware and normalized to UTC instants for
+  exact equality comparison.
+- If remote schedule matches desired schedule: returns success GET-only (zero PATCH).
+- If remote schedule differs from both base and desired (conflict / 3rd schedule):
+  returns false GET-only (zero PATCH), preserving the base aggregate and advancing
+  recovery toward `needs_review`.
+- If remote schedule matches base schedule: conditional `PATCH` with `If-Match`
+  using the exact ETag from the fresh GET.
+- A 2xx PATCH response is confirmed only if its body contains a valid timed event
+  matching the desired schedule.
+- Malformed, all-day, cancelled, recurring-instance, or recurring-master resources
+  fail closed. HTTP 412, transport errors, 5xx, or mismatches perform no second PATCH
+  in that attempt.
+- Logs strictly record operation, coarse outcome, HTTP status, and exception type,
+  never exposing IDs, ETags, tokens, schedules, or provider payloads.
+
 ## Privacy boundary
 
 Customer memory is stored only under

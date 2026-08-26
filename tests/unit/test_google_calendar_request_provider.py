@@ -142,14 +142,20 @@ async def test_wrong_or_invalid_binding_fails_without_provider_call(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_reschedule_sends_normalized_schedule_without_overwriting_metadata(monkeypatch):
+async def test_reschedule_sends_base_and_desired_schedules(monkeypatch):
     calls = []
 
-    async def fake_update(*args, **kwargs):
-        calls.append((args, kwargs))
+    async def fake_reschedule(
+        contractor, event_id, *, base_start, base_end, desired_start, desired_end
+    ):
+        calls.append(
+            (contractor, event_id, base_start, base_end, desired_start, desired_end)
+        )
         return True
 
-    monkeypatch.setattr(provider_module.calendar, "update_appointment", fake_update)
+    monkeypatch.setattr(
+        provider_module.calendar, "reschedule_appointment", fake_reschedule
+    )
     contractor = {"contractor_id": "contractor-1"}
     adapter = GoogleCalendarRequestProvider(contractor)
 
@@ -164,13 +170,12 @@ async def test_reschedule_sends_normalized_schedule_without_overwriting_metadata
     assert result is True
     assert calls == [
         (
-            (
-                contractor,
-                "provider/event id",
-                "2026-08-20T09:00:00-04:00",
-                "2026-08-20T10:30:00-04:00",
-            ),
-            {},
+            contractor,
+            "provider/event id",
+            START.isoformat(),
+            END.isoformat(),
+            "2026-08-20T09:00:00-04:00",
+            "2026-08-20T10:30:00-04:00",
         )
     ]
 
@@ -192,13 +197,47 @@ async def test_reschedule_rejects_invalid_schedule_without_provider_call(
     async def unexpected_call(*_args, **_kwargs):
         raise AssertionError("provider must not be called")
 
-    monkeypatch.setattr(provider_module.calendar, "update_appointment", unexpected_call)
+    monkeypatch.setattr(
+        provider_module.calendar, "reschedule_appointment", unexpected_call
+    )
 
     result = await GoogleCalendarRequestProvider({}).reschedule(
         binding=_Binding(),
         request=_Request(),
         scheduled_start=start,
         scheduled_end=end,
+        idempotency_key="reschedule-1",
+    )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_start", "base_end"),
+    [
+        ("not-a-date", "2026-08-14T14:00:00Z"),
+        ("2026-08-14T13:00:00", "2026-08-14T14:00:00"),
+        ("2026-08-14T15:00:00Z", "2026-08-14T14:00:00Z"),
+    ],
+)
+async def test_reschedule_rejects_invalid_base_schedule_without_provider_call(
+    monkeypatch,
+    base_start,
+    base_end,
+):
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("provider must not be called")
+
+    monkeypatch.setattr(
+        provider_module.calendar, "reschedule_appointment", unexpected_call
+    )
+
+    result = await GoogleCalendarRequestProvider({}).reschedule(
+        binding=_Binding(),
+        request=_Request(scheduled_start=base_start, scheduled_end=base_end),
+        scheduled_start="2026-08-20T09:00:00-04:00",
+        scheduled_end="2026-08-20T10:30:00-04:00",
         idempotency_key="reschedule-1",
     )
 
@@ -322,3 +361,160 @@ async def test_provider_exception_returns_false_without_logging_ids_or_payloads(
 def test_contractor_config_must_be_injected_as_a_dictionary():
     with pytest.raises(TypeError, match="contractor_config"):
         GoogleCalendarRequestProvider(None)
+
+
+@pytest.mark.asyncio
+async def test_reschedule_adapter_does_not_log_any_private_sentinel(monkeypatch, caplog):
+    """B1 adapter privacy: every asserted sentinel flows through the executed path.
+
+    Sentinels that flow as forwarded arguments (mutation-effective via spy validation):
+      access token, refresh token, contractor ID, event ID, base schedule (start/end),
+      desired schedule (start/end), idempotency key.
+
+    Sentinels that flow through the exception message raised by the spy after argument
+    validation (causal for log-message leakage — would appear if adapter logged the
+    exception message or request object):
+      full event URL, ETag, customer ID/key, request ID, summary, description,
+      provider body, exception text.
+
+    Every sentinel must be individually absent from logs while coarse
+    operation=reschedule and exception_type=RuntimeError are present.
+    """
+    from dataclasses import dataclass as _dc
+    from app.services import calendar as _calendar_module
+
+    # --- Unique sentinels -------------------------------------------------------
+    _s_access_token  = "SENTINEL_ACCESS_TOKEN_RESCHEDULE_7710"
+    _s_refresh_token = "SENTINEL_REFRESH_TOKEN_RESCHEDULE_7720"
+    _s_contractor_id = "sentinel-contractor-id-7730"
+    _s_customer_id   = "SENTINEL_CUSTOMER_ID_7740"
+    _s_customer_key  = "SENTINEL_CUSTOMER_KEY_7750"
+    _s_request_id    = "SENTINEL_REQUEST_ID_7760"
+    _s_idempotency_id = "SENTINEL_IDEMPOTENCY_ID_7770"
+    _s_event_id      = "sentinel-event-id-7780"
+    _s_event_url     = f"{_calendar_module.EVENTS_URL}/{_s_event_id}"
+    _s_etag          = '"SENTINEL_ETAG_VALUE_7790"'
+    # Unique ISO strings for base schedule — distinct from shared START/END constants.
+    _s_base_start    = "2026-09-01T09:17:00-04:00"
+    _s_base_end      = "2026-09-01T10:17:00-04:00"
+    _s_desired_start = "2026-09-02T11:44:00-04:00"
+    _s_desired_end   = "2026-09-02T12:44:00-04:00"
+    _s_summary       = "SENTINEL_EVENT_SUMMARY_7800"
+    _s_description   = "SENTINEL_EVENT_DESCRIPTION_7810"
+    _s_provider_body = "SENTINEL_PROVIDER_RESPONSE_BODY_7820"
+    _s_exc_text      = "SENTINEL_EXCEPTION_MESSAGE_7830"
+
+    # --- Request carries unique base-schedule sentinels as ISO strings -----------
+    # _request_schedule() calls _aware_datetime() which accepts ISO string input,
+    # so the adapter extracts these values and forwards them to calendar.reschedule_appointment.
+    @_dc(frozen=True)
+    class _SentinelRequest:
+        scheduled_start: str = _s_base_start
+        scheduled_end: str = _s_base_end
+        services: tuple[str, ...] = ("Furnace tune-up",)
+        # Extra fields the adapter never reads — present so logging the whole object leaks data.
+        customer_id: str = _s_customer_id
+        customer_key: str = _s_customer_key
+        request_id: str = _s_request_id
+
+    # --- Binding with sentinel event ID -----------------------------------------
+    @_dc(frozen=True)
+    class _SentinelBinding:
+        kind: str = GOOGLE_CALENDAR_PROVIDER_KIND
+        resource_id: str = _s_event_id
+
+    # --- Contractor config with sentinel tokens ---------------------------------
+    contractor_cfg = {
+        "contractor_id": _s_contractor_id,
+        "google_calendar_access_token": _s_access_token,
+        "google_calendar_refresh_token": _s_refresh_token,
+    }
+
+    # --- Spy: validate real forwarded args, then raise with all remaining sentinels
+    received: list[dict] = []
+
+    async def _spy_reschedule(
+        contractor,
+        event_id,
+        *,
+        base_start,
+        base_end,
+        desired_start,
+        desired_end,
+    ):
+        received.append(
+            dict(
+                contractor=contractor,
+                event_id=event_id,
+                base_start=base_start,
+                base_end=base_end,
+                desired_start=desired_start,
+                desired_end=desired_end,
+            )
+        )
+        # After all arguments are validated, raise an exception whose message contains
+        # every remaining sentinel (event URL, ETag, customer ID/key, request ID,
+        # summary, description, provider body, exc text).  The adapter catches Exception
+        # and logs only type(error).__name__ — so if it ever leaked the message all these
+        # would appear in logs, making each absent-from-log assertion causal.
+        raise RuntimeError(
+            f"{_s_event_url} etag={_s_etag} cid={_s_customer_id} "
+            f"ckey={_s_customer_key} rid={_s_request_id} "
+            f"summary={_s_summary} desc={_s_description} "
+            f"body={_s_provider_body} {_s_exc_text}"
+        )
+
+    monkeypatch.setattr(provider_module.calendar, "reschedule_appointment", _spy_reschedule)
+
+    adapter = GoogleCalendarRequestProvider(contractor_cfg)
+
+    with caplog.at_level("DEBUG"):
+        result = await adapter.reschedule(
+            binding=_SentinelBinding(),
+            request=_SentinelRequest(),
+            scheduled_start=_s_desired_start,
+            scheduled_end=_s_desired_end,
+            idempotency_key=_s_idempotency_id,
+        )
+
+    # Adapter must return False (underlying call raised).
+    assert result is False
+
+    # Spy must have been called exactly once with the correct forwarded arguments.
+    assert len(received) == 1
+    assert received[0]["event_id"] == _s_event_id
+    assert received[0]["contractor"] is contractor_cfg
+    # Base schedule: adapter reads _SentinelRequest.scheduled_start/end and forwards them.
+    assert received[0]["base_start"] == _s_base_start
+    assert received[0]["base_end"] == _s_base_end
+    # Desired schedule: passed directly via adapter.reschedule(scheduled_start/end=...).
+    assert received[0]["desired_start"] == _s_desired_start
+    assert received[0]["desired_end"] == _s_desired_end
+
+    # Coarse operation label and exception_type must be present.
+    assert "operation=reschedule" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+
+    # Every private sentinel must be individually absent from all logs.
+    _all_sentinels = [
+        _s_access_token,
+        _s_refresh_token,
+        _s_contractor_id,
+        _s_customer_id,
+        _s_customer_key,
+        _s_request_id,
+        _s_idempotency_id,
+        _s_event_id,
+        _s_event_url,
+        _s_etag,
+        _s_base_start,
+        _s_base_end,
+        _s_desired_start,
+        _s_desired_end,
+        _s_summary,
+        _s_description,
+        _s_provider_body,
+        _s_exc_text,
+    ]
+    for sentinel in _all_sentinels:
+        assert sentinel not in caplog.text, f"Private sentinel leaked in logs: {sentinel!r}"

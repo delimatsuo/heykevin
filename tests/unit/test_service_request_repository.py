@@ -603,6 +603,8 @@ async def test_recovery_replays_durable_semantic_proposal_and_finalizes(reposito
     )
     operation, values = recovery_adapter.calls[0]
     assert operation == "reschedule"
+    assert values["request"].scheduled_start == START
+    assert values["request"].scheduled_end == END
     assert values["scheduled_start"] == START + timedelta(days=1)
     assert values["scheduled_end"] == END + timedelta(days=1)
     assert values["idempotency_key"] != "transport-before-crash"

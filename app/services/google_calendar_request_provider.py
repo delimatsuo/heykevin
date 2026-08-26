@@ -108,20 +108,29 @@ class GoogleCalendarRequestProvider(ProviderMutationAdapter):
         scheduled_end: datetime,
         idempotency_key: str,
     ) -> bool:
-        """Move the bound event while preserving its existing title and notes."""
+        """Move the bound event using read-before-write optimistic fencing."""
 
         resource_id = _google_resource_id(binding)
-        schedule = _normalized_schedule(scheduled_start, scheduled_end)
-        if resource_id is None or schedule is None or not _valid_idempotency_key(idempotency_key):
+        base_schedule = _request_schedule(request)
+        desired_schedule = _normalized_schedule(scheduled_start, scheduled_end)
+        if (
+            resource_id is None
+            or base_schedule is None
+            or desired_schedule is None
+            or not _valid_idempotency_key(idempotency_key)
+        ):
             return False
-        start_time, end_time = schedule
+        base_start, base_end = base_schedule
+        desired_start, desired_end = desired_schedule
         return await self._call(
             "reschedule",
-            calendar.update_appointment(
+            calendar.reschedule_appointment(
                 self._contractor_config,
-                resource_id,
-                start_time,
-                end_time,
+                event_id=resource_id,
+                base_start=base_start,
+                base_end=base_end,
+                desired_start=desired_start,
+                desired_end=desired_end,
             ),
         )
 

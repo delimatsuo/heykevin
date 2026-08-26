@@ -350,7 +350,7 @@ async def test_create_contractor_accepts_valid_token(monkeypatch, signing_key, p
     async def fake_update_contractor(contractor_id, updates):
         return True
 
-    async def fake_get_by_phone(phone):
+    async def fake_get_by_phone(phone, *, country_code="US"):
         return None
 
     monkeypatch.setattr(contractors_api, "create_contractor", fake_create_contractor)

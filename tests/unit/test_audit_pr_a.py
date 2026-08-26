@@ -203,11 +203,11 @@ async def test_phone_lookup_rejects_apple_id_mismatch(stub_apple_identity, monke
     victim_contractor = {
         "contractor_id": "victim-1",
         "apple_user_id": "apple-user-victim",
-        "owner_phone": "+15551234567",
+        "owner_phone": "+14155551234",
         "subscription_uuid": "uuid-victim",
     }
 
-    async def fake_get_by_phone(phone):
+    async def fake_get_by_phone(phone, *, country_code="US"):
         return victim_contractor
 
     async def fake_update(contractor_id, updates):
@@ -251,11 +251,11 @@ async def test_phone_lookup_allows_apple_id_match(stub_apple_identity, monkeypat
     contractor = {
         "contractor_id": "owner-1",
         "apple_user_id": "apple-user-owner",
-        "owner_phone": "+15551234567",
+        "owner_phone": "+14155551234",
         "subscription_uuid": "uuid-owner",
     }
 
-    async def fake_get_by_phone(phone):
+    async def fake_get_by_phone(phone, *, country_code="US"):
         return contractor
 
     captured_updates: list = []
@@ -296,55 +296,149 @@ async def test_phone_lookup_allows_apple_id_match(stub_apple_identity, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_phone_lookup_binds_apple_id_for_legacy_record(
+async def test_phone_lookup_rejects_legacy_record_with_blank_apple_id(
     stub_apple_identity, monkeypatch
 ):
     """Legacy contractor (created before Apple Sign-In was required) has no
-    apple_user_id. First caller with a verified Apple identity should bind
-    their apple_user_id to the record so subsequent mismatching callers are
-    rejected.
+    apple_user_id. The endpoint must fail closed: knowing the phone number
+    does NOT grant account recovery/takeover without verified ownership.
+    Must return 409, with zero updates and zero token issuance.
     """
     legacy = {
         "contractor_id": "legacy-1",
         "apple_user_id": "",
-        "owner_phone": "+15559998888",
+        "owner_phone": "+14155559999",
         "subscription_uuid": "uuid-legacy",
     }
 
-    async def fake_get_by_phone(phone):
+    async def fake_get_by_phone(phone, *, country_code="US"):
         return legacy
 
-    captured_updates: list = []
+    async def fail_update(contractor_id, updates):
+        pytest.fail(f"update_contractor must not be called on legacy rejection: {updates}")
+
+    async def fail_create(data):
+        pytest.fail(f"create_contractor must not be called on legacy rejection: {data}")
+
+    async def fail_ensure_uuid(contractor_id, existing):
+        pytest.fail("ensure_subscription_uuid must not be called on legacy rejection")
+
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_owner_phone", fake_get_by_phone
+    )
+    monkeypatch.setattr(contractors_api, "update_contractor", fail_update)
+    monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fail_ensure_uuid)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await contractors_api.api_create_contractor(
+            contractors_api.ContractorCreate(
+                business_name="Acme",
+                owner_name="Alice",
+                owner_phone=legacy["owner_phone"],
+                apple_user_id="apple-user-firstsignin",
+                apple_identity_token="opaque-token-bypassed-by-stub",
+            ),
+            _non_admin_request(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "already exists" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_international_phone_hijack_rejection(stub_apple_identity, monkeypatch):
+    """Victim has UK E.164 phone +442079460958 and apple_user_id=apple-user-victim.
+    Attacker signs in with different Apple ID and national-format phone 020 7946 0958
+    and country_code=GB. Must be rejected with 409 Conflict.
+    """
+    victim_contractor = {
+        "contractor_id": "victim-uk-1",
+        "apple_user_id": "apple-user-victim",
+        "owner_phone": "+442079460958",
+        "country_code": "GB",
+        "subscription_uuid": "uuid-victim-uk",
+    }
+
+    seen_dedupe_args: dict = {}
+
+    async def fake_get_by_phone(phone, *, country_code="US"):
+        seen_dedupe_args["phone"] = phone
+        seen_dedupe_args["country_code"] = country_code
+        return victim_contractor
 
     async def fake_update(contractor_id, updates):
-        captured_updates.append((contractor_id, dict(updates)))
-        return True
-
-    async def fake_ensure_uuid(contractor_id, existing):
-        return existing.get("subscription_uuid", "")
+        pytest.fail("update_contractor must not run on rejected hijack")
+        return False
 
     monkeypatch.setattr(
         "app.db.contractors.get_contractor_by_owner_phone", fake_get_by_phone
     )
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update)
-    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_uuid)
 
-    response = await contractors_api.api_create_contractor(
-        contractors_api.ContractorCreate(
-            business_name="Acme",
-            owner_name="Alice",
-            owner_phone=legacy["owner_phone"],
-            apple_user_id="apple-user-firstsignin",
-            apple_identity_token="opaque-token-bypassed-by-stub",
-        ),
-        _non_admin_request(),
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await contractors_api.api_create_contractor(
+            contractors_api.ContractorCreate(
+                business_name="UK Services",
+                owner_name="Victim",
+                owner_phone="020 7946 0958",
+                country_code="GB",
+                apple_user_id="apple-user-attacker",
+                apple_identity_token="opaque-token-bypassed-by-stub",
+            ),
+            _non_admin_request(),
+        )
 
-    assert response["status"] == "ok"
-    assert response["contractor_id"] == "legacy-1"
-    # The first verified Apple sign-in for this legacy record should bind
-    # apple_user_id (so the next attacker with a different Apple ID gets 409).
-    bound = [u for _, u in captured_updates if "apple_user_id" in u]
-    assert bound and bound[0]["apple_user_id"] == "apple-user-firstsignin", (
-        "Legacy record must be bound to the first verified Apple ID"
+    assert exc_info.value.status_code == 409
+    assert seen_dedupe_args["country_code"] == "GB"
+
+
+@pytest.mark.asyncio
+async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
+    stub_apple_identity, monkeypatch
+):
+    """Legacy UK record with no apple_user_id must fail closed when looked up
+    by national-format phone 020 7946 0958. Zero updates, zero token issuance.
+    """
+    legacy = {
+        "contractor_id": "legacy-uk-1",
+        "apple_user_id": "",
+        "owner_phone": "+442079460958",
+        "country_code": "GB",
+        "subscription_uuid": "uuid-legacy-uk",
+    }
+
+    async def fake_get_by_phone(phone, *, country_code="US"):
+        return legacy
+
+    async def fail_update(contractor_id, updates):
+        pytest.fail("update_contractor must not run on legacy fail-closed rejection")
+
+    async def fail_create(data):
+        pytest.fail("create_contractor must not run on legacy fail-closed rejection")
+
+    async def fail_ensure_uuid(contractor_id, existing):
+        pytest.fail("ensure_subscription_uuid must not run on legacy fail-closed rejection")
+
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_owner_phone", fake_get_by_phone
     )
+    monkeypatch.setattr(contractors_api, "update_contractor", fail_update)
+    monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fail_ensure_uuid)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await contractors_api.api_create_contractor(
+            contractors_api.ContractorCreate(
+                business_name="UK Services",
+                owner_name="Alice",
+                owner_phone="020 7946 0958",
+                country_code="GB",
+                apple_user_id="apple-user-firstsignin",
+                apple_identity_token="opaque-token-bypassed-by-stub",
+            ),
+            _non_admin_request(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "already exists" in exc_info.value.detail

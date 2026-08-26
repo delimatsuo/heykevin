@@ -59,12 +59,12 @@ def _require_admin(request: Request):
 
 def _resolve_country_code(country_code: str = "", owner_phone: str = "") -> str:
     """Return a provisioning-safe country code for contractor onboarding."""
+    from app.db.contractors import SUPPORTED_COUNTRIES, detect_country_from_phone
     normalized = (country_code or "").strip().upper()
-    if normalized:
+    if normalized and normalized in SUPPORTED_COUNTRIES:
         return normalized
-    if owner_phone:
-        from app.db.contractors import detect_country_from_phone
-        return detect_country_from_phone(owner_phone)
+    if owner_phone and owner_phone.strip():
+        return detect_country_from_phone(owner_phone.strip())
     return "US"
 
 
@@ -285,6 +285,22 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     # callers (global bearer token) bypass Apple verification.
     await _enforce_apple_identity(request, body.apple_user_id, body.apple_identity_token)
 
+    # Resolve effective supported country before owner-phone dedupe.
+    # Explicit supported country wins; E.164 detection from owner_phone;
+    # missing country preserves US default.
+    effective_country = _resolve_country_code(body.country_code, body.owner_phone)
+
+    # Validate nonblank owner_phone before any Firestore dedupe/create work.
+    # Blank owner_phone remains allowed.
+    owner_phone_raw = (body.owner_phone or "").strip()
+    if owner_phone_raw:
+        from app.utils.phone import normalize_phone
+        canonical_phone = normalize_phone(owner_phone_raw, default_region=None)
+        if not canonical_phone:
+            canonical_phone = normalize_phone(owner_phone_raw, default_region=effective_country)
+        if not canonical_phone:
+            raise HTTPException(status_code=400, detail="Invalid owner phone number")
+
     # Deduplicate on apple_user_id first. It arrives on a verified Apple identity
     # token, so it cannot be spoofed by the caller — unlike owner_phone, which
     # needed the hijack guard below. It is also available earlier in onboarding
@@ -327,23 +343,39 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     #
     # The fix is to require the existing record's apple_user_id to match
     # the verified caller's apple_user_id. Legacy records with no
-    # apple_user_id are bound to the first caller that presents a verified
-    # Apple identity for them — acceptable for the current pre-launch user
-    # base (small, controlled) and aligns the legacy account with the
-    # current Sign-in-with-Apple flow on first use.
-    if body.owner_phone:
-        from app.db.contractors import get_contractor_by_owner_phone
-        existing = await get_contractor_by_owner_phone(body.owner_phone)
+    # apple_user_id fail closed (409) rather than auto-binding on unverified
+    # phone possession. Returning same-Apple-ID accounts are restored.
+    if owner_phone_raw:
+        from app.db.contractors import get_contractor_by_owner_phone, PhoneDedupeAmbiguityError
+        try:
+            existing = await get_contractor_by_owner_phone(
+                owner_phone_raw,
+                country_code=effective_country,
+            )
+        except PhoneDedupeAmbiguityError:
+            logger.warning("Phone-lookup rejected: deduplication ambiguity error")
+            raise HTTPException(
+                status_code=409,
+                detail="An account already exists for this phone number. Please contact support to recover your account.",
+            )
         if existing:
-            existing_apple_id = (existing.get("apple_user_id") or "").strip()
-            requested_apple_id = (body.apple_user_id or "").strip()
+            raw_apple_val = existing.get("apple_user_id")
+            existing_apple_id = (
+                raw_apple_val.strip()
+                if isinstance(raw_apple_val, str) and not isinstance(raw_apple_val, bool)
+                else ""
+            )
+            raw_req_apple_val = body.apple_user_id
+            requested_apple_id = (
+                raw_req_apple_val.strip()
+                if isinstance(raw_req_apple_val, str) and not isinstance(raw_req_apple_val, bool)
+                else ""
+            )
 
             if existing_apple_id and existing_apple_id != requested_apple_id:
                 # Cross-account hijack attempt. Log prefixes only (F-16).
                 logger.warning(
-                    "Phone-lookup hijack attempt rejected: phone=%s "
-                    "existing_apple_prefix=%s requested_apple_prefix=%s",
-                    redact_phone(body.owner_phone),
+                    "Phone-lookup hijack attempt rejected: existing_apple_prefix=%s requested_apple_prefix=%s",
                     existing_apple_id[:8],
                     requested_apple_id[:8] if requested_apple_id else "(empty)",
                 )
@@ -352,24 +384,18 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
                     detail="An account already exists for this phone number under a different Apple ID.",
                 )
 
-            logger.info(
-                "Returning existing contractor %s for phone %s",
-                existing["contractor_id"],
-                redact_phone(body.owner_phone),
-            )
+            if not existing_apple_id:
+                # Legacy account without verified Apple ID: fail closed. Phone knowledge
+                # alone does not prove ownership. Zero update, zero token issuance.
+                logger.warning("Phone-lookup legacy account match rejected: no apple_user_id bound")
+                raise HTTPException(
+                    status_code=409,
+                    detail="An account already exists for this phone number. Please contact support to recover your account.",
+                )
+
+            logger.info("Returning existing contractor matched on phone and verified apple_user_id")
             from app.middleware.auth import generate_contractor_token
             contractor_id = existing["contractor_id"]
-
-            # Bind apple_user_id on first authenticated access for legacy
-            # records that pre-date the Apple Sign-In requirement.
-            if not existing_apple_id and requested_apple_id:
-                logger.info(
-                    "Binding apple_user_id to legacy contractor %s on first verified sign-in",
-                    contractor_id,
-                )
-                await update_contractor(
-                    contractor_id, {"apple_user_id": requested_apple_id}
-                )
 
             subscription_uuid = await ensure_subscription_uuid(contractor_id, existing)
             raw_token, token_hash = generate_contractor_token(contractor_id)
@@ -391,10 +417,7 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
         # Business or Business Pro entitlement.
         data["mode"] = "personal"
     # Auto-detect country from phone if not explicitly provided
-    data["country_code"] = _resolve_country_code(
-        data.get("country_code", ""),
-        data.get("owner_phone", ""),
-    )
+    data["country_code"] = effective_country
     # Twilio number will be provisioned separately
     data["twilio_number"] = ""
     data["calendar_type"] = "none"

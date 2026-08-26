@@ -143,6 +143,7 @@ PROTECTED_FIELDS = frozenset({
     # Allowing PATCH to overwrite these would let an attacker hijack another account
     # by claiming its phone number or Apple user ID. (Security audit F-04.)
     "owner_phone",
+    "owner_phone_e164",
     "apple_user_id",
 })
 
@@ -257,45 +258,137 @@ async def get_contractor_by_subscription_uuid(subscription_uuid: str, include_in
     return None
 
 
-async def get_contractor_by_owner_phone(owner_phone: str) -> Optional[dict]:
+class PhoneDedupeAmbiguityError(Exception):
+    """Raised when phone deduplication encounters unexamined overflow or multiple conflicting canonical records."""
+    pass
+
+
+DOC_QUERY_CAP = 5
+
+
+async def get_contractor_by_owner_phone(
+    owner_phone: str,
+    *,
+    country_code: str = "US",
+) -> Optional[dict]:
     """Look up existing contractor by their personal phone number (unique ID)."""
-    if not owner_phone:
+    if not isinstance(owner_phone, str) or not owner_phone.strip():
         return None
+    import phonenumbers
     from app.utils.phone import normalize_phone
-    # Try parsing as E.164 first (no region needed), fall back to US
-    normalized = normalize_phone(owner_phone, default_region=None)
-    if not normalized:
-        normalized = normalize_phone(owner_phone, default_region="US")
-    if not normalized:
+
+    effective_country = (
+        country_code.strip().upper()
+        if isinstance(country_code, str) and country_code.strip().upper() in SUPPORTED_COUNTRIES
+        else "US"
+    )
+
+    # Try parsing as E.164 first (no region needed), fall back to effective country
+    canonical = normalize_phone(owner_phone, default_region=None)
+    if not canonical:
+        canonical = normalize_phone(owner_phone, default_region=effective_country)
+    if not canonical:
         return None
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
 
-    def _query(value: str):
+    def _query_field(field_name: str, value: str, limit: int = DOC_QUERY_CAP + 1):
         return list(
             db.collection(COLLECTION)
-            .where(filter=FieldFilter("owner_phone", "==", value))
+            .where(filter=FieldFilter(field_name, "==", value))
             .where(filter=FieldFilter("active", "==", True))
-            .limit(1)
+            .limit(limit)
             .stream()
         )
 
-    # Firestore compares strings exactly. `owner_phone` was historically stored
-    # unnormalized — production holds "(415) 555-1234" and bare digits alongside
-    # E.164 — so a normalized-only query silently missed those records and the
-    # caller created a duplicate account. New writes are normalized; this second
-    # lookup covers the records written before that.
-    candidates = [normalized]
-    raw = owner_phone.strip()
-    if raw and raw != normalized:
-        candidates.append(raw)
+    verified_matches_by_id: dict[str, dict] = {}
 
-    for candidate in candidates:
-        docs = await loop.run_in_executor(None, lambda c=candidate: _query(c))
-        if docs:
-            data = docs[0].to_dict()
-            data["contractor_id"] = docs[0].id
-            return data
+    def _record_match(doc_id: str, data: dict):
+        if doc_id not in verified_matches_by_id:
+            if len(verified_matches_by_id) >= 1:
+                raise PhoneDedupeAmbiguityError("Phone deduplication encountered multiple matching records")
+            verified_matches_by_id[doc_id] = data
+
+    # 1. Authoritative canonical companion lookup on owner_phone_e164
+    docs = await loop.run_in_executor(None, lambda: _query_field("owner_phone_e164", canonical))
+    if len(docs) > DOC_QUERY_CAP:
+        raise PhoneDedupeAmbiguityError("Phone deduplication encountered ambiguous unexamined records")
+    for doc in docs:
+        data = doc.to_dict()
+        doc_id = doc.id
+        data["contractor_id"] = doc_id
+        _record_match(doc_id, data)
+
+    # 2. Canonical lookup on owner_phone
+    docs = await loop.run_in_executor(None, lambda: _query_field("owner_phone", canonical))
+    if len(docs) > DOC_QUERY_CAP:
+        raise PhoneDedupeAmbiguityError("Phone deduplication encountered ambiguous unexamined records")
+    for doc in docs:
+        data = doc.to_dict()
+        doc_id = doc.id
+        data["contractor_id"] = doc_id
+        _record_match(doc_id, data)
+
+    # 3. Bounded deterministic legacy candidate representations for historical unnormalized records.
+    # Note: Arbitrary non-standard historical spellings require a separately authorized
+    # collision-aware backfill/migration; this provides bounded deterministic fallback
+    # without live collection scans.
+    raw_input = owner_phone.strip()
+    candidates_to_add: list[str] = [raw_input]
+    try:
+        parsed = phonenumbers.parse(owner_phone, effective_country)
+        if phonenumbers.is_valid_number(parsed):
+            nat = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.NATIONAL)
+            intl = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+            digits_nat = str(parsed.national_number)
+            nat_no_spaces = "".join(c for c in nat if c.isdigit())
+            digits_cc = f"{parsed.country_code}{parsed.national_number}"
+            candidates_to_add.extend([nat, intl, digits_nat, nat_no_spaces, digits_cc])
+    except phonenumbers.NumberParseException:
+        pass
+
+    seen = {canonical}
+    legacy_candidates = []
+    for c in candidates_to_add:
+        c_str = str(c).strip()
+        if c_str and c_str not in seen:
+            seen.add(c_str)
+            legacy_candidates.append(c_str)
+
+    # Enforce strict query ceiling (at most 6 legacy queries + 2 canonical queries = <= 8 total queries)
+    for candidate in legacy_candidates[:6]:
+        docs = await loop.run_in_executor(None, lambda c=candidate: _query_field("owner_phone", c))
+        if len(docs) > DOC_QUERY_CAP:
+            raise PhoneDedupeAmbiguityError("Phone deduplication encountered ambiguous unexamined records")
+
+        for doc in docs:
+            stored_data = doc.to_dict()
+            doc_id = doc.id
+            stored_raw_val = stored_data.get("owner_phone")
+            stored_raw = str(stored_raw_val).strip() if isinstance(stored_raw_val, (str, int, float)) else ""
+
+            stored_country_val = stored_data.get("country_code")
+            stored_country = (
+                stored_country_val.strip().upper()
+                if isinstance(stored_country_val, str)
+                else ""
+            )
+
+            # Re-normalize stored phone: E.164 first, otherwise require supported stored country
+            stored_canonical = normalize_phone(stored_raw, default_region=None)
+            if not stored_canonical:
+                if stored_country in SUPPORTED_COUNTRIES:
+                    stored_canonical = normalize_phone(stored_raw, default_region=stored_country)
+                else:
+                    stored_canonical = None
+
+            # Only accept legacy hit if stored canonical exactly matches requested canonical
+            if stored_canonical and stored_canonical == canonical:
+                stored_data["contractor_id"] = doc_id
+                _record_match(doc_id, stored_data)
+
+    if len(verified_matches_by_id) == 1:
+        return next(iter(verified_matches_by_id.values()))
     return None
 
 
@@ -371,19 +464,38 @@ async def get_contractor_by_pin(pin: str) -> Optional[dict]:
 
 async def create_contractor(data: dict) -> str:
     """Create a new contractor profile. Returns the contractor_id."""
-    db = get_firestore_client()
+    raw_country_val = data.get("country_code")
+    raw_country = (
+        raw_country_val.strip().upper()
+        if isinstance(raw_country_val, str)
+        else ""
+    )
+    country_code = raw_country if raw_country in SUPPORTED_COUNTRIES else "US"
+    data["country_code"] = country_code
+
     # Store owner_phone canonically. Firestore matches strings exactly, so
     # writing raw formats here is what broke dedupe on the next signup.
-    if data.get("owner_phone"):
+    # Nonblank invalid owner_phone must be rejected before Firestore acquisition.
+    owner_phone_raw = str(data.get("owner_phone") or "").strip()
+    if owner_phone_raw:
         from app.utils.phone import normalize_phone
-        canonical = normalize_phone(str(data["owner_phone"]))
-        if canonical:
-            data["owner_phone"] = canonical
+        canonical = normalize_phone(owner_phone_raw, default_region=None)
+        if not canonical:
+            canonical = normalize_phone(owner_phone_raw, default_region=country_code)
+        if not canonical:
+            raise ValueError("Invalid owner phone number")
+        data["owner_phone"] = canonical
+        data["owner_phone_e164"] = canonical
+    else:
+        if "owner_phone" in data:
+            data["owner_phone"] = ""
+        data["owner_phone_e164"] = ""
+
+    db = get_firestore_client()
     data["created_at"] = time.time()
     data["active"] = True
     data.setdefault("mode", "kevin")
     data.setdefault("voice_engine", "elevenlabs")
-    data.setdefault("country_code", "US")
     data.setdefault("business_address", "")
     data.setdefault("business_city", "")
     data.setdefault("business_country_name", "")

@@ -1,0 +1,171 @@
+# Hey Kevin — Canonical Source Roadmap & Reconciliation
+
+**Binding HEAD:** `4a773646bcec2c72ff3a95b9afda9b00ac8fe41c`
+**Branch:** `codex/roadmap-reconciliation`
+**Base:** `origin/main` (`4a773646bcec2c72ff3a95b9afda9b00ac8fe41c`)
+**Project:** Kevin (`delimatsuo/heykevin`)
+
+---
+
+## 1. Evidence Ceiling & Verification Scope
+
+This document is the canonical source roadmap for the Hey Kevin repository, verified strictly against the source code, unit test suite, and Git history at the binding HEAD above.
+
+> [!IMPORTANT]
+> **Evidence Ceiling**: Source implementation and automated unit tests prove repository code correctness and simulated contracts only. They do **not** prove:
+> - Active Cloud Run revisions, service configurations, or runtime environment variables in staging or production.
+> - Secret Manager secret provisioning or active encryption keys.
+> - Live provider configuration or account standing (Twilio, Deepgram, ElevenLabs, Gemini Live, Google Workspace, Jobber, Apple APNs/StoreKit).
+> - Live Firestore or RTDB account documents, active flags, or customer data.
+> - Physical iOS device execution, carrier GSM forwarding behavior, or cellular network audio quality.
+> - App Store review status, TestFlight builds, or live telephonic traffic.
+>
+> Non-source observations (such as GitHub issue queries) are explicitly labeled as dated external snapshots.
+
+---
+
+## 2. Recently Completed Source-Only Slices
+
+The following discrete backend hardening slices have been merged to `main` and verified through unit tests:
+
+1. **Tenant-Explicit Contact Isolation (PR #204 / merge `d5cb3dc`)**
+   - **Core paths:** [`app/services/adaptive_trust.py`](../app/services/adaptive_trust.py), [`app/services/lookup.py`](../app/services/lookup.py), [`tests/unit/test_call_history_tenant_isolation.py`](../tests/unit/test_call_history_tenant_isolation.py), [`tests/unit/test_tenant_explicit_contact_helpers.py`](../tests/unit/test_tenant_explicit_contact_helpers.py).
+   - **Outcome:** Enforces tenant-explicit contact lookup and eliminates global un-scoped fallback in contact lookup and adaptive trust resolution, ensuring contact evaluation is strictly isolated to the contractor tenant.
+
+2. **Default-Off Integration-Token Envelope Hardening (PR #205 / merge `7676458`)**
+   - **Core paths:** [`app/services/integration_tokens.py`](../app/services/integration_tokens.py), [`app/services/integration_token_mutations.py`](../app/services/integration_token_mutations.py), [`app/db/contractors.py`](../app/db/contractors.py), [`app/api/integrations.py`](../app/api/integrations.py), [`docs/runbooks/integration-token-envelope.md`](runbooks/integration-token-envelope.md), [`tests/unit/test_integration_token_envelope.py`](../tests/unit/test_integration_token_envelope.py).
+   - **Outcome:** Implemented context-bound AES-256-GCM encryption envelopes for Jobber and Google Calendar credentials with atomic CAS transitions, monotonic envelope floors (`jobber_token_envelope_required`, `google_calendar_token_envelope_required`), global write activation toggle (`INTEGRATION_TOKEN_ENCRYPTED_WRITES_ENABLED`), pair-valid boundary validation, and fail-closed downgrade protection.
+
+3. **Trusted Returning-Caller Intake Identity Hydration (PR #206 / merge `235cb8b`)**
+   - **Core paths:** [`app/services/gemini_pipeline.py`](../app/services/gemini_pipeline.py), [`app/services/live_intake_controller.py`](../app/services/live_intake_controller.py), [`tests/unit/test_live_intake_controller.py`](../tests/unit/test_live_intake_controller.py), [`tests/unit/test_receptionist_intelligence.py`](../tests/unit/test_receptionist_intelligence.py).
+   - **Outcome:** Hydrates caller identity and first-name greetings for recognized returning callers during conversational intake in Gemini live intake flows.
+
+4. **International Owner-Phone Canonicalization (PR #207 / merge `4a77364`)**
+   - **Core paths:** [`app/api/contractors.py`](../app/api/contractors.py), [`app/db/contractors.py`](../app/db/contractors.py), [`tests/test_apple_auth.py`](../tests/test_apple_auth.py), [`tests/unit/test_account_dedupe.py`](../tests/unit/test_account_dedupe.py), [`tests/unit/test_audit_pr_a.py`](../tests/unit/test_audit_pr_a.py).
+   - **Outcome:** Implemented for account creation and deduplication boundaries only: canonicalizes international owner phone numbers and persists `owner_phone_e164` to prevent multi-region format aliasing and duplicate tenant creation. `PATCH /api/contractors/{contractor_id}` accepts `owner_phone` via `ContractorUpdate` without canonicalization or recomputing `owner_phone_e164`; PATCH synchronization remains an explicit source gap.
+
+---
+
+## 3. Internationalization Status (Tasks 1–8)
+
+The internationalization plan ([`docs/superpowers/plans/2026-04-07-internationalization.md`](superpowers/plans/2026-04-07-internationalization.md)) defined eight tasks to support 9 countries (`US`, `CA`, `BR`, `GB`, `DE`, `FR`, `IT`, `ES`, `PT`). The table below reflects current source status versus owner/live gates:
+
+| Task | Title | Source Status | Source Implementation Details | Owner / Live Gate Status |
+|---|---|---|---|---|
+| **Task 1** | Country Model & Detection | **Implemented** | Supported country constants, `country_code` field, and `detect_country_from_phone()` helper implemented in [`app/db/contractors.py`](../app/db/contractors.py) and [`app/api/contractors.py`](../app/api/contractors.py). | Verified in unit tests. Cloud Run deployment is an owner gate. |
+| **Task 2** | International Twilio Provisioning | **Partial** | Asynchronous Twilio number search and `_create_regulatory_bundle()` helper implemented in [`app/db/contractors.py`](../app/db/contractors.py). Missing regulatory-country provider unit tests and iOS business address/city input. | Twilio regulatory compliance bundle submission/approval, international number purchases, and live qualification are owner-gated. |
+| **Task 3** | Regional Dial-In Routing | **Partial** | `get_dial_in_number(country_code)` helper implemented in [`app/config.py`](../app/config.py) and consumed in [`app/services/warm_transfer.py`](../app/services/warm_transfer.py). | `DIAL_IN_NUMBERS` environment variable provisioning, regional number inventory, and live conference testing are owner-gated. |
+| **Task 4** | Language Voice Mapping | **Implemented** | `GEMINI_VOICES` mapping per ISO language code implemented in [`app/services/gemini_pipeline.py`](../app/services/gemini_pipeline.py). | Live audible voice quality and latency qualification over Twilio Media Streams are owner-gated. |
+| **Task 5** | Forwarding Instructions API | **Partial** | `GET /api/forwarding-instructions` endpoint with GSM codes per country implemented in [`app/api/forwarding.py`](../app/api/forwarding.py). **Source Gap**: iOS client ([`OnboardingView.swift`](../ios/Kevin/Views/OnboardingView.swift)) still hardcodes US/Verizon codes and does not call this endpoint. | Carrier-network validation across international operators is owner-gated. |
+| **Task 6** | International Phone Normalization | **Partial** | Implemented for account creation and deduplication only: E.164 normalization logic in [`app/utils/phone.py`](../app/utils/phone.py); contractor creation canonicalization and account deduplication verified by PR #207 tests ([`tests/unit/test_account_dedupe.py`](../tests/unit/test_account_dedupe.py)). **Source Gap**: `PATCH /api/contractors/{contractor_id}` does not canonicalize `owner_phone` or sync `owner_phone_e164`. | Verified in creation unit tests. |
+| **Task 7** | Settings Country Code Update | **Partial** | `PUT /api/settings` updates root contractor `country_code` in [`app/api/settings.py`](../app/api/settings.py). **Source Gap**: `GET /api/settings` does not return `country_code`, direct country_code API tests are missing, and iOS settings UI lacks a country selection control. | Source-inspected; direct country_code API tests missing. |
+| **Task 8** | Staging / Production Qualification | **Owner-Gated** | Multi-country test matrix defined in plan. | Requires staging deployment, active credentials, real phone numbers, and physical device testing. |
+
+---
+
+## 4. Phase 0 Status & Historical Artifact Clarification
+
+1. **Source Status:**
+   - Phase 0 backend safety gates, CAS invariants, fail-closed integration boundaries, and subsequent architectural improvements have long since been merged into `main`.
+2. **Historical Artifact Demarcation:**
+   - [`docs/security/phase0-release-readiness.md`](security/phase0-release-readiness.md) represents immutable historical evidence as of 2026-07-01, not an open pre-merge checklist.
+   - The July 2026 staging smoke test executed against staging revision `kevin-api-staging-00032-tel` verified only enumerated read paths and disabled-gate boundaries; it did **not** prove enabled side effects, live carrier delivery, or full end-to-end call paths.
+   - The June 30, 2026 account audit reflects an immutable historical snapshot where 0 of 95 production contractor documents had `gated_actions` or compliance flags. Any future release decision requires a freshly executed aggregate-only audit.
+3. **Appointment-Confirmed Caller SMS Policy:**
+   - In [`app/services/gated_actions.py`](../app/services/gated_actions.py), `ActionKey.APPOINTMENT_CONFIRMED_CALLER_SMS` is configured with `requires_flag=False` and `requires_sms_compliance=False`.
+   - The registry policy specifies `requires_owner_confirmation=True` and `requires_idempotency=True`; `check_gated_action` permits execution when `context.owner_confirmed` is true or `automation_approvals[action]` is present.
+   - In the current appointment confirmation call path, `owner_confirmed=True` is explicitly passed.
+   - All other caller-facing SMS actions remain gated by default.
+4. **Rollback Authority:**
+   - Authoritative rollback procedures are encoded in [`.github/workflows/rollback.yml`](../.github/workflows/rollback.yml), supporting revision traffic-splitting and tagged redeployments for staging and production.
+   - Executing a `workflow_dispatch` rollback and placing an incoming live call require separate owner authorization; the owner performs the live call.
+
+---
+
+## 5. Next Recommended Source-Only Feature: Provider-Safe Google Calendar Reschedule Fencing
+
+**Objective:** Implement provider-safe Google Calendar reschedule fencing in backend services, default-off with zero live activation.
+
+### Reschedule Fencing Contract
+1. **Durable Bases & Fresh ETag Invariant:**
+   - Base state truth is durably stored in `PreparedProviderOperation.base_request` / canonical Firestore aggregate; desired state truth is the persisted reschedule arguments plus `result.request`.
+   - No base ETag is durably stored. Each mutation attempt or recovery refetch retrieves a fresh remote ETag via `GET`.
+2. **Schedule Validation & Instant Comparison:**
+   - Validate both base and desired timezone-aware, ordered schedule intervals (`start < end`).
+   - Compare schedules using normalized UTC instants so equivalent offsets (e.g. `14:00-04:00` vs `18:00Z`) match cleanly.
+   - All-day, cancelled, malformed, or recurring-master-shaped event resources fail closed.
+3. **Pre-Mutation Evaluation:**
+   - `GET` the bound event through the token-refresh wrapper; require a 2xx status, a valid ETag, and valid non-cancelled start/end times.
+   - `current == desired` => Idempotent GET-only success; no `PATCH` issued.
+   - `current differs from both base and desired` => Remote conflict; abort with failure and issue no `PATCH`.
+   - `current == base` => Permitted conditional update; issue a `PATCH` updating only `start` and `end` with `If-Match: "<ETag>"`.
+4. **Response Handling & Post-Condition Confirmation:**
+   - Accept success only if the 2xx response body explicitly confirms the desired `start` and `end` schedule.
+   - HTTP 412 Precondition Failed, timeout, transport error, 5xx, malformed/mismatched response, or token failure => return false/uncertain with zero second `PATCH` in that attempt.
+5. **Durable Recovery & Bounded Convergence:**
+   - Later durable recovery refetches the event via `GET`:
+     - If remote event is already at `desired` => finalize success exactly once (zero additional `PATCH`).
+     - If remote event is at `base` => acquire fresh ETag and perform conditional retry.
+     - If remote event is at a third schedule or in conflict => fail closed; bounded recovery leaves state as `needs_review` while retaining canonical base.
+   - Never describe an ambiguous transport error as safely overwritten or blindly retried.
+6. **Diagnostic Safety & Privacy:**
+   - Fixed payload-safe diagnostic codes only; logs strictly exclude event IDs, URLs, ETags, OAuth tokens, customer identifiers, request IDs, schedule strings, and raw provider payloads.
+
+### Targeted Implementation Allowlist (Source & Tests Only)
+- [`app/services/calendar.py`](../app/services/calendar.py)
+- [`app/services/google_calendar_request_provider.py`](../app/services/google_calendar_request_provider.py)
+- [`app/services/service_request_repository.py`](../app/services/service_request_repository.py)
+- [`docs/customer-memory-rollout.md`](customer-memory-rollout.md)
+- [`tests/unit/test_calendar_appointment_mutations.py`](../tests/unit/test_calendar_appointment_mutations.py)
+- [`tests/unit/test_google_calendar_request_provider.py`](../tests/unit/test_google_calendar_request_provider.py)
+- [`tests/unit/test_service_request_repository.py`](../tests/unit/test_service_request_repository.py)
+- [`tests/unit/test_service_request_recovery.py`](../tests/unit/test_service_request_recovery.py)
+- [`tests/unit/test_service_request_firestore.py`](../tests/unit/test_service_request_firestore.py)
+
+*Boundary Note:* [`app/services/service_request_recovery.py`](../app/services/service_request_recovery.py) and [`app/db/service_requests.py`](../app/db/service_requests.py) should remain unchanged unless a failing contract test proves otherwise. Evidence is source/mock-only; no live Google Calendar, Firestore recovery, staging deploy, feature flag activation, or provider qualification.
+
+### Mutation-Effective Proof Targets
+- Desired-current state yields GET-only success without issuing `PATCH`.
+- Third-schedule event yields GET-only conflict failure without issuing `PATCH`.
+- Missing base-equality guard causes tests to fail.
+- Missing or malformed ETag prevents `PATCH` invocation.
+- `PATCH` payload contains exact `If-Match` header and schedule-only body.
+- A 2xx `PATCH` whose response body has missing, malformed, or non-desired start/end returns false, retains canonical base/pending recovery, and never finalizes.
+- Exact Firestore round trip: canonical aggregate remains base; pending arguments/result remain desired; recovery receives both exact schedules; no ETag field exists anywhere in the durable document.
+- Exact 401 auth failure and retry sequences:
+  1. `GET` 401 -> token refresh -> retried `GET` supplies the ETag used by `PATCH`.
+  2. `PATCH` 401 -> token refresh -> retry uses the identical `If-Match` value and identical schedule-only body.
+  3. HTTP 412 from that retry returns false with no further `PATCH`.
+- HTTP 412 response executes zero second `PATCH`.
+- Timeout-after-PATCH followed by recovery `GET` at desired schedule finalizes exactly once with zero second `PATCH`.
+- Third-schedule divergence never `PATCH`es and reaches `needs_review` while retaining canonical base.
+- Sensitive sentinels are completely absent from diagnostic logs.
+
+---
+
+## 6. Categorization: Remaining Source Gaps vs. Owner / Live Gates
+
+### A. Remaining Source Gaps (Repository Code & Tests)
+- **PATCH Owner Phone Canonicalization:** Update `PATCH /api/contractors/{contractor_id}` in [`app/api/contractors.py`](../app/api/contractors.py) to canonicalize `owner_phone` and recompute `owner_phone_e164`.
+- **Settings Country Exposure & Tests:** Update `GET /api/settings` in [`app/api/settings.py`](../app/api/settings.py) to return `country_code` from the contractor document, add direct unit tests for `PUT /api/settings` `country_code` validation and updates, and add country selection controls to iOS `SettingsView.swift`.
+- **iOS Call Forwarding Integration:** Update [`OnboardingView.swift`](../ios/Kevin/Views/OnboardingView.swift) and [`SettingsView.swift`](../ios/Kevin/Views/SettingsView.swift) to fetch per-country forwarding dial codes dynamically from `GET /api/forwarding-instructions` instead of hardcoded US carrier strings.
+- **iOS International Address Capture:** Add business street address and city input fields to iOS onboarding/settings for accounts in regulatory countries (`DE`, `FR`, `IT`, `ES`, `PT`, `BR`).
+- **Regulatory Provisioning Unit Tests:** Expand unit test coverage for international regulatory bundle creation edge cases and error sanitization.
+
+### B. Owner / Live Gates (Explicitly Out of Bounds for Agent Tasks)
+- Cloud Run staging and production deployments (`gcloud run deploy` or GitHub Actions deploy workflows).
+- Feature flag enablement, backfills, or CAS runtime switches (`gated_actions`, `sms_compliance_status`, `INTEGRATION_TOKEN_ENCRYPTED_WRITES_ENABLED`, `jobber_token_envelope_required`, `google_calendar_token_envelope_required`).
+- Secret Manager provisioning, key rotations, or environment variable updates (`INTEGRATION_TOKEN_ENCRYPTION_KEYS`, `DIAL_IN_NUMBERS`, `APNS_*`).
+- Twilio A2P 10DLC registration, campaign submissions, and brand approvals.
+- Twilio international phone number inventory procurement, regulatory bundle document submissions, and address verifications.
+- Live Firestore / RTDB account audits or mutations.
+- Live telephony calls, carrier diversion tests, or acoustic voice qualification.
+- Physical iOS device testing, TestFlight uploads, or App Store submissions.
+- Legacy Apple ID lookup removal: requires completion of the monitored client adoption window and separate explicit owner authorization.
+
+---
+
+## 7. Dated External Observations: GitHub Issues
+
+- **Dated Observation (2026-08-25):** GitHub issue inventory observed on 2026-08-25 showed open Issue #33: *"Remove legacy Apple lookup GET fallback after build 24 adoption"*, tracking the eventual retirement of `GET /api/contractors/lookup-by-apple-id`.
+- **Authorization & Route Preservation:** Legacy endpoint removal is **explicitly not authorized** in this task and must remain intact until the monitored client adoption window concludes and a separate owner authorization is issued.

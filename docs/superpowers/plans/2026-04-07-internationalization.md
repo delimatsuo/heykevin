@@ -1,8 +1,26 @@
-# Kevin AI Internationalization — Implementation Plan (Revised)
+# Kevin AI Internationalization — Implementation Plan (Historical)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> [!WARNING]
+> **Historical Artifact & Working Document**: This plan is a historical implementation plan dated 2026-04-07. The unchecked step checkboxes (`- [ ]`) throughout this document are historical tracking markers and do **not** represent current repository or product state. For the current canonical source roadmap, evidence ceiling, and status of backend and iOS implementations, refer to [`docs/current-roadmap.md`](../../current-roadmap.md).
+>
+> While backend source foundations are largely merged on `main`, the nine-country product goal is **not complete**: iOS client onboarding and settings still hardcode US carrier codes and do not yet consume the forwarding instructions API, and provider qualification / live deployments remain owner-gated.
 
-**Goal:** Make Kevin AI work in 9 countries (US, CA, BR, GB, DE, FR, IT, ES, PT) with local phone numbers, per-language Gemini voices, regional dial-in numbers, and call forwarding instructions.
+### Reconciled Status Summary (as of HEAD `4a773646bcec2c72ff3a95b9afda9b00ac8fe41c`)
+
+| Task | Title | Source Implementation Status | Owner / Live Gate Status |
+|---|---|---|---|
+| **Task 1** | Add Country Fields to Contractor Model | **Implemented** in backend source (`app/db/contractors.py`, `app/api/contractors.py`). | Verified in unit tests. Staging/prod deployment is an owner gate. |
+| **Task 2** | Country-Aware Number Provisioning (Async) | **Partial** in source (async logic & regulatory helper in `app/db/contractors.py`). Missing regulatory-country unit tests and iOS address/city inputs. | Twilio regulatory bundle submission/approval, live number purchase, and carrier qualification are owner-gated. |
+| **Task 3** | Regional Dial-In Numbers | **Partial** in source (`get_dial_in_number()` in `app/config.py`, consumed in `app/services/warm_transfer.py`). | `DIAL_IN_NUMBERS` environment configuration, regional number inventory, and live conference testing are owner-gated. |
+| **Task 4** | Per-Language Gemini Voices | **Implemented** in backend source (`GEMINI_VOICES` in `app/services/gemini_pipeline.py`). | Live audible voice quality and latency qualification are owner-gated. |
+| **Task 5** | Forwarding Instructions API | **Partial** in source (`GET /api/forwarding-instructions` in `app/api/forwarding.py`). **Source Gap**: iOS client (`OnboardingView.swift`) still hardcodes US/Verizon codes and does not consume API. | Carrier network testing across international operators is owner-gated. |
+| **Task 6** | Phone Normalization for International Numbers | **Partial** in source (creation/dedupe canonicalization implemented in `app/db/contractors.py` and `tests/unit/test_account_dedupe.py`). **Source Gap**: `PATCH /api/contractors/{contractor_id}` does not canonicalize `owner_phone` or sync `owner_phone_e164`. | Verified in creation unit tests. |
+| **Task 7** | Add country_code to Settings API | **Partial** in source (`PUT /api/settings` updates root contractor). **Source Gap**: `GET /api/settings` does not return `country_code`, direct country_code API tests are missing, and iOS settings UI lacks country controls. | Source-inspected; direct country_code API tests missing. |
+| **Task 8** | Deploy and Test | **Owner-Gated**; unproven by repository source. | Requires staging deployment, active credentials, real phone numbers, and physical device testing. |
+
+---
+
+**Goal:** Make Kevin AI work in 9 countries (US, CA, BR, GB, DE, FR, IT, ES, PT) with local phone numbers, per-language Gemini voices, regional dial-in numbers, and call forwarding instructions (backend source partially complete; iOS client integration and provider qualification pending).
 
 **Architecture:** Add `country_code` and business address fields to the contractor model. Make phone provisioning country-aware with Twilio regulatory bundles for EU/BR. Replace single dial-in number with a per-country mapping. Replace 2-voice selection with a language-to-voice dict. Add a forwarding instructions API endpoint.
 
@@ -11,16 +29,16 @@
 **Spec:** `docs/superpowers/specs/2026-04-07-internationalization-design.md`
 **Review:** `docs/superpowers/plans/2026-04-07-internationalization-REVIEW.md`
 
-**Key files in current codebase:**
-- `app/config.py` — settings, `dial_in_number` at line 53
-- `app/db/contractors.py` — contractor CRUD, `provision_twilio_number` at line 149
-- `app/api/contractors.py` — contractor API, `ContractorCreate` at line 44, `provision-number` at line 176
-- `app/api/voip.py` — VoIP API
-- `app/api/settings.py` — settings API
-- `app/services/gemini_pipeline.py` — voice selection at lines 22-24, 110-112
-- `app/services/warm_transfer.py` — uses `settings.dial_in_number` at line 69
-- `app/services/state_machine.py` — `ActiveCall` class (has `contractor_id`, NOT `contractor_config`)
-- `app/utils/phone.py` — `normalize_phone()` already accepts `default_region`
+**Key files in codebase:**
+- `app/config.py` — settings, `dial_in_number`, `dial_in_numbers`, `get_dial_in_number`
+- `app/db/contractors.py` — contractor CRUD, country fields, `provision_twilio_number`, `_create_regulatory_bundle`
+- `app/api/contractors.py` — contractor API, `ContractorCreate`, `ContractorUpdate`, country validation
+- `app/api/settings.py` — settings API, `country_code` handling
+- `app/api/forwarding.py` — forwarding instructions API
+- `app/services/gemini_pipeline.py` — per-language voice selection (`GEMINI_VOICES`)
+- `app/services/warm_transfer.py` — regional dial-in number lookup
+- `app/utils/phone.py` — `normalize_phone()` international support
+- `ios/Kevin/Views/OnboardingView.swift` — iOS onboarding forwarding flow (source gap: needs API consumption)
 
 ---
 

@@ -99,3 +99,64 @@ def test_silence_and_hangup_scripts_do_not_credit_asked_slots():
     text = controller.after_caller_turn()
 
     assert "Allowed slots: service_action." in text
+
+
+def test_start_with_trusted_returning_caller_identity():
+    controller = LiveIntakeController.start(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+        caller_name="Jonathan",
+        caller_source="trusted_returning_caller",
+        caller_confidence=1.0,
+    )
+
+    assert controller.state.caller_identity.name == "Jonathan"
+    assert controller.state.caller_identity.source == "trusted_returning_caller"
+    assert controller.state.caller_identity.confidence == 1.0
+    assert controller.state.caller_identity.confirmed is True
+
+    text = controller.opening_instructions()
+
+    assert "- Caller is Jonathan." in text
+    assert "- Caller identity is unknown." not in text
+    assert "Do not ask:" in text
+    assert "the caller's name" in text
+    assert "Allowed slots: service_action." in text
+    assert controller.last_action_name == ActionName.ASK_ONE_CLARIFYING_QUESTION.value
+
+
+def test_start_default_remains_anonymous_and_backward_compatible():
+    controller = LiveIntakeController.start(
+        call_sid="CA_test",
+    )
+
+    assert controller.state.caller_identity.name == ""
+    assert controller.state.caller_identity.source == ""
+    assert controller.state.caller_identity.confidence == 0.0
+    assert controller.state.caller_identity.confirmed is False
+
+    text = controller.opening_instructions()
+
+    assert "- Caller identity is unknown." in text
+    assert "- Caller is" not in text
+    assert "the caller's name" not in text
+
+
+def test_start_with_low_confidence_caller_identity_remains_unconfirmed():
+    controller = LiveIntakeController.start(
+        call_sid="CA_test",
+        caller_phone="caller-id-ending-8667",
+        caller_name="Jonathan",
+        caller_source="trusted_returning_caller",
+        caller_confidence=0.5,
+    )
+
+    assert controller.state.caller_identity.name == "Jonathan"
+    assert controller.state.caller_identity.confidence == 0.5
+    assert controller.state.caller_identity.confirmed is False
+
+    text = controller.opening_instructions()
+
+    assert "- Caller identity is unknown." in text
+    assert "- Caller is Jonathan." not in text
+    assert "the caller's name" not in text

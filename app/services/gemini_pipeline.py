@@ -30,7 +30,10 @@ from app.services.voice_pipeline import (
     build_system_prompt,
     is_owner_availability_hold,
 )
-from app.services.receptionist_context import build_greeting_text
+from app.services.receptionist_context import (
+    build_greeting_text,
+    returning_caller_first_name,
+)
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
 
@@ -237,10 +240,35 @@ class GeminiPipeline:
         if mode != "personal":
             from app.services.live_intake_controller import LiveIntakeController
 
-            self._live_intake = LiveIntakeController.start(
-                call_sid=call_sid,
-                caller_phone=caller_phone,
-            )
+            caller_name = ""
+            caller_source = ""
+            caller_confidence = 0.0
+            try:
+                caller_name = returning_caller_first_name(self._contractor_config)
+                if caller_name:
+                    caller_source = "trusted_returning_caller"
+                    caller_confidence = 1.0
+            except Exception:  # noqa: BLE001 - fail closed to anonymous intake
+                caller_name = ""
+                caller_source = ""
+                caller_confidence = 0.0
+
+            try:
+                self._live_intake = LiveIntakeController.start(
+                    call_sid=call_sid,
+                    caller_phone=caller_phone,
+                    caller_name=caller_name,
+                    caller_source=caller_source,
+                    caller_confidence=caller_confidence,
+                )
+            except Exception:  # noqa: BLE001 - fail closed to anonymous intake
+                try:
+                    self._live_intake = LiveIntakeController.start(
+                        call_sid=call_sid,
+                        caller_phone=caller_phone,
+                    )
+                except Exception:  # noqa: BLE001 - do not break pipeline construction
+                    self._live_intake = None
 
         # Voice selection — pick the best voice for the contractor's language
         user_language = self._contractor_config.get("user_language", "en")

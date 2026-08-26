@@ -36,8 +36,19 @@ class LiveIntakeController:
         *,
         call_sid: str,
         caller_phone: str = "",
+        caller_name: str = "",
+        caller_source: str = "",
+        caller_confidence: float = 0.0,
     ) -> "LiveIntakeController":
-        return cls(IntakeState.new(call_sid=call_sid, caller_phone=caller_phone))
+        return cls(
+            IntakeState.new(
+                call_sid=call_sid,
+                caller_phone=caller_phone,
+                caller_name=caller_name,
+                caller_source=caller_source,
+                caller_confidence=caller_confidence,
+            )
+        )
 
     @property
     def last_action_name(self) -> str:

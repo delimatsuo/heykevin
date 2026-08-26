@@ -3076,3 +3076,759 @@ async def test_live_intake_does_not_inject_during_owner_availability_hold():
     await pipeline._flush_caller_transcript()
 
     assert len(pipeline._ws.sent_payloads) == sent_before
+
+
+def test_gemini_business_pipeline_hydrates_trusted_returning_caller_from_customer_memory():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+
+    now = datetime.now(UTC)
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == "Jonathan"
+    assert pipeline._live_intake.state.caller_identity.source == "trusted_returning_caller"
+    assert pipeline._live_intake.state.caller_identity.confidence == 1.0
+    assert pipeline._live_intake.state.caller_identity.confirmed is True
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller is Jonathan." in opening
+    assert "- Caller identity is unknown." not in opening
+    assert "Do not ask:" in opening
+    assert "the caller's name" in opening
+    assert "Allowed slots: service_action." in opening
+
+
+def test_gemini_business_pipeline_hydrates_from_projected_dict_memory():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    now = datetime.now(UTC)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    projected = project_customer_memory(memory)
+    assert isinstance(projected, dict)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = projected
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == "Jonathan"
+    assert pipeline._live_intake.state.caller_identity.source == "trusted_returning_caller"
+    assert pipeline._live_intake.state.caller_identity.confidence == 1.0
+    assert pipeline._live_intake.state.caller_identity.confirmed is True
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller is Jonathan." in opening
+    assert "- Caller identity is unknown." not in opening
+    assert "Do not ask:" in opening
+    assert "the caller's name" in opening
+    assert "Allowed slots: service_action." in opening
+
+
+def test_gemini_business_pipeline_projected_dict_candidate_remains_anonymous():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    now = datetime.now(UTC)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CANDIDATE,
+        identity_source=IdentitySource.TRANSCRIPT_EXTRACTED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    projected = project_customer_memory(memory)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = projected
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is Jonathan." not in opening
+    assert "the caller's name" not in opening
+
+
+def test_gemini_business_pipeline_projected_dict_expired_memory_remains_anonymous():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    now = datetime.now(UTC)
+    past = now - timedelta(days=100)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=past,
+        updated_at=past,
+        last_seen_at=past,
+        expires_at=past + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    projected = project_customer_memory(memory)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = projected
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is Jonathan." not in opening
+
+
+def test_gemini_business_pipeline_projected_dict_low_confidence_remains_anonymous():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    now = datetime.now(UTC)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.6,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    projected = project_customer_memory(memory)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = projected
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is Jonathan." not in opening
+
+
+@pytest.mark.asyncio
+async def test_gemini_business_pipeline_hostile_confirmed_name_sanitized_and_sentinel_absent(
+    caplog, monkeypatch
+):
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    caplog.set_level(logging.DEBUG)
+
+    captured_timing_calls: list[tuple[str, dict[str, object]]] = []
+    real_log_voice_timing = GeminiPipeline._log_voice_timing
+
+    def timing_spy(self, event: str, **metrics: object) -> None:
+        captured_timing_calls.append((event, dict(metrics)))
+        return real_log_voice_timing(self, event, **metrics)
+
+    monkeypatch.setattr(GeminiPipeline, "_log_voice_timing", timing_spy)
+
+    now = datetime.now(UTC)
+    raw_phone = "+15550009999"
+    hostile_display = f"Robert'); DROP TABLE users;-- \n SENSITIVE_SENTINEL {raw_phone}"
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name=hostile_display[:80],
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    projected = project_customer_memory(memory)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = projected
+
+    caller_phone = "+15550008667"
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone=caller_phone,
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_greeting()
+    await pipeline._send_opening_intake_instructions()
+
+    greeting_payload = json.dumps(pipeline._ws.sent_payloads[0])
+    intake_text = _last_instruction_text(pipeline)
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == "Robert'"
+    assert pipeline._live_intake.state.caller_identity.confirmed is True
+    assert "Hello, Robert'." in greeting_payload
+    assert "- Caller is Robert'." in intake_text
+
+    assert "\n" not in pipeline._live_intake.state.caller_identity.name
+    hostile_tokens = [
+        hostile_display[:80],
+        "DROP TABLE",
+        "users;--",
+        "SENSITIVE_SENTINEL",
+        raw_phone,
+        caller_phone,
+    ]
+    for sentinel in hostile_tokens:
+        assert sentinel not in pipeline._live_intake.state.caller_identity.name
+        assert sentinel not in intake_text
+        assert sentinel not in greeting_payload
+
+    forbidden_log_strings = [
+        hostile_display[:80],
+        "DROP TABLE",
+        "users;--",
+        "SENSITIVE_SENTINEL",
+        raw_phone,
+        caller_phone,
+        "Robert'",
+    ]
+    for forbidden in forbidden_log_strings:
+        assert forbidden not in caplog.text
+
+    assert len(captured_timing_calls) > 0
+    forbidden_keys = {"caller_name", "display_name", "caller_first_name"}
+    for event, metrics in captured_timing_calls:
+        serialized_metrics = str(metrics)
+        assert not (set(metrics.keys()) & forbidden_keys)
+        for forbidden in forbidden_log_strings:
+            assert forbidden not in event
+            assert forbidden not in serialized_metrics
+            for key, val in metrics.items():
+                assert forbidden not in str(key)
+                assert forbidden not in str(val)
+
+
+def test_gemini_business_pipeline_canonical_helper_spy_and_bypassed_reader_fails(monkeypatch):
+    import app.services.gemini_pipeline as gemini_pipeline_mod
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    now = datetime.now(UTC)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = project_customer_memory(memory)
+
+    helper_invocations = []
+    real_helper = gemini_pipeline_mod.returning_caller_first_name
+
+    def spy_helper(cfg):
+        helper_invocations.append(cfg)
+        return real_helper(cfg)
+
+    monkeypatch.setattr(gemini_pipeline_mod, "returning_caller_first_name", spy_helper)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert len(helper_invocations) >= 1
+    assert helper_invocations[0] is config
+    assert pipeline._live_intake.state.caller_identity.name == "Jonathan"
+
+    monkeypatch.setattr(gemini_pipeline_mod, "returning_caller_first_name", lambda _cfg: "")
+    pipeline_bypassed = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+    assert pipeline_bypassed._live_intake.state.caller_identity.name == ""
+    assert pipeline_bypassed._live_intake.state.caller_identity.confirmed is False
+
+
+def test_gemini_business_pipeline_causal_fails_if_personalization_flag_disabled():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+
+    now = datetime.now(UTC)
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = False
+    config["customer_memory"] = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is Jonathan." not in opening
+    assert "the caller's name" not in opening
+
+
+def test_gemini_business_pipeline_untrusted_legacy_known_caller_remains_anonymous():
+    config = _plumbing_config()
+    config["known_caller_name"] = "Jonathan Smith"
+    config["known_caller_name_trusted"] = False
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is Jonathan." not in opening
+
+
+def test_gemini_business_pipeline_trusted_legacy_known_caller_hydrates_intake():
+    config = _plumbing_config()
+    config["known_caller_name"] = "Jonathan Smith"
+    config["known_caller_name_trusted"] = True
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == "Jonathan"
+    assert pipeline._live_intake.state.caller_identity.source == "trusted_returning_caller"
+    assert pipeline._live_intake.state.caller_identity.confirmed is True
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller is Jonathan." in opening
+    assert "- Caller identity is unknown." not in opening
+    assert "Do not ask:" in opening
+    assert "the caller's name" in opening
+
+
+def test_gemini_business_pipeline_malformed_customer_memory_fails_closed_to_anonymous():
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = {"malformed": "data", "confidence": "not-a-number"}
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is" not in opening
+
+
+def test_gemini_business_pipeline_identity_bridge_exception_fails_closed_to_anonymous(monkeypatch):
+    import app.services.gemini_pipeline as gemini_pipeline_mod
+
+    def boom(_config):
+        raise RuntimeError("unexpected bridge failure")
+
+    monkeypatch.setattr(gemini_pipeline_mod, "returning_caller_first_name", boom)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller identity is unknown." in opening
+    assert "- Caller is" not in opening
+
+
+def test_gemini_business_pipeline_anonymous_retry_when_named_start_fails(monkeypatch):
+    from app.services.live_intake_controller import LiveIntakeController
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+
+    now = datetime.now(UTC)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = project_customer_memory(memory)
+
+    start_calls = []
+    real_start = LiveIntakeController.start
+
+    def mock_start(*args, **kwargs):
+        start_calls.append(kwargs)
+        if kwargs.get("caller_name"):
+            raise RuntimeError("named intake start failed")
+        return real_start(*args, **kwargs)
+
+    monkeypatch.setattr(LiveIntakeController, "start", mock_start)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert len(start_calls) == 2
+    assert start_calls[0]["caller_name"] == "Jonathan"
+    assert start_calls[0]["caller_source"] == "trusted_returning_caller"
+    assert start_calls[0]["caller_confidence"] == 1.0
+    assert start_calls[1]["call_sid"] == "CA_test"
+    assert start_calls[1]["caller_phone"] == "caller-id-ending-8667"
+    assert start_calls[1].get("caller_name", "") == ""
+
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == ""
+    assert pipeline._live_intake.state.caller_identity.confirmed is False
+    assert "- Caller identity is unknown." in pipeline._live_intake.opening_instructions()
+
+
+def test_gemini_business_pipeline_both_starts_fail_survives_with_none_live_intake(monkeypatch):
+    from app.services.live_intake_controller import LiveIntakeController
+
+    def fail_all_starts(*args, **kwargs):
+        raise RuntimeError("all controller starts failed")
+
+    monkeypatch.setattr(LiveIntakeController, "start", fail_all_starts)
+
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_business_pipeline_privacy_logging_and_no_mutation(caplog, monkeypatch):
+    import copy
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+    from app.services.receptionist_context import project_customer_memory
+    import app.services.gemini_pipeline as gemini_pipeline_mod
+
+    caplog.set_level(logging.DEBUG)
+
+    now = datetime.now(UTC)
+    memory = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="CallerNameLeakSentinel Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = project_customer_memory(memory)
+    config["private_sentinel"] = "SENSITIVE_SECRET_TOKEN_999"
+
+    config_snapshot = copy.deepcopy(config)
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="+15551234567",
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_greeting()
+    await pipeline._send_opening_intake_instructions()
+
+    # Prove it is the hydrated/sanitized caller identity
+    assert pipeline._live_intake is not None
+    assert pipeline._live_intake.state.caller_identity.name == "CallerNameLeakSentinel"
+    assert pipeline._live_intake.state.caller_identity.confirmed is True
+    opening = pipeline._live_intake.opening_instructions()
+    assert "- Caller is CallerNameLeakSentinel." in opening
+    greeting = pipeline._build_greeting_text()
+    assert "Hello, CallerNameLeakSentinel." in greeting
+
+    # Assert exact sentinel is absent from caplog.text after construction, greeting, opening intake
+    assert "CallerNameLeakSentinel" not in caplog.text
+    assert config == config_snapshot
+    assert "SENSITIVE_SECRET_TOKEN_999" not in caplog.text
+    assert "customer-key-1" not in caplog.text
+    assert "+15551234567" not in caplog.text
+
+    caplog.clear()
+
+    def boom_with_secret(_cfg):
+        raise RuntimeError("DATABASE_SECRET_CREDENTIAL_XYZ")
+
+    monkeypatch.setattr(gemini_pipeline_mod, "returning_caller_first_name", boom_with_secret)
+
+    pipeline_error = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="+15551234567",
+    )
+    assert pipeline_error._live_intake is not None
+    assert pipeline_error._live_intake.state.caller_identity.name == ""
+
+    assert "DATABASE_SECRET_CREDENTIAL_XYZ" not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_gemini_personal_pipeline_with_returning_caller_remains_without_live_intake():
+    config = _personal_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["known_caller_name"] = "Jonathan Smith"
+    config["known_caller_name_trusted"] = True
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+
+    assert pipeline._live_intake is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_greeting_and_intake_consistency_for_trusted_returning_caller():
+    from datetime import UTC, datetime, timedelta
+    from app.services.customer_memory import CustomerMemory, IdentitySource, IdentityState
+
+    now = datetime.now(UTC)
+    config = _plumbing_config()
+    config["customer_memory_personalization_enabled"] = True
+    config["customer_memory"] = CustomerMemory(
+        contractor_id="contractor-1",
+        customer_key="customer-key-1",
+        display_name="Jonathan Smith",
+        identity_state=IdentityState.CONFIRMED,
+        identity_source=IdentitySource.CALLER_CONFIRMED,
+        confidence=0.95,
+        language="en",
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=90),
+        last_command_id="call-1:name",
+    )
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=config,
+        caller_phone="caller-id-ending-8667",
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+    await pipeline._send_greeting()
+    await pipeline._send_opening_intake_instructions()
+
+    greeting_payload = json.dumps(pipeline._ws.sent_payloads[0])
+    intake_text = _last_instruction_text(pipeline)
+
+    assert "Hello, Jonathan. How can I help you today?" in greeting_payload
+    assert "- Caller is Jonathan." in intake_text
+    assert "- Caller identity is unknown." not in intake_text
+    assert "the caller's name" in intake_text
+    assert "Allowed slots: service_action." in intake_text

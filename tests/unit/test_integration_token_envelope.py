@@ -13217,3 +13217,227 @@ async def test_18qh_missing_contractor_real_orchestration_public_404_and_service
         integrations.logger.handlers = orig_logger_handlers
         integrations.logger.propagate = orig_logger_propagate
         root_logger.handlers = orig_root_handlers
+
+
+@pytest.mark.asyncio
+async def test_terminalize_provider_operation_intent_allows_newer_replacement_intent_post_read(monkeypatch):
+    """Prove terminalize_provider_operation_intent_cas confirms True when a newer valid intent appears post-commit,
+    and returns False when the same claim id reappears or the post-read is malformed."""
+    _setup_keyring(monkeypatch)
+
+    for provider in ("jobber", "google_calendar"):
+        cid = f"c-term-race-{provider}"
+        initial_claim_id = "claim_initial_12345678"
+        replacement_claim_id = "claim_replacement_87654321"
+
+        initial_intent_fields = {
+            f"{provider}_operation_intent_id": initial_claim_id,
+            f"{provider}_operation_intent_kind": "business",
+            f"{provider}_operation_intent_phase": "provider_request_started",
+            f"{provider}_operation_intent_expires_at": 9999999999.0,
+            f"{provider}_operation_intent_acquired_at": 100.0,
+            f"{provider}_operation_intent_generation": 0,
+            f"{provider}_operation_intent_lifecycle_epoch": 0,
+            f"{provider}_operation_intent_credentials_fingerprint": "a" * 64,
+        }
+
+        replacement_intent_fields = {
+            f"{provider}_operation_intent_id": replacement_claim_id,
+            f"{provider}_operation_intent_kind": "refresh",
+            f"{provider}_operation_intent_phase": "reserved",
+            f"{provider}_operation_intent_expires_at": 9999999999.0,
+            f"{provider}_operation_intent_acquired_at": 200.0,
+            f"{provider}_operation_intent_generation": 0,
+            f"{provider}_operation_intent_lifecycle_epoch": 0,
+            f"{provider}_operation_intent_credentials_fingerprint": "b" * 64,
+        }
+
+        # 1. Success case: Valid replacement intent appears strictly after commit and before post-read.
+        doc_data = {
+            "active": True,
+            "contractor_id": cid,
+            f"{provider}_connected": True,
+            f"{provider}_generation": 0,
+            f"{provider}_lifecycle_epoch": 0,
+            f"{provider}_access_token": "acc_token_123",
+            f"{provider}_refresh_token": "ref_token_123",
+            **initial_intent_fields,
+        }
+
+        c_doc = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db = _FakeFirestore({"contractors": {cid: c_doc}})
+
+        def _make_tracking_txn(inject_fields):
+            def _tracking_transaction():
+                txn = _FakeTransaction(db)
+                orig_commit = txn.commit
+
+                def _commit_with_race():
+                    orig_commit()
+                    for k, v in inject_fields.items():
+                        c_doc.data[k] = v
+
+                txn.commit = _commit_with_race
+                return txn
+            return _tracking_transaction
+
+        monkeypatch.setattr(db, "transaction", _make_tracking_txn(replacement_intent_fields))
+
+        result = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db,
+        )
+
+        assert result is True
+        for k, expected_v in replacement_intent_fields.items():
+            assert c_doc.data[k] == expected_v, f"Replacement field {k} was corrupted"
+
+        # 2. Same-claim reappearance: returns False and keeps same claim intact.
+        c_doc_same = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_same = _FakeFirestore({"contractors": {cid: c_doc_same}})
+
+        def _make_same_claim_txn():
+            def _tracking_transaction():
+                txn = _FakeTransaction(db_same)
+                orig_commit = txn.commit
+
+                def _commit_with_same_claim():
+                    orig_commit()
+                    for k, v in initial_intent_fields.items():
+                        c_doc_same.data[k] = v
+
+                txn.commit = _commit_with_same_claim
+                return txn
+            return _tracking_transaction
+
+        monkeypatch.setattr(db_same, "transaction", _make_same_claim_txn())
+
+        result_same = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_same,
+        )
+
+        assert result_same is False
+        for k, expected_v in initial_intent_fields.items():
+            assert c_doc_same.data[k] == expected_v
+
+        # 3. Malformed intent reappearance: returns False.
+        c_doc_malformed = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_malformed = _FakeFirestore({"contractors": {cid: c_doc_malformed}})
+        malformed_fields = {f"{provider}_operation_intent_id": "malformed_claim_123"}
+
+        def _make_malformed_txn():
+            def _tracking_transaction():
+                txn = _FakeTransaction(db_malformed)
+                orig_commit = txn.commit
+
+                def _commit_with_malformed():
+                    orig_commit()
+                    for k, v in malformed_fields.items():
+                        c_doc_malformed.data[k] = v
+
+                txn.commit = _commit_with_malformed
+                return txn
+            return _tracking_transaction
+
+        monkeypatch.setattr(db_malformed, "transaction", _make_malformed_txn())
+
+        result_malformed = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_malformed,
+        )
+
+        assert result_malformed is False
+
+        # 4. Existing post-read snapshot with to_dict()->None: returns False.
+        c_doc_none = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_none = _FakeFirestore({"contractors": {cid: c_doc_none}})
+
+        orig_none_get = c_doc_none.get
+        def _get_with_none_dict(*args, transaction=None, **kwargs):
+            snap = orig_none_get(*args, transaction=transaction, **kwargs)
+            if transaction is None:
+                class _ExistingNoneSnap:
+                    exists = True
+                    read_time = snap.read_time
+                    def to_dict(self):
+                        return None
+                return _ExistingNoneSnap()
+            return snap
+
+        c_doc_none.get = _get_with_none_dict
+
+        result_none = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_none,
+        )
+
+        assert result_none is False
+
+        # 5. Existing post-read snapshot with to_dict()->non-dict: returns False.
+        c_doc_nondict = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_nondict = _FakeFirestore({"contractors": {cid: c_doc_nondict}})
+
+        orig_nondict_get = c_doc_nondict.get
+        def _get_with_nondict(*args, transaction=None, **kwargs):
+            snap = orig_nondict_get(*args, transaction=transaction, **kwargs)
+            if transaction is None:
+                class _ExistingNonDictSnap:
+                    exists = True
+                    read_time = snap.read_time
+                    def to_dict(self):
+                        return "corrupted_non_dict_payload"
+                return _ExistingNonDictSnap()
+            return snap
+
+        c_doc_nondict.get = _get_with_nondict
+
+        result_nondict = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_nondict,
+        )
+
+        assert result_nondict is False
+
+        # 6. Missing post-read snapshot (exists=False): confirms True.
+        c_doc_missing = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_missing = _FakeFirestore({"contractors": {cid: c_doc_missing}})
+
+        orig_missing_get = c_doc_missing.get
+        def _get_with_missing(*args, transaction=None, **kwargs):
+            snap = orig_missing_get(*args, transaction=transaction, **kwargs)
+            if transaction is None:
+                class _MissingSnap:
+                    exists = False
+                    read_time = snap.read_time
+                    def to_dict(self):
+                        return {}
+                return _MissingSnap()
+            return snap
+
+        c_doc_missing.get = _get_with_missing
+
+        result_missing = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_missing,
+        )
+
+        assert result_missing is True

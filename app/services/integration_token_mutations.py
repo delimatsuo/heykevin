@@ -1393,12 +1393,17 @@ async def terminalize_provider_operation_intent_cas(
         return False
 
     post_snap = doc_ref.get()
-    post_data = post_snap.to_dict() if getattr(post_snap, "exists", False) else None
-    if post_data is not None:
-        p_status, _, _ = parse_provider_operation_intent(post_data, provider)
-        if p_status != "absent":
-            return False
-    return True
+    if not getattr(post_snap, "exists", False):
+        return True
+    post_data = post_snap.to_dict()
+    if type(post_data) is not dict:
+        return False
+    p_status, p_parsed, _ = parse_provider_operation_intent(post_data, provider)
+    if p_status == "absent":
+        return True
+    if p_status == "valid" and p_parsed is not None and p_parsed["id"] != claim_id:
+        return True
+    return False
 
 
 async def transition_provider_reauthorization_attempt_to_started_cas(

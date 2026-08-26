@@ -114,17 +114,22 @@ The internationalization plan ([`docs/superpowers/plans/2026-04-07-international
 ### Targeted Implementation Allowlist (Source & Tests Only)
 - [`app/services/calendar.py`](../app/services/calendar.py)
 - [`app/services/google_calendar_request_provider.py`](../app/services/google_calendar_request_provider.py)
+- [`app/services/integration_token_mutations.py`](../app/services/integration_token_mutations.py)
 - [`app/services/service_request_repository.py`](../app/services/service_request_repository.py)
 - [`docs/customer-memory-rollout.md`](customer-memory-rollout.md)
 - [`tests/unit/test_calendar_appointment_mutations.py`](../tests/unit/test_calendar_appointment_mutations.py)
 - [`tests/unit/test_google_calendar_request_provider.py`](../tests/unit/test_google_calendar_request_provider.py)
+- [`tests/unit/test_integration_token_envelope.py`](../tests/unit/test_integration_token_envelope.py)
 - [`tests/unit/test_service_request_repository.py`](../tests/unit/test_service_request_repository.py)
 - [`tests/unit/test_service_request_recovery.py`](../tests/unit/test_service_request_recovery.py)
 - [`tests/unit/test_service_request_firestore.py`](../tests/unit/test_service_request_firestore.py)
 
 *Boundary Note:* [`app/services/service_request_recovery.py`](../app/services/service_request_recovery.py) and [`app/db/service_requests.py`](../app/db/service_requests.py) should remain unchanged unless a failing contract test proves otherwise. Evidence is source/mock-only; no live Google Calendar, Firestore recovery, staging deploy, feature flag activation, or provider qualification.
 
+Shared-helper exception: The Google Calendar token-refresh path depends on `terminalize_provider_operation_intent_cas`. This slice may update that provider-agnostic helper, with Jobber and Google Calendar regression coverage, only so a post-read containing a valid different claim confirms the terminalized claim is absent; same-claim and malformed post-reads remain fail closed. This does not authorize other Jobber behavior or any live-provider change.
+
 ### Mutation-Effective Proof Targets
+
 - Desired-current state yields GET-only success without issuing `PATCH`.
 - Third-schedule event yields GET-only conflict failure without issuing `PATCH`.
 - Missing base-equality guard causes tests to fail.

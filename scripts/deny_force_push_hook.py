@@ -545,6 +545,30 @@ def _parse_git_global_options(
             i += 1
             continue
 
+        if arg == "--git-dir":
+            if i + 1 >= len(git_args):
+                raise ValueError("Git --git-dir is missing its repository path")
+            raise ValueError(
+                "Repository-local Git config via --git-dir is unsupported/uninspectable"
+            )
+
+        if arg.startswith("--git-dir="):
+            raise ValueError(
+                "Repository-local Git config via --git-dir is unsupported/uninspectable"
+            )
+
+        if arg == "-C":
+            if i + 1 >= len(git_args):
+                raise ValueError("Git -C is missing its repository path")
+            raise ValueError(
+                "Repository-local Git config via -C is unsupported/uninspectable"
+            )
+
+        if arg.startswith("-C") and len(arg) > 2:
+            raise ValueError(
+                "Repository-local Git config via -C is unsupported/uninspectable"
+            )
+
         if arg in GIT_GLOBAL_OPTS_WITH_ARG:
             i += 2
             continue
@@ -552,17 +576,12 @@ def _parse_git_global_options(
         if any(
             arg.startswith(opt + "=")
             for opt in [
-                "--git-dir",
                 "--work-tree",
                 "--namespace",
                 "--super-prefix",
                 "--exec-path",
             ]
         ):
-            i += 1
-            continue
-
-        if arg.startswith("-C") and len(arg) > 2:
             i += 1
             continue
 
@@ -2142,6 +2161,7 @@ def _inspect_shell_invocation(
 
 GIT_CONFIG_FILE_SELECTORS = {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"}
 GIT_CONFIG_USER_SEARCH_PATH_INPUTS = {"HOME", "XDG_CONFIG_HOME"}
+GIT_REPOSITORY_CONFIG_SELECTORS = {"GIT_DIR", "GIT_COMMON_DIR"}
 GIT_CONFIG_SEARCH_PATH_INPUTS = GIT_CONFIG_USER_SEARCH_PATH_INPUTS
 INITIAL_ASSUMED_EXPORTED_KEYS = frozenset(GIT_CONFIG_USER_SEARCH_PATH_INPUTS)
 
@@ -2171,6 +2191,11 @@ def _is_git_config_user_search_path_input(key: str) -> bool:
     return key in GIT_CONFIG_USER_SEARCH_PATH_INPUTS
 
 
+def _is_git_repository_config_selector(key: str) -> bool:
+    """Return True if key selects repository-local Git configuration."""
+    return key in GIT_REPOSITORY_CONFIG_SELECTORS
+
+
 _is_git_config_search_path_input = _is_git_config_user_search_path_input
 
 
@@ -2180,6 +2205,7 @@ def _is_tracked_git_env_key(key: str) -> bool:
         _is_git_config_protocol_key(key)
         or _is_git_config_file_selector(key)
         or _is_git_config_user_search_path_input(key)
+        or _is_git_repository_config_selector(key)
     )
 
 
@@ -2209,6 +2235,15 @@ def _validate_git_config_user_search_path_inputs(env_vars: dict[str, str]) -> No
             )
 
 
+def _validate_git_repository_config_selectors(env_vars: dict[str, str]) -> None:
+    """Fail closed when the command selects uninspectable repository-local config."""
+    for selector in ("GIT_DIR", "GIT_COMMON_DIR"):
+        if selector in env_vars:
+            raise ValueError(
+                f"Repository-local Git config via {selector} is unsupported/uninspectable"
+            )
+
+
 _validate_git_config_search_path_inputs = _validate_git_config_user_search_path_inputs
 
 
@@ -2226,6 +2261,7 @@ def _parse_git_env_details(
     """
     _validate_git_config_file_selectors(env_vars)
     _validate_git_config_user_search_path_inputs(env_vars)
+    _validate_git_repository_config_selectors(env_vars)
 
     for k, v in env_vars.items():
         if _is_git_config_protocol_key(k) and _has_shell_expansion(v):
@@ -2428,12 +2464,30 @@ def _consume_var_assignment(tokens: list[str]) -> tuple[str, str, bool] | None:
     return None
 
 
+class _CommandEnvironment(dict[str, str]):
+    """Tracked environment plus non-user-settable execution context metadata."""
+
+    def __init__(
+        self,
+        values: dict[str, str] | None = None,
+        *,
+        repository_context_changed: bool = False,
+    ) -> None:
+        super().__init__(values or {})
+        self.repository_context_changed = repository_context_changed
+
+
 def _unwrap_command_and_env(
     tokens: list[str],
     inherited_env: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Unwrap leading environment assignments and wrapper commands, accumulating env vars."""
-    env_vars: dict[str, str] = dict(inherited_env) if inherited_env else {}
+    env_vars = _CommandEnvironment(
+        dict(inherited_env) if inherited_env else {},
+        repository_context_changed=getattr(
+            inherited_env, "repository_context_changed", False
+        ),
+    )
     tokens = list(tokens)
 
     while tokens:
@@ -2529,11 +2583,32 @@ def _unwrap_command_and_env(
                     continue
                 elif t in {"-C", "--chdir"}:
                     tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
+                    if not tokens:
+                        raise ValueError(f"env {t} is missing its directory operand")
+                    directory = tokens.pop(0)
+                    if not directory or _has_shell_expansion(directory):
+                        raise ValueError(
+                            f"Dynamic env directory operand is unsupported: {directory!r}"
+                        )
+                    env_vars.repository_context_changed = True
                     continue
                 elif t.startswith("--chdir="):
                     tokens.pop(0)
+                    directory = t.split("=", 1)[1]
+                    if not directory or _has_shell_expansion(directory):
+                        raise ValueError(
+                            f"Dynamic env directory operand is unsupported: {directory!r}"
+                        )
+                    env_vars.repository_context_changed = True
+                    continue
+                elif t.startswith("-C") and len(t) > 2:
+                    tokens.pop(0)
+                    directory = t[2:]
+                    if _has_shell_expansion(directory):
+                        raise ValueError(
+                            f"Dynamic env directory operand is unsupported: {directory!r}"
+                        )
+                    env_vars.repository_context_changed = True
                     continue
                 elif t in {"-i", "--ignore-environment", "-"}:
                     tokens.pop(0)
@@ -3171,6 +3246,7 @@ class _ShellState:
         "defined_aliases",
         "expand_aliases",
         "exported_keys",
+        "repository_context_changed",
         "shell_vars",
     )
 
@@ -3182,6 +3258,7 @@ class _ShellState:
         allexport: bool = False,
         expand_aliases: bool = False,
         defined_aliases: set[str] | None = None,
+        repository_context_changed: bool | None = None,
     ) -> None:
         self.shell_vars: dict[str, str] = (
             dict(shell_vars) if shell_vars is not None else {}
@@ -3189,18 +3266,28 @@ class _ShellState:
         self.exported_keys: set[str] = (
             set(exported_keys)
             if exported_keys is not None
-            else set(INITIAL_ASSUMED_EXPORTED_KEYS)
+            else (
+                set(INITIAL_ASSUMED_EXPORTED_KEYS)
+                if inherited_env is None
+                else set()
+            )
         )
         self.allexport: bool = allexport
         self.expand_aliases: bool = expand_aliases
         self.defined_aliases: set[str] = (
             set(defined_aliases) if defined_aliases is not None else set()
         )
-        if inherited_env:
+        self.repository_context_changed = (
+            getattr(inherited_env, "repository_context_changed", False)
+            if repository_context_changed is None
+            else repository_context_changed
+        )
+        if inherited_env is not None:
             for k, v in inherited_env.items():
                 if _is_tracked_git_env_key(k):
                     self.shell_vars[k] = v
-                    self.exported_keys.add(k)
+                    if exported_keys is None:
+                        self.exported_keys.add(k)
 
     def apply_assignment(
         self,
@@ -3243,11 +3330,14 @@ class _ShellState:
 
     def get_exported_env(self) -> dict[str, str]:
         """Return the dictionary of currently exported Git config protocol and selector environment variables."""
-        return {
-            k: self.shell_vars[k]
-            for k in self.exported_keys
-            if k in self.shell_vars
-        }
+        return _CommandEnvironment(
+            {
+                k: self.shell_vars[k]
+                for k in self.exported_keys
+                if k in self.shell_vars
+            },
+            repository_context_changed=self.repository_context_changed,
+        )
 
     def copy(self) -> _ShellState:
         """Create a shallow copy of the shell state."""
@@ -3257,6 +3347,7 @@ class _ShellState:
             allexport=self.allexport,
             expand_aliases=self.expand_aliases,
             defined_aliases=self.defined_aliases,
+            repository_context_changed=self.repository_context_changed,
         )
 
 
@@ -3994,6 +4085,34 @@ def _apply_unalias_cmd(args: list[str], state: _ShellState) -> None:
         i += 1
 
 
+def _apply_directory_change_cmd(
+    cmd: str,
+    args: list[str],
+    state: _ShellState,
+) -> None:
+    """Track literal shell directory changes without resolving the filesystem."""
+    for arg in args:
+        if _has_shell_expansion(arg):
+            raise ValueError(
+                f"Dynamic {cmd} directory operand is unsupported: {arg!r}"
+            )
+
+    if cmd == "cd":
+        operands: list[str] = []
+        parsing_options = True
+        for arg in args:
+            if parsing_options and arg == "--":
+                parsing_options = False
+                continue
+            if parsing_options and arg in {"-L", "-P", "-e", "-@"}:
+                continue
+            operands.append(arg)
+        if len(operands) != 1 or not operands[0]:
+            raise ValueError("cd requires exactly one literal directory operand")
+
+    state.repository_context_changed = True
+
+
 def _apply_shell_state_segment(
     tokens: list[str],
     state: _ShellState,
@@ -4053,6 +4172,10 @@ def _apply_shell_state_segment(
 
     cmd = os.path.basename(unwrapped[0])
     args = unwrapped[1:]
+
+    if cmd in {"cd", "pushd", "popd"}:
+        _apply_directory_change_cmd(cmd, args, state)
+        return True
 
     if cmd == "export":
         _apply_export_cmd(args, state)
@@ -4309,6 +4432,9 @@ def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
     cmd = os.path.basename(unwrapped[0])
     args = unwrapped[1:]
 
+    if cmd in {"cd", "pushd", "popd"}:
+        return True
+
     if cmd == "export":
         opt_args: list[str] = []
         i = 0
@@ -4493,6 +4619,16 @@ def _is_git_or_executes_git(tokens: list[str]) -> bool:
     )
 
 
+def _validate_repository_context_for_git(
+    env_vars: _CommandEnvironment,
+) -> None:
+    """Fail closed before Git can load config from a changed working directory."""
+    if env_vars.repository_context_changed:
+        raise ValueError(
+            "Repository-local Git config via changed working directory is unsupported/uninspectable"
+        )
+
+
 def _inspect_single_command_git(
     tokens: list[str],
     _depth: int = 0,
@@ -4561,6 +4697,7 @@ def _inspect_single_command_git(
 
     dynamic_args = _extract_initial_dynamic_args(tokens)
     if dynamic_args is not None:
+        _validate_repository_context_for_git(env_vars)
         return _inspect_git_invocation(
             [_restore_sentinels(t) for t in dynamic_args],
             env_alias_configs=env_alias_configs,
@@ -4572,6 +4709,7 @@ def _inspect_single_command_git(
 
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
+        _validate_repository_context_for_git(env_vars)
         return _inspect_git_invocation(
             [_restore_sentinels(t) for t in tokens[1:]],
             env_alias_configs=env_alias_configs,
@@ -4581,6 +4719,7 @@ def _inspect_single_command_git(
             _inherited_env=env_vars,
         )
     if _has_shell_expansion(tokens[0]):
+        _validate_repository_context_for_git(env_vars)
         return _inspect_git_invocation(
             [_restore_sentinels(t) for t in tokens[1:]],
             env_alias_configs=env_alias_configs,
@@ -4659,6 +4798,7 @@ def _inspect_single_command_rm(
 
     dynamic_args = _extract_initial_dynamic_args(tokens)
     if dynamic_args is not None:
+        _validate_repository_context_for_git(env_vars)
         restored_dynamic_args = [_restore_sentinels(t) for t in dynamic_args]
         if _is_forbidden_rm_args(restored_dynamic_args):
             return True
@@ -4671,6 +4811,7 @@ def _inspect_single_command_rm(
 
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
+        _validate_repository_context_for_git(env_vars)
         return _inspect_git_invocation_for_rm(
             [_restore_sentinels(t) for t in tokens[1:]],
             env_alias_configs=env_alias_configs,
@@ -4681,6 +4822,7 @@ def _inspect_single_command_rm(
         return _is_forbidden_rm_args([_restore_sentinels(t) for t in tokens[1:]])
 
     if _has_shell_expansion(tokens[0]):
+        _validate_repository_context_for_git(env_vars)
         restored_trailing = [_restore_sentinels(t) for t in tokens[1:]]
         if _is_forbidden_rm_args(restored_trailing):
             return True

@@ -108,9 +108,7 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     # Git global options
     "git --no-pager push -f",
     "git -P push -fu origin main",
-    "git -C /path/to/repo push -f",
     "git -c user.name=Test push -f",
-    "git --git-dir=/foo/.git push --force origin main",
     "git --work-tree=/foo push -fu origin main",
     # Compound commands and pipelines
     "git checkout main && git push -f",
@@ -1426,8 +1424,6 @@ class TestGitAliasResolution:
             "-c", "user.name=Tester",
             "--config-env", "alias.env_fp=MY_FP",
             "--config-env=alias.env_att=ATT_VAR",
-            "-C", "/path/to/repo",
-            "--git-dir=/foo/.git",
             "--no-pager",
             "fp",
             "origin",
@@ -2619,8 +2615,6 @@ class TestHasForcingGitConfig:
             ["--config-env", "remote.origin.push=PUSH_SPEC"],
             ["--config-env=remote.origin.push=PUSH_SPEC"],
             ["--config-env", "REMOTE.ORIGIN.PUSH=PUSH_SPEC"],
-            ["-C", "/path/to/repo", "-c", "remote.origin.mirror=true"],
-            ["--git-dir=/foo/.git", "-c", "remote.origin.push=+main"],
             ["-c", "remote.origin.push=+main", "-c", "remote.origin.push=main"],
             ["-c", "remote.origin.push=main", "-c", "remote.origin.push=+main"],
         ],
@@ -2651,8 +2645,6 @@ class TestHasForcingGitConfig:
             ["-c", "branch.main.pushRemote=origin"],
             ["--config-env", "user.name=USER_NAME"],
             ["--config-env=user.email=USER_EMAIL"],
-            ["-C", "/path/to/repo"],
-            ["--git-dir=/repo/.git"],
             ["--work-tree=/repo"],
             ["--no-pager"],
             ["-c", "remote.origin.mirror=true", "-c", "remote.origin.mirror=false"],
@@ -8855,7 +8847,6 @@ class TestShellFunctionDefinitions:
             "function fp() { git push -f origin HEAD; }",
             "function fp ( ) { git push -f origin HEAD; }",
             "function fp { /usr/bin/git push -f; }",
-            "function fp { git -C /repo push -f; }",
             "function fp { git -c alias.fp='push -f' fp origin HEAD; }",
             "function fp { git push --mirror origin; }",
             "function fp { git push --force-with-lease origin main; }",
@@ -10394,3 +10385,269 @@ class TestDefect122BraceValueUserSearchPathBypass:
                 "destructive"
                 in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
             )
+
+
+class TestDefect125RepositoryLocalGitConfigSelectors:
+    """Fail closed on explicitly selected, uninspectable repository-local Git config."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "GIT_DIR=/tmp/evil.git git fp origin HEAD",
+            "GIT_COMMON_DIR=/tmp/common git fp origin HEAD",
+            "export GIT_DIR=/tmp/evil.git; git fp origin HEAD",
+            "export GIT_COMMON_DIR=/tmp/common; sh -c 'git fp origin HEAD'",
+            "git --git-dir=/tmp/evil.git fp origin HEAD",
+            "git --git-dir /tmp/evil.git fp origin HEAD",
+            "git -C /tmp/evil fp origin HEAD",
+            "git -C/tmp/evil fp origin HEAD",
+        ],
+    )
+    def test_repository_config_selectors_fail_closed(self, cmd: str) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(
+                ValueError,
+                match=r"Repository-local Git config via (GIT_DIR|GIT_COMMON_DIR|--git-dir|-C) is unsupported/uninspectable",
+            ):
+                checker(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "GIT_DIR=/tmp/evil.git; git status",
+            "GIT_COMMON_DIR=/tmp/common; git status",
+            "export GIT_DIR=/tmp/evil.git; unset GIT_DIR; git status",
+            "export GIT_COMMON_DIR=/tmp/common; export -n GIT_COMMON_DIR; git status",
+            "GIT_DIR=/tmp/evil.git env -u GIT_DIR git status",
+            "GIT_COMMON_DIR=/tmp/common env -i git status",
+            "GIT_DIRECTORY=/tmp/evil.git git status",
+        ],
+    )
+    def test_repository_config_selector_safe_controls(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "git_args",
+        [
+            ["--git-dir=/tmp/evil.git", "status"],
+            ["--git-dir", "/tmp/evil.git", "status"],
+            ["--git-dir"],
+            ["-C", "/tmp/evil", "status"],
+            ["-C/tmp/evil", "status"],
+            ["-C"],
+        ],
+    )
+    def test_repository_config_option_helper_contracts(
+        self, git_args: list[str]
+    ) -> None:
+        for helper in (
+            _parse_git_global_configs,
+            _has_forcing_git_config,
+            _scan_git_forcing_configs,
+        ):
+            with pytest.raises(ValueError, match=r"--git-dir|-C"):
+                helper(git_args)
+
+    @pytest.mark.parametrize("selector", ["GIT_DIR", "GIT_COMMON_DIR"])
+    def test_mutation_effective_repository_selector_validator(
+        self, monkeypatch: pytest.MonkeyPatch, selector: str
+    ) -> None:
+        cmd = f"{selector}=/tmp/evil git fp origin HEAD"
+
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=selector):
+                checker(cmd)
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._validate_git_repository_config_selectors",
+            lambda env: None,
+        )
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+
+class TestDefect126ExplicitEmptyChildEnvironment:
+    """An explicit empty child environment must not regain root-shell exports."""
+
+    def test_shell_state_none_empty_and_explicit_inherited_contracts(self) -> None:
+        root = _ShellState()
+        assert root.exported_keys == INITIAL_ASSUMED_EXPORTED_KEYS
+        assert root.shell_vars == {}
+
+        empty_child = _ShellState(inherited_env={})
+        assert empty_child.exported_keys == set()
+        assert empty_child.shell_vars == {}
+        assert empty_child.get_exported_env() == {}
+
+        explicit_child = _ShellState(inherited_env={"GIT_DIR": "/tmp/repo"})
+        assert explicit_child.exported_keys == {"GIT_DIR"}
+        assert explicit_child.shell_vars == {"GIT_DIR": "/tmp/repo"}
+        assert explicit_child.get_exported_env() == {"GIT_DIR": "/tmp/repo"}
+
+        exact_exports = _ShellState(
+            inherited_env={"HOME": "/tmp/home"}, exported_keys=set()
+        )
+        assert exact_exports.exported_keys == set()
+        copied = exact_exports.copy()
+        assert copied.exported_keys == set()
+        assert copied.shell_vars == {"HOME": "/tmp/home"}
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "env -i sh -c 'HOME=/tmp/attacker; git status'",
+            "env -u HOME sh -c 'HOME=/tmp/attacker; git status'",
+            "env -i sh -c 'XDG_CONFIG_HOME=/tmp/attacker; git status'",
+            "env -i sh -c 'HOME=/tmp/attacker; sh -c \"git status\"'",
+        ],
+    )
+    def test_explicit_empty_child_environment_safe_controls(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "env -i sh -c 'export HOME=/tmp/attacker; git status'",
+            "env -i sh -c 'HOME=/tmp/attacker git status'",
+            "env -i sh -c 'export XDG_CONFIG_HOME=/tmp/attacker; git status'",
+            "HOME=/tmp/attacker; git status",
+            "XDG_CONFIG_HOME=/tmp/attacker; git status",
+        ],
+    )
+    def test_explicit_or_root_exports_still_fail_closed(self, cmd: str) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(
+                ValueError,
+                match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+            ):
+                checker(cmd)
+
+    def test_mutation_effective_old_constructor_reintroduces_false_positive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cmd = "env -i sh -c 'HOME=/tmp/attacker; git status'"
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+        original_init = _ShellState.__init__
+
+        def old_init_mutant(
+            state: _ShellState,
+            inherited_env: dict[str, str] | None = None,
+            shell_vars: dict[str, str] | None = None,
+            exported_keys: set[str] | None = None,
+            allexport: bool = False,
+            expand_aliases: bool = False,
+            defined_aliases: set[str] | None = None,
+        ) -> None:
+            original_init(
+                state,
+                inherited_env=inherited_env,
+                shell_vars=shell_vars,
+                exported_keys=(
+                    set(INITIAL_ASSUMED_EXPORTED_KEYS)
+                    if exported_keys is None
+                    else exported_keys
+                ),
+                allexport=allexport,
+                expand_aliases=expand_aliases,
+                defined_aliases=defined_aliases,
+            )
+
+        monkeypatch.setattr(_ShellState, "__init__", old_init_mutant)
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=r"HOME"):
+                checker(cmd)
+
+
+class TestDefect127ChangedRepositoryContext:
+    """Fail closed only when a changed working directory can reach Git."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cd /tmp/evil && git fp origin HEAD",
+            "cd /tmp/evil; git fp origin HEAD",
+            "cd /tmp/evil\ngit fp origin HEAD",
+            "builtin cd /tmp/evil; git fp origin HEAD",
+            "command cd /tmp/evil; git fp origin HEAD",
+            "pushd /tmp/evil; git fp origin HEAD",
+            "popd; git fp origin HEAD",
+            "env -C /tmp/evil git fp origin HEAD",
+            "env -C/tmp/evil git fp origin HEAD",
+            "env --chdir /tmp/evil git fp origin HEAD",
+            "env --chdir=/tmp/evil git fp origin HEAD",
+            "cd /tmp/evil; sh -c 'git fp origin HEAD'",
+            "env -C /tmp/evil sh -c 'git fp origin HEAD'",
+            "cd /tmp/evil; env -i git fp origin HEAD",
+        ],
+    )
+    def test_changed_repository_context_fails_closed_at_git_boundary(
+        self, cmd: str
+    ) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(
+                ValueError,
+                match=r"Repository-local Git config via changed working directory is unsupported/uninspectable",
+            ):
+                checker(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cd /tmp/evil; printf ok",
+            "env -C /tmp/evil printf ok",
+            "env -C/tmp/evil printf ok",
+            "env --chdir=/tmp/evil printf ok",
+            "cd /tmp/evil; sh -c 'printf ok'",
+            "env -C /tmp/evil sh -c 'printf ok'",
+        ],
+    )
+    def test_changed_repository_context_non_git_controls_remain_safe(
+        self, cmd: str
+    ) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cd $TARGET; git status",
+            "cd \"$TARGET\"; git status",
+            "env -C $TARGET git status",
+            "env --chdir=\"$TARGET\" git status",
+            "env -C",
+            "env --chdir",
+        ],
+    )
+    def test_dynamic_or_missing_directory_operands_fail_closed(
+        self, cmd: str
+    ) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=r"directory operand"):
+                checker(cmd)
+
+    def test_directory_context_survives_state_copy_and_export(self) -> None:
+        state = _ShellState(inherited_env={})
+        assert _apply_shell_state_segment(["cd", "/tmp/evil"], state) is True
+        assert state.repository_context_changed is True
+        assert state.copy().repository_context_changed is True
+        assert state.get_exported_env().repository_context_changed is True
+
+    def test_mutation_effective_context_validator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cmd = "cd /tmp/evil; git fp origin HEAD"
+
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=r"changed working directory"):
+                checker(cmd)
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._validate_repository_context_for_git",
+            lambda env_vars: None,
+        )
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False

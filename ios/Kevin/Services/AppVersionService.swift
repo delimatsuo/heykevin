@@ -21,13 +21,17 @@ final class AppVersionService: ObservableObject {
 
     @Published var state: VersionGateState = .unknown
 
-    private let currentVersion: String = {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-    }()
+    private let currentVersion: String
 
     private static let lastOptionalNagKey = "kevin.update.lastOptionalNag"
 
-    private init() {}
+    private init() {
+        self.currentVersion = Self.marketingVersion()
+    }
+
+    nonisolated static func marketingVersion(from infoDictionary: [String: Any]? = Bundle.main.infoDictionary) -> String {
+        infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
 
     func check() async {
         guard let url = URL(string: "\(AppState.shared.backendURL)/api/app/version?platform=ios") else {

@@ -2297,7 +2297,6 @@ def _parse_git_env_details(
     _validate_git_config_file_selectors(env_vars)
     _validate_git_config_user_search_path_inputs(env_vars)
     _validate_git_repository_config_selectors(env_vars)
-    _validate_git_execution_path_selectors(env_vars)
 
     for k, v in env_vars.items():
         if _is_git_config_protocol_key(k) and _has_shell_expansion(v):
@@ -4757,6 +4756,7 @@ def _inspect_single_command_git(
     dynamic_args = _extract_initial_dynamic_args(tokens)
     if dynamic_args is not None:
         _validate_repository_context_for_git(env_vars)
+        _validate_git_execution_path_selectors(env_vars)
         return _inspect_git_invocation(
             [_restore_sentinels(t) for t in dynamic_args],
             env_alias_configs=env_alias_configs,
@@ -4769,6 +4769,7 @@ def _inspect_single_command_git(
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
         _validate_repository_context_for_git(env_vars)
+        _validate_git_execution_path_selectors(env_vars)
         return _inspect_git_invocation(
             [_restore_sentinels(t) for t in tokens[1:]],
             env_alias_configs=env_alias_configs,
@@ -4779,6 +4780,7 @@ def _inspect_single_command_git(
         )
     if _has_shell_expansion(tokens[0]):
         _validate_repository_context_for_git(env_vars)
+        _validate_git_execution_path_selectors(env_vars)
         return _inspect_git_invocation(
             [_restore_sentinels(t) for t in tokens[1:]],
             env_alias_configs=env_alias_configs,
@@ -4865,6 +4867,7 @@ def _inspect_single_command_rm(
     dynamic_args = _extract_initial_dynamic_args(tokens)
     if dynamic_args is not None:
         _validate_repository_context_for_git(env_vars)
+        _validate_git_execution_path_selectors(env_vars)
         restored_dynamic_args = [_restore_sentinels(t) for t in dynamic_args]
         if _is_forbidden_rm_args(restored_dynamic_args):
             return True
@@ -4878,6 +4881,7 @@ def _inspect_single_command_rm(
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
         _validate_repository_context_for_git(env_vars)
+        _validate_git_execution_path_selectors(env_vars)
         return _inspect_git_invocation_for_rm(
             [_restore_sentinels(t) for t in tokens[1:]],
             env_alias_configs=env_alias_configs,
@@ -4889,6 +4893,7 @@ def _inspect_single_command_rm(
 
     if _has_shell_expansion(tokens[0]):
         _validate_repository_context_for_git(env_vars)
+        _validate_git_execution_path_selectors(env_vars)
         restored_trailing = [_restore_sentinels(t) for t in tokens[1:]]
         if _is_forbidden_rm_args(restored_trailing):
             return True

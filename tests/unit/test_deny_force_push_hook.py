@@ -2979,6 +2979,19 @@ class TestDefect130GitExecutionPath:
             "GIT_EXEC_PATH=/tmp/helpers; sh -c 'git fp origin HEAD'",
             "GIT_EXEC_PATH=; sh -c 'git status'",
             "GIT_EXEC_PATH=; sh -c 'git fp origin HEAD'",
+            "GIT_EXEC_PATH=/tmp/helpers bash -c 'printf ok; git status'",
+            "GIT_EXEC_PATH=/tmp/helpers eval 'git status'",
+            "GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec git status \\;",
+            "GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec sh -c 'git status' \\;",
+            "GIT_EXEC_PATH= bash -c 'printf ok; git status'",
+            "GIT_EXEC_PATH= eval 'git status'",
+            "GIT_EXEC_PATH= find /tmp/tree -exec git status \\;",
+            "export GIT_EXEC_PATH=/tmp/helpers; bash -c 'printf ok; git status'",
+            "export GIT_EXEC_PATH=/tmp/helpers; eval 'git status'",
+            "export GIT_EXEC_PATH=/tmp/helpers; find /tmp/tree -exec git status \\;",
+            "env GIT_EXEC_PATH=/tmp/helpers bash -c 'printf ok; git status'",
+            "env GIT_EXEC_PATH=/tmp/helpers eval 'git status'",
+            "env GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec git status \\;",
         ],
     )
     def test_classifiers_fail_closed_on_git_exec_path_environment(
@@ -3001,6 +3014,23 @@ class TestDefect130GitExecutionPath:
             "export GIT_EXEC_PATH=/tmp/helpers; export -n GIT_EXEC_PATH; git status",
             "env -u GIT_EXEC_PATH git status",
             "GIT_EXEC_PATH_LOOKALIKE=/tmp/helpers git status",
+            "GIT_EXEC_PATH=/tmp/helpers sh -c 'printf ok'",
+            "GIT_EXEC_PATH=/tmp/helpers bash -c 'printf ok'",
+            "GIT_EXEC_PATH=/tmp/helpers eval 'printf ok'",
+            "GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec printf ok \\;",
+            "GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec sh -c 'printf ok' \\;",
+            "env GIT_EXEC_PATH=/tmp/helpers sh -c 'printf ok'",
+            "env GIT_EXEC_PATH=/tmp/helpers bash -c 'printf ok'",
+            "env GIT_EXEC_PATH=/tmp/helpers eval 'printf ok'",
+            "env GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec printf ok \\;",
+            "export GIT_EXEC_PATH=/tmp/helpers; sh -c 'printf ok'",
+            "export GIT_EXEC_PATH=/tmp/helpers; bash -c 'printf ok'",
+            "export GIT_EXEC_PATH=/tmp/helpers; eval 'printf ok'",
+            "export GIT_EXEC_PATH=/tmp/helpers; find /tmp/tree -exec printf ok \\;",
+            "GIT_EXEC_PATH= sh -c 'printf ok'",
+            "GIT_EXEC_PATH= bash -c 'printf ok'",
+            "GIT_EXEC_PATH= eval 'printf ok'",
+            "GIT_EXEC_PATH= find /tmp/tree -exec printf ok \\;",
         ],
     )
     def test_safe_controls_remain_false(self, command: str) -> None:
@@ -3076,10 +3106,20 @@ class TestDefect130GitExecutionPath:
         assert contains_forced_git_push(command) is False
         assert contains_forbidden_rm(command) is False
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD",
+            "GIT_EXEC_PATH=/tmp/helpers git status",
+            "GIT_EXEC_PATH=/tmp/helpers sh -c 'git status'",
+            "GIT_EXEC_PATH=/tmp/helpers bash -c 'printf ok; git status'",
+            "GIT_EXEC_PATH=/tmp/helpers eval 'git status'",
+            "GIT_EXEC_PATH=/tmp/helpers find /tmp/tree -exec git status \\;",
+        ],
+    )
     def test_mutation_effective_environment_validator_bypass(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, command: str
     ) -> None:
-        command = "GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD"
         for checker in (contains_forced_git_push, contains_forbidden_rm):
             with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
                 checker(command)
@@ -3159,6 +3199,10 @@ class TestDefect130GitExecutionPath:
             "git status",
             "sh -c 'git fp origin HEAD'",
             "sh -c 'git status'",
+            "bash -c 'printf ok; git status'",
+            "eval 'git status'",
+            "find /tmp/tree -exec git status \\;",
+            "find /tmp/tree -exec sh -c 'git status' \\;",
         ],
     )
     @pytest.mark.parametrize("git_exec_path_val", ["/tmp/helpers", ""])
@@ -3181,6 +3225,11 @@ class TestDefect130GitExecutionPath:
             "unset GIT_EXEC_PATH; sh -c 'git status'",
             "export -n GIT_EXEC_PATH; sh -c 'git status'",
             "printf ok",
+            "sh -c 'printf ok'",
+            "bash -c 'printf ok'",
+            "eval 'printf ok'",
+            "find /tmp/tree -exec printf ok \\;",
+            "find /tmp/tree -exec sh -c 'printf ok' \\;",
         ],
     )
     @pytest.mark.parametrize("git_exec_path_val", ["/tmp/helpers", ""])
@@ -3217,6 +3266,58 @@ class TestDefect130GitExecutionPath:
             )
             is False
         )
+
+    @pytest.mark.parametrize(
+        "safe_cmd",
+        [
+            "sh -c 'printf ok'",
+            "bash -c 'printf ok'",
+            "eval 'printf ok'",
+            "find /tmp/tree -exec printf ok \\;",
+            "find /tmp/tree -exec sh -c 'printf ok' \\;",
+        ],
+    )
+    def test_inherited_presence_safe_commands_return_false(
+        self, safe_cmd: str
+    ) -> None:
+        for val in ("/tmp/helpers", ""):
+            state_with_presence = _initial_hook_shell_state(
+                {"GIT_EXEC_PATH": val}
+            )
+            assert (
+                contains_forced_git_push(
+                    safe_cmd, _shell_state=state_with_presence.copy()
+                )
+                is False
+            )
+            assert (
+                contains_forbidden_rm(
+                    safe_cmd, _shell_state=state_with_presence.copy()
+                )
+                is False
+            )
+
+    @pytest.mark.parametrize(
+        "git_cmd",
+        [
+            "git status",
+            "sh -c 'git status'",
+            "bash -c 'printf ok; git status'",
+            "eval 'git status'",
+            "find /tmp/tree -exec git status \\;",
+            "find /tmp/tree -exec sh -c 'git status' \\;",
+        ],
+    )
+    def test_inherited_presence_git_commands_fail_closed(
+        self, git_cmd: str
+    ) -> None:
+        for val in ("/tmp/helpers", ""):
+            state_with_presence = _initial_hook_shell_state(
+                {"GIT_EXEC_PATH": val}
+            )
+            for checker in (contains_forced_git_push, contains_forbidden_rm):
+                with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                    checker(git_cmd, _shell_state=state_with_presence.copy())
 
 
 class TestExtractInitialBacktickArgs:

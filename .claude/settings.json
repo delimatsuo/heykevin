@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Bash(rm -rf *)",
+      "Bash(rm -rf)",
+      "Bash(rm -Rf *)",
+      "Bash(rm -Rf)",
+      "Bash(rm -r -f *)",
+      "Bash(rm -f -r *)",
+      "Bash(rm --recursive --force *)",
+      "Bash(rm --recursive --force)",
+      "Bash(rm --force --recursive *)",
+      "Bash(rm --force --recursive)",
+      "Bash(/bin/rm -rf *)",
+      "Bash(/bin/rm -rf)",
+      "Bash(/bin/rm -Rf *)",
+      "Bash(/bin/rm -Rf)",
+      "Bash(/bin/rm -r -f *)",
+      "Bash(/bin/rm -f -r *)",
+      "Bash(/bin/rm --recursive --force *)",
+      "Bash(/bin/rm --recursive --force)",
+      "Bash(/bin/rm --force --recursive *)",
+      "Bash(/bin/rm --force --recursive)",
+      "Bash(/usr/bin/rm -rf *)",
+      "Bash(/usr/bin/rm -rf)",
+      "Bash(/usr/bin/rm -Rf *)",
+      "Bash(/usr/bin/rm -Rf)",
+      "Bash(/usr/bin/rm -r -f *)",
+      "Bash(/usr/bin/rm -f -r *)",
+      "Bash(/usr/bin/rm --recursive --force *)",
+      "Bash(/usr/bin/rm --recursive --force)",
+      "Bash(/usr/bin/rm --force --recursive *)",
+      "Bash(/usr/bin/rm --force --recursive)",
+      "Bash(git push *-f*)",
+      "Bash(git push *--force*)",
+      "Bash(git push *--force-with-lease*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyRead": [
+        ".env",
+        ".env.*",
+        "**/.env",
+        "**/.env.*",
+        "./.env",
+        "./.env.*",
+        "./**/.env",
+        "./**/.env.*"
+      ]
+    }
+  }
+}

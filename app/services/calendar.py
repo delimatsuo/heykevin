@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import suppress
+from dataclasses import dataclass
 import hashlib
 import json
 import time
@@ -80,6 +82,23 @@ MAX_PRIVATE_PROPERTY_VALUE_BYTES = 1_024
 MAX_SERVICE_METADATA_ATTEMPTS = 2
 
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _same_provider_authorization_snapshot(left: object, right: object) -> bool:
+    """Return true only for exact lifecycle, generation, and raw-credential identity."""
+    if type(left) is not dict or type(right) is not dict:
+        return False
+    for key in (
+        "generation",
+        "lifecycle_epoch",
+        "access_token_raw",
+        "refresh_token_raw",
+    ):
+        left_value = left.get(key)
+        right_value = right.get(key)
+        if type(left_value) is not type(right_value) or left_value != right_value:
+            return False
+    return True
 
 
 def _utc_now() -> datetime:
@@ -563,8 +582,14 @@ async def _with_token_refresh(
     call,
     *,
     terminalize_intent_on_exception: bool = False,
+    include_authorization_context: bool = False,
 ):
-    """Authorize via fresh durable snapshot, call `call(token)`, and on 401 do one forced refresh + retry."""
+    """Authorize via a durable snapshot, call once, and retry once after a 401 refresh.
+
+    When ``include_authorization_context`` is true, return ``(response, snapshot)``
+    so a later state-changing step can CAS-bind itself to the exact lifecycle and
+    raw credentials that authorized the successful read.
+    """
     from app.services.integration_token_mutations import load_durable_provider_snapshot
     from app.services.integration_tokens import validate_token_string
 
@@ -641,6 +666,8 @@ async def _with_token_refresh(
                     kind="business",
                     observed_generation=snap.get("generation"),
                     observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                    observed_access_raw=snap.get("access_token_raw"),
+                    observed_refresh_raw=snap.get("refresh_token_raw"),
                 )
                 break
             except IntegrationTokenLeaseError:
@@ -656,12 +683,18 @@ async def _with_token_refresh(
                 kind="business",
                 observed_generation=snap.get("generation"),
                 observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                observed_access_raw=snap.get("access_token_raw"),
+                observed_refresh_raw=snap.get("refresh_token_raw"),
             )
         await transition_provider_operation_intent_to_started_cas(
             contractor_id=valid_cid,
             provider="google_calendar",
             claim_id=claim_id,
             kind="business",
+            observed_generation=snap.get("generation"),
+            observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+            observed_access_raw=snap.get("access_token_raw"),
+            observed_refresh_raw=snap.get("refresh_token_raw"),
         )
         resp = await call(access_token)
         terminal_outcome = True
@@ -703,15 +736,30 @@ async def _with_token_refresh(
                     )
 
     if resp.status_code != 401:
-        return resp
+        return (resp, snap) if include_authorization_context else resp
+
+    pre_refresh_snap = await load_durable_provider_snapshot(
+        valid_cid,
+        provider="google_calendar",
+    )
+    if not _same_provider_authorization_snapshot(pre_refresh_snap, snap):
+        logger.warning(
+            "Google Calendar 401 retry blocked: provider=google_calendar reason=authorization_changed"
+        )
+        return (resp, snap) if include_authorization_context else resp
 
     refreshed = await refresh_access_token(contractor, force=True)
     if not refreshed:
-        return resp
+        return (resp, snap) if include_authorization_context else resp
 
     retry_snap = await load_durable_provider_snapshot(valid_cid, provider="google_calendar")
     if retry_snap is None:
-        return resp
+        return (resp, snap) if include_authorization_context else resp
+    if retry_snap.get("lifecycle_epoch") != snap.get("lifecycle_epoch"):
+        logger.warning(
+            "Google Calendar 401 retry blocked: provider=google_calendar reason=lifecycle_changed"
+        )
+        return (resp, snap) if include_authorization_context else resp
 
     retry_claim_id = None
     retry_terminal_outcome = False
@@ -723,16 +771,26 @@ async def _with_token_refresh(
             kind="business",
             observed_generation=retry_snap.get("generation"),
             observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+            observed_access_raw=retry_snap.get("access_token_raw"),
+            observed_refresh_raw=retry_snap.get("refresh_token_raw"),
         )
         await transition_provider_operation_intent_to_started_cas(
             contractor_id=valid_cid,
             provider="google_calendar",
             claim_id=retry_claim_id,
             kind="business",
+            observed_generation=retry_snap.get("generation"),
+            observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+            observed_access_raw=retry_snap.get("access_token_raw"),
+            observed_refresh_raw=retry_snap.get("refresh_token_raw"),
         )
         retry_resp = await call(retry_snap["access_token"])
         retry_terminal_outcome = True
-        return retry_resp
+        return (
+            (retry_resp, retry_snap)
+            if include_authorization_context
+            else retry_resp
+        )
     except asyncio.CancelledError:
         _retry_call_raised = True
         raise
@@ -1205,15 +1263,24 @@ def _parse_aware_datetime(value: datetime | str) -> datetime | None:
     return parsed
 
 
+def _normalize_utc_whole_second(dt: datetime) -> datetime:
+    """Normalize a timezone-aware datetime to UTC with microseconds truncated to zero."""
+    return dt.astimezone(UTC).replace(microsecond=0)
+
+
 def _validate_non_recurring_timed_event(
     event: object,
+    *,
+    expected_event_id: str,
 ) -> tuple[datetime, datetime, str] | None:
     """Validate a Google Calendar event resource as a non-cancelled, non-recurring timed event.
 
-    Returns (start_utc, end_utc, etag) or None if malformed, cancelled, all-day,
-    recurring-master, recurring-instance, or missing a valid ETag.
+    Returns (start_utc, end_utc, etag) normalized to UTC whole seconds, or None if malformed,
+    cancelled, all-day, recurring-master, recurring-instance, or missing a valid ETag.
     """
     if not isinstance(event, dict):
+        return None
+    if event.get("id") != expected_event_id:
         return None
     if event.get("status") == "cancelled":
         return None
@@ -1240,7 +1307,187 @@ def _validate_non_recurring_timed_event(
     end_dt = _parse_aware_datetime(end_raw)
     if start_dt is None or end_dt is None or end_dt <= start_dt:
         return None
-    return (start_dt.astimezone(UTC), end_dt.astimezone(UTC), etag)
+    start_utc = _normalize_utc_whole_second(start_dt)
+    end_utc = _normalize_utc_whole_second(end_dt)
+    if end_utc <= start_utc:
+        return None
+    return (start_utc, end_utc, etag)
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarReconciliationResult:
+    """Coarse GET-only reconciliation result for Google Calendar reschedule recovery."""
+
+    has_matching_claim: bool
+    confirmed: bool
+    claim_id: str | None = None
+    logical_operation_id: str | None = None
+    authorization_status: str = "blocked"
+
+
+async def reconcile_reschedule_appointment(
+    contractor: dict,
+    event_id: str,
+    *,
+    desired_start: datetime | str,
+    desired_end: datetime | str,
+    logical_operation_id: str,
+) -> CalendarReconciliationResult:
+    """GET-only Google Calendar reconciliation for a bound reschedule proposal.
+
+    Never issues a PATCH and never attempts token refresh.
+    Authorizes via load_google_calendar_reconciliation_snapshot using exact bound_operation_id.
+    """
+    if not _valid_managed_operation_id(logical_operation_id):
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    if not isinstance(contractor, dict):
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    raw_cid = contractor.get("contractor_id") or contractor.get("id")
+    if not isinstance(raw_cid, str) or not raw_cid.strip():
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    event_url = _event_resource_url(event_id)
+    if not event_url:
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    parsed_desired_start = _parse_aware_datetime(desired_start)
+    parsed_desired_end = _parse_aware_datetime(desired_end)
+    if (
+        parsed_desired_start is None
+        or parsed_desired_end is None
+        or parsed_desired_end <= parsed_desired_start
+    ):
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    desired_start_utc = _normalize_utc_whole_second(parsed_desired_start)
+    desired_end_utc = _normalize_utc_whole_second(parsed_desired_end)
+    if desired_end_utc <= desired_start_utc:
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    from app.services.integration_token_mutations import load_google_calendar_reconciliation_snapshot
+
+    snap = await load_google_calendar_reconciliation_snapshot(
+        contractor_id=raw_cid.strip(),
+        bound_operation_id=logical_operation_id,
+    )
+    if snap is None:
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    authorization_status = snap.get("authorization_status")
+    if authorization_status == "verified_absent":
+        return CalendarReconciliationResult(
+            has_matching_claim=False,
+            confirmed=False,
+            authorization_status="verified_absent",
+        )
+    if authorization_status != "matching_claim":
+        return CalendarReconciliationResult(has_matching_claim=False, confirmed=False)
+
+    claim_id = snap.get("claim_id")
+    access_token = snap.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        return CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=False,
+            claim_id=claim_id,
+            logical_operation_id=logical_operation_id,
+            authorization_status="matching_claim",
+        )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                event_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=8.0,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=False,
+            claim_id=claim_id,
+            logical_operation_id=logical_operation_id,
+            authorization_status="matching_claim",
+        )
+
+    if not 200 <= resp.status_code < 300:
+        return CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=False,
+            claim_id=claim_id,
+            logical_operation_id=logical_operation_id,
+            authorization_status="matching_claim",
+        )
+
+    try:
+        event_data = resp.json()
+    except Exception:
+        return CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=False,
+            claim_id=claim_id,
+            logical_operation_id=logical_operation_id,
+            authorization_status="matching_claim",
+        )
+
+    validated = _validate_non_recurring_timed_event(
+        event_data,
+        expected_event_id=event_id,
+    )
+    if validated is None:
+        return CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=False,
+            claim_id=claim_id,
+            logical_operation_id=logical_operation_id,
+            authorization_status="matching_claim",
+        )
+
+    current_start_utc, current_end_utc, _ = validated
+    if current_start_utc == desired_start_utc and current_end_utc == desired_end_utc:
+        return CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=True,
+            claim_id=claim_id,
+            logical_operation_id=logical_operation_id,
+            authorization_status="matching_claim",
+        )
+
+    return CalendarReconciliationResult(
+        has_matching_claim=True,
+        confirmed=False,
+        claim_id=claim_id,
+        logical_operation_id=logical_operation_id,
+        authorization_status="matching_claim",
+    )
+
+
+async def clear_reconciled_reschedule_claim(
+    contractor: dict,
+    *,
+    claim_id: str,
+    logical_operation_id: str,
+) -> bool:
+    """Clear an exact reconciled Google Calendar operation intent claim after recovery finalization."""
+    if not _valid_managed_operation_id(logical_operation_id):
+        return False
+    if not isinstance(contractor, dict):
+        return False
+    raw_cid = contractor.get("contractor_id") or contractor.get("id")
+    if not isinstance(raw_cid, str) or not raw_cid.strip():
+        return False
+
+    from app.services.integration_token_mutations import clear_reconciled_google_calendar_operation_intent_cas
+
+    return await clear_reconciled_google_calendar_operation_intent_cas(
+        contractor_id=raw_cid.strip(),
+        claim_id=claim_id,
+        bound_operation_id=logical_operation_id,
+    )
 
 
 async def reschedule_appointment(
@@ -1251,6 +1498,7 @@ async def reschedule_appointment(
     base_end: datetime | str,
     desired_start: datetime | str,
     desired_end: datetime | str,
+    logical_operation_id: str | None = None,
 ) -> bool:
     """Reschedule an existing Google Calendar appointment with optimistic fencing.
 
@@ -1260,9 +1508,15 @@ async def reschedule_appointment(
     3. If remote current schedule equals desired: returns True (GET-only, no PATCH).
     4. If remote current schedule differs from both base and desired: returns False (conflict, no PATCH).
     5. If remote current schedule equals base: conditional PATCH with If-Match from fresh GET.
-    6. Confirms PATCH 2xx response body is a valid timed event matching desired schedule.
-    7. HTTP 412, errors, or mismatches return False with zero second PATCH in that attempt.
+    6. When logical_operation_id is supplied: binds PATCH claim, transitions to started immediately before HTTP,
+       transitions to uncertain on error/5xx/mismatch, and terminalizes on 2xx success or terminal 4xx.
     """
+    if logical_operation_id is not None and not _valid_managed_operation_id(logical_operation_id):
+        logger.error(
+            "Google Calendar reschedule event error: operation=reschedule reason=invalid_logical_operation_id"
+        )
+        return False
+
     event_url = _event_resource_url(event_id)
     if not event_url:
         logger.error(
@@ -1288,13 +1542,19 @@ async def reschedule_appointment(
         )
         return False
 
-    base_start_utc = parsed_base_start.astimezone(UTC)
-    base_end_utc = parsed_base_end.astimezone(UTC)
-    desired_start_utc = parsed_desired_start.astimezone(UTC)
-    desired_end_utc = parsed_desired_end.astimezone(UTC)
+    base_start_utc = _normalize_utc_whole_second(parsed_base_start)
+    base_end_utc = _normalize_utc_whole_second(parsed_base_end)
+    desired_start_utc = _normalize_utc_whole_second(parsed_desired_start)
+    desired_end_utc = _normalize_utc_whole_second(parsed_desired_end)
 
-    desired_start_iso = parsed_desired_start.isoformat()
-    desired_end_iso = parsed_desired_end.isoformat()
+    if base_end_utc <= base_start_utc or desired_end_utc <= desired_start_utc:
+        logger.error(
+            "Google Calendar reschedule event error: operation=reschedule reason=invalid_schedule"
+        )
+        return False
+
+    desired_start_iso = desired_start_utc.isoformat()
+    desired_end_iso = desired_end_utc.isoformat()
 
     async def _get(token: str):
         async with httpx.AsyncClient() as client:
@@ -1305,10 +1565,11 @@ async def reschedule_appointment(
             )
 
     try:
-        get_resp = await _with_token_refresh(
+        get_result = await _with_token_refresh(
             contractor,
             _get,
             terminalize_intent_on_exception=True,
+            include_authorization_context=logical_operation_id is not None,
         )
     except Exception as error:  # noqa: BLE001
         logger.error(
@@ -1316,6 +1577,21 @@ async def reschedule_appointment(
             type(error).__name__,
         )
         return False
+
+    get_authorization_snapshot = None
+    if logical_operation_id is not None:
+        if (
+            type(get_result) is not tuple
+            or len(get_result) != 2
+            or type(get_result[1]) is not dict
+        ):
+            logger.error(
+                "Google Calendar reschedule event error: operation=get_event reason=missing_authorization_context"
+            )
+            return False
+        get_resp, get_authorization_snapshot = get_result
+    else:
+        get_resp = get_result
 
     if get_resp is None:
         logger.error(
@@ -1338,7 +1614,10 @@ async def reschedule_appointment(
         )
         return False
 
-    validated_event = _validate_non_recurring_timed_event(event_data)
+    validated_event = _validate_non_recurring_timed_event(
+        event_data,
+        expected_event_id=event_id,
+    )
     if validated_event is None:
         logger.error(
             "Google Calendar reschedule event error: operation=get_event reason=unsafe_resource_shape"
@@ -1364,65 +1643,475 @@ async def reschedule_appointment(
         "end": {"dateTime": desired_end_iso},
     }
 
-    async def _patch(token: str):
+    if logical_operation_id is None:
+        async def _patch(token: str):
+            async with httpx.AsyncClient() as client:
+                return await client.patch(
+                    event_url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "If-Match": etag,
+                    },
+                    json=patch_body,
+                    timeout=8.0,
+                )
+
+        try:
+            patch_resp = await _with_token_refresh(
+                contractor,
+                _patch,
+                terminalize_intent_on_exception=True,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event exception_type=%s",
+                type(error).__name__,
+            )
+            return False
+
+        if patch_resp is None:
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event reason=no_valid_access_token"
+            )
+            return False
+
+        if not 200 <= patch_resp.status_code < 300:
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event status_code=%s",
+                patch_resp.status_code,
+            )
+            return False
+
+        try:
+            patched_data = patch_resp.json()
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event reason=invalid_response"
+            )
+            return False
+
+        validated_patch = _validate_non_recurring_timed_event(
+            patched_data,
+            expected_event_id=event_id,
+        )
+        if validated_patch is None:
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event reason=invalid_response"
+            )
+            return False
+
+        patched_start_utc, patched_end_utc, _ = validated_patch
+        if patched_start_utc != desired_start_utc or patched_end_utc != desired_end_utc:
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event reason=response_schedule_mismatch"
+            )
+            return False
+
+        logger.info(
+            "Google Calendar reschedule event updated: operation=reschedule outcome=success"
+        )
+        return True
+
+    from app.services.integration_token_mutations import (
+        IntegrationTokenLeaseError,
+        acquire_provider_operation_intent_cas,
+        load_durable_provider_snapshot,
+        terminalize_provider_operation_intent_cas,
+        transition_google_calendar_operation_intent_to_outcome_uncertain_cas,
+        transition_provider_operation_intent_to_started_cas,
+    )
+    from app.services.integration_tokens import validate_token_string
+
+    raw_cid = contractor.get("contractor_id") or contractor.get("id")
+    if not isinstance(raw_cid, str) or not raw_cid.strip():
+        return False
+    try:
+        valid_cid = validate_token_string(raw_cid.strip(), name="contractor_id")
+    except Exception:
+        return False
+    if valid_cid is None:
+        return False
+
+    if type(get_authorization_snapshot) is not dict:
+        return False
+    snap = get_authorization_snapshot
+
+    async def _terminalize_pre_http_claim(claim: str) -> None:
+        cleanup_task = asyncio.create_task(
+            terminalize_provider_operation_intent_cas(
+                contractor_id=valid_cid,
+                provider="google_calendar",
+                claim_id=claim,
+                kind="business",
+                bound_operation_id=logical_operation_id,
+            )
+        )
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            with suppress(BaseException):
+                await cleanup_task
+            raise
+
+    async def _acquire_bound_claim(snapshot: dict) -> tuple[str, float]:
+        acquire_task = asyncio.create_task(
+            acquire_provider_operation_intent_cas(
+                contractor_id=valid_cid,
+                provider="google_calendar",
+                kind="business",
+                bound_operation_id=logical_operation_id,
+                observed_generation=snapshot.get("generation"),
+                observed_lifecycle_epoch=snapshot.get("lifecycle_epoch"),
+                observed_access_raw=snapshot.get("access_token_raw"),
+                observed_refresh_raw=snapshot.get("refresh_token_raw"),
+            )
+        )
+        try:
+            return await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            acquired_claim = None
+            try:
+                acquired_claim, _ = await acquire_task
+            except BaseException:
+                pass
+            if acquired_claim is not None:
+                with suppress(BaseException):
+                    await _terminalize_pre_http_claim(acquired_claim)
+            raise
+
+    async def _transition_bound_claim_to_started(
+        claim: str,
+        snapshot: dict,
+    ) -> None:
+        transition_task = asyncio.create_task(
+            transition_provider_operation_intent_to_started_cas(
+                contractor_id=valid_cid,
+                provider="google_calendar",
+                claim_id=claim,
+                kind="business",
+                bound_operation_id=logical_operation_id,
+                observed_generation=snapshot.get("generation"),
+                observed_lifecycle_epoch=snapshot.get("lifecycle_epoch"),
+                observed_access_raw=snapshot.get("access_token_raw"),
+                observed_refresh_raw=snapshot.get("refresh_token_raw"),
+            )
+        )
+        try:
+            await asyncio.shield(transition_task)
+        except asyncio.CancelledError:
+            with suppress(BaseException):
+                await transition_task
+            with suppress(BaseException):
+                await _terminalize_pre_http_claim(claim)
+            raise
+
+    claim_id = None
+    try:
+        for _ in range(5):
+            try:
+                claim_id, _ = await _acquire_bound_claim(snap)
+                break
+            except IntegrationTokenLeaseError:
+                await asyncio.sleep(0.01)
+
+        if claim_id is None:
+            claim_id, _ = await _acquire_bound_claim(snap)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+
+    try:
+        await _transition_bound_claim_to_started(claim_id, snap)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        with suppress(Exception):
+            await _terminalize_pre_http_claim(claim_id)
+        return False
+
+    patch_resp = None
+    patch_exc = None
+    try:
         async with httpx.AsyncClient() as client:
-            return await client.patch(
+            patch_resp = await client.patch(
                 event_url,
                 headers={
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": f"Bearer {snap['access_token']}",
                     "Content-Type": "application/json",
                     "If-Match": etag,
                 },
                 json=patch_body,
                 timeout=8.0,
             )
+    except asyncio.CancelledError as exc:
+        patch_exc = exc
+    except Exception as exc:
+        patch_exc = exc
 
-    try:
-        patch_resp = await _with_token_refresh(
-            contractor,
-            _patch,
-            terminalize_intent_on_exception=True,
-        )
-    except Exception as error:  # noqa: BLE001
+    if patch_exc is not None:
         logger.error(
             "Google Calendar reschedule event error: operation=patch_event exception_type=%s",
-            type(error).__name__,
+            type(patch_exc).__name__,
         )
+        with suppress(Exception):
+            await asyncio.shield(
+                transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                    contractor_id=valid_cid,
+                    claim_id=claim_id,
+                    bound_operation_id=logical_operation_id,
+                    observed_generation=snap.get("generation"),
+                    observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                    observed_access_raw=snap.get("access_token_raw"),
+                    observed_refresh_raw=snap.get("refresh_token_raw"),
+                )
+            )
+        if isinstance(patch_exc, asyncio.CancelledError):
+            raise patch_exc
         return False
 
-    if patch_resp is None:
-        logger.error(
-            "Google Calendar reschedule event error: operation=patch_event reason=no_valid_access_token"
+    if patch_resp.status_code == 401:
+        term_ok = await terminalize_provider_operation_intent_cas(
+            contractor_id=valid_cid,
+            provider="google_calendar",
+            claim_id=claim_id,
+            kind="business",
+            bound_operation_id=logical_operation_id,
         )
+        if term_ok is not True:
+            return False
+        pre_refresh_snap = await load_durable_provider_snapshot(
+            valid_cid,
+            provider="google_calendar",
+        )
+        if not _same_provider_authorization_snapshot(pre_refresh_snap, snap):
+            logger.warning(
+                "Google Calendar reschedule retry blocked: operation=patch_event reason=authorization_changed"
+            )
+            return False
+
+        refreshed = await refresh_access_token(contractor, force=True)
+        if not refreshed:
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event reason=refresh_failed"
+            )
+            return False
+
+        retry_snap = await load_durable_provider_snapshot(valid_cid, provider="google_calendar")
+        if retry_snap is None:
+            return False
+        if retry_snap.get("lifecycle_epoch") != snap.get("lifecycle_epoch"):
+            logger.warning(
+                "Google Calendar reschedule retry blocked: operation=patch_event reason=lifecycle_changed"
+            )
+            return False
+
+        try:
+            retry_claim_id, _ = await _acquire_bound_claim(retry_snap)
+            await _transition_bound_claim_to_started(retry_claim_id, retry_snap)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+        retry_resp = None
+        retry_exc = None
+        try:
+            async with httpx.AsyncClient() as client:
+                retry_resp = await client.patch(
+                    event_url,
+                    headers={
+                        "Authorization": f"Bearer {retry_snap['access_token']}",
+                        "Content-Type": "application/json",
+                        "If-Match": etag,
+                    },
+                    json=patch_body,
+                    timeout=8.0,
+                )
+        except asyncio.CancelledError as exc:
+            retry_exc = exc
+        except Exception as exc:
+            retry_exc = exc
+
+        if retry_exc is not None:
+            logger.error(
+                "Google Calendar reschedule event error: operation=patch_event_retry exception_type=%s",
+                type(retry_exc).__name__,
+            )
+            with suppress(Exception):
+                await asyncio.shield(
+                    transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                        contractor_id=valid_cid,
+                        claim_id=retry_claim_id,
+                        bound_operation_id=logical_operation_id,
+                        observed_generation=retry_snap.get("generation"),
+                        observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+                        observed_access_raw=retry_snap.get("access_token_raw"),
+                        observed_refresh_raw=retry_snap.get("refresh_token_raw"),
+                    )
+                )
+            if isinstance(retry_exc, asyncio.CancelledError):
+                raise retry_exc
+            return False
+
+        if retry_resp.status_code in (401, 412) or (400 <= retry_resp.status_code < 500):
+            with suppress(Exception):
+                await terminalize_provider_operation_intent_cas(
+                    contractor_id=valid_cid,
+                    provider="google_calendar",
+                    claim_id=retry_claim_id,
+                    kind="business",
+                    bound_operation_id=logical_operation_id,
+                )
+            return False
+
+        if not 200 <= retry_resp.status_code < 300:
+            with suppress(Exception):
+                await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                    contractor_id=valid_cid,
+                    claim_id=retry_claim_id,
+                    bound_operation_id=logical_operation_id,
+                    observed_generation=retry_snap.get("generation"),
+                    observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+                    observed_access_raw=retry_snap.get("access_token_raw"),
+                    observed_refresh_raw=retry_snap.get("refresh_token_raw"),
+                )
+            return False
+
+        try:
+            retry_data = retry_resp.json()
+        except Exception:
+            with suppress(Exception):
+                await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                    contractor_id=valid_cid,
+                    claim_id=retry_claim_id,
+                    bound_operation_id=logical_operation_id,
+                    observed_generation=retry_snap.get("generation"),
+                    observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+                    observed_access_raw=retry_snap.get("access_token_raw"),
+                    observed_refresh_raw=retry_snap.get("refresh_token_raw"),
+                )
+            return False
+
+        validated_retry = _validate_non_recurring_timed_event(
+            retry_data,
+            expected_event_id=event_id,
+        )
+        if validated_retry is None:
+            with suppress(Exception):
+                await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                    contractor_id=valid_cid,
+                    claim_id=retry_claim_id,
+                    bound_operation_id=logical_operation_id,
+                    observed_generation=retry_snap.get("generation"),
+                    observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+                    observed_access_raw=retry_snap.get("access_token_raw"),
+                    observed_refresh_raw=retry_snap.get("refresh_token_raw"),
+                )
+            return False
+
+        r_start_utc, r_end_utc, _ = validated_retry
+        if r_start_utc != desired_start_utc or r_end_utc != desired_end_utc:
+            with suppress(Exception):
+                await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                    contractor_id=valid_cid,
+                    claim_id=retry_claim_id,
+                    bound_operation_id=logical_operation_id,
+                    observed_generation=retry_snap.get("generation"),
+                    observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+                    observed_access_raw=retry_snap.get("access_token_raw"),
+                    observed_refresh_raw=retry_snap.get("refresh_token_raw"),
+                )
+            return False
+
+        term_ok = await terminalize_provider_operation_intent_cas(
+            contractor_id=valid_cid,
+            provider="google_calendar",
+            claim_id=retry_claim_id,
+            kind="business",
+            bound_operation_id=logical_operation_id,
+        )
+        return term_ok is True
+
+    if patch_resp.status_code == 412 or (400 <= patch_resp.status_code < 500):
+        with suppress(Exception):
+            await terminalize_provider_operation_intent_cas(
+                contractor_id=valid_cid,
+                provider="google_calendar",
+                claim_id=claim_id,
+                kind="business",
+                bound_operation_id=logical_operation_id,
+            )
         return False
 
     if not 200 <= patch_resp.status_code < 300:
-        logger.error(
-            "Google Calendar reschedule event error: operation=patch_event status_code=%s",
-            patch_resp.status_code,
-        )
+        with suppress(Exception):
+            await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                contractor_id=valid_cid,
+                claim_id=claim_id,
+                bound_operation_id=logical_operation_id,
+                observed_generation=snap.get("generation"),
+                observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                observed_access_raw=snap.get("access_token_raw"),
+                observed_refresh_raw=snap.get("refresh_token_raw"),
+            )
         return False
 
     try:
         patched_data = patch_resp.json()
-    except Exception:  # noqa: BLE001
-        logger.error(
-            "Google Calendar reschedule event error: operation=patch_event reason=invalid_response"
-        )
+    except Exception:
+        with suppress(Exception):
+            await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                contractor_id=valid_cid,
+                claim_id=claim_id,
+                bound_operation_id=logical_operation_id,
+                observed_generation=snap.get("generation"),
+                observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                observed_access_raw=snap.get("access_token_raw"),
+                observed_refresh_raw=snap.get("refresh_token_raw"),
+            )
         return False
 
-    validated_patch = _validate_non_recurring_timed_event(patched_data)
+    validated_patch = _validate_non_recurring_timed_event(
+        patched_data,
+        expected_event_id=event_id,
+    )
     if validated_patch is None:
-        logger.error(
-            "Google Calendar reschedule event error: operation=patch_event reason=invalid_response"
-        )
+        with suppress(Exception):
+            await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                contractor_id=valid_cid,
+                claim_id=claim_id,
+                bound_operation_id=logical_operation_id,
+                observed_generation=snap.get("generation"),
+                observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                observed_access_raw=snap.get("access_token_raw"),
+                observed_refresh_raw=snap.get("refresh_token_raw"),
+            )
         return False
 
     patched_start_utc, patched_end_utc, _ = validated_patch
     if patched_start_utc != desired_start_utc or patched_end_utc != desired_end_utc:
-        logger.error(
-            "Google Calendar reschedule event error: operation=patch_event reason=response_schedule_mismatch"
-        )
+        with suppress(Exception):
+            await transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+                contractor_id=valid_cid,
+                claim_id=claim_id,
+                bound_operation_id=logical_operation_id,
+                observed_generation=snap.get("generation"),
+                observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+                observed_access_raw=snap.get("access_token_raw"),
+                observed_refresh_raw=snap.get("refresh_token_raw"),
+            )
+        return False
+
+    term_ok = await terminalize_provider_operation_intent_cas(
+        contractor_id=valid_cid,
+        provider="google_calendar",
+        claim_id=claim_id,
+        kind="business",
+        bound_operation_id=logical_operation_id,
+    )
+    if term_ok is not True:
         return False
 
     logger.info(

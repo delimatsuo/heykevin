@@ -26,7 +26,13 @@ An appointment is found from the tenant plus hashed normalized caller number; it
 not require a fabricated identity-memory document. Disabling name personalization
 therefore does not reinterpret or erase an already-authorized provider request.
 
-## Required Firestore configuration
+## Required Firestore configuration — owner-gated operator action
+
+> [!IMPORTANT]
+> These commands are a runbook, not authorization to execute them. Creating
+> indexes, enabling TTL, selecting a GCP project, or changing any Firestore
+> environment requires separate owner authorization and operator-controlled
+> credentials. Source implementation or a reviewed merge does not satisfy this gate.
 
 Set `PROJECT_ID` explicitly for each isolated environment. Do not infer it from a
 developer's active gcloud configuration.
@@ -72,7 +78,12 @@ gcloud firestore fields ttls list \
   --database="(default)"
 ```
 
-## Qualification gates
+## Qualification gates — owner-gated and non-authorizing
+
+The following staging/provider/device exercises require separate owner authorization,
+isolated accounts, and operator coordination. This document does not authorize live
+Firestore access, provider calls, staging or production deployment, feature-flag
+changes, customer-data access, phone calls, or spend.
 
 - Use an isolated staging Firestore project and a dedicated Google Calendar.
 - Book a real staging appointment, then call back from the same number and verify
@@ -122,23 +133,65 @@ are not retention-swept automatically.
 Rescheduling a provider-bound Google Calendar appointment uses read-before-write
 optimistic fencing rather than blind overwrites:
 
-- Every reschedule attempt and recovery pass fetches a fresh event resource via
-  the token-refresh wrapper. ETags are never stored in Firestore.
-- Datetimes are validated as timezone-aware and normalized to UTC instants for
-  exact equality comparison.
+- Every ordinary reschedule attempt fetches a fresh event resource via the
+  token-refresh wrapper. Exact-claim recovery reconciliation performs one direct,
+  authorized GET without refresh. Every successful resource validation requires
+  the exact requested Google event ID. ETags are never stored in Firestore.
+- Datetimes are validated as timezone-aware and normalized to UTC whole seconds
+  (truncating microseconds) for exact equality comparison, and outgoing PATCH
+  request bodies emit normalized UTC whole-second RFC3339 timestamps.
 - If remote schedule matches desired schedule: returns success GET-only (zero PATCH).
 - If remote schedule differs from both base and desired (conflict / 3rd schedule):
   returns false GET-only (zero PATCH), preserving the base aggregate and advancing
   recovery toward `needs_review`.
-- If remote schedule matches base schedule: conditional `PATCH` with `If-Match`
-  using the exact ETag from the fresh GET.
-- A 2xx PATCH response is confirmed only if its body contains a valid timed event
-  matching the desired schedule.
+- Only an explicit durable `verified_absent` authorization result permits an
+  ordinary fenced attempt. Read/decrypt/malformed/different-claim states remain
+  blocked with zero provider execution. When authorized and remote matches base,
+  the attempt may issue a conditional `PATCH` with `If-Match` using the exact ETag
+  from the fresh GET.
+- A 2xx PATCH response is confirmed only if its body contains the exact requested
+  event ID and a valid timed event matching the desired schedule.
 - Malformed, all-day, cancelled, recurring-instance, or recurring-master resources
   fail closed. HTTP 412, transport errors, 5xx, or mismatches perform no second PATCH
   in that attempt.
+- In-flight PATCH transitions to `provider_request_started` immediately before HTTP and
+  transitions to `provider_outcome_uncertain` on transport error, timeout, cancellation,
+  5xx, or schedule mismatch, retaining the exact bound 64-hex logical operation ID.
+- The bound claim acquisition, started transition, and uncertainty transition must
+  CAS-match the exact generation, lifecycle epoch, and raw credential pair that
+  authorized the preceding GET. A controlled 401 retry may use refreshed credentials
+  only within the same lifecycle and binds to the exact retry snapshot.
+- Recovery first performs GET-only reconciliation without refreshing tokens. Before a
+  reconciliation GET and again transactionally before finalization, the canonical
+  authorizer validates exact bound claim/operation and lifecycle/generation; exact
+  active and provider-connected state; a usable paired access/refresh credential set;
+  token-envelope floor compliance; valid encrypted credential envelopes whose
+  provider/token-kind AAD binding authenticates and decrypts when encrypted; the
+  canonical required Google Calendar scope; and token-expiry metadata, when present,
+  having finite-positive numeric shape. The source snapshot must carry a valid
+  authoritative Firestore server `read_time`. Any inactive, disconnected, missing or
+  unusable credential pair, plaintext below an enforced envelope floor, tampered or
+  wrong-AAD envelope, reduced/malformed scope, malformed/non-positive/non-finite expiry
+  metadata, lifecycle/claim mismatch, or missing/invalid `read_time` fails closed with
+  zero provider construction or zero finalization writes as applicable.
+- A matching started/uncertain claim never issues a PATCH: desired state enters one
+  Firestore transaction that revalidates the recovery lease, canonical proposal, exact
+  claim, lifecycle counters, and raw-credential fingerprint before atomically finalizing
+  the canonical record and clearing only that claim. Cancellation, failure, or any
+  mismatch leaves the proposal and fence retryable; every unconfirmed result retains
+  the fence. Only the explicit durable `verified_absent` result permits the ordinary
+  fresh-ETag, conditionally fenced attempt to run.
+- Unconfirmed claims or requests transitioning to `needs_review` retain the provider fence
+  to block disconnects and unsafe retries.
 - Logs strictly record operation, coarse outcome, HTTP status, and exception type,
   never exposing IDs, ETags, tokens, schedules, or provider payloads.
+
+Historical pre-repair evidence (2026-08-26): 496 focused tests and 3,765 total
+repository suite tests previously passed in pre-repair evaluation; those prior
+counts are historical pre-repair records and do not qualify the current tree.
+Current exact-head verification belongs in the pull request and required hosted
+CI. No live provider, Firestore, staging, production, or customer-data
+qualification was performed.
 
 ## Privacy boundary
 

@@ -1,7 +1,9 @@
 """Focused Google Calendar appointment update and cancellation tests."""
 
+import asyncio
 import logging
 import os
+from urllib.parse import unquote
 
 import pytest
 
@@ -25,9 +27,16 @@ class _FakeResponse:
 
 
 class _FakeAsyncClient:
-    def __init__(self, calls: list, responses: list[_FakeResponse]):
+    def __init__(
+        self,
+        calls: list,
+        responses: list[_FakeResponse],
+        *,
+        inject_event_id: bool = True,
+    ):
         self.calls = calls
         self.responses = responses
+        self.inject_event_id = inject_event_id
 
     async def __aenter__(self):
         return self
@@ -37,7 +46,22 @@ class _FakeAsyncClient:
 
     async def _request(self, method: str, url: str, **kwargs):
         self.calls.append((method, url, kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if (
+            self.inject_event_id
+            and method in ("GET", "PATCH")
+            and 200 <= response.status_code < 300
+            and type(response._body) is dict
+            and "id" not in response._body
+        ):
+            response = _FakeResponse(
+                response.status_code,
+                {
+                    **response._body,
+                    "id": unquote(url.rsplit("/", 1)[-1]),
+                },
+            )
+        return response
 
     async def post(self, url: str, **kwargs):
         return await self._request("POST", url, **kwargs)
@@ -52,12 +76,16 @@ class _FakeAsyncClient:
         return await self._request("DELETE", url, **kwargs)
 
 
-def _patch_client(monkeypatch, responses):
+def _patch_client(monkeypatch, responses, *, inject_event_id: bool = True):
     calls = []
     monkeypatch.setattr(
         calendar.httpx,
         "AsyncClient",
-        lambda: _FakeAsyncClient(calls, responses),
+        lambda: _FakeAsyncClient(
+            calls,
+            responses,
+            inject_event_id=inject_event_id,
+        ),
     )
     return calls
 
@@ -786,6 +814,7 @@ async def test_reschedule_appointment_remote_base_executes_conditional_patch_wit
             _FakeResponse(
                 200,
                 {
+                    "id": event_id,
                     "etag": '"etag-base-1"',
                     "start": {"dateTime": base_start},
                     "end": {"dateTime": base_end},
@@ -825,12 +854,11 @@ async def test_reschedule_appointment_remote_base_executes_conditional_patch_wit
     assert kwargs["headers"]["Authorization"] == "Bearer access-token"
     assert kwargs["headers"]["Content-Type"] == "application/json"
     assert kwargs["json"] == {
-        "start": {"dateTime": desired_start},
-        "end": {"dateTime": desired_end},
+        "start": {"dateTime": "2026-08-13T15:00:00+00:00"},
+        "end": {"dateTime": "2026-08-13T16:00:00+00:00"},
     }
     assert "summary" not in kwargs["json"]
     assert "description" not in kwargs["json"]
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -992,6 +1020,7 @@ async def test_reschedule_appointment_patch_412_returns_false_with_no_second_pat
             _FakeResponse(
                 200,
                 {
+                    "id": "event-1",
                     "etag": '"etag-base-1"',
                     "start": {"dateTime": base_start},
                     "end": {"dateTime": base_end},
@@ -1161,8 +1190,8 @@ async def test_reschedule_appointment_patch_401_refreshes_and_retries_failing_if
 
     # Assert identical schedule-only bodies and no other event fields
     expected_body = {
-        "start": {"dateTime": desired_start},
-        "end": {"dateTime": desired_end},
+        "start": {"dateTime": "2026-08-13T15:00:00+00:00"},
+        "end": {"dateTime": "2026-08-13T16:00:00+00:00"},
     }
     assert patch_calls[0][2]["json"] == expected_body
     assert patch_calls[1][2]["json"] == expected_body
@@ -1346,6 +1375,7 @@ async def test_reschedule_appointment_call_exception_terminalizes_intent_and_all
             return _FakeResponse(
                 200,
                 {
+                    "id": "event-1",
                     "etag": '"etag-base-1"',
                     "start": {"dateTime": base_start},
                     "end": {"dateTime": base_end},
@@ -1529,8 +1559,9 @@ async def test_terminalization_raises_after_normal_retry_response_propagates(mon
 
     async def _load_snap(contractor_id, *, provider):
         snap_calls.append(len(snap_calls) + 1)
-        # First call: initial authorization gate. Second call: retry gate.
-        return _SNAP_INITIAL if len(snap_calls) == 1 else _SNAP_RETRY
+        # Initial authorization and pre-refresh continuity reads must agree;
+        # only the post-refresh retry gate advances to the new credentials.
+        return _SNAP_INITIAL if len(snap_calls) <= 2 else _SNAP_RETRY
 
     claim_counter = {"n": 0}
 
@@ -1757,7 +1788,7 @@ async def test_terminalize_false_on_retry_200_raises_coarse_error(monkeypatch):
 
     async def _load_snap(contractor_id, *, provider):
         snap_calls.append(len(snap_calls) + 1)
-        return _SNAP_INITIAL if len(snap_calls) == 1 else _SNAP_RETRY
+        return _SNAP_INITIAL if len(snap_calls) <= 2 else _SNAP_RETRY
 
     claim_counter = {"n": 0}
 
@@ -1949,7 +1980,7 @@ async def test_cancelled_error_during_retry_call_runs_cleanup_and_propagates(mon
 
     async def _load_snap(contractor_id, *, provider):
         snap_calls.append(len(snap_calls) + 1)
-        return _SNAP_INITIAL if len(snap_calls) == 1 else _SNAP_RETRY
+        return _SNAP_INITIAL if len(snap_calls) <= 2 else _SNAP_RETRY
 
     claim_counter = {"n": 0}
 
@@ -2086,3 +2117,1074 @@ async def test_reschedule_transport_exception_logging_privacy(monkeypatch, caplo
     assert "exception_type=RuntimeError" in caplog.text
     for sentinel in [*sentinels.values(), event_url]:
         assert sentinel not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_microsecond_normalization_performs_single_patch_with_utc_whole_seconds(
+    monkeypatch,
+):
+    event_id = "event-micro-1"
+    base_start = "2026-08-13T09:00:00.123456-04:00"
+    base_end = "2026-08-13T10:00:00.999999-04:00"
+    desired_start = "2026-08-13T11:00:00.555555-04:00"
+    desired_end = "2026-08-13T12:00:00.000001-04:00"
+
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-base-micro"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-desired-micro"',
+                    "start": {"dateTime": "2026-08-13T15:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T16:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+    )
+
+    assert succeeded is True
+    assert len(calls) == 2
+    get_call, patch_call = calls
+    assert get_call[0] == "GET"
+    assert patch_call[0] == "PATCH"
+    assert patch_call[2]["headers"]["If-Match"] == '"etag-base-micro"'
+    assert patch_call[2]["json"] == {
+        "start": {"dateTime": "2026-08-13T15:00:00+00:00"},
+        "end": {"dateTime": "2026-08-13T16:00:00+00:00"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_microsecond_remote_already_at_desired_is_get_only_success(
+    monkeypatch,
+):
+    event_id = "event-micro-desired"
+    base_start = "2026-08-13T09:00:00.123456-04:00"
+    base_end = "2026-08-13T10:00:00.999999-04:00"
+    desired_start = "2026-08-13T11:00:00.500000-04:00"
+    desired_end = "2026-08-13T12:00:00.500000-04:00"
+
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-already-desired"',
+                    "start": {"dateTime": "2026-08-13T15:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T16:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+    )
+
+    assert succeeded is True
+    assert len(calls) == 1
+    assert calls[0][0] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_one_second_divergence_is_conflict_without_patch(
+    monkeypatch,
+):
+    event_id = "event-one-sec-conflict"
+    base_start = "2026-08-13T09:00:00-04:00"
+    base_end = "2026-08-13T10:00:00-04:00"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+
+    # Remote event starts 1 second later than base_start
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-diverged-1s"',
+                    "start": {"dateTime": "2026-08-13T13:00:01Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+    )
+
+    assert succeeded is False
+    assert len(calls) == 1
+    assert calls[0][0] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_truncation_collapse_fails_before_http_request(
+    monkeypatch,
+):
+    event_id = "event-collapse"
+    calls = _patch_client(monkeypatch, [])
+
+    # Base interval collapses to 0 duration after microsecond truncation
+    succeeded_base = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start="2026-08-13T09:00:00.100000-04:00",
+        base_end="2026-08-13T09:00:00.900000-04:00",
+        desired_start="2026-08-13T11:00:00-04:00",
+        desired_end="2026-08-13T12:00:00-04:00",
+    )
+    assert succeeded_base is False
+    assert len(calls) == 0
+
+    # Desired interval collapses to 0 duration after microsecond truncation
+    succeeded_desired = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start="2026-08-13T09:00:00-04:00",
+        base_end="2026-08-13T10:00:00-04:00",
+        desired_start="2026-08-13T11:00:00.200000-04:00",
+        desired_end="2026-08-13T11:00:00.800000-04:00",
+    )
+    assert succeeded_desired is False
+    assert len(calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_bound_patch_timeout_enters_uncertain_and_blocks_disconnect(
+    monkeypatch,
+):
+    import app.services.integration_token_mutations as it_mutations
+    from app.services.integration_tokens import IntegrationTokenCASConflict
+
+    event_id = "event-timeout-uncertain"
+    base_start = "2026-08-13T09:00:00-04:00"
+    base_end = "2026-08-13T10:00:00-04:00"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+    op_id = "1" * 64
+
+    class _TimeoutPatchClient:
+        def __init__(self):
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, **kwargs):
+            self.calls.append(("GET", url, kwargs))
+            return _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            )
+
+        async def patch(self, url, **kwargs):
+            self.calls.append(("PATCH", url, kwargs))
+            raise TimeoutError("Simulated network timeout during PATCH")
+
+    timeout_client = _TimeoutPatchClient()
+    monkeypatch.setattr(calendar.httpx, "AsyncClient", lambda: timeout_client)
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+
+    assert succeeded is False
+    assert len(timeout_client.calls) == 2
+
+    # Verify intent transitioned to provider_outcome_uncertain with exact bound_operation_id
+    db = it_mutations.get_firestore_client()
+    doc_data = db.collection("contractors").document("contractor-1").data
+    assert doc_data.get("google_calendar_operation_intent_phase") == "provider_outcome_uncertain"
+    assert doc_data.get("google_calendar_operation_intent_bound_operation_id") == op_id
+
+    # Disconnect must be blocked by the uncertain claim
+    with pytest.raises(
+        IntegrationTokenCASConflict,
+        match="Provider operation outcome uncertain; disconnect pending reconciliation",
+    ):
+        await it_mutations.disconnect_provider_envelope_cas(
+            contractor_id="contractor-1",
+            provider="google_calendar",
+        )
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_bound_patch_cancellation_enters_uncertain_and_reraises(
+    monkeypatch,
+):
+    import app.services.integration_token_mutations as it_mutations
+
+    event_id = "event-cancel-uncertain"
+    base_start = "2026-08-13T09:00:00-04:00"
+    base_end = "2026-08-13T10:00:00-04:00"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+    op_id = "2" * 64
+
+    class _CancelPatchClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, **kwargs):
+            return _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            )
+
+        async def patch(self, url, **kwargs):
+            raise asyncio.CancelledError("Task cancelled during in-flight PATCH")
+
+    monkeypatch.setattr(calendar.httpx, "AsyncClient", _CancelPatchClient)
+
+    with pytest.raises(asyncio.CancelledError):
+        await calendar.reschedule_appointment(
+            _contractor(),
+            event_id,
+            base_start=base_start,
+            base_end=base_end,
+            desired_start=desired_start,
+            desired_end=desired_end,
+            logical_operation_id=op_id,
+        )
+
+    # Uncertainty claim must be durably recorded
+    db = it_mutations.get_firestore_client()
+    doc_data = db.collection("contractors").document("contractor-1").data
+    assert doc_data.get("google_calendar_operation_intent_phase") == "provider_outcome_uncertain"
+    assert doc_data.get("google_calendar_operation_intent_bound_operation_id") == op_id
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_bound_patch_5xx_and_mismatch_enter_uncertain(monkeypatch):
+    import app.services.integration_token_mutations as it_mutations
+
+    event_id = "event-5xx"
+    base_start = "2026-08-13T09:00:00-04:00"
+    base_end = "2026-08-13T10:00:00-04:00"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+    op_id = "3" * 64
+
+    # 1. 500 Server Error
+    _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(500, {"error": "Internal Google Error"}),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert succeeded is False
+    db = it_mutations.get_firestore_client()
+    doc_data = db.collection("contractors").document("contractor-1").data
+    assert doc_data.get("google_calendar_operation_intent_phase") == "provider_outcome_uncertain"
+
+    # Reset intent for next check
+    for field in it_mutations.get_provider_operation_intent_keys("google_calendar"):
+        doc_data.pop(field, None)
+
+    # 2. 200 OK with response schedule mismatch
+    op_id_mismatch = "4" * 64
+    _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-mismatch"',
+                    "start": {"dateTime": "2026-08-13T18:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T19:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id_mismatch,
+    )
+    assert succeeded is False
+    assert doc_data.get("google_calendar_operation_intent_phase") == "provider_outcome_uncertain"
+    assert doc_data.get("google_calendar_operation_intent_bound_operation_id") == op_id_mismatch
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_bound_patch_412_terminalizes_intent(monkeypatch):
+    import app.services.integration_token_mutations as it_mutations
+
+    event_id = "event-412"
+    base_start = "2026-08-13T09:00:00-04:00"
+    base_end = "2026-08-13T10:00:00-04:00"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+    op_id = "5" * 64
+
+    _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(412, {"error": "Precondition Failed"}),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert succeeded is False
+
+    db = it_mutations.get_firestore_client()
+    doc_data = db.collection("contractors").document("contractor-1").data
+    assert "google_calendar_operation_intent_id" not in doc_data
+
+
+@pytest.mark.asyncio
+async def test_reschedule_appointment_bound_patch_2xx_desired_terminalizes_and_succeeds(
+    monkeypatch,
+):
+    import app.services.integration_token_mutations as it_mutations
+
+    event_id = "event-success"
+    base_start = "2026-08-13T09:00:00-04:00"
+    base_end = "2026-08-13T10:00:00-04:00"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+    op_id = "7" * 64
+
+    _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-desired"',
+                    "start": {"dateTime": "2026-08-13T15:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T16:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    succeeded = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start=base_start,
+        base_end=base_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert succeeded is True
+
+    db = it_mutations.get_firestore_client()
+    doc_data = db.collection("contractors").document("contractor-1").data
+    assert "google_calendar_operation_intent_id" not in doc_data
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reschedule_appointment_and_clear_claim(monkeypatch):
+    import app.services.integration_token_mutations as it_mutations
+
+    cid = "contractor-1"
+    op_id = "8" * 64
+    claim_id = "claim-recon-1"
+    desired_start = "2026-08-13T11:00:00-04:00"
+    desired_end = "2026-08-13T12:00:00-04:00"
+    event_id = "event-recon"
+
+    # Setup durable contractor with encrypted tokens, lifecycle, and bound uncertain claim
+    enc_acc = it_mutations.encrypt_integration_token("plain-acc", contractor_id=cid, provider="google_calendar", token_kind="access")
+    enc_ref = it_mutations.encrypt_integration_token("plain-ref", contractor_id=cid, provider="google_calendar", token_kind="refresh")
+    fp = it_mutations.compute_raw_credentials_fingerprint(enc_acc, enc_ref)
+
+    db = it_mutations.get_firestore_client()
+    doc_ref = db.collection("contractors").document(cid)
+    doc_ref.set({
+        "contractor_id": cid,
+        "active": True,
+        "google_calendar_connected": True,
+        "google_calendar_access_token": enc_acc,
+        "google_calendar_refresh_token": enc_ref,
+        "google_calendar_token_envelope_required": True,
+        "google_calendar_scope": it_mutations.CANONICAL_GOOGLE_CALENDAR_SCOPE,
+        "google_calendar_token_expires_at": 1800000000.0,
+        "google_calendar_generation": 3,
+        "google_calendar_lifecycle_epoch": 2,
+        "google_calendar_operation_intent_id": claim_id,
+        "google_calendar_operation_intent_kind": "business",
+        "google_calendar_operation_intent_phase": "provider_outcome_uncertain",
+        "google_calendar_operation_intent_expires_at": 100.0,
+        "google_calendar_operation_intent_acquired_at": 50.0,
+        "google_calendar_operation_intent_generation": 3,
+        "google_calendar_operation_intent_lifecycle_epoch": 2,
+        "google_calendar_operation_intent_credentials_fingerprint": fp,
+        "google_calendar_operation_intent_bound_operation_id": op_id,
+    })
+
+    async def _unexpected_refresh(*_args, **_kwargs):
+        raise AssertionError("GET-only reconciliation must not refresh tokens")
+
+    monkeypatch.setattr(calendar, "refresh_access_token", _unexpected_refresh)
+
+    # Case A: GET returns desired schedule -> confirmed True with claim handle
+    confirmed_calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-desired-valid"',
+                    "start": {"dateTime": "2026-08-13T15:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T16:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    result_confirmed = await calendar.reconcile_reschedule_appointment(
+        _contractor(),
+        event_id,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert result_confirmed.has_matching_claim is True
+    assert result_confirmed.confirmed is True
+    assert result_confirmed.claim_id == claim_id
+    assert result_confirmed.logical_operation_id == op_id
+    assert [method for method, _url, _kwargs in confirmed_calls] == ["GET"]
+
+    # Case A2: Equivalent offset and sub-second provider values normalize to
+    # the same UTC whole-second desired interval.
+    offset_calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-desired-offset"',
+                    "start": {"dateTime": "2026-08-13T10:00:00.999999-05:00"},
+                    "end": {"dateTime": "2026-08-13T11:00:00.999999-05:00"},
+                },
+            ),
+        ],
+    )
+    result_offset = await calendar.reconcile_reschedule_appointment(
+        _contractor(),
+        event_id,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert result_offset.has_matching_claim is True
+    assert result_offset.confirmed is True
+    assert [method for method, _url, _kwargs in offset_calls] == ["GET"]
+
+    # Case B: GET returns base schedule -> confirmed False, matching claim True
+    _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    result_base = await calendar.reconcile_reschedule_appointment(
+        _contractor(),
+        event_id,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert result_base.has_matching_claim is True
+    assert result_base.confirmed is False
+    assert result_base.claim_id == claim_id
+
+    # Case C: 1-second divergence -> confirmed False
+    _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "etag": '"etag-diverged-1s"',
+                    "start": {"dateTime": "2026-08-13T15:00:01Z"},
+                    "end": {"dateTime": "2026-08-13T16:00:00Z"},
+                },
+            ),
+        ],
+    )
+
+    result_1s = await calendar.reconcile_reschedule_appointment(
+        _contractor(),
+        event_id,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert result_1s.has_matching_claim is True
+    assert result_1s.confirmed is False
+
+    # Case C2: A desired-looking resource without the exact requested event id
+    # is not confirmation and must retain the matching durable claim.
+    for unsafe_identity in (None, "different-event-id"):
+        unsafe_body = {
+            "etag": '"etag-unsafe-identity"',
+            "start": {"dateTime": "2026-08-13T15:00:00Z"},
+            "end": {"dateTime": "2026-08-13T16:00:00Z"},
+        }
+        if unsafe_identity is not None:
+            unsafe_body["id"] = unsafe_identity
+        unsafe_calls = _patch_client(
+            monkeypatch,
+            [_FakeResponse(200, unsafe_body)],
+            inject_event_id=False,
+        )
+        unsafe_result = await calendar.reconcile_reschedule_appointment(
+            _contractor(),
+            event_id,
+            desired_start=desired_start,
+            desired_end=desired_end,
+            logical_operation_id=op_id,
+        )
+        assert unsafe_result.authorization_status == "matching_claim"
+        assert unsafe_result.has_matching_claim is True
+        assert unsafe_result.confirmed is False
+        assert [method for method, _url, _kwargs in unsafe_calls] == ["GET"]
+
+    # Case D: Wrong bound_operation_id -> has_matching_claim False
+    result_wrong_id = await calendar.reconcile_reschedule_appointment(
+        _contractor(),
+        event_id,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id="0" * 64,
+    )
+    assert result_wrong_id.has_matching_claim is False
+    assert result_wrong_id.confirmed is False
+
+    # Case E: Clear claim
+    cleared = await calendar.clear_reconciled_reschedule_claim(
+        _contractor(),
+        claim_id=claim_id,
+        logical_operation_id=op_id,
+    )
+    assert cleared is True
+    assert "google_calendar_operation_intent_id" not in doc_ref.data
+
+    # Case F: Adversarial regression against invalid durable record (floor False)
+    # Proves no HTTP client construction occurs when durable record is invalid.
+    doc_ref.set({
+        "contractor_id": cid,
+        "active": True,
+        "google_calendar_connected": True,
+        "google_calendar_access_token": enc_acc,
+        "google_calendar_refresh_token": enc_ref,
+        "google_calendar_token_envelope_required": False,  # Invalid: requires promotion
+        "google_calendar_generation": 3,
+        "google_calendar_lifecycle_epoch": 2,
+        "google_calendar_operation_intent_id": claim_id,
+        "google_calendar_operation_intent_kind": "business",
+        "google_calendar_operation_intent_phase": "provider_outcome_uncertain",
+        "google_calendar_operation_intent_expires_at": 100.0,
+        "google_calendar_operation_intent_acquired_at": 50.0,
+        "google_calendar_operation_intent_generation": 3,
+        "google_calendar_operation_intent_lifecycle_epoch": 2,
+        "google_calendar_operation_intent_credentials_fingerprint": fp,
+        "google_calendar_operation_intent_bound_operation_id": op_id,
+    })
+    constructor_count = 0
+
+    class _ForbiddenAsyncClient:
+        def __init__(self, *args, **kwargs):
+            nonlocal constructor_count
+            constructor_count += 1
+            raise AssertionError("httpx.AsyncClient constructed for invalid durable record")
+
+    monkeypatch.setattr(calendar.httpx, "AsyncClient", _ForbiddenAsyncClient)
+    adv_result = await calendar.reconcile_reschedule_appointment(
+        _contractor(),
+        event_id,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        logical_operation_id=op_id,
+    )
+    assert constructor_count == 0
+    assert adv_result.has_matching_claim is False
+    assert adv_result.confirmed is False
+    assert adv_result.authorization_status == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_event_id", [None, "different-event-id"])
+async def test_reschedule_initial_get_requires_exact_event_identity(
+    monkeypatch,
+    returned_event_id,
+):
+    event_id = "identity-fenced-event"
+    body = {
+        "etag": '"etag-base"',
+        "start": {"dateTime": "2026-08-13T13:00:00Z"},
+        "end": {"dateTime": "2026-08-13T14:00:00Z"},
+    }
+    if returned_event_id is not None:
+        body["id"] = returned_event_id
+    calls = _patch_client(
+        monkeypatch,
+        [_FakeResponse(200, body)],
+        inject_event_id=False,
+    )
+
+    result = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start="2026-08-13T09:00:00-04:00",
+        base_end="2026-08-13T10:00:00-04:00",
+        desired_start="2026-08-13T11:00:00-04:00",
+        desired_end="2026-08-13T12:00:00-04:00",
+        logical_operation_id="a" * 64,
+    )
+
+    assert result is False
+    assert [method for method, _url, _kwargs in calls] == ["GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_event_id", [None, "different-event-id"])
+async def test_bound_reschedule_patch_identity_mismatch_retains_uncertain_fence(
+    monkeypatch,
+    returned_event_id,
+):
+    import app.services.integration_token_mutations as mutations_module
+
+    event_id = "identity-fenced-patch"
+    patch_body = {
+        "etag": '"etag-desired"',
+        "start": {"dateTime": "2026-08-13T15:00:00Z"},
+        "end": {"dateTime": "2026-08-13T16:00:00Z"},
+    }
+    if returned_event_id is not None:
+        patch_body["id"] = returned_event_id
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(200, patch_body),
+        ],
+        inject_event_id=False,
+    )
+
+    logical_operation_id = "b" * 64
+    result = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start="2026-08-13T09:00:00-04:00",
+        base_end="2026-08-13T10:00:00-04:00",
+        desired_start="2026-08-13T11:00:00-04:00",
+        desired_end="2026-08-13T12:00:00-04:00",
+        logical_operation_id=logical_operation_id,
+    )
+
+    assert result is False
+    assert [method for method, _url, _kwargs in calls] == ["GET", "PATCH"]
+    db = mutations_module.get_firestore_client()
+    durable = db.collection("contractors").document("contractor-1").data
+    assert durable["google_calendar_operation_intent_phase"] == "provider_outcome_uncertain"
+    assert (
+        durable["google_calendar_operation_intent_bound_operation_id"]
+        == logical_operation_id
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_kind", ["lifecycle", "raw_credentials"])
+async def test_bound_reschedule_cas_rejects_authorization_change_after_get(
+    monkeypatch,
+    mutation_kind,
+):
+    import app.services.integration_token_mutations as mutations_module
+
+    original_acquire = mutations_module.acquire_provider_operation_intent_cas
+    acquire_calls = 0
+    db = mutations_module.get_firestore_client()
+    doc_ref = db.collection("contractors").document("contractor-1")
+
+    async def _mutating_acquire(**kwargs):
+        nonlocal acquire_calls
+        acquire_calls += 1
+        if acquire_calls == 2:
+            if mutation_kind == "lifecycle":
+                doc_ref.data["google_calendar_lifecycle_epoch"] += 1
+            else:
+                doc_ref.data["google_calendar_access_token"] = "account-b-access-token"
+                doc_ref.data["google_calendar_refresh_token"] = "account-b-refresh-token"
+        return await original_acquire(**kwargs)
+
+    monkeypatch.setattr(
+        mutations_module,
+        "acquire_provider_operation_intent_cas",
+        _mutating_acquire,
+    )
+    event_id = "authorization-swap-event"
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            )
+        ],
+        inject_event_id=False,
+    )
+
+    result = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start="2026-08-13T09:00:00-04:00",
+        base_end="2026-08-13T10:00:00-04:00",
+        desired_start="2026-08-13T11:00:00-04:00",
+        desired_end="2026-08-13T12:00:00-04:00",
+        logical_operation_id="c" * 64,
+    )
+
+    assert result is False
+    assert acquire_calls == 2
+    assert [method for method, _url, _kwargs in calls] == ["GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_kind", ["lifecycle", "raw_credentials"])
+async def test_bound_reschedule_401_retry_rejects_authorization_change(
+    monkeypatch,
+    mutation_kind,
+):
+    import app.services.integration_token_mutations as mutations_module
+
+    original_load = mutations_module.load_durable_provider_snapshot
+    load_calls = 0
+    db = mutations_module.get_firestore_client()
+    doc_ref = db.collection("contractors").document("contractor-1")
+
+    async def _mutating_load(contractor_id, provider, db=None):
+        nonlocal load_calls
+        load_calls += 1
+        if load_calls == 2:
+            if mutation_kind == "lifecycle":
+                doc_ref.data["google_calendar_lifecycle_epoch"] += 1
+            else:
+                doc_ref.data["google_calendar_access_token"] = "account-b-access-token"
+                doc_ref.data["google_calendar_refresh_token"] = "account-b-refresh-token"
+        return await original_load(contractor_id, provider, db=db)
+
+    async def _unexpected_refresh(*_args, **_kwargs):
+        raise AssertionError("authorization change must block refresh and retry")
+
+    monkeypatch.setattr(
+        mutations_module,
+        "load_durable_provider_snapshot",
+        _mutating_load,
+    )
+    monkeypatch.setattr(calendar, "refresh_access_token", _unexpected_refresh)
+
+    event_id = "authorization-swap-retry-event"
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            ),
+            _FakeResponse(401, {"error": "expired"}),
+        ],
+        inject_event_id=False,
+    )
+
+    result = await calendar.reschedule_appointment(
+        _contractor(),
+        event_id,
+        base_start="2026-08-13T09:00:00-04:00",
+        base_end="2026-08-13T10:00:00-04:00",
+        desired_start="2026-08-13T11:00:00-04:00",
+        desired_end="2026-08-13T12:00:00-04:00",
+        logical_operation_id="d" * 64,
+    )
+
+    assert result is False
+    assert load_calls == 2
+    assert [method for method, _url, _kwargs in calls] == ["GET", "PATCH"]
+
+
+@pytest.mark.asyncio
+async def test_bound_reschedule_real_task_cancellation_persists_uncertain_fence(
+    monkeypatch,
+):
+    import app.services.integration_token_mutations as mutations_module
+
+    event_id = "task-cancelled-patch"
+    patch_started = asyncio.Event()
+    keep_patch_open = asyncio.Event()
+
+    class _BlockingPatchClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url, **_kwargs):
+            return _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            )
+
+        async def patch(self, _url, **_kwargs):
+            patch_started.set()
+            await keep_patch_open.wait()
+            raise AssertionError("blocked PATCH should be cancelled")
+
+    monkeypatch.setattr(calendar.httpx, "AsyncClient", _BlockingPatchClient)
+    logical_operation_id = "e" * 64
+    task = asyncio.create_task(
+        calendar.reschedule_appointment(
+            _contractor(),
+            event_id,
+            base_start="2026-08-13T09:00:00-04:00",
+            base_end="2026-08-13T10:00:00-04:00",
+            desired_start="2026-08-13T11:00:00-04:00",
+            desired_end="2026-08-13T12:00:00-04:00",
+            logical_operation_id=logical_operation_id,
+        )
+    )
+    await asyncio.wait_for(patch_started.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    db = mutations_module.get_firestore_client()
+    durable = db.collection("contractors").document("contractor-1").data
+    assert durable["google_calendar_operation_intent_phase"] == "provider_outcome_uncertain"
+    assert (
+        durable["google_calendar_operation_intent_bound_operation_id"]
+        == logical_operation_id
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_stage", ["acquire", "started_transition"])
+async def test_bound_reschedule_pre_http_cancellation_cleans_committed_claim(
+    monkeypatch,
+    cancelled_stage,
+):
+    import app.services.integration_token_mutations as mutations_module
+    from app.services.integration_tokens import (
+        get_provider_operation_intent_keys,
+        parse_provider_operation_intent,
+    )
+
+    original_acquire = mutations_module.acquire_provider_operation_intent_cas
+    original_transition = mutations_module.transition_provider_operation_intent_to_started_cas
+    stage_entered = asyncio.Event()
+    allow_commit = asyncio.Event()
+
+    async def _blocking_acquire(**kwargs):
+        if (
+            cancelled_stage == "acquire"
+            and kwargs.get("bound_operation_id") is not None
+        ):
+            stage_entered.set()
+            await allow_commit.wait()
+        return await original_acquire(**kwargs)
+
+    async def _blocking_transition(**kwargs):
+        if (
+            cancelled_stage == "started_transition"
+            and kwargs.get("bound_operation_id") is not None
+        ):
+            stage_entered.set()
+            await allow_commit.wait()
+        return await original_transition(**kwargs)
+
+    monkeypatch.setattr(
+        mutations_module,
+        "acquire_provider_operation_intent_cas",
+        _blocking_acquire,
+    )
+    monkeypatch.setattr(
+        mutations_module,
+        "transition_provider_operation_intent_to_started_cas",
+        _blocking_transition,
+    )
+
+    event_id = f"cancel-before-http-{cancelled_stage}"
+    calls = _patch_client(
+        monkeypatch,
+        [
+            _FakeResponse(
+                200,
+                {
+                    "id": event_id,
+                    "etag": '"etag-base"',
+                    "start": {"dateTime": "2026-08-13T13:00:00Z"},
+                    "end": {"dateTime": "2026-08-13T14:00:00Z"},
+                },
+            )
+        ],
+        inject_event_id=False,
+    )
+    task = asyncio.create_task(
+        calendar.reschedule_appointment(
+            _contractor(),
+            event_id,
+            base_start="2026-08-13T09:00:00-04:00",
+            base_end="2026-08-13T10:00:00-04:00",
+            desired_start="2026-08-13T11:00:00-04:00",
+            desired_end="2026-08-13T12:00:00-04:00",
+            logical_operation_id="f" * 64,
+        )
+    )
+    await asyncio.wait_for(stage_entered.wait(), timeout=1.0)
+    task.cancel()
+    allow_commit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [method for method, _url, _kwargs in calls] == ["GET"]
+    db = mutations_module.get_firestore_client()
+    durable = db.collection("contractors").document("contractor-1").data
+    status, intent, _ = parse_provider_operation_intent(durable, "google_calendar")
+    assert status == "absent"
+    assert intent is None
+    for key in get_provider_operation_intent_keys("google_calendar"):
+        assert key not in durable

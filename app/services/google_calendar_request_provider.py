@@ -117,7 +117,7 @@ class GoogleCalendarRequestProvider(ProviderMutationAdapter):
             resource_id is None
             or base_schedule is None
             or desired_schedule is None
-            or not _valid_idempotency_key(idempotency_key)
+            or not _valid_logical_operation_id(idempotency_key)
         ):
             return False
         base_start, base_end = base_schedule
@@ -131,8 +131,59 @@ class GoogleCalendarRequestProvider(ProviderMutationAdapter):
                 base_end=base_end,
                 desired_start=desired_start,
                 desired_end=desired_end,
+                logical_operation_id=idempotency_key,
             ),
         )
+
+    async def reconcile_reschedule(
+        self,
+        *,
+        binding: ProviderBinding,
+        request: ServiceRequest,
+        scheduled_start: datetime,
+        scheduled_end: datetime,
+        logical_operation_id: str,
+    ) -> calendar.CalendarReconciliationResult:
+        """Perform GET-only reconciliation for a bound reschedule operation."""
+
+        resource_id = _google_resource_id(binding)
+        desired_schedule = _normalized_schedule(scheduled_start, scheduled_end)
+        if (
+            resource_id is None
+            or desired_schedule is None
+            or not _valid_logical_operation_id(logical_operation_id)
+        ):
+            return calendar.CalendarReconciliationResult(
+                has_matching_claim=False,
+                confirmed=False,
+            )
+        desired_start, desired_end = desired_schedule
+        return await calendar.reconcile_reschedule_appointment(
+            self._contractor_config,
+            event_id=resource_id,
+            desired_start=desired_start,
+            desired_end=desired_end,
+            logical_operation_id=logical_operation_id,
+        )
+
+    async def clear_reconciled_claim(
+        self,
+        *,
+        claim_id: str,
+        logical_operation_id: str,
+    ) -> bool:
+        """Clear an exact reconciled claim after recovery finalization."""
+
+        if not _valid_logical_operation_id(logical_operation_id):
+            return False
+        try:
+            return await calendar.clear_reconciled_reschedule_claim(
+                self._contractor_config,
+                claim_id=claim_id,
+                logical_operation_id=logical_operation_id,
+            )
+        except Exception:
+            return False
 
     async def add_service(
         self,

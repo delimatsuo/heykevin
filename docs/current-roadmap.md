@@ -1,15 +1,18 @@
 # Hey Kevin — Canonical Source Roadmap & Reconciliation
 
-**Binding HEAD:** `4a773646bcec2c72ff3a95b9afda9b00ac8fe41c`
-**Branch:** `codex/roadmap-reconciliation`
-**Base:** `origin/main` (`4a773646bcec2c72ff3a95b9afda9b00ac8fe41c`)
+**Candidate branch:** `codex/google-calendar-reschedule-fencing`
+**Candidate base:** `origin/main` (`63fe3e195a45f0b368c4a4d1599825c0392fa2f7`)
+**Pre-repair candidate HEAD:** `5ba200af899683bf1191df0d960625c7b14e00d1`
 **Project:** Kevin (`delimatsuo/heykevin`)
 
 ---
 
 ## 1. Evidence Ceiling & Verification Scope
 
-This document is the canonical source roadmap for the Hey Kevin repository, verified strictly against the source code, unit test suite, and Git history at the binding HEAD above.
+This document is the canonical source roadmap for the Hey Kevin repository. The
+Google Calendar reschedule-fencing section describes the candidate branch above;
+the pull request records the exact reviewed diff hash and final commit after review
+repairs. Evidence is limited to source, automated tests, and Git history.
 
 > [!IMPORTANT]
 > **Evidence Ceiling**: Source implementation and automated unit tests prove repository code correctness and simulated contracts only. They do **not** prove:
@@ -82,9 +85,9 @@ The internationalization plan ([`docs/superpowers/plans/2026-04-07-international
 
 ---
 
-## 5. Next Recommended Source-Only Feature: Provider-Safe Google Calendar Reschedule Fencing
+## 5. Implemented Candidate Pending Review/Merge: Provider-Safe Google Calendar Reschedule Fencing
 
-**Objective:** Implement provider-safe Google Calendar reschedule fencing in backend services, default-off with zero live activation.
+**Objective:** Deliver provider-safe Google Calendar reschedule fencing in backend services, default-off with zero live activation. The source candidate is implemented on the branch above and remains pending reviewed-clean merge.
 
 ### Reschedule Fencing Contract
 1. **Durable Bases & Fresh ETag Invariant:**
@@ -92,41 +95,60 @@ The internationalization plan ([`docs/superpowers/plans/2026-04-07-international
    - No base ETag is durably stored. Each mutation attempt or recovery refetch retrieves a fresh remote ETag via `GET`.
 2. **Schedule Validation & Instant Comparison:**
    - Validate both base and desired timezone-aware, ordered schedule intervals (`start < end`).
-   - Compare schedules using normalized UTC instants so equivalent offsets (e.g. `14:00-04:00` vs `18:00Z`) match cleanly.
+   - Compare schedules using normalized UTC whole-second instants (converting to UTC and truncating microseconds to zero) so equivalent offsets and sub-second precision differences match cleanly. Outgoing PATCH request bodies emit normalized desired UTC whole-second RFC3339 timestamps.
    - All-day, cancelled, malformed, or recurring-master-shaped event resources fail closed.
 3. **Pre-Mutation Evaluation:**
-   - `GET` the bound event through the token-refresh wrapper; require a 2xx status, a valid ETag, and valid non-cancelled start/end times.
+   - `GET` the bound event through the token-refresh wrapper; require a 2xx status, the exact requested event ID, a valid ETag, and valid non-cancelled start/end times.
+   - A bound PATCH claim must CAS-match the exact generation, lifecycle epoch, and raw credential pair that authorized the GET. A controlled 401 retry may advance credentials only within the same lifecycle and must bind to the exact retry snapshot.
    - `current == desired` => Idempotent GET-only success; no `PATCH` issued.
    - `current differs from both base and desired` => Remote conflict; abort with failure and issue no `PATCH`.
    - `current == base` => Permitted conditional update; issue a `PATCH` updating only `start` and `end` with `If-Match: "<ETag>"`.
 4. **Response Handling & Post-Condition Confirmation:**
-   - Accept success only if the 2xx response body explicitly confirms the desired `start` and `end` schedule.
+   - Accept success only if the 2xx response body identifies the exact requested event and explicitly confirms the desired `start` and `end` schedule.
    - HTTP 412 Precondition Failed, timeout, transport error, 5xx, malformed/mismatched response, or token failure => return false/uncertain with zero second `PATCH` in that attempt.
 5. **Durable Recovery & Bounded Convergence:**
-   - Later durable recovery refetches the event via `GET`:
-     - If remote event is already at `desired` => finalize success exactly once (zero additional `PATCH`).
-     - If remote event is at `base` => acquire fresh ETag and perform conditional retry.
-     - If remote event is at a third schedule or in conflict => fail closed; bounded recovery leaves state as `needs_review` while retaining canonical base.
+   - Later durable recovery first performs exact-claim, GET-only reconciliation.
+   - Before a reconciliation GET and again transactionally before finalization, the canonical authorizer validates exact bound claim/operation and lifecycle/generation; exact active and provider-connected state; a usable paired access/refresh credential set; token-envelope floor compliance; valid encrypted credential envelopes whose provider/token-kind AAD binding authenticates and decrypts when encrypted; the canonical required Google Calendar scope; and token-expiry metadata, when present, having finite-positive numeric shape. The source snapshot must carry a valid authoritative Firestore server `read_time`. Any inactive, disconnected, missing or unusable credential pair, plaintext below an enforced envelope floor, tampered or wrong-AAD envelope, reduced/malformed scope, malformed/non-positive/non-finite expiry metadata, lifecycle/claim mismatch, or missing/invalid `read_time` fails closed with zero provider construction or zero finalization writes as applicable.
+   - If a matching started/uncertain claim exists and the remote event is already at `desired`, one Firestore transaction must verify the recovery lease, canonical proposal, exact claim identity, lifecycle counters, and raw-credential fingerprint before it both finalizes the canonical request and clears only that exact claim. No additional `PATCH` is issued.
+   - If a matching claim exists but the remote result is `base`, third-state, malformed, unavailable, or otherwise unconfirmed, issue zero `PATCH`; bounded recovery retains the fence and advances toward `needs_review`.
+   - Only an explicit `verified_absent` result from the durable authorizer may allow the ordinary fenced attempt to run. Read failures, malformed state, decryption failures, a different claim, and every other indeterminate state remain blocked with zero provider execution.
    - Never describe an ambiguous transport error as safely overwritten or blindly retried.
 6. **Diagnostic Safety & Privacy:**
    - Fixed payload-safe diagnostic codes only; logs strictly exclude event IDs, URLs, ETags, OAuth tokens, customer identifiers, request IDs, schedule strings, and raw provider payloads.
+7. **Bound Uncertainty & Fenced Recovery:**
+   - Ambiguous Google Calendar reschedule PATCHes retain a bound started/uncertain claim; expiry alone never clears or quarantines it.
+   - Disconnect stays blocked until desired-state reconciliation finalizes first and an exact claim clear follows.
 
 ### Targeted Implementation Allowlist (Source & Tests Only)
+- [`app/db/contractors.py`](../app/db/contractors.py)
+- [`app/db/service_requests.py`](../app/db/service_requests.py)
 - [`app/services/calendar.py`](../app/services/calendar.py)
 - [`app/services/google_calendar_request_provider.py`](../app/services/google_calendar_request_provider.py)
+- [`app/services/integration_tokens.py`](../app/services/integration_tokens.py)
 - [`app/services/integration_token_mutations.py`](../app/services/integration_token_mutations.py)
+- [`app/services/service_request_recovery.py`](../app/services/service_request_recovery.py)
 - [`app/services/service_request_repository.py`](../app/services/service_request_repository.py)
+- [`docs/current-roadmap.md`](current-roadmap.md)
 - [`docs/customer-memory-rollout.md`](customer-memory-rollout.md)
 - [`tests/unit/test_calendar_appointment_mutations.py`](../tests/unit/test_calendar_appointment_mutations.py)
+- [`tests/unit/test_contractor_protected_fields.py`](../tests/unit/test_contractor_protected_fields.py)
 - [`tests/unit/test_google_calendar_request_provider.py`](../tests/unit/test_google_calendar_request_provider.py)
 - [`tests/unit/test_integration_token_envelope.py`](../tests/unit/test_integration_token_envelope.py)
 - [`tests/unit/test_service_request_repository.py`](../tests/unit/test_service_request_repository.py)
 - [`tests/unit/test_service_request_recovery.py`](../tests/unit/test_service_request_recovery.py)
 - [`tests/unit/test_service_request_firestore.py`](../tests/unit/test_service_request_firestore.py)
 
-*Boundary Note:* [`app/services/service_request_recovery.py`](../app/services/service_request_recovery.py) and [`app/db/service_requests.py`](../app/db/service_requests.py) should remain unchanged unless a failing contract test proves otherwise. Evidence is source/mock-only; no live Google Calendar, Firestore recovery, staging deploy, feature flag activation, or provider qualification.
+*Boundary Note:* The recovery worker and Firestore repository changed only where causal tests required exact-claim reconciliation and atomic canonical-finalization-plus-claim-clear. The two new protected contractor fields prevent client PATCH writes to lifecycle state. Evidence is source/mock-only; no live Google Calendar, Firestore recovery, staging deploy, feature flag activation, or provider qualification.
 
-Shared-helper exception: The Google Calendar token-refresh path depends on `terminalize_provider_operation_intent_cas`. This slice may update that provider-agnostic helper, with Jobber and Google Calendar regression coverage, only so a post-read containing a valid different claim confirms the terminalized claim is absent; same-claim and malformed post-reads remain fail closed. This does not authorize other Jobber behavior or any live-provider change.
+Shared-helper exception: Google Calendar authorization and recovery reuse the
+provider-agnostic durable operation-intent parser and CAS helpers. This slice may
+update those shared helpers only to enforce exact lifecycle/generation/raw-credential
+binding, persist and parse the Google-only bound operation ID, transition ambiguous
+Google PATCH outcomes to uncertainty, classify reconciliation authorization, and
+atomically finalize the canonical request while clearing an exact reconciled claim.
+Jobber regression
+coverage must remain green; this does not authorize new Jobber behavior, provider
+activation, or any live-provider change.
 
 ### Mutation-Effective Proof Targets
 
@@ -135,16 +157,25 @@ Shared-helper exception: The Google Calendar token-refresh path depends on `term
 - Missing base-equality guard causes tests to fail.
 - Missing or malformed ETag prevents `PATCH` invocation.
 - `PATCH` payload contains exact `If-Match` header and schedule-only body.
-- A 2xx `PATCH` whose response body has missing, malformed, or non-desired start/end returns false, retains canonical base/pending recovery, and never finalizes.
+- A 2xx `PATCH` whose response body has a missing/wrong event ID or missing, malformed, or non-desired start/end returns false, retains canonical base/pending recovery, and never finalizes.
 - Exact Firestore round trip: canonical aggregate remains base; pending arguments/result remain desired; recovery receives both exact schedules; no ETag field exists anywhere in the durable document.
 - Exact 401 auth failure and retry sequences:
   1. `GET` 401 -> token refresh -> retried `GET` supplies the ETag used by `PATCH`.
   2. `PATCH` 401 -> token refresh -> retry uses the identical `If-Match` value and identical schedule-only body.
   3. HTTP 412 from that retry returns false with no further `PATCH`.
+- Disconnect/reconnect, lifecycle changes, or raw-credential swaps between GET and bound claim acquisition cause zero PATCH; the same changes before a 401 retry cause zero retry PATCH.
 - HTTP 412 response executes zero second `PATCH`.
 - Timeout-after-PATCH followed by recovery `GET` at desired schedule finalizes exactly once with zero second `PATCH`.
+- Cancellation or failure at the atomic recovery-finalization boundary leaves both the canonical proposal and exact provider fence retryable; a later GET-only reconciliation finalizes and clears both without a provider replay.
 - Third-schedule divergence never `PATCH`es and reaches `needs_review` while retaining canonical base.
 - Sensitive sentinels are completely absent from diagnostic logs.
+
+Historical pre-repair evidence (2026-08-26): 496 focused tests and 3,765 total
+repository suite tests previously passed in pre-repair evaluation; those prior
+counts are historical pre-repair records and do not qualify the current tree.
+Current exact-head verification belongs in the pull request and required hosted
+CI. This is not live Google Calendar, Firestore, staging, production, or
+customer-data qualification.
 
 ---
 

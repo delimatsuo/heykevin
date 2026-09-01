@@ -146,10 +146,10 @@ async def test_reschedule_sends_base_and_desired_schedules(monkeypatch):
     calls = []
 
     async def fake_reschedule(
-        contractor, event_id, *, base_start, base_end, desired_start, desired_end
+        contractor, event_id, *, base_start, base_end, desired_start, desired_end, logical_operation_id=None
     ):
         calls.append(
-            (contractor, event_id, base_start, base_end, desired_start, desired_end)
+            (contractor, event_id, base_start, base_end, desired_start, desired_end, logical_operation_id)
         )
         return True
 
@@ -158,13 +158,14 @@ async def test_reschedule_sends_base_and_desired_schedules(monkeypatch):
     )
     contractor = {"contractor_id": "contractor-1"}
     adapter = GoogleCalendarRequestProvider(contractor)
+    op_id = "a" * 64
 
     result = await adapter.reschedule(
         binding=_Binding(),
         request=_Request(),
         scheduled_start="2026-08-20T09:00:00-04:00",
         scheduled_end="2026-08-20T10:30:00-04:00",
-        idempotency_key="reschedule-1",
+        idempotency_key=op_id,
     )
 
     assert result is True
@@ -176,8 +177,29 @@ async def test_reschedule_sends_base_and_desired_schedules(monkeypatch):
             END.isoformat(),
             "2026-08-20T09:00:00-04:00",
             "2026-08-20T10:30:00-04:00",
+            op_id,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_reschedule_rejects_invalid_logical_operation_id_without_provider_call(monkeypatch):
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("provider must not be called")
+
+    monkeypatch.setattr(
+        provider_module.calendar, "reschedule_appointment", unexpected_call
+    )
+
+    result = await GoogleCalendarRequestProvider({}).reschedule(
+        binding=_Binding(),
+        request=_Request(),
+        scheduled_start="2026-08-20T09:00:00-04:00",
+        scheduled_end="2026-08-20T10:30:00-04:00",
+        idempotency_key="non-64-hex-id",
+    )
+
+    assert result is False
 
 
 @pytest.mark.asyncio
@@ -206,7 +228,7 @@ async def test_reschedule_rejects_invalid_schedule_without_provider_call(
         request=_Request(),
         scheduled_start=start,
         scheduled_end=end,
-        idempotency_key="reschedule-1",
+        idempotency_key="b" * 64,
     )
 
     assert result is False
@@ -238,7 +260,7 @@ async def test_reschedule_rejects_invalid_base_schedule_without_provider_call(
         request=_Request(scheduled_start=base_start, scheduled_end=base_end),
         scheduled_start="2026-08-20T09:00:00-04:00",
         scheduled_end="2026-08-20T10:30:00-04:00",
-        idempotency_key="reschedule-1",
+        idempotency_key="c" * 64,
     )
 
     assert result is False
@@ -390,7 +412,7 @@ async def test_reschedule_adapter_does_not_log_any_private_sentinel(monkeypatch,
     _s_customer_id   = "SENTINEL_CUSTOMER_ID_7740"
     _s_customer_key  = "SENTINEL_CUSTOMER_KEY_7750"
     _s_request_id    = "SENTINEL_REQUEST_ID_7760"
-    _s_idempotency_id = "SENTINEL_IDEMPOTENCY_ID_7770"
+    _s_idempotency_id = "f" * 64
     _s_event_id      = "sentinel-event-id-7780"
     _s_event_url     = f"{_calendar_module.EVENTS_URL}/{_s_event_id}"
     _s_etag          = '"SENTINEL_ETAG_VALUE_7790"'
@@ -441,6 +463,7 @@ async def test_reschedule_adapter_does_not_log_any_private_sentinel(monkeypatch,
         base_end,
         desired_start,
         desired_end,
+        logical_operation_id=None,
     ):
         received.append(
             dict(
@@ -450,6 +473,7 @@ async def test_reschedule_adapter_does_not_log_any_private_sentinel(monkeypatch,
                 base_end=base_end,
                 desired_start=desired_start,
                 desired_end=desired_end,
+                logical_operation_id=logical_operation_id,
             )
         )
         # After all arguments are validated, raise an exception whose message contains
@@ -490,6 +514,7 @@ async def test_reschedule_adapter_does_not_log_any_private_sentinel(monkeypatch,
     # Desired schedule: passed directly via adapter.reschedule(scheduled_start/end=...).
     assert received[0]["desired_start"] == _s_desired_start
     assert received[0]["desired_end"] == _s_desired_end
+    assert received[0]["logical_operation_id"] == _s_idempotency_id
 
     # Coarse operation label and exception_type must be present.
     assert "operation=reschedule" in caplog.text
@@ -518,3 +543,62 @@ async def test_reschedule_adapter_does_not_log_any_private_sentinel(monkeypatch,
     ]
     for sentinel in _all_sentinels:
         assert sentinel not in caplog.text, f"Private sentinel leaked in logs: {sentinel!r}"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reschedule_forwards_to_calendar_and_handles_result(monkeypatch):
+    contractor = {"contractor_id": "c1"}
+    adapter = GoogleCalendarRequestProvider(contractor)
+    op_id = "d" * 64
+
+    async def fake_reconcile(
+        contractor_arg,
+        event_id,
+        *,
+        desired_start,
+        desired_end,
+        logical_operation_id,
+    ):
+        assert contractor_arg is contractor
+        assert event_id == "provider/event id"
+        assert logical_operation_id == op_id
+        return provider_module.calendar.CalendarReconciliationResult(
+            has_matching_claim=True,
+            confirmed=True,
+            claim_id="claim-123",
+            logical_operation_id=op_id,
+            authorization_status="matching_claim",
+        )
+
+    monkeypatch.setattr(provider_module.calendar, "reconcile_reschedule_appointment", fake_reconcile)
+
+    res = await adapter.reconcile_reschedule(
+        binding=_Binding(),
+        request=_Request(),
+        scheduled_start=START,
+        scheduled_end=END,
+        logical_operation_id=op_id,
+    )
+    assert res.has_matching_claim is True
+    assert res.confirmed is True
+    assert res.claim_id == "claim-123"
+    assert res.logical_operation_id == op_id
+    assert res.authorization_status == "matching_claim"
+
+
+@pytest.mark.asyncio
+async def test_clear_reconciled_claim_forwards_to_calendar(monkeypatch):
+    contractor = {"contractor_id": "c1"}
+    adapter = GoogleCalendarRequestProvider(contractor)
+    op_id = "e" * 64
+
+    async def fake_clear(contractor_arg, *, claim_id, logical_operation_id):
+        assert contractor_arg is contractor
+        assert claim_id == "claim-123"
+        assert logical_operation_id == op_id
+        return True
+
+    monkeypatch.setattr(provider_module.calendar, "clear_reconciled_reschedule_claim", fake_clear)
+
+    assert await adapter.clear_reconciled_claim(claim_id="claim-123", logical_operation_id=op_id) is True
+    assert await adapter.clear_reconciled_claim(claim_id="claim-123", logical_operation_id="invalid") is False

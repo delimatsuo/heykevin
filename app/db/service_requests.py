@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,13 @@ from app.services.service_request import (
     ServiceRequestCommandOutcome,
     ServiceRequestCommandResult,
     ServiceRequestOperation,
+)
+from app.services.integration_tokens import (
+    OPERATION_INTENT_BASE_KEYS,
+)
+from app.services.integration_token_mutations import (
+    _extract_snapshot_server_time,
+    classify_google_calendar_reconciliation_record,
 )
 from app.services.service_request_repository import (
     ExecutionKind,
@@ -598,8 +606,24 @@ def _validate_recovery_lease(lease: LeasedProviderRecovery) -> None:
         or request != lease.request_id
     ):
         raise ServiceRequestRepositoryConflict("provider recovery lease identity is invalid")
-    if lease.kind not in {"create", "operation"}:
-        raise ServiceRequestRepositoryConflict("provider recovery lease kind is invalid")
+    preparation = lease.preparation
+    if isinstance(preparation, PreparedProviderCreate):
+        _validate_prepared_provider_create(preparation)
+        expected_kind = "create"
+    elif isinstance(preparation, PreparedProviderOperation):
+        _validate_prepared_provider_operation(preparation)
+        expected_kind = "operation"
+    else:
+        raise ServiceRequestRepositoryConflict("provider recovery preparation is invalid")
+    if (
+        lease.kind != expected_kind
+        or lease.contractor_id != preparation.contractor_id
+        or lease.customer_key != preparation.customer_key
+        or lease.request_id != preparation.request_id
+    ):
+        raise ServiceRequestRepositoryConflict(
+            "provider recovery lease does not match its preparation"
+        )
     _bounded_worker_identifier(lease.owner, "recovery owner")
     _bounded_worker_identifier(lease.lease_id, "recovery lease_id")
     _required_aware_datetime(lease.lease_expires_at, "recovery lease expiry")
@@ -1683,6 +1707,120 @@ class FirestoreServiceRequestRepository:
                 updated.pop(NEXT_ATTEMPT_AT_FIELD, None)
                 updated.pop(PROVIDER_RECOVERY_LEASE_FIELD, None)
                 tx.set(ref, updated)
+                return True
+
+            return _transaction(transaction)
+
+        return await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, _write),
+            timeout=IO_TIMEOUT_SECONDS,
+        )
+
+    async def finalize_reconciled_provider_recovery(
+        self,
+        lease: LeasedProviderRecovery,
+        *,
+        claim_id: str,
+        bound_operation_id: str,
+    ) -> bool:
+        """Atomically finalize a reconciled reschedule and clear its exact Calendar fence."""
+
+        _validate_recovery_lease(lease)
+        if (
+            type(claim_id) is not str
+            or re.fullmatch(r"[0-9A-Za-z_-]{1,128}", claim_id) is None
+        ):
+            return False
+        if (
+            type(bound_operation_id) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", bound_operation_id) is None
+            or bound_operation_id != lease.preparation.logical_operation_id
+        ):
+            return False
+        preparation = lease.preparation
+        if (
+            not isinstance(preparation, PreparedProviderOperation)
+            or preparation.operation is not ServiceRequestOperation.RESCHEDULE
+            or preparation.binding.kind != "google_calendar"
+        ):
+            return False
+
+        db = self._db()
+        request_ref = _collection(db, preparation.contractor_id).document(
+            preparation.request_id
+        )
+        contractor_ref = db.collection("contractors").document(
+            preparation.contractor_id
+        )
+
+        def _write() -> bool:
+            transaction = db.transaction()
+
+            @firestore.transactional
+            def _transaction(tx) -> bool:
+                request_snapshot = request_ref.get(transaction=tx)
+                contractor_snapshot = contractor_ref.get(transaction=tx)
+                if not request_snapshot.exists or not contractor_snapshot.exists:
+                    return False
+
+                request_data = request_snapshot.to_dict() or {}
+                contractor_data = contractor_snapshot.to_dict() or {}
+                if not _lease_matches(request_data, lease):
+                    return False
+                kind, recovered = _recovery_preparation(
+                    request_snapshot,
+                    contractor_id=preparation.contractor_id,
+                    request_id=preparation.request_id,
+                )
+                if (
+                    kind != lease.kind
+                    or kind != "operation"
+                    or not isinstance(recovered, PreparedProviderOperation)
+                    or recovered.operation is not ServiceRequestOperation.RESCHEDULE
+                    or recovered.contractor_id != preparation.contractor_id
+                    or recovered.customer_key != preparation.customer_key
+                    or recovered.request_id != preparation.request_id
+                    or recovered.logical_operation_id != bound_operation_id
+                    or recovered.binding != preparation.binding
+                ):
+                    raise ServiceRequestRepositoryConflict(
+                        "reconciled provider recovery proposal changed"
+                    )
+
+                try:
+                    _extract_snapshot_server_time(contractor_snapshot)
+                except Exception:
+                    return False
+
+                auth = classify_google_calendar_reconciliation_record(
+                    contractor_data,
+                    contractor_id=preparation.contractor_id,
+                    bound_operation_id=bound_operation_id,
+                    claim_id=claim_id,
+                )
+                if auth is None or auth.get("authorization_status") != "matching_claim":
+                    return False
+
+                finalized = dict(request_data)
+                finalized.update(
+                    _request_fields(
+                        recovered.result.request,
+                        customer_key=recovered.customer_key,
+                        execution_kind=ExecutionKind.PROVIDER,
+                    )
+                )
+                finalized.pop(PENDING_PROVIDER_OPERATION_FIELD, None)
+                finalized.pop(PROVIDER_RECOVERY_STATE_FIELD, None)
+                finalized.pop(PROVIDER_RECOVERY_ATTEMPTS_FIELD, None)
+                finalized.pop(NEXT_ATTEMPT_AT_FIELD, None)
+                finalized.pop(PROVIDER_RECOVERY_LEASE_FIELD, None)
+
+                claim_deletes = {
+                    f"google_calendar_{key}": firestore.DELETE_FIELD
+                    for key in OPERATION_INTENT_BASE_KEYS
+                }
+                tx.set(request_ref, finalized)
+                tx.update(contractor_ref, claim_deletes)
                 return True
 
             return _transaction(transaction)

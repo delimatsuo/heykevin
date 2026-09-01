@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,10 +15,18 @@ from scripts.deny_force_push_hook import (
     XARGS_INPUT_SENTINEL,
     _clean_command_segment,
     _extract_find_actions,
+    _extract_initial_backtick_args,
+    _extract_initial_dynamic_args,
+    _has_forcing_git_config,
     _has_shell_expansion,
     _inspect_git_invocation,
     _inspect_git_invocation_for_rm,
+    _is_all_parens,
+    _is_forced_push_args,
     _parse_git_global_configs,
+    _reconstruct_git_args,
+    _scan_git_forcing_configs,
+    _split_into_commands,
     _tokenize_command,
     _tokenize_split_string,
     _unwrap_xargs,
@@ -82,6 +90,8 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     "git push -f &",
     "git push origin main\ngit push -unf origin HEAD",
     "(git push -f)",
+    "(git push -f origin HEAD)",
+    "((git push -f origin HEAD))",
     "{ git push -f; }",
     # Variable assignments and wrappers
     "VAR=1 git push -f",
@@ -125,6 +135,17 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     # Find execution multi-action forced push
     "find /tmp/tree -exec echo {} \\; -exec git push -f origin HEAD \\;",
     "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD ';'",
+    # Dynamic command substitutions with quoted or escaped literal parentheses
+    "$(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+    "$(printf %s ')' >/dev/null; printf git) push --mirror origin",
+    '$(printf %s ")" >/dev/null; printf git) push -f origin HEAD',
+    "$(printf %s \\) >/dev/null; printf git) push -f origin HEAD",
+    "$(printf %s '(' >/dev/null; printf git) push -f origin HEAD",
+    "$(printf %s '(' >/dev/null; printf git) push --mirror origin",
+    "$(printf %s \\( >/dev/null; printf git) push -f origin HEAD",
+    "command $(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+    '"$(which git)" push -f origin HEAD',
+    '"$(which git)" push --mirror origin',
 ]
 
 ALLOWED_GIT_PUSH_COMMANDS = [
@@ -157,6 +178,9 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "git commit -m 'git push -f'",
     "git diff --check",
     "git status",
+    "(git status)",
+    "((git status))",
+    "(git push origin main)",
     "git pull origin main",
     "git checkout -b feature/test",
     # Non-git commands or quoted git strings
@@ -186,6 +210,13 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     # Safe multi-action find controls
     "find /tmp/tree -exec echo {} \\; -exec rm -- {} \\;",
     "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
+    # Safe command substitutions with quoted or escaped literal parentheses
+    "$(printf %s ')' >/dev/null; printf git) push origin main",
+    "$(printf %s '(' >/dev/null; printf git) status",
+    "command $(printf %s ')' >/dev/null; printf git) push origin main",
+    '"$(which git)" push origin main',
+    "echo ')'",
+    "printf '%s' '('",
 ]
 
 BLOCKED_RM_COMMANDS = [
@@ -237,6 +268,10 @@ BLOCKED_RM_COMMANDS = [
     "true; rm -rf target",
     "echo ';'; rm -rf target",
     "true # comment\nrm -rf target",
+    # Dynamic command substitutions with quoted or escaped literal parentheses
+    "$(printf %s ')' >/dev/null; printf rm) -rf /tmp/example",
+    "$(printf %s '(' >/dev/null; printf rm) --recursive --force /tmp/example",
+    "command $(printf %s ')' >/dev/null; printf rm) -r -f /tmp/example",
 ]
 
 ALLOWED_RM_COMMANDS = [
@@ -273,6 +308,10 @@ ALLOWED_RM_COMMANDS = [
     "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
     "echo ';'",
     'echo ";"',
+    # Safe rm controls with quoted or escaped literal parentheses
+    "$(printf %s ')' >/dev/null; printf rm) -r /tmp/example",
+    "$(printf %s '(' >/dev/null; printf rm) --force /tmp/example",
+    "echo ')'",
 ]
 
 
@@ -1713,3 +1752,1053 @@ class TestReviewFindingsCLI:
         res = self._run_hook(payload)
         assert res.returncode == 0
         assert res.stdout == ""
+
+
+class TestIsForcedPushArgs:
+    """Pure-helper tests for _is_forced_push_args covering --mirror, forcing forms, and safe controls."""
+
+    @pytest.mark.parametrize(
+        "push_args",
+        [
+            ["--mirror"],
+            ["--mirror", "origin"],
+            ["origin", "--mirror"],
+            ["--mirror", "origin", "main"],
+            ["-u", "--mirror", "origin"],
+            ["--mirror", "-u", "origin"],
+            ["-f"],
+            ["-fu", "origin", "main"],
+            ["--force"],
+            ["--force", "origin", "main"],
+            ["--force-with-lease"],
+            ["--force-with-lease", "origin", "main"],
+            ["--force-if-includes"],
+            ["--force-if-includes", "origin", "main"],
+            ["+main"],
+            ["origin", "+HEAD:main"],
+            ["--", "+main"],
+            ["origin", "--", "+HEAD:main"],
+        ],
+    )
+    def test_blocks_forced_push_args(self, push_args: list[str]) -> None:
+        assert _is_forced_push_args(push_args) is True
+
+    @pytest.mark.parametrize(
+        "push_args",
+        [
+            ["origin", "main"],
+            ["origin", "HEAD"],
+            ["-u", "origin", "HEAD"],
+            ["--follow-tags", "origin", "HEAD"],
+            ["--all", "origin"],
+            ["--prune", "origin"],
+            ["--tags", "origin"],
+            ["--atomic", "origin", "main"],
+            ["--all", "--prune", "--tags", "--follow-tags", "--atomic", "origin"],
+            ["--dry-run", "origin", "main"],
+            ["-v", "origin", "main"],
+            ["--", "origin", "main"],
+            ["--", "--mirror"],
+        ],
+    )
+    def test_allows_safe_push_args(self, push_args: list[str]) -> None:
+        assert _is_forced_push_args(push_args) is False
+
+    @pytest.mark.parametrize(
+        "push_args",
+        [
+            ["$FORCE"],
+            ["origin", "$REFSPEC"],
+            ["${FORCE}"],
+            ["`printf -- -f`"],
+            ["$(printf -- -f)"],
+        ],
+    )
+    def test_shell_expansion_in_args_raises_value_error(self, push_args: list[str]) -> None:
+        with pytest.raises(ValueError, match="shell expansion"):
+            _is_forced_push_args(push_args)
+
+
+class TestHasForcingGitConfig:
+    """Pure-helper tests for _has_forcing_git_config and _scan_git_forcing_configs."""
+
+    @pytest.mark.parametrize(
+        "git_args",
+        [
+            ["-c", "remote.origin.mirror=true"],
+            ["-c", "remote.origin.mirror=1"],
+            ["-c", "remote.origin.mirror=yes"],
+            ["-c", "remote.origin.mirror=on"],
+            ["-c", "remote.origin.mirror=TRUE"],
+            ["-c", "remote.origin.mirror=Yes"],
+            ["-c", "remote.origin.mirror=ON"],
+            ["-c", "remote.origin.mirror"],
+            ["-cremote.origin.mirror=true"],
+            ["-cremote.origin.mirror"],
+            ["-c", "REMOTE.ORIGIN.MIRROR=true"],
+            ["-c", "remote.upstream.mirror=true"],
+            ["-c", "remote.custom-remote.mirror=true"],
+            ["--config-env", "remote.origin.mirror=MY_ENV"],
+            ["--config-env=remote.origin.mirror=MY_ENV"],
+            ["--config-env", "remote.origin.mirror"],
+            ["--config-env=remote.origin.mirror"],
+            ["--config-env", "REMOTE.ORIGIN.MIRROR=MY_ENV"],
+            ["-c", "remote.origin.push=+refs/heads/*:refs/remotes/origin/*"],
+            ["-c", "remote.origin.push=+main"],
+            ["-c", "remote.origin.push=+HEAD:main"],
+            ["-cremote.origin.push=+main"],
+            ["-c", "REMOTE.ORIGIN.PUSH=+main"],
+            ["--config-env", "remote.origin.push=PUSH_SPEC"],
+            ["--config-env=remote.origin.push=PUSH_SPEC"],
+            ["--config-env", "REMOTE.ORIGIN.PUSH=PUSH_SPEC"],
+            ["-C", "/path/to/repo", "-c", "remote.origin.mirror=true"],
+            ["--git-dir=/foo/.git", "-c", "remote.origin.push=+main"],
+            ["-c", "remote.origin.push=+main", "-c", "remote.origin.push=main"],
+            ["-c", "remote.origin.push=main", "-c", "remote.origin.push=+main"],
+        ],
+    )
+    def test_detects_forcing_git_configs(self, git_args: list[str]) -> None:
+        assert _has_forcing_git_config(git_args) is True
+        assert _scan_git_forcing_configs(git_args) is True
+
+    @pytest.mark.parametrize(
+        "git_args",
+        [
+            ["-c", "remote.origin.mirror=false"],
+            ["-c", "remote.origin.mirror=no"],
+            ["-c", "remote.origin.mirror=off"],
+            ["-c", "remote.origin.mirror=0"],
+            ["-c", "remote.origin.mirror=FALSE"],
+            ["-c", "remote.origin.mirror=No"],
+            ["-c", "remote.origin.mirror=OFF"],
+            ["-cremote.origin.mirror=false"],
+            ["-cremote.origin.mirror=0"],
+            ["-c", "remote.origin.push=refs/heads/*:refs/remotes/origin/*"],
+            ["-c", "remote.origin.push=main"],
+            ["-c", "remote.origin.push=HEAD:main"],
+            ["-cremote.origin.push=main"],
+            ["-c", "user.name=Tester"],
+            ["-c", "core.bare=true"],
+            ["-c", "push.default=current"],
+            ["-c", "branch.main.pushRemote=origin"],
+            ["--config-env", "user.name=USER_NAME"],
+            ["--config-env=user.email=USER_EMAIL"],
+            ["-C", "/path/to/repo"],
+            ["--git-dir=/repo/.git"],
+            ["--work-tree=/repo"],
+            ["--no-pager"],
+            ["-c", "remote.origin.mirror=true", "-c", "remote.origin.mirror=false"],
+            ["-c", "remote.origin.push=main", "-c", "remote.origin.push=refs/heads/*:refs/remotes/origin/*"],
+            ["-c", "remote.origin.push=HEAD:main", "-c", "remote.origin.push=main"],
+        ],
+    )
+    def test_allows_safe_and_explicit_false_configs(self, git_args: list[str]) -> None:
+        assert _has_forcing_git_config(git_args) is False
+        assert _scan_git_forcing_configs(git_args) is False
+
+    def test_later_forcing_config_overrides_earlier_false(self) -> None:
+        args = ["-c", "remote.origin.mirror=false", "-c", "remote.origin.mirror=true"]
+        assert _has_forcing_git_config(args) is True
+
+    def test_earlier_forcing_push_retains_forcing_with_later_safe(self) -> None:
+        args = ["-c", "remote.origin.push=+main", "-c", "remote.origin.push=main"]
+        assert _has_forcing_git_config(args) is True
+
+    def test_later_forcing_push_overrides_earlier_safe(self) -> None:
+        args = ["-c", "remote.origin.push=main", "-c", "remote.origin.push=+main"]
+        assert _has_forcing_git_config(args) is True
+
+    def test_safe_only_repeated_push_configs_are_not_forcing(self) -> None:
+        args = ["-c", "remote.origin.push=main", "-c", "remote.origin.push=HEAD:main"]
+        assert _has_forcing_git_config(args) is False
+
+
+class TestExtractInitialBacktickArgs:
+    """Unit tests for _extract_initial_backtick_args helper."""
+
+    def test_non_backtick_starts_returns_none(self) -> None:
+        assert _extract_initial_backtick_args([]) is None
+        assert _extract_initial_backtick_args(["git", "push"]) is None
+        assert _extract_initial_backtick_args(['"$GIT"', "push", "-f"]) is None
+
+    @pytest.mark.parametrize(
+        ("tokens", "expected"),
+        [
+            (
+                ["`", "which", "git", "`", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["`", "which", "git", "`", "push", "--mirror", "origin"],
+                ["push", "--mirror", "origin"],
+            ),
+            (
+                ["`", "which", "git", "`", "push", "origin", "main"],
+                ["push", "origin", "main"],
+            ),
+            (
+                ["`", "which", "git", "`", "status"],
+                ["status"],
+            ),
+            (
+                ["`", "which", "rm", "`", "-rf", "target"],
+                ["-rf", "target"],
+            ),
+            (
+                ["`", "which", "rm", "`", "-r", "target"],
+                ["-r", "target"],
+            ),
+            (
+                ["`", "which", "git", "`"],
+                [],
+            ),
+        ],
+    )
+    def test_matched_backtick_returns_trailing_args(
+        self, tokens: list[str], expected: list[str]
+    ) -> None:
+        assert _extract_initial_backtick_args(tokens) == expected
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [
+            ["`"],
+            ["`", "which", "git"],
+            ["`", "which", "rm", "-rf", "target"],
+        ],
+    )
+    def test_unmatched_backtick_raises_value_error(self, tokens: list[str]) -> None:
+        with pytest.raises(ValueError, match="Unmatched opening backtick"):
+            _extract_initial_backtick_args(tokens)
+
+
+class TestIsAllParens:
+    """Unit tests for _is_all_parens helper."""
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "(",
+            ")",
+            "((",
+            "))",
+            "(((",
+            ")))",
+            "()",
+            ")(",
+            "(())",
+            "()()",
+        ],
+    )
+    def test_recognizes_all_parenthesis_tokens(self, token: str) -> None:
+        assert _is_all_parens(token) is True
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "",
+            "&&",
+            "||",
+            ";",
+            ";;",
+            "|&",
+            "&",
+            ">",
+            "<",
+            "push",
+            "-f",
+            "$(",
+            "${",
+            "git",
+            "which",
+            "a(b)",
+            "(a)",
+        ],
+    )
+    def test_rejects_non_parenthesis_tokens(self, token: str) -> None:
+        assert _is_all_parens(token) is False
+
+
+class TestExtractInitialDynamicArgs:
+    """Unit tests for _extract_initial_dynamic_args helper."""
+
+    def test_non_dynamic_starts_returns_none(self) -> None:
+        assert _extract_initial_dynamic_args([]) is None
+        assert _extract_initial_dynamic_args(["git", "push"]) is None
+        assert _extract_initial_dynamic_args(['"$GIT"', "push", "-f"]) is None
+
+    @pytest.mark.parametrize(
+        ("tokens", "expected"),
+        [
+            (
+                ["`", "which", "git", "`", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "GIT", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "{GIT}", "push", "--mirror", "origin"],
+                ["push", "--mirror", "origin"],
+            ),
+            (
+                ["$", "(", "which", "git", ")", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "(", "which", "git", ")", "push", "--mirror", "origin"],
+                ["push", "--mirror", "origin"],
+            ),
+            (
+                ["$", "(", "$", "(", "which", "echo", ")", "git", ")", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "(", "which", "$", "(", "echo", "git", "))", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "git", "))", "push", "-f", "origin", "HEAD"],
+                ["push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "git", "))", "push", "--mirror", "origin"],
+                ["push", "--mirror", "origin"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "git", "))", "push", "origin", "main"],
+                ["push", "origin", "main"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "git", "))", "status"],
+                ["status"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "rm", "))", "-rf", "/tmp/example"],
+                ["-rf", "/tmp/example"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "rm", "))", "--recursive", "--force", "/tmp/example"],
+                ["--recursive", "--force", "/tmp/example"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "rm", "))", "-r", "/tmp/example"],
+                ["-r", "/tmp/example"],
+            ),
+            (
+                ["$", "(", "echo", "$", "(", "which", "rm", "))", "--force", "/tmp/example"],
+                ["--force", "/tmp/example"],
+            ),
+            (
+                ["$", "(", "which", "$", "(", "echo", "git", ")))", "push", "-f", "origin", "HEAD"],
+                [")", "push", "-f", "origin", "HEAD"],
+            ),
+            (
+                ["$", "RM", "-rf", "target"],
+                ["-rf", "target"],
+            ),
+            (
+                ["$", "{RM}", "--recursive", "--force", "target"],
+                ["--recursive", "--force", "target"],
+            ),
+            (
+                ["$", "(", "which", "rm", ")", "-rf", "target"],
+                ["-rf", "target"],
+            ),
+            (
+                ["$", "(", "which", "git", ")", "push", "origin", "main"],
+                ["push", "origin", "main"],
+            ),
+            (
+                ["$", "GIT"],
+                [],
+            ),
+            (
+                ["$", "{GIT}"],
+                [],
+            ),
+            (
+                ["$", "(", "which", "git", ")"],
+                [],
+            ),
+            (
+                ["$", "(", "which", "$", "(", "echo", "git", "))"],
+                [],
+            ),
+        ],
+    )
+    def test_matched_dynamic_prefixes_return_trailing_args(
+        self, tokens: list[str], expected: list[str]
+    ) -> None:
+        assert _extract_initial_dynamic_args(tokens) == expected
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [
+            ["`"],
+            ["`", "which", "git"],
+            ["$"],
+            ["$", "("],
+            ["$", "(", "which", "git"],
+            ["$", "(", "which", "$", "(", "echo", "git", ")"],
+            ["$", "(", "$", "(", "which", "git"],
+            ["$", "()"],
+            ["$", "{GIT"],
+            ["$", "{}"],
+            ["$", "{123}"],
+            ["$", "123"],
+            ["$", "$"],
+        ],
+    )
+    def test_unmatched_or_malformed_dynamic_prefix_raises_value_error(
+        self, tokens: list[str]
+    ) -> None:
+        with pytest.raises(ValueError):
+            _extract_initial_dynamic_args(tokens)
+
+
+class TestSplitIntoCommandsDynamicSubstitution:
+    """Unit tests for _split_into_commands preserving command substitution groups."""
+
+    def test_command_substitution_preserved_in_segment(self) -> None:
+        tokens = ["$", "(", "which", "git", ")", "push", "-f", "origin", "HEAD"]
+        assert _split_into_commands(tokens) == [
+            ["$", "(", "which", "git", ")", "push", "-f", "origin", "HEAD"]
+        ]
+
+    def test_command_substitution_after_wrapper(self) -> None:
+        tokens = ["command", "$", "(", "which", "git", ")", "push", "-f", "origin", "HEAD"]
+        assert _split_into_commands(tokens) == [
+            ["command", "$", "(", "which", "git", ")", "push", "-f", "origin", "HEAD"]
+        ]
+
+    def test_nested_command_substitution(self) -> None:
+        tokens = ["$", "(", "$", "(", "which", "echo", ")", "git", ")", "push", "-f"]
+        assert _split_into_commands(tokens) == [
+            ["$", "(", "$", "(", "which", "echo", ")", "git", ")", "push", "-f"]
+        ]
+
+    def test_nested_command_substitution_adjacent_closing_parens(self) -> None:
+        tokens = ["$", "(", "which", "$", "(", "echo", "git", "))", "push", "-f", "origin", "HEAD"]
+        assert _split_into_commands(tokens) == [
+            ["$", "(", "which", "$", "(", "echo", "git", "))", "push", "-f", "origin", "HEAD"]
+        ]
+
+    def test_nested_command_substitution_after_wrapper_adjacent_closing_parens(self) -> None:
+        tokens = ["command", "$", "(", "echo", "$", "(", "which", "git", "))", "push", "-f", "origin", "HEAD"]
+        assert _split_into_commands(tokens) == [
+            ["command", "$", "(", "echo", "$", "(", "which", "git", "))", "push", "-f", "origin", "HEAD"]
+        ]
+
+    def test_command_substitution_with_extra_closing_paren_remainder(self) -> None:
+        tokens = ["$", "(", "which", "$", "(", "echo", "git", ")))", "push", "-f"]
+        assert _split_into_commands(tokens) == [
+            ["$", "(", "which", "$", "(", "echo", "git", "))"],
+            ["push", "-f"],
+        ]
+
+    def test_unmatched_command_substitution_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Unmatched '\\$\\(' in command substitution"):
+            _split_into_commands(["$", "(", "which", "git"])
+
+    def test_unmatched_nested_command_substitution_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Unmatched '\\$\\(' in command substitution"):
+            _split_into_commands(["$", "(", "which", "$", "(", "echo", "git", ")"])
+        with pytest.raises(ValueError, match="Unmatched '\\$\\(' in command substitution"):
+            _split_into_commands(["$", "(", "$", "(", "which", "git"])
+
+
+class TestReconstructGitArgs:
+    """Unit tests for _reconstruct_git_args helper."""
+
+    def test_empty_and_plain_args_unaffected(self) -> None:
+        assert _reconstruct_git_args([]) == []
+        assert _reconstruct_git_args(["push", "origin", "main"]) == ["push", "origin", "main"]
+        assert _reconstruct_git_args(["--no-pager", "status"]) == ["--no-pager", "status"]
+
+    def test_colon_separated_c_config_reconstruction(self) -> None:
+        raw = ["-c", "remote.origin.push=+refs/heads/*", ":", "refs/remotes/origin/*", "push", "origin"]
+        expected = ["-c", "remote.origin.push=+refs/heads/*:refs/remotes/origin/*", "push", "origin"]
+        assert _reconstruct_git_args(raw) == expected
+
+    def test_attached_c_and_config_env_reconstruction(self) -> None:
+        raw_att = ["-cremote.origin.push=+refs/heads/*", ":", "refs/remotes/origin/*", "push", "origin"]
+        expected_att = ["-cremote.origin.push=+refs/heads/*:refs/remotes/origin/*", "push", "origin"]
+        assert _reconstruct_git_args(raw_att) == expected_att
+
+        raw_env = ["--config-env", "remote.origin.push=+refs/heads/*", ":", "refs/remotes/origin/*", "push", "origin"]
+        expected_env = ["--config-env", "remote.origin.push=+refs/heads/*:refs/remotes/origin/*", "push", "origin"]
+        assert _reconstruct_git_args(raw_env) == expected_env
+
+        raw_env_eq = ["--config-env=remote.origin.push=+refs/heads/*", ":", "refs/remotes/origin/*", "push", "origin"]
+        expected_env_eq = ["--config-env=remote.origin.push=+refs/heads/*:refs/remotes/origin/*", "push", "origin"]
+        assert _reconstruct_git_args(raw_env_eq) == expected_env_eq
+
+    def test_multiple_colons_and_global_options(self) -> None:
+        raw = ["-C", "/path/to/repo", "-c", "remote.origin.push=+refs/heads/*", ":", "refs/remotes/origin/*", ":", "more", "push", "origin"]
+        expected = ["-C", "/path/to/repo", "-c", "remote.origin.push=+refs/heads/*:refs/remotes/origin/*:more", "push", "origin"]
+        assert _reconstruct_git_args(raw) == expected
+
+
+class TestShellExpandedExecutables:
+    """Tests for dynamic shell-expanded executable tokens ($ or backticks)."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'GIT=git; "$GIT" push -f origin HEAD',
+            '"$GIT" push --mirror origin',
+            'command "$GIT" push --force origin HEAD',
+            'env "$GIT" push origin +HEAD:main',
+            'sudo "$GIT" push -f origin HEAD',
+            'timeout 30 "$GIT" push -f origin HEAD',
+            'nice "$GIT" push --mirror origin',
+            'stdbuf -oL "$GIT" push -fu origin main',
+            'time "$GIT" push -f origin HEAD',
+            'bash -c \'"$GIT" push -f origin HEAD\'',
+            'sh -c \'"$GIT" push --mirror origin\'',
+            '"$GIT" -c alias.fp=\'push -f\' fp origin HEAD',
+            '"$GIT" -c remote.origin.mirror=true push origin',
+            '"$GIT" -c remote.origin.push=+main push origin',
+            '"$GIT" --config-env remote.origin.mirror=VAR push origin',
+            '"$GIT" --config-env remote.origin.push=VAR push origin',
+            '`which git` push -f origin HEAD',
+            '`which git` push --mirror origin',
+            '`which git` -c alias.fp=\'push -f\' fp origin HEAD',
+            "$GIT push -f origin HEAD",
+            "${GIT} push --mirror origin",
+            "$(which git) push -f origin HEAD",
+            "$(which git) push --mirror origin",
+            "command $(which git) push -f origin HEAD",
+            "$($(which echo) git) push -f origin HEAD",
+            "$(which $(echo git)) push -f origin HEAD",
+            "$(echo $(which git)) push -f origin HEAD",
+            "$(echo $(which git)) push --mirror origin",
+            "command $(echo $(which git)) push -f origin HEAD",
+            "command $(which $(echo git)) push -f origin HEAD",
+            "$GIT -c alias.fp='push -f' fp origin HEAD",
+            "${GIT} -c remote.origin.mirror=true push origin",
+            "$(which git) -c remote.origin.push=+main push origin",
+        ],
+    )
+    def test_blocks_dynamic_git_forced_push(self, command: str) -> None:
+        assert contains_forced_git_push(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'RM=rm; "$RM" -rf target',
+            'command "$RM" --recursive --force target',
+            'sudo "$RM" -r -f target',
+            'env "$RM" -fr target',
+            'timeout 10 "$RM" -rf target',
+            'bash -c \'"$RM" -rf target\'',
+            '"$CMD" -c "alias.nuke=\'!rm -rf target\'" nuke',
+            '`which rm` -rf target',
+            '`which git` -c "alias.nuke=\'!rm -rf target\'" nuke',
+            "$RM -rf target",
+            "${RM} --recursive --force target",
+            "$(which rm) -rf target",
+            "command $(which rm) -rf target",
+            "$($(which echo) rm) -rf target",
+            "$(echo $(which rm)) -rf /tmp/example",
+            "command $(echo $(which rm)) --recursive --force /tmp/example",
+            "$(which $(echo rm)) -rf /tmp/example",
+            "command $(which $(echo rm)) --recursive --force /tmp/example",
+            "$CMD -c \"alias.nuke='!rm -rf target'\" nuke",
+            "$(which git) -c \"alias.nuke='!rm -rf target'\" nuke",
+        ],
+    )
+    def test_blocks_dynamic_destructive_rm(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            '"$GIT" status --short',
+            '"$GIT" push origin main',
+            '"$GIT" push --follow-tags origin HEAD',
+            '"$GIT" push --all origin',
+            '"$GIT" push --prune origin',
+            '"$GIT" push --tags origin',
+            '"$GIT" push --atomic origin main',
+            '"$GIT" -c remote.origin.mirror=false push origin',
+            '"$GIT" -c remote.origin.push=main push origin',
+            '"$GIT" log -n 5',
+            '"$GIT" diff --check',
+            '`which git` status',
+            '`which git` push origin main',
+            '`which git` log -n 5',
+            "$GIT push origin main",
+            "${GIT} status",
+            "$(which git) push origin main",
+            "$(which git) status",
+            "$(echo $(which git)) push origin main",
+            "$(echo $(which git)) status",
+            "command $(echo $(which git)) push origin main",
+            "$(which $(echo git)) push origin main",
+            "$(which $(echo git)) status",
+            "command $(which $(echo git)) push origin main",
+            "$GIT status --short",
+            "${GIT} push --follow-tags origin HEAD",
+            "$GIT log -n 5",
+            "${GIT} diff --check",
+        ],
+    )
+    def test_allows_dynamic_git_safe_controls(self, command: str) -> None:
+        assert contains_forced_git_push(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            '"$RM" -r target',
+            '"$RM" -f target',
+            '"$RM" target',
+            'command "$RM" -r target',
+            'env "$RM" -f target',
+            'sudo "$RM" -r target',
+            '"$PYTHON" -m pytest -q',
+            '"$FOO" bar baz',
+            '`which rm` -r target',
+            '`which rm` -f target',
+            '`which rm` target',
+            "$RM -r target",
+            "${RM} -f target",
+            "$(which rm) -r target",
+            "command $(which rm) -r target",
+            "$RM target",
+            "${RM} target",
+            "$(which rm) target",
+            "command $(which rm) target",
+            "$(echo $(which rm)) -r /tmp/example",
+            "$(echo $(which rm)) --force /tmp/example",
+            "command $(echo $(which rm)) -r /tmp/example",
+            "command $(echo $(which rm)) --force /tmp/example",
+            "$(which $(echo rm)) -r /tmp/example",
+            "$(which $(echo rm)) --force /tmp/example",
+        ],
+    )
+    def test_allows_dynamic_rm_safe_controls(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is False
+        assert contains_forced_git_push(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "`which git push -f origin HEAD",
+            "`which rm -rf target",
+            "$(which git push -f origin HEAD",
+            "$(which rm -rf target",
+            "$($(which git) push -f origin HEAD",
+            "$(which $(echo git) push -f origin HEAD",
+            "$(echo $(which git) push -f origin HEAD",
+            "$(echo $(which rm) -rf /tmp/example",
+            "command $(which rm -rf target",
+            "command $(which git push -f origin HEAD",
+            "command $(which $(echo rm) -rf /tmp/example",
+            "command $(which $(echo git) push -f origin HEAD",
+        ],
+    )
+    def test_unmatched_initial_backtick_or_substitution_raises_value_error(
+        self, command: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(command)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(command)
+
+
+class TestMirrorPushesAndForcingConfigsCLI:
+    """CLI end-to-end contract tests for mirror pushes, forcing configs, and shell-expanded executables."""
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push --mirror",
+            "git push --mirror origin",
+            "git push origin --mirror",
+            "git -c alias.mp='push --mirror' mp origin",
+            "find /tmp/tree -exec git push --mirror origin \\;",
+            "find /tmp/tree -exec git push --mirror origin +",
+            "command git push --mirror origin",
+            "env git push --mirror origin",
+            "sudo git push --mirror origin",
+            "bash -c 'git push --mirror origin'",
+            "git -c remote.origin.mirror=true push origin",
+            "git -c remote.origin.mirror=1 push origin",
+            "git -c remote.origin.mirror=yes push origin",
+            "git -c remote.origin.mirror=on push origin",
+            "git -c remote.origin.mirror push origin",
+            "git -cremote.origin.mirror=true push origin",
+            "git --config-env remote.origin.mirror=VAR push origin",
+            "git --config-env=remote.origin.mirror=VAR push origin",
+            "git -c remote.origin.push=+main push origin",
+            "git -c remote.origin.push=+refs/heads/*:refs/remotes/origin/* push origin",
+            "git -cremote.origin.push=+main push origin",
+            "git --config-env remote.origin.push=VAR push origin",
+            "git --config-env=remote.origin.push=VAR push origin",
+            "git -c remote.origin.push=+main -c remote.origin.push=main push origin",
+            "git -c remote.origin.push=main -c remote.origin.push=+main push origin",
+            "git -c alias.mp='-c remote.origin.mirror=true push' mp origin",
+            "git -c alias.pp='-c remote.origin.push=+main push' pp origin",
+            'GIT=git; "$GIT" push -f origin HEAD',
+            '"$GIT" push --mirror origin',
+            'command "$GIT" push --force origin HEAD',
+            'env "$GIT" push origin +HEAD:main',
+            '`which git` push -f origin HEAD',
+            '`which git` push --mirror origin',
+            '`which git` -c alias.fp=\'push -f\' fp origin HEAD',
+            "$GIT push -f origin HEAD",
+            "${GIT} push --mirror origin",
+            "$(which git) push -f origin HEAD",
+            "$(which git) push --mirror origin",
+            "command $(which git) push -f origin HEAD",
+            "$($(which echo) git) push -f origin HEAD",
+            "$(which $(echo git)) push -f origin HEAD",
+            "$(echo $(which git)) push -f origin HEAD",
+            "$(echo $(which git)) push --mirror origin",
+            "command $(echo $(which git)) push -f origin HEAD",
+            "command $(which $(echo git)) push -f origin HEAD",
+        ],
+    )
+    def test_cli_denies_mirror_configs_and_expanded_git_pushes(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["permissionDecision"] == "deny"
+        assert "no-force-push" in hook_out["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'RM=rm; "$RM" -rf target',
+            'command "$RM" --recursive --force target',
+            'sudo "$RM" -r -f target',
+            'env "$RM" -fr target',
+            'timeout 10 "$RM" -rf target',
+            'bash -c \'"$RM" -rf target\'',
+            '"$CMD" -c "alias.nuke=\'!rm -rf target\'" nuke',
+            '`which rm` -rf target',
+            '`which git` -c "alias.nuke=\'!rm -rf target\'" nuke',
+            "$RM -rf target",
+            "${RM} --recursive --force target",
+            "$(which rm) -rf target",
+            "command $(which rm) -rf target",
+            "$($(which echo) rm) -rf target",
+            "$(echo $(which rm)) -rf /tmp/example",
+            "command $(echo $(which rm)) --recursive --force /tmp/example",
+            "$(which $(echo rm)) -rf /tmp/example",
+            "command $(which $(echo rm)) --recursive --force /tmp/example",
+        ],
+    )
+    def test_cli_denies_expanded_destructive_rm(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["permissionDecision"] == "deny"
+        assert "destructive" in hook_out["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push --all origin",
+            "git push --prune origin",
+            "git push --tags origin",
+            "git push --follow-tags origin HEAD",
+            "git push --atomic origin main",
+            "git -c remote.origin.mirror=false push origin",
+            "git -c remote.origin.mirror=no push origin",
+            "git -c remote.origin.mirror=off push origin",
+            "git -c remote.origin.mirror=0 push origin",
+            "git -c remote.origin.push=main push origin",
+            "git -c remote.origin.push=main -c remote.origin.push=HEAD:main push origin",
+            "git -c remote.origin.mirror=true status",
+            "git -c remote.origin.push=+main status",
+            "git -c alias.st='-c remote.origin.mirror=true status' st",
+            '"$GIT" status --short',
+            '"$GIT" push origin main',
+            '"$RM" -r target',
+            '"$PYTHON" -m pytest -q',
+            '"$FOO" bar baz',
+            '`which git` status',
+            '`which git` push origin main',
+            '`which rm` -r target',
+            '`which rm` -f target',
+            '`which rm` target',
+            "$GIT push origin main",
+            "${GIT} status",
+            "$(which git) push origin main",
+            "$(which git) status",
+            "$(echo $(which git)) push origin main",
+            "$(echo $(which git)) status",
+            "command $(echo $(which git)) push origin main",
+            "$(which $(echo git)) push origin main",
+            "$(which $(echo git)) status",
+            "command $(which $(echo git)) push origin main",
+            "$RM -r target",
+            "${RM} -f target",
+            "$(which rm) -r target",
+            "command $(which rm) -r target",
+            "$(echo $(which rm)) -r /tmp/example",
+            "$(echo $(which rm)) --force /tmp/example",
+            "command $(echo $(which rm)) -r /tmp/example",
+            "command $(echo $(which rm)) --force /tmp/example",
+            "$(which $(echo rm)) -r /tmp/example",
+            "$(which $(echo rm)) --force /tmp/example",
+        ],
+    )
+    def test_cli_allows_safe_mirror_config_and_expanded_controls(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "`which git push -f origin HEAD",
+            "`which rm -rf target",
+            "$(which git push -f origin HEAD",
+            "$(which rm -rf target",
+            "$($(which git) push -f origin HEAD",
+            "$(which $(echo git) push -f origin HEAD",
+            "$(echo $(which git) push -f origin HEAD",
+            "$(echo $(which rm) -rf /tmp/example",
+            "command $(which rm -rf target",
+            "command $(which git push -f origin HEAD",
+            "command $(which $(echo rm) -rf /tmp/example",
+            "command $(which $(echo git) push -f origin HEAD",
+        ],
+    )
+    def test_cli_unmatched_initial_backtick_or_substitution_fails_closed(
+        self, cmd: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+
+class TestQuotedEscapedParentheses:
+    """Unit and contract tests for preserving quote and escape context with literal parentheses."""
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Single-quoted close parenthesis inside command substitution
+            "$(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+            "$(printf %s ')' >/dev/null; printf git) push --mirror origin",
+            # Double-quoted close parenthesis inside command substitution
+            '$(printf %s ")" >/dev/null; printf git) push -f origin HEAD',
+            # Backslash-escaped close parenthesis inside command substitution
+            "$(printf %s \\) >/dev/null; printf git) push -f origin HEAD",
+            # Single-quoted open parenthesis inside command substitution
+            "$(printf %s '(' >/dev/null; printf git) push -f origin HEAD",
+            "$(printf %s '(' >/dev/null; printf git) push --mirror origin",
+            # Backslash-escaped open parenthesis inside command substitution
+            "$(printf %s \\( >/dev/null; printf git) push -f origin HEAD",
+            # Wrapper preceding command substitution containing quoted paren
+            "command $(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+            # Double-quoted dynamic executables
+            '"$(which git)" push -f origin HEAD',
+            '"$(which git)" push --mirror origin',
+        ],
+    )
+    def test_blocks_forced_push_with_quoted_or_escaped_parens(self, command: str) -> None:
+        assert contains_forced_git_push(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Safe branch pushes and status commands
+            "$(printf %s ')' >/dev/null; printf git) push origin main",
+            "$(printf %s '(' >/dev/null; printf git) status",
+            "command $(printf %s ')' >/dev/null; printf git) push origin main",
+            '"$(which git)" push origin main',
+            # Standalone commands outputting literal parens
+            "echo ')'",
+            "printf '%s' '('",
+            'echo ")"',
+            "echo \\)",
+            "printf '%s' \\(",
+        ],
+    )
+    def test_allows_safe_controls_with_quoted_or_escaped_parens(self, command: str) -> None:
+        assert contains_forced_git_push(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "$(printf %s ')' >/dev/null; printf rm) -rf /tmp/example",
+            "$(printf %s '(' >/dev/null; printf rm) --recursive --force /tmp/example",
+            "command $(printf %s ')' >/dev/null; printf rm) -r -f /tmp/example",
+        ],
+    )
+    def test_blocks_destructive_rm_with_quoted_or_escaped_parens(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "$(printf %s ')' >/dev/null; printf rm) -r /tmp/example",
+            "$(printf %s '(' >/dev/null; printf rm) --force /tmp/example",
+            "echo ')'",
+            "echo '('",
+            'echo ")"',
+            "echo \\)",
+        ],
+    )
+    def test_allows_safe_rm_controls_with_quoted_or_escaped_parens(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is False
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("echo ')'", [["echo", ")"]]),
+            ('echo ")"', [["echo", ")"]]),
+            ("echo \\)", [["echo", ")"]]),
+            ("printf '%s' '('", [["printf", "%s", "("]]),
+            ('printf "%s" "("', [["printf", "%s", "("]]),
+            ("printf '%s' \\(", [["printf", "%s", "("]]),
+            (
+                "$(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+                [
+                    [
+                        "$",
+                        "(",
+                        "printf",
+                        "%s",
+                        ")",
+                        ">",
+                        "/dev/null",
+                        ";",
+                        "printf",
+                        "git",
+                        ")",
+                        "push",
+                        "-f",
+                        "origin",
+                        "HEAD",
+                    ]
+                ],
+            ),
+        ],
+    )
+    def test_tokenization_preserves_quoted_and_escaped_parens(
+        self, command: str, expected: list[list[str]]
+    ) -> None:
+        assert _tokenize_command(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "$(printf %s ')' >/dev/null; printf git push -f origin HEAD",
+            "$(printf %s '(' >/dev/null; printf git push -f origin HEAD",
+            "$(printf %s \\) >/dev/null; printf git push -f origin HEAD",
+        ],
+    )
+    def test_unmatched_substitution_with_literal_parens_raises_value_error(
+        self, command: str
+    ) -> None:
+        with pytest.raises(ValueError, match="Unmatched '\\$\\(' in command substitution"):
+            contains_forced_git_push(command)
+        with pytest.raises(ValueError, match="Unmatched '\\$\\(' in command substitution"):
+            contains_forbidden_rm(command)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "$(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+            "$(printf %s ')' >/dev/null; printf git) push --mirror origin",
+            '$(printf %s ")" >/dev/null; printf git) push -f origin HEAD',
+            "$(printf %s \\) >/dev/null; printf git) push -f origin HEAD",
+            "$(printf %s '(' >/dev/null; printf git) push -f origin HEAD",
+            "$(printf %s '(' >/dev/null; printf git) push --mirror origin",
+            "$(printf %s \\( >/dev/null; printf git) push -f origin HEAD",
+            "command $(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
+            '"$(which git)" push -f origin HEAD',
+            '"$(which git)" push --mirror origin',
+        ],
+    )
+    def test_cli_denies_forced_push_with_quoted_parens(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "$(printf %s ')' >/dev/null; printf rm) -rf /tmp/example",
+            "$(printf %s '(' >/dev/null; printf rm) --recursive --force /tmp/example",
+            "command $(printf %s ')' >/dev/null; printf rm) -r -f /tmp/example",
+        ],
+    )
+    def test_cli_denies_destructive_rm_with_quoted_parens(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "$(printf %s ')' >/dev/null; printf git) push origin main",
+            "$(printf %s '(' >/dev/null; printf git) status",
+            "command $(printf %s ')' >/dev/null; printf git) push origin main",
+            '"$(which git)" push origin main',
+            "echo ')'",
+            "printf '%s' '('",
+            "$(printf %s ')' >/dev/null; printf rm) -r /tmp/example",
+            "$(printf %s '(' >/dev/null; printf rm) --force /tmp/example",
+        ],
+    )
+    def test_cli_allows_safe_controls_with_quoted_parens(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "$(printf %s ')' >/dev/null; printf git push -f origin HEAD",
+            "$(printf %s '(' >/dev/null; printf git push -f origin HEAD",
+        ],
+    )
+    def test_cli_unmatched_substitution_with_quoted_parens_fails_closed(
+        self, cmd: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr

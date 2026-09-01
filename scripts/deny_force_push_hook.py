@@ -115,6 +115,17 @@ FIND_EXEC_ACTIONS = {
 FIND_INPUT_SENTINEL = "$FIND_INPUT"
 
 _LITERAL_SEMICOLON_SENTINEL = "__KEVIN_HOOK_LITERAL_SEMICOLON_SENTINEL_PR212__"
+_LITERAL_OPEN_PAREN_SENTINEL = "__KEVIN_HOOK_LITERAL_OPEN_PAREN_SENTINEL_PR212__"
+_LITERAL_CLOSE_PAREN_SENTINEL = "__KEVIN_HOOK_LITERAL_CLOSE_PAREN_SENTINEL_PR212__"
+
+
+def _restore_sentinels(token: str) -> str:
+    """Restore sentinel replacements back to literal characters."""
+    return (
+        token.replace(_LITERAL_SEMICOLON_SENTINEL, ";")
+        .replace(_LITERAL_OPEN_PAREN_SENTINEL, "(")
+        .replace(_LITERAL_CLOSE_PAREN_SENTINEL, ")")
+    )
 
 
 def _extract_find_actions(tokens: list[str]) -> list[list[str]]:
@@ -136,20 +147,193 @@ def _extract_find_actions(tokens: list[str]) -> list[list[str]]:
         if tok in FIND_EXEC_ACTIONS:
             i += 1
             cmd_tokens: list[str] = []
-            while i < n and tokens[i] not in {"+", ";"}:
+            while i < n and tokens[i] not in {"+", ";", _LITERAL_SEMICOLON_SENTINEL}:
                 cmd_tokens.append(tokens[i])
                 i += 1
-            if i < n and tokens[i] in {"+", ";"}:
+            if i < n and tokens[i] in {"+", ";", _LITERAL_SEMICOLON_SENTINEL}:
                 i += 1
             if cmd_tokens:
                 replaced = [
-                    t.replace("{}", FIND_INPUT_SENTINEL) for t in cmd_tokens
+                    _restore_sentinels(t).replace("{}", FIND_INPUT_SENTINEL)
+                    for t in cmd_tokens
                 ]
                 actions.append(replaced)
         else:
             i += 1
 
     return actions
+
+
+def _extract_initial_backtick_args(tokens: list[str]) -> list[str] | None:
+    """If tokens starts with a literal backtick, find matching closing backtick and return trailing arguments.
+
+    If token zero is not a literal backtick, returns None.
+    If token zero is a literal backtick but no matching closing backtick exists, raises ValueError.
+    """
+    if not tokens or tokens[0] != "`":
+        return None
+
+    for idx in range(1, len(tokens)):
+        if tokens[idx] == "`":
+            return [_restore_sentinels(t) for t in tokens[idx + 1 :]]
+
+    raise ValueError("Unmatched opening backtick in command substitution")
+
+
+def _is_all_parens(token: str) -> bool:
+    """Return True if token consists solely of parenthesis characters ('(' or ')')."""
+    return bool(token) and all(c in "()" for c in token)
+
+
+def _extract_initial_dynamic_args(tokens: list[str]) -> list[str] | None:
+    """If tokens start with a dynamic executable prefix, return trailing arguments.
+
+    Recognizes:
+    - literal backtick: `...`
+    - dollar + identifier token: $GIT, $RM
+    - dollar + braced identifier token: ${GIT}, ${RM}
+    - dollar + open parenthesis: $(...) command substitution
+
+    If token zero is not a dynamic executable prefix, returns None.
+    If the prefix is malformed or unmatched, raises ValueError.
+    """
+    if not tokens:
+        return None
+
+    if tokens[0] == "`":
+        for idx in range(1, len(tokens)):
+            if tokens[idx] == "`":
+                return [_restore_sentinels(t) for t in tokens[idx + 1 :]]
+        raise ValueError("Unmatched opening backtick in command substitution")
+
+    if tokens[0] == "$":
+        if len(tokens) < 2:
+            raise ValueError("Incomplete variable expansion '$'")
+        next_tok = tokens[1]
+        if _is_all_parens(next_tok) and next_tok.startswith("("):
+            paren_depth = 0
+            for char in next_tok:
+                if char == "(":
+                    paren_depth += 1
+                elif char == ")":
+                    paren_depth -= 1
+            if paren_depth <= 0:
+                raise ValueError(
+                    f"Malformed command substitution: '${next_tok}'"
+                )
+            idx = 2
+            while idx < len(tokens):
+                tok = tokens[idx]
+                if _is_all_parens(tok):
+                    closed_idx = None
+                    for p_idx, char in enumerate(tok):
+                        if char == "(":
+                            paren_depth += 1
+                        elif char == ")":
+                            paren_depth -= 1
+                            if paren_depth == 0:
+                                closed_idx = p_idx
+                                break
+                    if closed_idx is not None:
+                        remainder = tok[closed_idx + 1 :]
+                        if remainder:
+                            raw_trailing = [remainder] + tokens[idx + 1 :]
+                        else:
+                            raw_trailing = tokens[idx + 1 :]
+                        return [_restore_sentinels(t) for t in raw_trailing]
+                idx += 1
+            raise ValueError("Unmatched opening parenthesis in command substitution")
+        if next_tok.startswith("{"):
+            if not next_tok.endswith("}"):
+                raise ValueError(
+                    f"Unmatched opening brace in variable expansion: '${next_tok}'"
+                )
+            var_name = next_tok[1:-1]
+            if not var_name.isidentifier():
+                raise ValueError(
+                    f"Malformed variable name in variable expansion: '${next_tok}'"
+                )
+            return [_restore_sentinels(t) for t in tokens[2:]]
+        if next_tok.isidentifier():
+            return [_restore_sentinels(t) for t in tokens[2:]]
+        raise ValueError(f"Malformed variable expansion: '${next_tok}'")
+
+    return None
+
+
+def _reconstruct_git_args(git_args: list[str]) -> list[str]:
+    """Reconstruct git argument tokens where literal colons split config values.
+
+    Narrowly repairs Git config values (-c and --config-env) when a literal colon
+    token directly follows a config value token.
+    """
+    reconstructed: list[str] = []
+    i = 0
+    n = len(git_args)
+    while i < n:
+        arg = git_args[i]
+        if arg == "--":
+            reconstructed.extend(git_args[i:])
+            break
+
+        if arg == "-c":
+            reconstructed.append(arg)
+            i += 1
+            if i < n:
+                val = git_args[i]
+                i += 1
+                while i + 1 < n and git_args[i] == ":":
+                    val = val + ":" + git_args[i + 1]
+                    i += 2
+                reconstructed.append(val)
+            continue
+
+        if arg.startswith("-c") and not arg.startswith("-C"):
+            val = arg
+            i += 1
+            while i + 1 < n and git_args[i] == ":":
+                val = val + ":" + git_args[i + 1]
+                i += 2
+            reconstructed.append(val)
+            continue
+
+        if arg == "--config-env":
+            reconstructed.append(arg)
+            i += 1
+            if i < n:
+                val = git_args[i]
+                i += 1
+                while i + 1 < n and git_args[i] == ":":
+                    val = val + ":" + git_args[i + 1]
+                    i += 2
+                reconstructed.append(val)
+            continue
+
+        if arg.startswith("--config-env="):
+            val = arg
+            i += 1
+            while i + 1 < n and git_args[i] == ":":
+                val = val + ":" + git_args[i + 1]
+                i += 2
+            reconstructed.append(val)
+            continue
+
+        if not arg.startswith("-"):
+            reconstructed.extend(git_args[i:])
+            break
+
+        if arg in GIT_GLOBAL_OPTS_WITH_ARG:
+            reconstructed.append(arg)
+            i += 1
+            if i < n:
+                reconstructed.append(git_args[i])
+                i += 1
+            continue
+
+        reconstructed.append(arg)
+        i += 1
+
+    return reconstructed
 
 
 def _record_alias_config(
@@ -164,6 +348,15 @@ def _record_alias_config(
         if key_stripped.lower().startswith("alias."):
             alias_name = key_stripped[len("alias."):].lower()
             if alias_name:
+                setting_stripped = setting.strip()
+                if (
+                    len(setting_stripped) >= 2
+                    and setting_stripped.startswith("'")
+                    and setting_stripped.endswith("'")
+                ):
+                    setting = setting_stripped[1:-1]
+                else:
+                    setting = setting_stripped
                 alias_configs[alias_name] = (kind, setting)
 
 
@@ -175,6 +368,7 @@ def _parse_git_global_configs(
     Returns (alias_configs, remaining_tokens) where alias_configs maps lowercase alias name
     to ('c', value) or ('config-env', env_var_name).
     """
+    git_args = _reconstruct_git_args(git_args)
     alias_configs: dict[str, tuple[str, str]] = {}
     i = 0
     while i < len(git_args):
@@ -237,8 +431,133 @@ def _parse_git_global_configs(
     return alias_configs, git_args[i:]
 
 
+def _record_forcing_config(
+    mirror_configs: dict[str, tuple[str, str]],
+    push_configs: list[tuple[str, str, str]],
+    entry: str,
+    kind: str,
+) -> None:
+    """Record a git config entry for forcing inspection."""
+    if "=" in entry:
+        key, setting = entry.split("=", 1)
+        key_stripped = key.strip().lower()
+        if key_stripped:
+            setting_stripped = setting.strip()
+            if (
+                len(setting_stripped) >= 2
+                and setting_stripped.startswith("'")
+                and setting_stripped.endswith("'")
+            ):
+                setting = setting_stripped[1:-1]
+            else:
+                setting = setting_stripped
+            if key_stripped.startswith("remote."):
+                if key_stripped.endswith(".mirror") and len(key_stripped) > len("remote..mirror"):
+                    mirror_configs[key_stripped] = (kind, setting)
+                elif key_stripped.endswith(".push") and len(key_stripped) > len("remote..push"):
+                    push_configs.append((key_stripped, kind, setting))
+    else:
+        key_stripped = entry.strip().lower()
+        if key_stripped:
+            setting = "true" if kind == "c" else ""
+            if key_stripped.startswith("remote."):
+                if key_stripped.endswith(".mirror") and len(key_stripped) > len("remote..mirror"):
+                    mirror_configs[key_stripped] = (kind, setting)
+                elif key_stripped.endswith(".push") and len(key_stripped) > len("remote..push"):
+                    push_configs.append((key_stripped, kind, setting))
+
+
+def _has_forcing_git_config(git_args: list[str]) -> bool:
+    """Scan leading Git global options for forcing config settings (-c and --config-env).
+
+    Detects:
+    - remote.<name>.mirror set truthy or supplied via --config-env
+    - remote.<name>.push whose value begins with '+' or is supplied via --config-env
+
+    Explicit false mirror values (false, no, off, 0) are safe.
+    Does not inspect files, git config, or environment variables.
+    """
+    git_args = _reconstruct_git_args(git_args)
+    mirror_configs: dict[str, tuple[str, str]] = {}
+    push_configs: list[tuple[str, str, str]] = []
+    i = 0
+    while i < len(git_args):
+        arg = git_args[i]
+        if arg == "--":
+            break
+        if not arg.startswith("-"):
+            break
+
+        if arg == "-c":
+            i += 1
+            if i < len(git_args):
+                _record_forcing_config(mirror_configs, push_configs, git_args[i], "c")
+                i += 1
+            continue
+
+        if arg.startswith("-c") and not arg.startswith("-C"):
+            val = arg[2:]
+            _record_forcing_config(mirror_configs, push_configs, val, "c")
+            i += 1
+            continue
+
+        if arg == "--config-env":
+            i += 1
+            if i < len(git_args):
+                _record_forcing_config(mirror_configs, push_configs, git_args[i], "config-env")
+                i += 1
+            continue
+
+        if arg.startswith("--config-env="):
+            val = arg[len("--config-env="):]
+            _record_forcing_config(mirror_configs, push_configs, val, "config-env")
+            i += 1
+            continue
+
+        if arg in GIT_GLOBAL_OPTS_WITH_ARG:
+            i += 2
+            continue
+
+        if any(
+            arg.startswith(opt + "=")
+            for opt in [
+                "--git-dir",
+                "--work-tree",
+                "--namespace",
+                "--super-prefix",
+                "--exec-path",
+            ]
+        ):
+            i += 1
+            continue
+
+        if arg.startswith("-C") and len(arg) > 2:
+            i += 1
+            continue
+
+        i += 1
+
+    for _key, kind, val in push_configs:
+        if kind == "config-env":
+            return True
+        if val.strip().startswith("+"):
+            return True
+
+    for kind, val in mirror_configs.values():
+        if kind == "config-env":
+            return True
+        if val.strip().lower() not in {"false", "no", "off", "0"}:
+            return True
+
+    return False
+
+
+_scan_git_forcing_configs = _has_forcing_git_config
+
+
 def _inspect_git_invocation(git_args: list[str]) -> bool:
     """Inspect git command arguments (after 'git') for forced push with alias resolution."""
+    has_forcing_config = _has_forcing_git_config(git_args)
     alias_configs, remaining = _parse_git_global_configs(git_args)
     if not remaining:
         return False
@@ -278,6 +597,8 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
                     f"Failed to parse git alias value {value!r}: {exc}"
                 ) from exc
             combined = expansion + current_tokens[1:]
+            if _has_forcing_git_config(combined):
+                has_forcing_config = True
             new_alias_configs, remaining_tokens = _parse_git_global_configs(combined)
             alias_configs.update(new_alias_configs)
             current_tokens = remaining_tokens
@@ -290,6 +611,9 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
     subcmd = current_tokens[0]
     if subcmd != "push":
         return False
+
+    if has_forcing_config:
+        return True
 
     push_args = current_tokens[1:]
     return _is_forced_push_args(push_args)
@@ -452,8 +776,9 @@ def _strip_comments_preserving_newlines(command: str) -> str:
     the next newline or EOF. The terminating newline is preserved as a command
     separator.
 
-    Escaped semicolons in NORMAL state and semicolons inside quotes are replaced
-    with _LITERAL_SEMICOLON_SENTINEL so they are not treated as command separators.
+    Escaped semicolons and parentheses in NORMAL state, as well as semicolons and
+    parentheses inside quotes, are replaced with collision-resistant sentinels
+    so they are not treated as structural delimiters.
     """
     result: list[str] = []
     i = 0
@@ -469,6 +794,16 @@ def _strip_comments_preserving_newlines(command: str) -> str:
                 if i + 1 < n and command[i + 1] == ";":
                     result.append(_LITERAL_SEMICOLON_SENTINEL)
                     prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
+                    i += 2
+                    continue
+                if i + 1 < n and command[i + 1] == "(":
+                    result.append(_LITERAL_OPEN_PAREN_SENTINEL)
+                    prev_char = _LITERAL_OPEN_PAREN_SENTINEL[-1]
+                    i += 2
+                    continue
+                if i + 1 < n and command[i + 1] == ")":
+                    result.append(_LITERAL_CLOSE_PAREN_SENTINEL)
+                    prev_char = _LITERAL_CLOSE_PAREN_SENTINEL[-1]
                     i += 2
                     continue
                 result.append(ch)
@@ -514,6 +849,16 @@ def _strip_comments_preserving_newlines(command: str) -> str:
                 prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
                 i += 1
                 continue
+            elif ch == "(":
+                result.append(_LITERAL_OPEN_PAREN_SENTINEL)
+                prev_char = _LITERAL_OPEN_PAREN_SENTINEL[-1]
+                i += 1
+                continue
+            elif ch == ")":
+                result.append(_LITERAL_CLOSE_PAREN_SENTINEL)
+                prev_char = _LITERAL_CLOSE_PAREN_SENTINEL[-1]
+                i += 1
+                continue
             else:
                 result.append(ch)
                 prev_char = ch
@@ -533,6 +878,16 @@ def _strip_comments_preserving_newlines(command: str) -> str:
                     prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
                     i += 2
                     continue
+                if i + 1 < n and command[i + 1] == "(":
+                    result.append(_LITERAL_OPEN_PAREN_SENTINEL)
+                    prev_char = _LITERAL_OPEN_PAREN_SENTINEL[-1]
+                    i += 2
+                    continue
+                if i + 1 < n and command[i + 1] == ")":
+                    result.append(_LITERAL_CLOSE_PAREN_SENTINEL)
+                    prev_char = _LITERAL_CLOSE_PAREN_SENTINEL[-1]
+                    i += 2
+                    continue
                 result.append(ch)
                 i += 1
                 if i < n:
@@ -545,6 +900,16 @@ def _strip_comments_preserving_newlines(command: str) -> str:
             elif ch == ";":
                 result.append(_LITERAL_SEMICOLON_SENTINEL)
                 prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
+                i += 1
+                continue
+            elif ch == "(":
+                result.append(_LITERAL_OPEN_PAREN_SENTINEL)
+                prev_char = _LITERAL_OPEN_PAREN_SENTINEL[-1]
+                i += 1
+                continue
+            elif ch == ")":
+                result.append(_LITERAL_CLOSE_PAREN_SENTINEL)
+                prev_char = _LITERAL_CLOSE_PAREN_SENTINEL[-1]
                 i += 1
                 continue
             else:
@@ -564,8 +929,8 @@ def _strip_comments_preserving_newlines(command: str) -> str:
     return "".join(result)
 
 
-def _tokenize_command(command: str) -> list[list[str]]:
-    """Tokenize a shell command string and split into individual command segments."""
+def _tokenize_command_raw(command: str) -> list[list[str]]:
+    """Tokenize a shell command string into command segments preserving internal sentinels."""
     cleaned = _strip_comments_preserving_newlines(command)
     lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"
@@ -576,9 +941,14 @@ def _tokenize_command(command: str) -> list[list[str]]:
     if not tokens:
         return []
 
-    commands = _split_into_commands(tokens)
+    return _split_into_commands(tokens)
+
+
+def _tokenize_command(command: str) -> list[list[str]]:
+    """Tokenize a shell command string and split into individual command segments with restored literals."""
+    commands = _tokenize_command_raw(command)
     return [
-        [tok.replace(_LITERAL_SEMICOLON_SENTINEL, ";") for tok in cmd]
+        [_restore_sentinels(tok) for tok in cmd]
         for cmd in commands
     ]
 
@@ -617,14 +987,68 @@ def _split_into_commands(tokens: list[str]) -> list[list[str]]:
     """Split a stream of shell tokens into individual command segments."""
     commands: list[list[str]] = []
     current: list[str] = []
+    i = 0
+    token_list = list(tokens)
 
-    for token in tokens:
-        if token in COMMAND_SEPARATORS:
+    while i < len(token_list):
+        tok = token_list[i]
+        if (
+            tok == "$"
+            and i + 1 < len(token_list)
+            and _is_all_parens(token_list[i + 1])
+            and token_list[i + 1].startswith("(")
+        ):
+            next_tok = token_list[i + 1]
+            paren_depth = 0
+            for char in next_tok:
+                if char == "(":
+                    paren_depth += 1
+                elif char == ")":
+                    paren_depth -= 1
+            if paren_depth <= 0:
+                raise ValueError(
+                    f"Malformed command substitution: '${next_tok}'"
+                )
+            current.append("$")
+            current.append(next_tok)
+            i += 2
+            while i < len(token_list) and paren_depth > 0:
+                inner_tok = token_list[i]
+                if _is_all_parens(inner_tok):
+                    closed_idx = None
+                    for p_idx, char in enumerate(inner_tok):
+                        if char == "(":
+                            paren_depth += 1
+                        elif char == ")":
+                            paren_depth -= 1
+                            if paren_depth == 0:
+                                closed_idx = p_idx
+                                break
+                    if closed_idx is not None:
+                        part_consumed = inner_tok[: closed_idx + 1]
+                        current.append(part_consumed)
+                        remainder = inner_tok[closed_idx + 1 :]
+                        i += 1
+                        if remainder:
+                            token_list.insert(i, remainder)
+                        break
+                    else:
+                        current.append(inner_tok)
+                        i += 1
+                else:
+                    current.append(inner_tok)
+                    i += 1
+            if paren_depth > 0:
+                raise ValueError("Unmatched '$(' in command substitution")
+            continue
+
+        if tok in COMMAND_SEPARATORS or _is_all_parens(tok):
             if current:
                 commands.append(current)
                 current = []
         else:
-            current.append(token)
+            current.append(tok)
+        i += 1
 
     if current:
         commands.append(current)
@@ -684,6 +1108,8 @@ def _is_forced_push_args(push_args: list[str]) -> bool:
             if arg.startswith("+"):
                 return True
             if arg.startswith("--force"):
+                return True
+            if arg == "--mirror":
                 return True
             if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1 and "f" in arg[1:]:
                 return True
@@ -929,12 +1355,12 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
                     and len(token) > 1
                     and "c" in token[1:]
                 ):
-                    return contains_forced_git_push(tokens[i + 1])
+                    return contains_forced_git_push(_restore_sentinels(tokens[i + 1]))
             break
 
         if cmd_word == "eval":
             tokens.pop(0)
-            return contains_forced_git_push(" ".join(tokens))
+            return contains_forced_git_push(" ".join(_restore_sentinels(t) for t in tokens))
 
         break
 
@@ -950,11 +1376,17 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
             f"find dynamic executable is not supported: {tokens[0]!r}"
         )
 
-    cmd_binary = os.path.basename(tokens[0])
-    if cmd_binary != "git":
-        return False
+    dynamic_args = _extract_initial_dynamic_args(tokens)
+    if dynamic_args is not None:
+        return _inspect_git_invocation([_restore_sentinels(t) for t in dynamic_args])
 
-    return _inspect_git_invocation(tokens[1:])
+    cmd_binary = os.path.basename(tokens[0])
+    if cmd_binary == "git":
+        return _inspect_git_invocation([_restore_sentinels(t) for t in tokens[1:]])
+    if _has_shell_expansion(tokens[0]):
+        return _inspect_git_invocation([_restore_sentinels(t) for t in tokens[1:]])
+
+    return False
 
 
 def _inspect_single_command_rm(tokens: list[str]) -> bool:
@@ -1156,12 +1588,12 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
                     and len(token) > 1
                     and "c" in token[1:]
                 ):
-                    return contains_forbidden_rm(tokens[i + 1])
+                    return contains_forbidden_rm(_restore_sentinels(tokens[i + 1]))
             break
 
         if cmd_word == "eval":
             tokens.pop(0)
-            return contains_forbidden_rm(" ".join(tokens))
+            return contains_forbidden_rm(" ".join(_restore_sentinels(t) for t in tokens))
 
         break
 
@@ -1177,14 +1609,26 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
             f"find dynamic executable is not supported: {tokens[0]!r}"
         )
 
+    dynamic_args = _extract_initial_dynamic_args(tokens)
+    if dynamic_args is not None:
+        restored_dynamic_args = [_restore_sentinels(t) for t in dynamic_args]
+        if _is_forbidden_rm_args(restored_dynamic_args):
+            return True
+        return _inspect_git_invocation_for_rm(restored_dynamic_args)
+
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
-        return _inspect_git_invocation_for_rm(tokens[1:])
-    if cmd_binary != "rm":
-        return False
+        return _inspect_git_invocation_for_rm([_restore_sentinels(t) for t in tokens[1:]])
+    if cmd_binary == "rm":
+        return _is_forbidden_rm_args([_restore_sentinels(t) for t in tokens[1:]])
 
-    rm_args = tokens[1:]
-    return _is_forbidden_rm_args(rm_args)
+    if _has_shell_expansion(tokens[0]):
+        restored_trailing = [_restore_sentinels(t) for t in tokens[1:]]
+        if _is_forbidden_rm_args(restored_trailing):
+            return True
+        return _inspect_git_invocation_for_rm(restored_trailing)
+
+    return False
 
 
 def contains_forced_git_push(command: str) -> bool:
@@ -1195,7 +1639,7 @@ def contains_forced_git_push(command: str) -> bool:
     if not command or not command.strip():
         return False
 
-    commands = _tokenize_command(command)
+    commands = _tokenize_command_raw(command)
     for cmd_tokens in commands:
         cleaned = _clean_command_segment(cmd_tokens)
         if _inspect_single_command_git(cleaned):
@@ -1212,7 +1656,7 @@ def contains_forbidden_rm(command: str) -> bool:
     if not command or not command.strip():
         return False
 
-    commands = _tokenize_command(command)
+    commands = _tokenize_command_raw(command)
     for cmd_tokens in commands:
         cleaned = _clean_command_segment(cmd_tokens)
         if _inspect_single_command_rm(cleaned):

@@ -11,7 +11,7 @@ import json
 import os
 import shlex
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 COMMAND_SEPARATORS = {
     ";",
@@ -3387,6 +3387,22 @@ class _ShellState:
         )
 
 
+def _initial_hook_shell_state(
+    env: Mapping[str, str] | None = None,
+) -> _ShellState:
+    """Construct initial root shell state for the CLI entrypoint.
+
+    Inspects only whether GIT_EXEC_PATH is present in the environment without
+    enumerating other variables or retaining any custom path value.
+    """
+    state = _ShellState()
+    environ = os.environ if env is None else env
+    if "GIT_EXEC_PATH" in environ:
+        state.shell_vars["GIT_EXEC_PATH"] = ""
+        state.exported_keys.add("GIT_EXEC_PATH")
+    return state
+
+
 def _unwrap_builtin_wrappers(tokens: list[str]) -> list[str]:
     """Unwrap shell builtin executable wrappers (builtin, command [-p] [--], literal time).
 
@@ -6057,8 +6073,13 @@ def main() -> None:
         sys.exit(2)
 
     try:
-        is_forced = contains_forced_git_push(command)
-        is_forbidden_rm = contains_forbidden_rm(command)
+        initial_state = _initial_hook_shell_state()
+        is_forced = contains_forced_git_push(
+            command, _shell_state=initial_state.copy()
+        )
+        is_forbidden_rm = contains_forbidden_rm(
+            command, _shell_state=initial_state.copy()
+        )
     except Exception as exc:
         sys.stderr.write(f"Shell tokenization failed: {exc}\n")
         sys.exit(2)

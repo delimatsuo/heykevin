@@ -32,6 +32,7 @@ from scripts.deny_force_push_hook import (
     _extract_raw_substitutions,
     _has_forcing_git_config,
     _has_shell_expansion,
+    _initial_hook_shell_state,
     _inspect_git_invocation,
     _inspect_git_invocation_for_rm,
     _inspect_shell_invocation,
@@ -2894,14 +2895,30 @@ class TestDefect130GitExecutionPath:
         "Custom Git execution path via GIT_EXEC_PATH is unsupported/uninspectable"
     )
 
-    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+    def _run_hook(
+        self,
+        stdin_payload: str,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(HOOK_SCRIPT_PATH)],
             input=stdin_payload,
             capture_output=True,
             text=True,
+            env=env,
             check=False,
         )
+
+    def _make_subprocess_env(
+        self, git_exec_path: str | None = None
+    ) -> dict[str, str]:
+        env = os.environ.copy()
+        env["KEVIN_DISABLE_DOTENV"] = "1"
+        if git_exec_path is not None:
+            env["GIT_EXEC_PATH"] = git_exec_path
+        else:
+            env.pop("GIT_EXEC_PATH", None)
+        return env
 
     def test_pure_helpers_raise_on_custom_exec_path_option(self) -> None:
         git_args = ["--exec-path=/tmp/helpers", "fp", "origin", "HEAD"]
@@ -3093,6 +3110,113 @@ class TestDefect130GitExecutionPath:
         for checker in (contains_forced_git_push, contains_forbidden_rm):
             with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
                 checker(command)
+
+    def test_initial_hook_shell_state_when_git_exec_path_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("GIT_EXEC_PATH", raising=False)
+        state = _initial_hook_shell_state()
+        assert state.shell_vars == {}
+        assert state.exported_keys == INITIAL_ASSUMED_EXPORTED_KEYS
+        assert state.get_exported_env() == {}
+
+        explicit_state = _initial_hook_shell_state({})
+        assert explicit_state.shell_vars == {}
+        assert explicit_state.exported_keys == INITIAL_ASSUMED_EXPORTED_KEYS
+        assert explicit_state.get_exported_env() == {}
+
+    def test_initial_hook_shell_state_when_git_exec_path_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        secret_value = "/opt/secret-custom-git-helpers/bin"
+        monkeypatch.setenv("GIT_EXEC_PATH", secret_value)
+        state = _initial_hook_shell_state()
+        assert state.shell_vars == {"GIT_EXEC_PATH": ""}
+        assert secret_value not in state.shell_vars.values()
+        assert "GIT_EXEC_PATH" in state.exported_keys
+        assert state.get_exported_env() == {"GIT_EXEC_PATH": ""}
+
+        explicit_state = _initial_hook_shell_state(
+            {"GIT_EXEC_PATH": "/custom/secret/path", "OTHER_VAR": "val"}
+        )
+        assert explicit_state.shell_vars == {"GIT_EXEC_PATH": ""}
+        assert "/custom/secret/path" not in explicit_state.shell_vars.values()
+        assert "OTHER_VAR" not in explicit_state.shell_vars
+        assert "GIT_EXEC_PATH" in explicit_state.exported_keys
+        assert explicit_state.get_exported_env() == {"GIT_EXEC_PATH": ""}
+
+    def test_pure_classifiers_unaffected_by_process_git_exec_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GIT_EXEC_PATH", "/tmp/helpers")
+        assert contains_forced_git_push("git status") is False
+        assert contains_forbidden_rm("git status") is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git fp origin HEAD",
+            "git status",
+            "sh -c 'git fp origin HEAD'",
+            "sh -c 'git status'",
+        ],
+    )
+    @pytest.mark.parametrize("git_exec_path_val", ["/tmp/helpers", ""])
+    def test_cli_subprocess_inherited_git_exec_path_fails_closed(
+        self, command: str, git_exec_path_val: str
+    ) -> None:
+        env = self._make_subprocess_env(git_exec_path=git_exec_path_val)
+        payload = json.dumps({"command": command})
+        result = self._run_hook(payload, env=env)
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert self.ENV_ERROR in result.stderr
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "unset GIT_EXEC_PATH; git status",
+            "export -n GIT_EXEC_PATH; git status",
+            "env -u GIT_EXEC_PATH git status",
+            "unset GIT_EXEC_PATH; sh -c 'git status'",
+            "export -n GIT_EXEC_PATH; sh -c 'git status'",
+            "printf ok",
+        ],
+    )
+    @pytest.mark.parametrize("git_exec_path_val", ["/tmp/helpers", ""])
+    def test_cli_subprocess_safe_controls_with_inherited_git_exec_path_exit_0(
+        self, command: str, git_exec_path_val: str
+    ) -> None:
+        env = self._make_subprocess_env(git_exec_path=git_exec_path_val)
+        payload = json.dumps({"command": command})
+        result = self._run_hook(payload, env=env)
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert result.stderr == ""
+
+    def test_mutation_effective_process_presence_seeding(self) -> None:
+        command = "git fp origin HEAD"
+
+        state_with_presence = _initial_hook_shell_state(
+            {"GIT_EXEC_PATH": "/tmp/helpers"}
+        )
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                checker(command, _shell_state=state_with_presence.copy())
+
+        state_without_presence = _initial_hook_shell_state({})
+        assert (
+            contains_forced_git_push(
+                command, _shell_state=state_without_presence.copy()
+            )
+            is False
+        )
+        assert (
+            contains_forbidden_rm(
+                command, _shell_state=state_without_presence.copy()
+            )
+            is False
+        )
 
 
 class TestExtractInitialBacktickArgs:

@@ -19,6 +19,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -49,21 +53,29 @@ env:
     **/*.pyo
 
 jobs:
-  test:
-    name: Test
-    # F-18: only run the test job on PRs from this repo, not from forks. A
-    # forked PR can otherwise spend our runner minutes and exfiltrate any
-    # secrets the test job touches (currently none, so this is defence in
-    # depth). Push and workflow_dispatch are always allowed.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+  test_suites:
+    name: Python suite ${{ matrix.shard }}/7
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && inputs.candidate_sha || github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && inputs.candidate_sha) || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate exact checked-out HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && inputs.candidate_sha) || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Expected SHA must be an exact lowercase 40-character SHA" && exit 1)
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA" || (echo "Checked-out SHA does not match expected SHA" && exit 1)
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -74,8 +86,118 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Run tests
-        run: pytest --tb=short -q
+      - name: Run test shard
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          SHARD_FILE="$(mktemp)"
+          trap 'rm -f "$SHARD_FILE"' EXIT
+          python scripts/partition_tests.py --shard "$TEST_SHARD" --total-shards 7 > "$SHARD_FILE"
+          test -s "$SHARD_FILE" || (echo "Test shard $TEST_SHARD partition produced no test files" && exit 1)
+          mapfile -t test_files < "$SHARD_FILE"
+          test "${#test_files[@]}" -gt 0 || (echo "Test shard $TEST_SHARD array is empty" && exit 1)
+          for f in "${test_files[@]}"; do
+            test -n "$f" || (echo "Empty test file entry in shard $TEST_SHARD" && exit 1)
+          done
+          python -m pytest --tb=short -q -- "${test_files[@]}"
+
+  quality:
+    name: Python quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && inputs.candidate_sha) || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact checked-out HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'workflow_dispatch' && inputs.target == 'staging' && inputs.candidate_sha) || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Expected SHA must be an exact lowercase 40-character SHA" && exit 1)
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA" || (echo "Checked-out SHA does not match expected SHA" && exit 1)
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint fatal Ruff selectors
+        run: ruff check --select E9,F63,F7,F82 .
+
+      - name: Compile Python bytecode
+        run: python -m compileall -q .
+
+      - name: Check git diff whitespace and conflicts
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+          DISPATCH_CANDIDATE_SHA: ${{ (inputs.target == 'staging' && inputs.candidate_sha) || github.sha }}
+        run: |
+          set -euo pipefail
+          EMPTY_TREE_SHA="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Invalid PR base SHA: $PR_BASE_SHA" && exit 1)
+            [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Invalid PR head SHA: $PR_HEAD_SHA" && exit 1)
+            git cat-file -e "$PR_BASE_SHA^{commit}" || (echo "PR base commit unavailable: $PR_BASE_SHA" && exit 1)
+            git cat-file -e "$PR_HEAD_SHA^{commit}" || (echo "PR head commit unavailable: $PR_HEAD_SHA" && exit 1)
+            git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            [[ "$PUSH_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Invalid push head SHA: $PUSH_HEAD_SHA" && exit 1)
+            git cat-file -e "$PUSH_HEAD_SHA^{commit}" || (echo "Push head commit unavailable: $PUSH_HEAD_SHA" && exit 1)
+            if [ -z "$PUSH_BEFORE_SHA" ] || [[ "$PUSH_BEFORE_SHA" =~ ^0{40}$ ]]; then
+              git diff --check "$EMPTY_TREE_SHA" "$PUSH_HEAD_SHA"
+            else
+              [[ "$PUSH_BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Invalid push before SHA: $PUSH_BEFORE_SHA" && exit 1)
+              git cat-file -e "$PUSH_BEFORE_SHA^{commit}" || (echo "Push before commit unavailable: $PUSH_BEFORE_SHA" && exit 1)
+              git diff --check "$PUSH_BEFORE_SHA" "$PUSH_HEAD_SHA"
+            fi
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            [[ "$DISPATCH_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || (echo "Invalid candidate SHA: $DISPATCH_CANDIDATE_SHA" && exit 1)
+            git cat-file -e "$DISPATCH_CANDIDATE_SHA^{commit}" || (echo "Candidate commit unavailable: $DISPATCH_CANDIDATE_SHA" && exit 1)
+            if git rev-parse --verify "${DISPATCH_CANDIDATE_SHA}~1^{commit}" >/dev/null 2>&1; then
+              git diff --check "${DISPATCH_CANDIDATE_SHA}~1" "$DISPATCH_CANDIDATE_SHA"
+            else
+              git diff --check "$EMPTY_TREE_SHA" "$DISPATCH_CANDIDATE_SHA"
+            fi
+          else
+            echo "Unsupported event for diff check: $EVENT_NAME" && exit 1
+          fi
+
+  test:
+    name: Test
+    needs: [test_suites, quality]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate test and quality results
+        env:
+          SUITES_RESULT: ${{ needs.test_suites.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          set -euo pipefail
+          echo "test_suites result: $SUITES_RESULT"
+          echo "quality result: $QUALITY_RESULT"
+          if [ "$SUITES_RESULT" = "success" ] && [ "$QUALITY_RESULT" = "success" ]; then
+            echo "All test suites and quality checks passed successfully."
+            exit 0
+          else
+            echo "Gate failed: test_suites=$SUITES_RESULT quality=$QUALITY_RESULT"
+            exit 1
+          fi
 
   deploy-staging:
     name: Deploy to Staging
@@ -102,6 +224,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate exact staging candidate
         if: github.event_name == 'workflow_dispatch'
@@ -216,6 +339,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Refuse non-main production deploy
         env:

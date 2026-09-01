@@ -2954,6 +2954,14 @@ class TestDefect130GitExecutionPath:
             "GIT_EXEC_PATH=/tmp/helpers sh -c 'git fp origin HEAD'",
             "env GIT_EXEC_PATH=/tmp/helpers sh -c 'git fp origin HEAD'",
             "GIT_EXEC_PATH= git fp origin HEAD",
+            "GIT_EXEC_PATH=/tmp/helpers; git status",
+            "GIT_EXEC_PATH=/tmp/helpers; git fp origin HEAD",
+            "GIT_EXEC_PATH=; git status",
+            "GIT_EXEC_PATH=; git fp origin HEAD",
+            "GIT_EXEC_PATH=/tmp/helpers; sh -c 'git status'",
+            "GIT_EXEC_PATH=/tmp/helpers; sh -c 'git fp origin HEAD'",
+            "GIT_EXEC_PATH=; sh -c 'git status'",
+            "GIT_EXEC_PATH=; sh -c 'git fp origin HEAD'",
         ],
     )
     def test_classifiers_fail_closed_on_git_exec_path_environment(
@@ -2970,7 +2978,8 @@ class TestDefect130GitExecutionPath:
             "git --exec-path push -f origin HEAD",
             "git fp --exec-path=/tmp/helpers",
             "GIT_EXEC_PATH=/tmp/helpers printf ok",
-            "GIT_EXEC_PATH=/tmp/helpers; git status",
+            "unset GIT_EXEC_PATH; GIT_EXEC_PATH=/tmp/helpers; git status",
+            "export -n GIT_EXEC_PATH; GIT_EXEC_PATH=/tmp/helpers; git status",
             "export GIT_EXEC_PATH=/tmp/helpers; unset GIT_EXEC_PATH; git status",
             "export GIT_EXEC_PATH=/tmp/helpers; export -n GIT_EXEC_PATH; git status",
             "env -u GIT_EXEC_PATH git status",
@@ -2988,7 +2997,7 @@ class TestDefect130GitExecutionPath:
         assert _is_tracked_git_env_key("GIT_EXEC_PATH") is True
         assert _is_tracked_git_env_key("GIT_EXEC_PATH_EXTRA") is False
         assert INITIAL_ASSUMED_EXPORTED_KEYS == frozenset(
-            {"HOME", "XDG_CONFIG_HOME"}
+            {"HOME", "XDG_CONFIG_HOME", "GIT_EXEC_PATH"}
         )
 
         _validate_git_execution_path_selectors({})
@@ -3064,6 +3073,26 @@ class TestDefect130GitExecutionPath:
         )
         assert contains_forced_git_push(command) is False
         assert contains_forbidden_rm(command) is False
+
+    def test_mutation_effective_inherited_export_bypass_demonstration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        command = "GIT_EXEC_PATH=/tmp/helpers; git fp origin HEAD"
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                checker(command)
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook.INITIAL_ASSUMED_EXPORTED_KEYS",
+            frozenset({"HOME", "XDG_CONFIG_HOME"}),
+        )
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
+
+        monkeypatch.undo()
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                checker(command)
 
 
 class TestExtractInitialBacktickArgs:
@@ -10047,8 +10076,10 @@ class TestDefect120GitConfigSearchPathInputs:
         assert _is_tracked_git_env_key("GIT_CONFIG_NOSYSTEM") is False
         assert _is_tracked_git_env_key("HOMEPATH") is False
 
-        # Initial assumed exported keys include exactly HOME and XDG_CONFIG_HOME
-        assert INITIAL_ASSUMED_EXPORTED_KEYS == frozenset({"HOME", "XDG_CONFIG_HOME"})
+        # Initial assumed exported keys include HOME, XDG_CONFIG_HOME, and GIT_EXEC_PATH
+        assert INITIAL_ASSUMED_EXPORTED_KEYS == frozenset(
+            {"HOME", "XDG_CONFIG_HOME", "GIT_EXEC_PATH"}
+        )
 
         # Validation passes on absent / empty dict / safe variables
         _validate_git_config_user_search_path_inputs({})
@@ -10354,13 +10385,15 @@ class TestDefect121InheritedExportAttributeBypass:
     """Tests for Defect #121: Inherited export-attribute bypass on bare assignment (HOME and XDG_CONFIG_HOME)."""
 
     def test_shell_state_initial_assumed_export_contract(self) -> None:
-        """A fresh root _ShellState starts with HOME and XDG_CONFIG_HOME in exported_keys but absent from shell_vars and get_exported_env()."""
+        """A fresh root _ShellState starts with HOME, XDG_CONFIG_HOME, and GIT_EXEC_PATH in exported_keys but absent from shell_vars and get_exported_env()."""
         state = _ShellState()
         assert "HOME" in state.exported_keys
         assert "XDG_CONFIG_HOME" in state.exported_keys
+        assert "GIT_EXEC_PATH" in state.exported_keys
         assert state.exported_keys == INITIAL_ASSUMED_EXPORTED_KEYS
         assert "HOME" not in state.shell_vars
         assert "XDG_CONFIG_HOME" not in state.shell_vars
+        assert "GIT_EXEC_PATH" not in state.shell_vars
         assert state.shell_vars == {}
         assert state.get_exported_env() == {}
 
@@ -10407,6 +10440,7 @@ class TestDefect121InheritedExportAttributeBypass:
         copied = state.copy()
         assert "HOME" not in copied.exported_keys
         assert "XDG_CONFIG_HOME" in copied.exported_keys
+        assert "GIT_EXEC_PATH" in copied.exported_keys
         copied.apply_assignment("HOME", "/tmp/attacker", is_append=False)
         assert copied.get_exported_env() == {}
 

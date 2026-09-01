@@ -10,8 +10,12 @@ import sys
 import pytest
 
 from scripts.deny_force_push_hook import (
+    XARGS_INPUT_SENTINEL,
+    _clean_command_segment,
     _has_shell_expansion,
+    _tokenize_command,
     _tokenize_split_string,
+    _unwrap_xargs,
     contains_forbidden_rm,
     contains_forced_git_push,
 )
@@ -153,6 +157,12 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "true # comment\ngit push origin codex/c++",
     "true # comment\ncommand rm -r target",
     "pytest tests/unit",
+    # Safe xargs controls
+    "xargs echo hello </dev/null",
+    "xargs -0 printf %s </dev/null",
+    "xargs rm -- target </dev/null",
+    "xargs -I{} rm -- {} </dev/null",
+    "xargs -J% command rm -- % </dev/null",
 ]
 
 BLOCKED_RM_COMMANDS = [
@@ -217,6 +227,12 @@ ALLOWED_RM_COMMANDS = [
     "true # comment\ncommand rm -f target",
     "rm -- -rf",
     "rm -r -- -f",
+    # Safe xargs controls
+    "xargs echo hello </dev/null",
+    "xargs -0 printf %s </dev/null",
+    "xargs rm -- target </dev/null",
+    "xargs -I{} rm -- {} </dev/null",
+    "xargs -J% command rm -- % </dev/null",
 ]
 
 
@@ -261,6 +277,25 @@ class TestContainsForcedGitPush:
     )
     def test_shell_expansion_in_push_raises_value_error(self, command: str) -> None:
         with pytest.raises(ValueError, match="shell expansion"):
+            contains_forced_git_push(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "xargs git push -f origin HEAD </dev/null",
+            "xargs git push origin HEAD </dev/null",
+            "xargs -0 -n 1 command git push origin HEAD </dev/null",
+            "xargs -n1 -- git push --follow-tags origin HEAD </dev/null",
+            "/usr/bin/xargs env VAR=1 git push origin HEAD </dev/null",
+            "xargs -0n 1 git push -f origin HEAD </dev/null",
+            "xargs -0n1 git push -f origin HEAD </dev/null",
+            "xargs -rtP 2 git push origin HEAD </dev/null",
+            "xargs -I{} {} push -f origin HEAD </dev/null",
+            "xargs -I{} command {} push -f origin HEAD </dev/null",
+        ],
+    )
+    def test_xargs_git_push_raises_value_error(self, command: str) -> None:
+        with pytest.raises(ValueError, match=r"(shell expansion|xargs dynamic executable)"):
             contains_forced_git_push(command)
 
 
@@ -315,6 +350,38 @@ class TestContainsForbiddenRm:
     )
     def test_dynamic_operand_after_double_dash_is_allowed(self, command: str) -> None:
         assert contains_forbidden_rm(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "xargs rm -rf target </dev/null",
+            "xargs rm -f target </dev/null",
+            "xargs -I{} rm {} -- target </dev/null",
+            "xargs -J% command rm % -- target </dev/null",
+            "xargs -0n 1 rm -rf target </dev/null",
+            "xargs -0n1 rm -rf target </dev/null",
+            "xargs -rtP 2 rm -rf target </dev/null",
+            "xargs -I{} {} -rf target </dev/null",
+            "xargs -I{} command {} -rf target </dev/null",
+        ],
+    )
+    def test_xargs_rm_raises_value_error(self, command: str) -> None:
+        with pytest.raises(ValueError, match=r"(shell expansion|xargs dynamic executable)"):
+            contains_forbidden_rm(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "xargs echo hello </dev/null",
+            "xargs -0 printf %s </dev/null",
+            "xargs rm -- target </dev/null",
+            "xargs -I{} rm -- {} </dev/null",
+            "xargs -J% command rm -- % </dev/null",
+        ],
+    )
+    def test_xargs_safe_controls_return_false(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is False
+        assert contains_forced_git_push(command) is False
 
 
 class TestDenyForcePushHookCLI:
@@ -567,6 +634,53 @@ class TestDenyForcePushHookCLI:
         assert res.returncode == 0
         assert res.stdout == ""
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "xargs git push -f origin HEAD </dev/null",
+            "xargs git push origin HEAD </dev/null",
+            "xargs -0 -n 1 command git push origin HEAD </dev/null",
+            "xargs -n1 -- git push --follow-tags origin HEAD </dev/null",
+            "/usr/bin/xargs env VAR=1 git push origin HEAD </dev/null",
+            "xargs -0n 1 git push -f origin HEAD </dev/null",
+            "xargs -0n1 git push -f origin HEAD </dev/null",
+            "xargs -rtP 2 git push origin HEAD </dev/null",
+            "xargs -I{} {} push -f origin HEAD </dev/null",
+            "xargs -I{} command {} push -f origin HEAD </dev/null",
+            "xargs rm -rf target </dev/null",
+            "xargs rm -f target </dev/null",
+            "xargs -I{} rm {} -- target </dev/null",
+            "xargs -J% command rm % -- target </dev/null",
+            "xargs -0n 1 rm -rf target </dev/null",
+            "xargs -0n1 rm -rf target </dev/null",
+            "xargs -rtP 2 rm -rf target </dev/null",
+            "xargs -I{} {} -rf target </dev/null",
+            "xargs -I{} command {} -rf target </dev/null",
+        ],
+    )
+    def test_cli_xargs_uncertainty_fails_closed(self, command: str) -> None:
+        payload = json.dumps({"command": command})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "xargs echo hello </dev/null",
+            "xargs -0 printf %s </dev/null",
+            "xargs rm -- target </dev/null",
+            "xargs -I{} rm -- {} </dev/null",
+            "xargs -J% command rm -- % </dev/null",
+        ],
+    )
+    def test_cli_xargs_safe_controls_allowed(self, command: str) -> None:
+        payload = json.dumps({"command": command})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
 
 class TestHasShellExpansion:
     """Unit tests for _has_shell_expansion helper."""
@@ -604,6 +718,51 @@ class TestHasShellExpansion:
     )
     def test_allows_plain_tokens(self, token: str) -> None:
         assert _has_shell_expansion(token) is False
+
+
+class TestTokenizeCommand:
+    """Direct unit tests for _tokenize_command and brace handling."""
+
+    def test_xargs_braces_preserved_in_command_segment(self) -> None:
+        raw_segments = _tokenize_command("xargs -I{} rm {} -- target </dev/null")
+        assert raw_segments == [
+            ["xargs", "-I{}", "rm", "{}", "--", "target", "<", "/dev/null"]
+        ]
+        cleaned = _clean_command_segment(raw_segments[0])
+        assert cleaned == ["xargs", "-I{}", "rm", "{}", "--", "target"]
+
+    def test_standalone_shell_group_braces_split_and_denied(self) -> None:
+        segments = _tokenize_command("{ rm -rf target; }")
+        assert segments == [["rm", "-rf", "target"]]
+        assert contains_forbidden_rm("{ rm -rf target; }") is True
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ('echo "hello {world}"', [["echo", "hello {world}"]]),
+            ("echo 'hello {world}'", [["echo", "hello {world}"]]),
+            ('echo "{}"', [["echo", "{}"]]),
+            ("echo '{}'", [["echo", "{}"]]),
+            ("git push origin '+main'", [["git", "push", "origin", "+main"]]),
+            ("git push origin +main", [["git", "push", "origin", "+main"]]),
+            (
+                "git push origin +HEAD:main",
+                [["git", "push", "origin", "+HEAD", ":", "main"]],
+            ),
+            (
+                "xargs -J% command rm % -- target",
+                [["xargs", "-J%", "command", "rm", "%", "--", "target"]],
+            ),
+            (
+                "time -f %E git push -f origin HEAD",
+                [["time", "-f", "%E", "git", "push", "-f", "origin", "HEAD"]],
+            ),
+        ],
+    )
+    def test_quoted_braces_and_plus_percent_tokens_unaffected(
+        self, command: str, expected: list[list[str]]
+    ) -> None:
+        assert _tokenize_command(command) == expected
 
 
 class TestTokenizeSplitString:
@@ -656,6 +815,238 @@ class TestTokenizeSplitString:
     ) -> None:
         with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
             _tokenize_split_string(unsupported_str)
+
+
+class TestUnwrapXargs:
+    """Unit tests for _unwrap_xargs helper."""
+
+    def test_empty_tokens_returns_empty_list(self) -> None:
+        assert _unwrap_xargs([]) == []
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [
+            ["xargs"],
+            ["xargs", "-0"],
+            ["xargs", "-n", "1", "--"],
+            ["xargs", "-n1", "--"],
+            ["xargs", "--"],
+            ["xargs", "-I"],
+            ["xargs", "--replace"],
+            ["xargs", "-P"],
+        ],
+    )
+    def test_no_command_returns_empty_list(self, tokens: list[str]) -> None:
+        assert _unwrap_xargs(tokens) == []
+
+    def test_plain_xargs_appends_sentinel(self) -> None:
+        tokens = ["xargs", "git", "push", "-f", "origin", "HEAD"]
+        assert _unwrap_xargs(tokens) == [
+            "git",
+            "push",
+            "-f",
+            "origin",
+            "HEAD",
+            XARGS_INPUT_SENTINEL,
+        ]
+
+    def test_separate_short_options(self) -> None:
+        tokens = [
+            "xargs",
+            "-a", "file.txt",
+            "-d", "\n",
+            "-E", "EOF",
+            "-L", "10",
+            "-n", "5",
+            "-P", "4",
+            "-R", "2",
+            "-S", "256",
+            "-s", "1024",
+            "echo", "hi",
+        ]
+        assert _unwrap_xargs(tokens) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+    def test_attached_short_options(self) -> None:
+        tokens = [
+            "xargs",
+            "-afile.txt",
+            "-d\n",
+            "-EEOF",
+            "-L10",
+            "-n5",
+            "-P4",
+            "-R2",
+            "-S256",
+            "-s1024",
+            "echo", "hi",
+        ]
+        assert _unwrap_xargs(tokens) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+    def test_grouped_short_options_with_argument(self) -> None:
+        tokens = ["xargs", "-0n", "1", "git", "push"]
+        assert _unwrap_xargs(tokens) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_attached = ["xargs", "-0n1", "git", "push"]
+        assert _unwrap_xargs(tokens_attached) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_grouped = ["xargs", "-rtP", "2", "git", "push"]
+        assert _unwrap_xargs(tokens_grouped) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+    def test_optional_short_and_long_replace_default_braces(self) -> None:
+        tokens_i = ["xargs", "-i", "git", "push"]
+        assert _unwrap_xargs(tokens_i) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_i_placeholder = ["xargs", "-i", "rm", "{}", "--", "target"]
+        assert _unwrap_xargs(tokens_i_placeholder) == [
+            "rm",
+            XARGS_INPUT_SENTINEL,
+            "--",
+            "target",
+            XARGS_INPUT_SENTINEL,
+        ]
+
+        tokens_replace = ["xargs", "--replace", "git", "push"]
+        assert _unwrap_xargs(tokens_replace) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_replace_placeholder = ["xargs", "--replace", "rm", "{}", "--", "target"]
+        assert _unwrap_xargs(tokens_replace_placeholder) == [
+            "rm",
+            XARGS_INPUT_SENTINEL,
+            "--",
+            "target",
+            XARGS_INPUT_SENTINEL,
+        ]
+
+    def test_optional_replace_explicit_string(self) -> None:
+        tokens_i = ["xargs", "-i%", "echo", "%"]
+        assert _unwrap_xargs(tokens_i) == [
+            "echo",
+            XARGS_INPUT_SENTINEL,
+            XARGS_INPUT_SENTINEL,
+        ]
+
+        tokens_replace = ["xargs", "--replace=%", "echo", "%"]
+        assert _unwrap_xargs(tokens_replace) == [
+            "echo",
+            XARGS_INPUT_SENTINEL,
+            XARGS_INPUT_SENTINEL,
+        ]
+
+    def test_optional_short_e_and_l_do_not_consume_command_token(self) -> None:
+        tokens_e = ["xargs", "-e", "git", "push"]
+        assert _unwrap_xargs(tokens_e) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_l = ["xargs", "-l", "git", "push"]
+        assert _unwrap_xargs(tokens_l) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_e_att = ["xargs", "-eEOF", "echo", "hi"]
+        assert _unwrap_xargs(tokens_e_att) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+        tokens_l_att = ["xargs", "-l10", "echo", "hi"]
+        assert _unwrap_xargs(tokens_l_att) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+    def test_optional_long_eof_and_max_lines_semantics(self) -> None:
+        tokens_equals = ["xargs", "--eof=END", "--max-lines=2", "git", "push"]
+        assert _unwrap_xargs(tokens_equals) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_bare_eof = ["xargs", "--eof", "git", "push"]
+        assert _unwrap_xargs(tokens_bare_eof) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+        tokens_bare_lines = ["xargs", "--max-lines", "git", "push"]
+        assert _unwrap_xargs(tokens_bare_lines) == ["git", "push", XARGS_INPUT_SENTINEL]
+
+    def test_long_options_separate(self) -> None:
+        tokens = [
+            "xargs",
+            "--arg-file", "file.txt",
+            "--delimiter", "\n",
+            "--max-args", "5",
+            "--max-procs", "4",
+            "--max-chars", "1024",
+            "--process-slot-var", "SLOT",
+            "echo", "hi",
+        ]
+        assert _unwrap_xargs(tokens) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+    def test_long_options_equals(self) -> None:
+        tokens = [
+            "xargs",
+            "--arg-file=file.txt",
+            "--delimiter=\n",
+            "--eof=EOF",
+            "--max-lines=10",
+            "--max-args=5",
+            "--max-procs=4",
+            "--max-chars=1024",
+            "--process-slot-var=SLOT",
+            "echo", "hi",
+        ]
+        assert _unwrap_xargs(tokens) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+    def test_no_arg_options_skipped(self) -> None:
+        tokens = [
+            "xargs",
+            "-0",
+            "-r",
+            "-t",
+            "-x",
+            "-p",
+            "-o",
+            "--null",
+            "--no-run-if-empty",
+            "--verbose",
+            "echo", "hi",
+        ]
+        assert _unwrap_xargs(tokens) == ["echo", "hi", XARGS_INPUT_SENTINEL]
+
+    def test_double_dash_terminates_options(self) -> None:
+        tokens = ["xargs", "-n1", "--", "git", "push", "--follow-tags", "origin", "HEAD"]
+        assert _unwrap_xargs(tokens) == [
+            "git",
+            "push",
+            "--follow-tags",
+            "origin",
+            "HEAD",
+            XARGS_INPUT_SENTINEL,
+        ]
+
+    @pytest.mark.parametrize(
+        ("tokens", "expected"),
+        [
+            (
+                ["xargs", "-I{}", "rm", "{}", "--", "target"],
+                ["rm", XARGS_INPUT_SENTINEL, "--", "target", XARGS_INPUT_SENTINEL],
+            ),
+            (
+                ["xargs", "-I", "{}", "rm", "{}", "--", "target"],
+                ["rm", XARGS_INPUT_SENTINEL, "--", "target", XARGS_INPUT_SENTINEL],
+            ),
+            (
+                ["xargs", "-J%", "rm", "%", "--", "target"],
+                ["rm", XARGS_INPUT_SENTINEL, "--", "target", XARGS_INPUT_SENTINEL],
+            ),
+            (
+                ["xargs", "-J", "%", "rm", "%", "--", "target"],
+                ["rm", XARGS_INPUT_SENTINEL, "--", "target", XARGS_INPUT_SENTINEL],
+            ),
+            (
+                ["xargs", "--replace={}", "rm", "{}", "--", "target"],
+                ["rm", XARGS_INPUT_SENTINEL, "--", "target", XARGS_INPUT_SENTINEL],
+            ),
+            (
+                ["xargs", "--replace", "rm", "{}", "--", "target"],
+                ["rm", XARGS_INPUT_SENTINEL, "--", "target", XARGS_INPUT_SENTINEL],
+            ),
+            (
+                ["xargs", "-I{}", "rm", "--", "{}"],
+                ["rm", "--", XARGS_INPUT_SENTINEL, XARGS_INPUT_SENTINEL],
+            ),
+        ],
+    )
+    def test_replacement_placeholders_substituted_and_appended(
+        self, tokens: list[str], expected: list[str]
+    ) -> None:
+        assert _unwrap_xargs(tokens) == expected
 
 
 class TestSettingsJsonContract:

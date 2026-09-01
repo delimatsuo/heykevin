@@ -68,6 +68,142 @@ SHELL_BINARIES = {
     "dash",
 }
 
+XARGS_REQ_SHORT_OPTS = {
+    "a",
+    "d",
+    "E",
+    "I",
+    "J",
+    "L",
+    "n",
+    "P",
+    "R",
+    "S",
+    "s",
+}
+
+XARGS_OPT_SHORT_OPTS = {
+    "e",
+    "i",
+    "l",
+}
+
+XARGS_REQ_LONG_OPTS = {
+    "--arg-file",
+    "--delimiter",
+    "--max-args",
+    "--max-procs",
+    "--max-chars",
+    "--process-slot-var",
+}
+
+XARGS_OPT_LONG_OPTS = {
+    "--eof",
+    "--replace",
+    "--max-lines",
+}
+
+XARGS_INPUT_SENTINEL = "$XARGS_INPUT"
+
+
+def _unwrap_xargs(tokens: list[str]) -> list[str]:
+    """Unwrap an xargs command segment into wrapped command tokens with dynamic sentinels.
+
+    Parses portable GNU and BSD xargs options, records replacement strings (-I, -J, -i, --replace),
+    replaces placeholder occurrences in wrapped command tokens with a dynamic sentinel,
+    and appends a dynamic sentinel to model stdin-derived arguments.
+
+    Returns an empty list if no wrapped command is present.
+    """
+    if not tokens:
+        return []
+
+    idx = 1
+    repl_strings: list[str] = []
+
+    while idx < len(tokens):
+        token = tokens[idx]
+
+        if token == "--":
+            idx += 1
+            break
+
+        if token.startswith("--"):
+            if "=" in token:
+                opt_name, opt_val = token.split("=", 1)
+                if opt_name in XARGS_REQ_LONG_OPTS:
+                    idx += 1
+                    continue
+                elif opt_name in XARGS_OPT_LONG_OPTS:
+                    if opt_name == "--replace" and opt_val:
+                        repl_strings.append(opt_val)
+                    idx += 1
+                    continue
+                else:
+                    idx += 1
+                    continue
+            else:
+                if token in XARGS_REQ_LONG_OPTS:
+                    idx += 1
+                    if idx < len(tokens):
+                        idx += 1
+                    continue
+                elif token in XARGS_OPT_LONG_OPTS:
+                    if token == "--replace":
+                        repl_strings.append("{}")
+                    idx += 1
+                    continue
+                else:
+                    idx += 1
+                    continue
+
+        if token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                char = token[j]
+                if char in XARGS_REQ_SHORT_OPTS:
+                    remainder = token[j + 1 :]
+                    if remainder:
+                        if char in {"I", "J"}:
+                            repl_strings.append(remainder)
+                    else:
+                        idx += 1
+                        if idx < len(tokens):
+                            opt_val = tokens[idx]
+                            if char in {"I", "J"} and opt_val:
+                                repl_strings.append(opt_val)
+                    break
+                elif char in XARGS_OPT_SHORT_OPTS:
+                    remainder = token[j + 1 :]
+                    if remainder:
+                        if char == "i":
+                            repl_strings.append(remainder)
+                    else:
+                        if char == "i":
+                            repl_strings.append("{}")
+                    break
+                else:
+                    j += 1
+            idx += 1
+            continue
+
+        break
+
+    wrapped_cmd = tokens[idx:]
+    if not wrapped_cmd:
+        return []
+
+    result: list[str] = []
+    for tok in wrapped_cmd:
+        replaced = tok
+        for repl in repl_strings:
+            if repl:
+                replaced = replaced.replace(repl, XARGS_INPUT_SENTINEL)
+        result.append(replaced)
+
+    result.append(XARGS_INPUT_SENTINEL)
+    return result
+
 
 def _strip_comments_preserving_newlines(command: str) -> str:
     """Strip unquoted shell comments while preserving newline command boundaries.
@@ -162,7 +298,7 @@ def _tokenize_command(command: str) -> list[list[str]]:
     lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"
     lexer.commenters = ""
-    lexer.wordchars += "+%"
+    lexer.wordchars += "+%{}"
 
     tokens = list(lexer)
     if not tokens:
@@ -329,6 +465,11 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
         return False
 
     while tokens:
+        if XARGS_INPUT_SENTINEL in tokens[0]:
+            raise ValueError(
+                f"xargs dynamic executable is not supported: {tokens[0]!r}"
+            )
+
         cmd_word = os.path.basename(tokens[0])
 
         if cmd_word == "sudo":
@@ -484,6 +625,10 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
                     break
             continue
 
+        if cmd_word == "xargs":
+            tokens = _unwrap_xargs(tokens)
+            continue
+
         if cmd_word in SHELL_BINARIES:
             for i in range(1, len(tokens) - 1):
                 token = tokens[i]
@@ -506,6 +651,11 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
 
     if not tokens:
         return False
+
+    if XARGS_INPUT_SENTINEL in tokens[0]:
+        raise ValueError(
+            f"xargs dynamic executable is not supported: {tokens[0]!r}"
+        )
 
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary != "git":
@@ -549,6 +699,11 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
         return False
 
     while tokens:
+        if XARGS_INPUT_SENTINEL in tokens[0]:
+            raise ValueError(
+                f"xargs dynamic executable is not supported: {tokens[0]!r}"
+            )
+
         cmd_word = os.path.basename(tokens[0])
 
         if cmd_word == "sudo":
@@ -704,6 +859,10 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
                     break
             continue
 
+        if cmd_word == "xargs":
+            tokens = _unwrap_xargs(tokens)
+            continue
+
         if cmd_word in SHELL_BINARIES:
             for i in range(1, len(tokens) - 1):
                 token = tokens[i]
@@ -726,6 +885,11 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
 
     if not tokens:
         return False
+
+    if XARGS_INPUT_SENTINEL in tokens[0]:
+        raise ValueError(
+            f"xargs dynamic executable is not supported: {tokens[0]!r}"
+        )
 
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary != "rm":

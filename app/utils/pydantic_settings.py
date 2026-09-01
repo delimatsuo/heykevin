@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from pydantic_settings import BaseSettings
+
 KEVIN_DISABLE_DOTENV = "KEVIN_DISABLE_DOTENV"
 
 
@@ -19,3 +21,11 @@ def dotenv_settings_kwargs() -> dict[str, Any]:
     if os.environ.get(KEVIN_DISABLE_DOTENV) == "1":
         return {"_env_file": None}
     return {}
+
+
+class DotenvProtectedBaseSettings(BaseSettings):
+    """BaseSettings subclass enforcing dotenv protection when KEVIN_DISABLE_DOTENV=1."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.update(dotenv_settings_kwargs())
+        super().__init__(*args, **kwargs)

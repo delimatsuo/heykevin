@@ -7,10 +7,8 @@ import logging
 import os
 import re
 
-from pydantic_settings import BaseSettings
-
 from app.utils.logging import get_logger
-from app.utils.pydantic_settings import dotenv_settings_kwargs
+from app.utils.pydantic_settings import DotenvProtectedBaseSettings
 
 logger = get_logger(__name__)
 
@@ -31,7 +29,7 @@ PUBLIC_DEMO_BREAKER_TWILIO_HTTP_TIMEOUT_SECONDS = 2.0
 PUBLIC_DEMO_BREAKER_SUSPEND_TIMEOUT_SECONDS = 3.0
 
 
-class PublicDemoBreakerSettings(BaseSettings):
+class PublicDemoBreakerSettings(DotenvProtectedBaseSettings):
     """Minimal settings surface for the private, parent-authority runtime."""
 
     environment: str = ""
@@ -50,7 +48,7 @@ class PublicDemoBreakerSettings(BaseSettings):
 
 
 def get_breaker_settings() -> PublicDemoBreakerSettings:
-    return PublicDemoBreakerSettings(**dotenv_settings_kwargs())
+    return PublicDemoBreakerSettings()
 
 
 breaker_settings = get_breaker_settings()

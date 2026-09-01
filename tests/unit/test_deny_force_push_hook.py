@@ -9,7 +9,11 @@ import sys
 
 import pytest
 
-from scripts.deny_force_push_hook import contains_forbidden_rm, contains_forced_git_push
+from scripts.deny_force_push_hook import (
+    _tokenize_split_string,
+    contains_forbidden_rm,
+    contains_forced_git_push,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HOOK_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "deny_force_push_hook.py"
@@ -95,6 +99,12 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     "zsh -c 'git push -f'",
     "ksh -c 'git push -f'",
     "dash -c 'git push -f'",
+    # GNU env split-string options
+    "env -S 'git push -f origin main'",
+    "env --split-string 'git push --force origin main'",
+    "env --split-string='git push -unf origin HEAD'",
+    "env -S 'VAR=1 git push origin +HEAD:main'",
+    "env -S 'VAR=1' git push -f origin main",
 ]
 
 ALLOWED_GIT_PUSH_COMMANDS = [
@@ -103,6 +113,9 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "git push origin feature/--force-docs",
     "git push origin codex/c++",
     # Safe wrapper controls
+    "env -S 'git push origin codex/new-feature'",
+    "env --split-string='git push --follow-tags origin HEAD'",
+    "env -S 'VAR=1' git push -u origin HEAD",
     "timeout 30 git push --follow-tags origin HEAD",
     "nice git push origin codex/new-feature",
     "stdbuf -oL git push origin codex/c++",
@@ -173,9 +186,18 @@ BLOCKED_RM_COMMANDS = [
     "if true; then rm -rf target; fi",
     "(rm -rf target)",
     "{ rm -rf target; }",
+    # GNU env split-string options
+    "env -S 'command rm -rf target'",
+    "env --split-string 'rm -r -f target'",
+    "env --split-string='VAR=1 /bin/rm --recursive --force target'",
+    "env -S 'VAR=1' command rm -rf target",
 ]
 
 ALLOWED_RM_COMMANDS = [
+    # GNU env split-string safe controls
+    "env -S 'command rm -r target'",
+    "env --split-string='rm -f target'",
+    "env -S 'VAR=1' command rm -r target",
     "echo 'rm -rf target'",
     "printf '%s' 'rm -rf target'",
     "command rm -r target",
@@ -216,6 +238,16 @@ class TestContainsForcedGitPush:
         with pytest.raises(ValueError):
             contains_forced_git_push("git push 'unclosed string")
 
+    def test_unclosed_split_string_quote_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push("env -S 'git push \"unclosed string'")
+
+    def test_split_string_with_backslash_separator_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
+            contains_forced_git_push("env -S 'git\\_push\\_-f\\_origin\\_main'")
+        with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
+            contains_forced_git_push("env --split-string 'git\\_push\\_-f\\_origin\\_main'")
+
 
 class TestContainsForbiddenRm:
     """Pure-function tests for contains_forbidden_rm."""
@@ -235,6 +267,16 @@ class TestContainsForbiddenRm:
     def test_unclosed_quote_raises_value_error(self) -> None:
         with pytest.raises(ValueError):
             contains_forbidden_rm("rm -rf 'unclosed string")
+
+    def test_unclosed_split_string_quote_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            contains_forbidden_rm("env -S 'rm -rf \"unclosed string'")
+
+    def test_split_string_with_backslash_separator_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
+            contains_forbidden_rm("env -S 'command\\_rm\\_-rf\\_target'")
+        with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
+            contains_forbidden_rm("env --split-string 'command\\_rm\\_-rf\\_target'")
 
 
 class TestDenyForcePushHookCLI:
@@ -325,6 +367,30 @@ class TestDenyForcePushHookCLI:
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
+    def test_cli_denies_split_string_force_push(self) -> None:
+        payload = json.dumps({"toolInput": {"command": "env -S 'git push -f origin main'"}})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PreToolUse"
+        assert hook_out["permissionDecision"] == "deny"
+        assert "no-force-push" in hook_out["permissionDecisionReason"].lower()
+
+    def test_cli_denies_split_string_rm(self) -> None:
+        payload = json.dumps(
+            {"toolInput": {"command": "env --split-string='command rm -rf target'"}}
+        )
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PreToolUse"
+        assert hook_out["permissionDecision"] == "deny"
+        assert "destructive" in hook_out["permissionDecisionReason"].lower()
+
     def test_cli_allows_safe_push(self) -> None:
         payload = json.dumps({"toolInput": {"command": "git push origin main"}})
         res = self._run_hook(payload)
@@ -349,6 +415,12 @@ class TestDenyForcePushHookCLI:
             "printf '%s' 'rm -rf target'",
             "true # comment\ngit push origin codex/c++",
             "true # comment\ncommand rm -r target",
+            "env -S 'git push origin codex/new-feature'",
+            "env --split-string='git push --follow-tags origin HEAD'",
+            "env -S 'command rm -r target'",
+            "env --split-string='rm -f target'",
+            "env -S 'VAR=1' git push -u origin HEAD",
+            "env -S 'VAR=1' command rm -r target",
         ],
     )
     def test_cli_allows_safe_mutation_controls(self, cmd: str) -> None:
@@ -384,6 +456,92 @@ class TestDenyForcePushHookCLI:
         res = self._run_hook(payload)
         assert res.returncode == 2
         assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_malformed_split_string_fails_closed(self) -> None:
+        payload = json.dumps({"command": "env -S 'git push \"unclosed string'"})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_env_split_string_backslash_separator_git_push_fails_closed(self) -> None:
+        payload = json.dumps({"command": "env -S 'git\\_push\\_-f\\_origin\\_main'"})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_env_split_string_backslash_separator_rm_fails_closed(self) -> None:
+        payload = json.dumps(
+            {"command": "env --split-string 'command\\_rm\\_-rf\\_target'"}
+        )
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_env_split_string_equals_backslash_separator_rm_fails_closed(self) -> None:
+        payload = json.dumps(
+            {"command": "env --split-string='command\\_rm\\_-rf\\_target'"}
+        )
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_env_split_string_dollar_brace_expansion_fails_closed(self) -> None:
+        payload = json.dumps({"command": "env -S '${CMD:-git} push -f origin main'"})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+
+class TestTokenizeSplitString:
+    """Direct unit tests for _tokenize_split_string helper."""
+
+    def test_ordinary_plain_strings_tokenize_successfully(self) -> None:
+        assert _tokenize_split_string("git push origin main") == [
+            "git",
+            "push",
+            "origin",
+            "main",
+        ]
+        assert _tokenize_split_string("command rm -r target") == [
+            "command",
+            "rm",
+            "-r",
+            "target",
+        ]
+        assert _tokenize_split_string("VAR=1 git push -u origin HEAD") == [
+            "VAR=1",
+            "git",
+            "push",
+            "-u",
+            "origin",
+            "HEAD",
+        ]
+        assert _tokenize_split_string("git push 'origin' \"main\"") == [
+            "git",
+            "push",
+            "origin",
+            "main",
+        ]
+
+    @pytest.mark.parametrize(
+        "unsupported_str",
+        [
+            "git\\_push\\_-f\\_origin\\_main",
+            "command\\_rm\\_-rf\\_target",
+            "git\\ push",
+            "git\\npush",
+            "$VAR",
+            "${CMD}",
+            "${CMD:-git} push -f origin main",
+            "git push $BRANCH",
+            "VAR=$VAL git push",
+        ],
+    )
+    def test_backslash_or_dollar_strings_raise_value_error(
+        self, unsupported_str: str
+    ) -> None:
+        with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
+            _tokenize_split_string(unsupported_str)
 
 
 class TestSettingsJsonContract:

@@ -171,6 +171,19 @@ def _tokenize_command(command: str) -> list[list[str]]:
     return _split_into_commands(tokens)
 
 
+def _tokenize_split_string(split_str: str) -> list[str]:
+    """Tokenize an env split-string argument into individual tokens.
+
+    Raises ValueError if quotation or escaping is malformed, or if the string
+    contains backslash escapes or dollar expansions outside the supported subset.
+    """
+    if "\\" in split_str or "$" in split_str:
+        raise ValueError(
+            "env split-string containing backslash escapes or variable expansions is not supported"
+        )
+    return shlex.split(split_str, posix=True)
+
+
 def _is_var_assignment(token: str) -> bool:
     """Check if token is an environment variable assignment like FOO=bar."""
     if "=" not in token:
@@ -323,14 +336,32 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
                 if t == "--":
                     tokens.pop(0)
                     break
-                if t in {"-u", "-C", "-S"}:
+                if t in {"-S", "--split-string"}:
+                    tokens.pop(0)
+                    if tokens:
+                        raw_val = tokens.pop(0)
+                        split_tokens = _tokenize_split_string(raw_val)
+                        tokens = split_tokens + tokens
+                    continue
+                elif t.startswith("--split-string="):
+                    tokens.pop(0)
+                    raw_val = t.split("=", 1)[1]
+                    split_tokens = _tokenize_split_string(raw_val)
+                    tokens = split_tokens + tokens
+                    continue
+                elif t.startswith("-S") and len(t) > 2:
+                    tokens.pop(0)
+                    raw_val = t[2:]
+                    split_tokens = _tokenize_split_string(raw_val)
+                    tokens = split_tokens + tokens
+                    continue
+                elif t in {"-u", "-C", "--unset", "--chdir"}:
                     tokens.pop(0)
                     if tokens:
                         tokens.pop(0)
                 elif (
                     t.startswith("--unset=")
                     or t.startswith("--chdir=")
-                    or t.startswith("--split-string=")
                 ):
                     tokens.pop(0)
                 elif t.startswith("-"):
@@ -525,14 +556,32 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
                 if t == "--":
                     tokens.pop(0)
                     break
-                if t in {"-u", "-C", "-S"}:
+                if t in {"-S", "--split-string"}:
+                    tokens.pop(0)
+                    if tokens:
+                        raw_val = tokens.pop(0)
+                        split_tokens = _tokenize_split_string(raw_val)
+                        tokens = split_tokens + tokens
+                    continue
+                elif t.startswith("--split-string="):
+                    tokens.pop(0)
+                    raw_val = t.split("=", 1)[1]
+                    split_tokens = _tokenize_split_string(raw_val)
+                    tokens = split_tokens + tokens
+                    continue
+                elif t.startswith("-S") and len(t) > 2:
+                    tokens.pop(0)
+                    raw_val = t[2:]
+                    split_tokens = _tokenize_split_string(raw_val)
+                    tokens = split_tokens + tokens
+                    continue
+                elif t in {"-u", "-C", "--unset", "--chdir"}:
                     tokens.pop(0)
                     if tokens:
                         tokens.pop(0)
                 elif (
                     t.startswith("--unset=")
                     or t.startswith("--chdir=")
-                    or t.startswith("--split-string=")
                 ):
                     tokens.pop(0)
                 elif t.startswith("-"):

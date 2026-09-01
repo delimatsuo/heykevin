@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from scripts.deny_force_push_hook import (
+    _has_shell_expansion,
     _tokenize_split_string,
     contains_forbidden_rm,
     contains_forced_git_push,
@@ -248,6 +249,20 @@ class TestContainsForcedGitPush:
         with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
             contains_forced_git_push("env --split-string 'git\\_push\\_-f\\_origin\\_main'")
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'FORCE=-f; git push "$FORCE" origin HEAD',
+            'git push "${FORCE}" origin HEAD',
+            'git push origin "$REFSPEC"',
+            'git push "$(printf -- -f)" origin HEAD',
+            "git push `printf -- -f` origin HEAD",
+        ],
+    )
+    def test_shell_expansion_in_push_raises_value_error(self, command: str) -> None:
+        with pytest.raises(ValueError, match="shell expansion"):
+            contains_forced_git_push(command)
+
 
 class TestContainsForbiddenRm:
     """Pure-function tests for contains_forbidden_rm."""
@@ -277,6 +292,29 @@ class TestContainsForbiddenRm:
             contains_forbidden_rm("env -S 'command\\_rm\\_-rf\\_target'")
         with pytest.raises(ValueError, match="backslash escapes or variable expansions"):
             contains_forbidden_rm("env --split-string 'command\\_rm\\_-rf\\_target'")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'OPTS=-rf; rm "$OPTS" target',
+            'rm "${OPTS}" target',
+            'rm "$(printf -- -rf)" target',
+            "rm `printf -- -rf` target",
+        ],
+    )
+    def test_shell_expansion_in_rm_raises_value_error(self, command: str) -> None:
+        with pytest.raises(ValueError, match="shell expansion"):
+            contains_forbidden_rm(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'rm -- "$TARGET"',
+            'rm -r -- "$TARGET"',
+        ],
+    )
+    def test_dynamic_operand_after_double_dash_is_allowed(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is False
 
 
 class TestDenyForcePushHookCLI:
@@ -490,6 +528,82 @@ class TestDenyForcePushHookCLI:
         res = self._run_hook(payload)
         assert res.returncode == 2
         assert "Shell tokenization failed" in res.stderr
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'FORCE=-f; git push "$FORCE" origin HEAD',
+            'git push "${FORCE}" origin HEAD',
+            'git push origin "$REFSPEC"',
+            'git push "$(printf -- -f)" origin HEAD',
+            "git push `printf -- -f` origin HEAD",
+            'OPTS=-rf; rm "$OPTS" target',
+            'rm "${OPTS}" target',
+            'rm "$(printf -- -rf)" target',
+            "rm `printf -- -rf` target",
+        ],
+    )
+    def test_cli_shell_expansion_fails_closed(self, command: str) -> None:
+        payload = json.dumps({"command": command})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git push origin main",
+            'rm -- "$TARGET"',
+            'rm -r -- "$TARGET"',
+            'echo "$VALUE"',
+        ],
+    )
+    def test_cli_allows_safe_controls_with_dynamic_operands_or_unrelated(
+        self, command: str
+    ) -> None:
+        payload = json.dumps({"command": command})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+
+class TestHasShellExpansion:
+    """Unit tests for _has_shell_expansion helper."""
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "$VAR",
+            "${VAR}",
+            "$((1+1))",
+            "$(cmd)",
+            "$1",
+            "$@",
+            "$?",
+            "`cmd`",
+            "foo$bar",
+            "foo`bar`",
+        ],
+    )
+    def test_detects_expansion_markers(self, token: str) -> None:
+        assert _has_shell_expansion(token) is True
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "main",
+            "origin",
+            "-f",
+            "--force",
+            "+main",
+            "--",
+            "target",
+            "feature/test-1",
+        ],
+    )
+    def test_allows_plain_tokens(self, token: str) -> None:
+        assert _has_shell_expansion(token) is False
 
 
 class TestTokenizeSplitString:

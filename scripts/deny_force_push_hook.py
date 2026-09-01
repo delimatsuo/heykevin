@@ -245,8 +245,19 @@ def _clean_command_segment(tokens: list[str]) -> list[str]:
     return cleaned
 
 
+def _has_shell_expansion(token: str) -> bool:
+    """Check if token contains unsupported shell expansion markers ($ or `)."""
+    return "$" in token or "`" in token
+
+
 def _is_forced_push_args(push_args: list[str]) -> bool:
     """Check if arguments to 'git push' indicate a forced push."""
+    for arg in push_args:
+        if _has_shell_expansion(arg):
+            raise ValueError(
+                f"git push argument containing shell expansion is not supported: {arg!r}"
+            )
+
     after_double_dash = False
 
     for arg in push_args:
@@ -270,6 +281,16 @@ def _is_forced_push_args(push_args: list[str]) -> bool:
 
 def _is_forbidden_rm_args(rm_args: list[str]) -> bool:
     """Check if arguments to 'rm' combine recursive and force semantics in any order or grouping."""
+    for arg in rm_args:
+        if arg == "--":
+            # Any arguments after '--' are filenames/operands, not flags
+            break
+
+        if _has_shell_expansion(arg):
+            raise ValueError(
+                f"rm argument containing shell expansion before '--' is not supported: {arg!r}"
+            )
+
     has_recursive = False
     has_force = False
 

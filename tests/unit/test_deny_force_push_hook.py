@@ -23,6 +23,8 @@ from scripts.deny_force_push_hook import (
     _apply_unset_cmd,
     _build_git_config_env,
     _clean_command_segment,
+    _CommandEnvironment,
+    _extract_find_action_specs,
     _extract_find_actions,
     _extract_initial_backtick_args,
     _extract_initial_dynamic_args,
@@ -2213,9 +2215,7 @@ class TestFindExecutionActions:
         "command",
         [
             "find /tmp/tree -exec git push -f origin HEAD +",
-            "find /tmp/tree -execdir git push -fu origin main +",
             "find /tmp/tree -ok /usr/bin/git push --force origin HEAD +",
-            "find /tmp/tree -okdir git push origin +main +",
             "find /tmp/tree -exec git -c alias.fp='push -f' fp origin HEAD +",
             "find /tmp/tree -exec sh -c 'git push -f origin HEAD' {} +",
             "sudo find /tmp/tree -exec git push -f origin HEAD +",
@@ -2226,6 +2226,107 @@ class TestFindExecutionActions:
     )
     def test_contains_forced_git_push_blocks_find_actions(self, command: str) -> None:
         assert contains_forced_git_push(command) is True
+
+    def test_extract_find_action_specs_retains_action_kind(self) -> None:
+        tokens = [
+            "find",
+            "/tmp/tree",
+            "-exec",
+            "echo",
+            "{}",
+            ";",
+            "-execdir",
+            "git",
+            "fp",
+            "+",
+            "-okdir",
+            "sh",
+            "-c",
+            "git fp",
+            "{}",
+            ";",
+        ]
+        assert _extract_find_action_specs(tokens) == [
+            ("-exec", ["echo", FIND_INPUT_SENTINEL]),
+            ("-execdir", ["git", "fp"]),
+            ("-okdir", ["sh", "-c", "git fp", FIND_INPUT_SENTINEL]),
+        ]
+        assert _extract_find_actions(tokens) == [
+            ["echo", FIND_INPUT_SENTINEL],
+            ["git", "fp"],
+            ["sh", "-c", "git fp", FIND_INPUT_SENTINEL],
+        ]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -execdir git fp origin HEAD \\;",
+            "find /tmp/tree -execdir git fp origin HEAD +",
+            "find /tmp/tree -okdir git fp origin HEAD \\;",
+            "find /tmp/tree -okdir sh -c 'git fp origin HEAD' {} \\;",
+            "find /tmp/tree -execdir git push -fu origin main +",
+            "find /tmp/tree -okdir git push origin +main +",
+        ],
+    )
+    def test_find_directory_actions_fail_closed_at_git_boundary(
+        self, command: str
+    ) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=r"changed working directory"):
+                checker(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -exec git fp origin HEAD \\;",
+            "find /tmp/tree -ok git fp origin HEAD \\;",
+            "find /tmp/tree -execdir printf ok \\;",
+            "find /tmp/tree -okdir sh -c 'printf ok' {} \\;",
+        ],
+    )
+    def test_find_directory_action_safe_controls(self, command: str) -> None:
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
+
+    def test_find_directory_action_does_not_mutate_outer_environment(self) -> None:
+        inherited = _CommandEnvironment(
+            {"GIT_CONFIG_COUNT": "0"}, repository_context_changed=False
+        )
+        original = dict(inherited)
+
+        with pytest.raises(ValueError, match=r"changed working directory"):
+            contains_forced_git_push(
+                "find /tmp/tree -execdir sh -c 'git fp origin HEAD' {} \\;",
+                _inherited_env=inherited,
+            )
+
+        assert inherited == original
+        assert inherited.repository_context_changed is False
+
+    def test_find_directory_action_marker_is_mutation_effective(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        command = "find /tmp/tree -execdir git fp origin HEAD \\;"
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=r"changed working directory"):
+                checker(command)
+
+        original = _extract_find_action_specs
+
+        def downgrade_directory_actions(
+            tokens: list[str],
+        ) -> list[tuple[str, list[str]]]:
+            return [
+                ("-exec" if kind in {"-execdir", "-okdir"} else kind, action)
+                for kind, action in original(tokens)
+            ]
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._extract_find_action_specs",
+            downgrade_directory_actions,
+        )
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
 
     @pytest.mark.parametrize(
         "command",

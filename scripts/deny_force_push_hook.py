@@ -163,23 +163,24 @@ def _restore_sentinels(token: str) -> str:
     )
 
 
-def _extract_find_actions(tokens: list[str]) -> list[list[str]]:
-    """Extract command actions from find arguments.
+def _extract_find_action_specs(tokens: list[str]) -> list[tuple[str, list[str]]]:
+    """Extract find action kinds together with their command tokens.
 
     Recognizes find execution actions (-exec, -execdir, -ok, -okdir).
     An action command starts immediately after the action flag and ends at '+', ';',
     or the end of the current token segment.
 
     Occurrences of '{}' in action arguments are replaced with FIND_INPUT_SENTINEL.
-    Returns a list of command token lists.
+    Returns a list of (action kind, command token list) tuples.
     """
-    actions: list[list[str]] = []
+    actions: list[tuple[str, list[str]]] = []
     i = 1
     n = len(tokens)
 
     while i < n:
         tok = tokens[i]
         if tok in FIND_EXEC_ACTIONS:
+            action_kind = tok
             i += 1
             cmd_tokens: list[str] = []
             while i < n and tokens[i] not in {"+", ";", _LITERAL_SEMICOLON_SENTINEL}:
@@ -192,11 +193,16 @@ def _extract_find_actions(tokens: list[str]) -> list[list[str]]:
                     _restore_sentinels(t).replace("{}", FIND_INPUT_SENTINEL)
                     for t in cmd_tokens
                 ]
-                actions.append(replaced)
+                actions.append((action_kind, replaced))
         else:
             i += 1
 
     return actions
+
+
+def _extract_find_actions(tokens: list[str]) -> list[list[str]]:
+    """Extract find command actions while preserving the legacy helper contract."""
+    return [action for _kind, action in _extract_find_action_specs(tokens)]
 
 
 def _extract_initial_backtick_args(tokens: list[str]) -> list[str] | None:
@@ -4658,11 +4664,18 @@ def _inspect_single_command_git(
     cmd_word = os.path.basename(tokens[0])
 
     if cmd_word == "find":
-        actions = _extract_find_actions(tokens)
+        actions = _extract_find_action_specs(tokens)
         if not actions:
             return False
-        for action in actions:
-            if _inspect_single_command_git(action, _depth=_depth + 1, _inherited_env=env_vars):
+        for action_kind, action in actions:
+            action_env = env_vars
+            if action_kind in {"-execdir", "-okdir"}:
+                action_env = _CommandEnvironment(
+                    dict(env_vars), repository_context_changed=True
+                )
+            if _inspect_single_command_git(
+                action, _depth=_depth + 1, _inherited_env=action_env
+            ):
                 return True
         return False
 
@@ -4759,11 +4772,18 @@ def _inspect_single_command_rm(
     cmd_word = os.path.basename(tokens[0])
 
     if cmd_word == "find":
-        actions = _extract_find_actions(tokens)
+        actions = _extract_find_action_specs(tokens)
         if not actions:
             return False
-        for action in actions:
-            if _inspect_single_command_rm(action, _depth=_depth + 1, _inherited_env=env_vars):
+        for action_kind, action in actions:
+            action_env = env_vars
+            if action_kind in {"-execdir", "-okdir"}:
+                action_env = _CommandEnvironment(
+                    dict(env_vars), repository_context_changed=True
+                )
+            if _inspect_single_command_rm(
+                action, _depth=_depth + 1, _inherited_env=action_env
+            ):
                 return True
         return False
 

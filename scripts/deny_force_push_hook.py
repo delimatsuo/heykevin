@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""PreToolUse hook guard to deny git force-push commands.
+"""PreToolUse hook guard to deny git force-push and destructive rm commands.
 
-Exposes contains_forced_git_push(command: str) -> bool and a CLI entrypoint
-conforming to Claude PreToolUse hook protocol.
+Exposes contains_forced_git_push(command: str) -> bool, contains_forbidden_rm(command: str) -> bool,
+and a CLI entrypoint conforming to Claude PreToolUse hook protocol.
 """
 
 from __future__ import annotations
@@ -59,6 +59,116 @@ GIT_GLOBAL_OPTS_WITH_ARG = {
     "--config-env",
     "--exec-path",
 }
+
+SHELL_BINARIES = {
+    "sh",
+    "bash",
+    "zsh",
+    "ksh",
+    "dash",
+}
+
+
+def _strip_comments_preserving_newlines(command: str) -> str:
+    """Strip unquoted shell comments while preserving newline command boundaries.
+
+    POSIX shell comments begin with an unquoted '#' at a word boundary (start of
+    line, after whitespace, or after a command separator/operator) and extend to
+    the next newline or EOF. The terminating newline is preserved as a command
+    separator.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(command)
+    state = "NORMAL"
+    prev_char: str | None = None
+
+    while i < n:
+        ch = command[i]
+
+        if state == "NORMAL":
+            if ch == "\\":
+                result.append(ch)
+                i += 1
+                if i < n:
+                    result.append(command[i])
+                    prev_char = command[i]
+                    i += 1
+                else:
+                    prev_char = ch
+                continue
+            elif ch == "'":
+                state = "SINGLE_QUOTE"
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+            elif ch == '"':
+                state = "DOUBLE_QUOTE"
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+            elif ch == "#" and (prev_char is None or prev_char in " \t\r\n;&|(){}<>"):
+                state = "COMMENT"
+                i += 1
+                continue
+            else:
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "SINGLE_QUOTE":
+            result.append(ch)
+            if ch == "'":
+                state = "NORMAL"
+            prev_char = ch
+            i += 1
+            continue
+
+        elif state == "DOUBLE_QUOTE":
+            if ch == "\\":
+                result.append(ch)
+                i += 1
+                if i < n:
+                    result.append(command[i])
+                    prev_char = command[i]
+                    i += 1
+                else:
+                    prev_char = ch
+                continue
+            result.append(ch)
+            if ch == '"':
+                state = "NORMAL"
+            prev_char = ch
+            i += 1
+            continue
+
+        elif state == "COMMENT":
+            if ch == "\n":
+                result.append("\n")
+                state = "NORMAL"
+                prev_char = "\n"
+            i += 1
+            continue
+
+    return "".join(result)
+
+
+def _tokenize_command(command: str) -> list[list[str]]:
+    """Tokenize a shell command string and split into individual command segments."""
+    cleaned = _strip_comments_preserving_newlines(command)
+    lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
+    lexer.wordchars += "+%"
+
+    tokens = list(lexer)
+    if not tokens:
+        return []
+
+    return _split_into_commands(tokens)
 
 
 def _is_var_assignment(token: str) -> bool:
@@ -145,7 +255,36 @@ def _is_forced_push_args(push_args: list[str]) -> bool:
     return False
 
 
-def _inspect_single_command(tokens: list[str]) -> bool:
+def _is_forbidden_rm_args(rm_args: list[str]) -> bool:
+    """Check if arguments to 'rm' combine recursive and force semantics in any order or grouping."""
+    has_recursive = False
+    has_force = False
+
+    for arg in rm_args:
+        if arg == "--":
+            # Any arguments after '--' are filenames/operands, not flags
+            break
+
+        if arg == "--recursive":
+            has_recursive = True
+        elif arg == "--force":
+            has_force = True
+        elif arg.startswith("--"):
+            pass
+        elif arg.startswith("-") and len(arg) > 1:
+            flags = arg[1:]
+            if "r" in flags or "R" in flags:
+                has_recursive = True
+            if "f" in flags:
+                has_force = True
+
+        if has_recursive and has_force:
+            return True
+
+    return has_recursive and has_force
+
+
+def _inspect_single_command_git(tokens: list[str]) -> bool:
     """Inspect a single clean command segment for forced git push."""
     idx = 0
     while idx < len(tokens) and _is_var_assignment(tokens[idx]):
@@ -204,7 +343,7 @@ def _inspect_single_command(tokens: list[str]) -> bool:
 
         if cmd_word == "command":
             tokens.pop(0)
-            while tokens and tokens[0] in {"-p", "-v", "-V"}:
+            while tokens and (tokens[0] in {"-p", "-v", "-V"} or tokens[0] == "--"):
                 tokens.pop(0)
             continue
 
@@ -215,6 +354,9 @@ def _inspect_single_command(tokens: list[str]) -> bool:
                     tokens.pop(0)
                     if tokens:
                         tokens.pop(0)
+                elif tokens[0] == "--":
+                    tokens.pop(0)
+                    break
                 else:
                     tokens.pop(0)
             continue
@@ -290,9 +432,17 @@ def _inspect_single_command(tokens: list[str]) -> bool:
                     break
             continue
 
-        if cmd_word in {"sh", "bash", "zsh", "ksh", "dash"}:
-            for i in range(len(tokens) - 1):
-                if tokens[i] == "-c":
+        if cmd_word in SHELL_BINARIES:
+            for i in range(1, len(tokens) - 1):
+                token = tokens[i]
+                if token == "--":
+                    break
+                if (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and len(token) > 1
+                    and "c" in token[1:]
+                ):
                     return contains_forced_git_push(tokens[i + 1])
             break
 
@@ -336,6 +486,185 @@ def _inspect_single_command(tokens: list[str]) -> bool:
     return _is_forced_push_args(push_args)
 
 
+def _inspect_single_command_rm(tokens: list[str]) -> bool:
+    """Inspect a single clean command segment for forbidden destructive rm."""
+    idx = 0
+    while idx < len(tokens) and _is_var_assignment(tokens[idx]):
+        idx += 1
+    tokens = tokens[idx:]
+
+    if not tokens:
+        return False
+
+    while tokens:
+        cmd_word = os.path.basename(tokens[0])
+
+        if cmd_word == "sudo":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                elif _is_var_assignment(t):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "env":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-u", "-C", "-S"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif (
+                    t.startswith("--unset=")
+                    or t.startswith("--chdir=")
+                    or t.startswith("--split-string=")
+                ):
+                    tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                elif _is_var_assignment(t):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "command":
+            tokens.pop(0)
+            while tokens and (tokens[0] in {"-p", "-v", "-V"} or tokens[0] == "--"):
+                tokens.pop(0)
+            continue
+
+        if cmd_word in {"nohup", "builtin", "exec"}:
+            tokens.pop(0)
+            while tokens and tokens[0].startswith("-"):
+                if tokens[0] == "-a":
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif tokens[0] == "--":
+                    tokens.pop(0)
+                    break
+                else:
+                    tokens.pop(0)
+            continue
+
+        if cmd_word == "timeout":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                    break
+                if t in {"-k", "-s", "--kill-after", "--signal"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                else:
+                    tokens.pop(0)
+                    break
+            continue
+
+        if cmd_word == "nice":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-n", "--adjustment"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-") or (len(t) > 1 and t.startswith("+") and t[1:].isdigit()):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "stdbuf":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-i", "-o", "-e", "--input", "--output", "--error"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "time":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-f", "-o", "--format", "--output"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word in SHELL_BINARIES:
+            for i in range(1, len(tokens) - 1):
+                token = tokens[i]
+                if token == "--":
+                    break
+                if (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and len(token) > 1
+                    and "c" in token[1:]
+                ):
+                    return contains_forbidden_rm(tokens[i + 1])
+            break
+
+        if cmd_word == "eval":
+            tokens.pop(0)
+            return contains_forbidden_rm(" ".join(tokens))
+
+        break
+
+    if not tokens:
+        return False
+
+    cmd_binary = os.path.basename(tokens[0])
+    if cmd_binary != "rm":
+        return False
+
+    rm_args = tokens[1:]
+    return _is_forbidden_rm_args(rm_args)
+
+
 def contains_forced_git_push(command: str) -> bool:
     """Pure function checking whether a shell command contains a forced git push.
 
@@ -344,19 +673,27 @@ def contains_forced_git_push(command: str) -> bool:
     if not command or not command.strip():
         return False
 
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-    lexer.whitespace = " \t\r"
-    lexer.commenters = "#"
-    lexer.wordchars += "+%"
-
-    tokens = list(lexer)
-    if not tokens:
-        return False
-
-    commands = _split_into_commands(tokens)
+    commands = _tokenize_command(command)
     for cmd_tokens in commands:
         cleaned = _clean_command_segment(cmd_tokens)
-        if _inspect_single_command(cleaned):
+        if _inspect_single_command_git(cleaned):
+            return True
+
+    return False
+
+
+def contains_forbidden_rm(command: str) -> bool:
+    """Pure function checking whether a shell command contains a forbidden destructive rm invocation.
+
+    Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes).
+    """
+    if not command or not command.strip():
+        return False
+
+    commands = _tokenize_command(command)
+    for cmd_tokens in commands:
+        cleaned = _clean_command_segment(cmd_tokens)
+        if _inspect_single_command_rm(cleaned):
             return True
 
     return False
@@ -400,6 +737,7 @@ def main() -> None:
 
     try:
         is_forced = contains_forced_git_push(command)
+        is_forbidden_rm = contains_forbidden_rm(command)
     except Exception as exc:
         sys.stderr.write(f"Shell tokenization failed: {exc}\n")
         sys.exit(2)
@@ -411,6 +749,19 @@ def main() -> None:
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
                     "Git force-push is prohibited by repository no-force-push policy."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        sys.exit(0)
+
+    if is_forbidden_rm:
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Destructive rm commands with combined recursive and force flags are prohibited by repository destructive-command policy."
                 ),
             }
         }

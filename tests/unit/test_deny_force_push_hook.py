@@ -1,4 +1,4 @@
-"""Unit and contract tests for the Claude PreToolUse deny force-push hook."""
+"""Unit and contract tests for the Claude PreToolUse deny force-push and rm hook."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ import sys
 
 import pytest
 
-from scripts.deny_force_push_hook import contains_forced_git_push
+from scripts.deny_force_push_hook import contains_forbidden_rm, contains_forced_git_push
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HOOK_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "deny_force_push_hook.py"
 SETTINGS_PATH = PROJECT_ROOT / ".claude" / "settings.json"
 
-BLOCKED_COMMANDS = [
+BLOCKED_GIT_PUSH_COMMANDS = [
     # Basic short option and grouped forms
     "git push -f",
     "git push -fu",
@@ -86,9 +86,18 @@ BLOCKED_COMMANDS = [
     'bash -c "git push -f"',
     'eval "git push -f"',
     "if true; then git push -f; fi",
+    # Shell option combinations and unquoted comments with newlines
+    "bash -lc 'git push -f'",
+    "sh -ec 'git push --force origin main'",
+    "true # comment\ngit push -f",
+    "true # comment\ngit push -f origin main",
+    "sh -c 'git push -f'",
+    "zsh -c 'git push -f'",
+    "ksh -c 'git push -f'",
+    "dash -c 'git push -f'",
 ]
 
-ALLOWED_COMMANDS = [
+ALLOWED_GIT_PUSH_COMMANDS = [
     # Normal branches with hyphen or plus in branch name
     "git push origin codex/new-feature",
     "git push origin feature/--force-docs",
@@ -100,6 +109,8 @@ ALLOWED_COMMANDS = [
     "time git push -u origin HEAD",
     "/usr/bin/time -f %E git push -u origin HEAD",
     "time -f %E git push origin codex/c++",
+    "bash -lc 'git push origin codex/new-feature'",
+    "sh -ec 'git push --follow-tags origin HEAD'",
     # Non-force flags and standard pushes
     "git push --follow-tags origin HEAD",
     "git push -u origin HEAD",
@@ -120,18 +131,80 @@ ALLOWED_COMMANDS = [
     "echo 'git push -f'",
     'echo "git push origin +main"',
     "echo git push -f",
+    "echo '# git push -f'",
+    "echo 'rm -rf target'",
+    "command rm -r target",
+    "env rm -f target",
+    "printf '%s' 'rm -rf target'",
+    "true # comment\ngit push origin codex/c++",
+    "true # comment\ncommand rm -r target",
     "pytest tests/unit",
+]
+
+BLOCKED_RM_COMMANDS = [
+    "rm -rf target",
+    "rm -fr target",
+    "rm -r -f target",
+    "rm -R -f target",
+    "rm -f -r target",
+    "rm -f -R target",
+    "rm --recursive --force target",
+    "rm --force --recursive target",
+    "rm -r --force target",
+    "rm --recursive -f target",
+    "rm -rfv target",
+    "rm -vfr target",
+    "/bin/rm -rf target",
+    "/usr/bin/rm -rf target",
+    "command rm -rf target",
+    "env rm -fr target",
+    "sudo /bin/rm -r -f target",
+    "timeout 5 /usr/bin/rm --recursive --force target",
+    "bash -lc 'rm -rf target'",
+    "sh -ec 'rm -rf target'",
+    "true # comment\ncommand rm -rf target",
+    "sudo env command rm -rf target",
+    "nice rm -rf target",
+    "stdbuf -oL rm -rf target",
+    "time rm -rf target",
+    "nohup rm -rf target",
+    "exec rm -rf target",
+    "eval 'rm -rf target'",
+    "if true; then rm -rf target; fi",
+    "(rm -rf target)",
+    "{ rm -rf target; }",
+]
+
+ALLOWED_RM_COMMANDS = [
+    "echo 'rm -rf target'",
+    "printf '%s' 'rm -rf target'",
+    "command rm -r target",
+    "env rm -f target",
+    "rm target",
+    "rm -r target",
+    "rm -R target",
+    "rm -f target",
+    "/bin/rm -r target",
+    "/usr/bin/rm -f target",
+    "sudo rm -r target",
+    "timeout 5 rm -f target",
+    "bash -lc 'rm -r target'",
+    "sh -ec 'rm -f target'",
+    "true # comment\ncommand rm -r target",
+    "true # comment\ncommand rm -f target",
+    "rm -- -rf",
+    "rm -r -- -f",
 ]
 
 
 class TestContainsForcedGitPush:
     """Pure-function tests for contains_forced_git_push."""
 
-    @pytest.mark.parametrize("command", BLOCKED_COMMANDS)
+    @pytest.mark.parametrize("command", BLOCKED_GIT_PUSH_COMMANDS)
     def test_blocks_forced_push_variants(self, command: str) -> None:
         assert contains_forced_git_push(command) is True, f"Expected {command!r} to be blocked"
 
-    @pytest.mark.parametrize("command", ALLOWED_COMMANDS)
+    @pytest.mark.parametrize("command", ALLOWED_GIT_PUSH_COMMANDS)
     def test_allows_safe_command_variants(self, command: str) -> None:
         assert contains_forced_git_push(command) is False, f"Expected {command!r} to be allowed"
 
@@ -142,6 +215,26 @@ class TestContainsForcedGitPush:
     def test_unclosed_quote_raises_value_error(self) -> None:
         with pytest.raises(ValueError):
             contains_forced_git_push("git push 'unclosed string")
+
+
+class TestContainsForbiddenRm:
+    """Pure-function tests for contains_forbidden_rm."""
+
+    @pytest.mark.parametrize("command", BLOCKED_RM_COMMANDS)
+    def test_blocks_forbidden_rm_variants(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is True, f"Expected {command!r} to be blocked"
+
+    @pytest.mark.parametrize("command", ALLOWED_RM_COMMANDS)
+    def test_allows_safe_rm_variants(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is False, f"Expected {command!r} to be allowed"
+
+    def test_empty_command_is_allowed(self) -> None:
+        assert contains_forbidden_rm("") is False
+        assert contains_forbidden_rm("   ") is False
+
+    def test_unclosed_quote_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            contains_forbidden_rm("rm -rf 'unclosed string")
 
 
 class TestDenyForcePushHookCLI:
@@ -181,6 +274,57 @@ class TestDenyForcePushHookCLI:
         data = json.loads(res.stdout)
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+    def test_cli_denies_comment_newline_force_push(self) -> None:
+        payload = json.dumps({"command": "true # comment\ngit push -f"})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_cli_denies_wrapped_rm(self) -> None:
+        payload = json.dumps({"toolInput": {"command": "command rm -rf target"}})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PreToolUse"
+        assert hook_out["permissionDecision"] == "deny"
+        assert "destructive" in hook_out["permissionDecisionReason"].lower()
+
+    def test_cli_denies_comment_newline_wrapped_rm(self) -> None:
+        payload = json.dumps({"command": "true # comment\ncommand rm -rf target"})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_cli_denies_sudo_rm_separate_flags(self) -> None:
+        payload = json.dumps({"command": "sudo /bin/rm -r -f target"})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_cli_denies_timeout_rm_long_flags(self) -> None:
+        payload = json.dumps({"command": "timeout 5 /usr/bin/rm --recursive --force target"})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_cli_denies_shell_grouped_rm(self) -> None:
+        payload = json.dumps({"command": "bash -lc 'rm -rf target'"})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
     def test_cli_allows_safe_push(self) -> None:
         payload = json.dumps({"toolInput": {"command": "git push origin main"}})
         res = self._run_hook(payload)
@@ -189,6 +333,26 @@ class TestDenyForcePushHookCLI:
 
     def test_cli_allows_echo(self) -> None:
         payload = json.dumps({"toolInput": {"command": 'echo "git push -f"'}})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "bash -lc 'git push origin codex/new-feature'",
+            "sh -ec 'git push --follow-tags origin HEAD'",
+            "echo '# git push -f'",
+            "echo 'rm -rf target'",
+            "command rm -r target",
+            "env rm -f target",
+            "printf '%s' 'rm -rf target'",
+            "true # comment\ngit push origin codex/c++",
+            "true # comment\ncommand rm -r target",
+        ],
+    )
+    def test_cli_allows_safe_mutation_controls(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
         res = self._run_hook(payload)
         assert res.returncode == 0
         assert res.stdout == ""
@@ -295,6 +459,6 @@ class TestSettingsJsonContract:
         assert command_hook == {
             "type": "command",
             "command": 'python3 "$CLAUDE_PROJECT_DIR/scripts/deny_force_push_hook.py"',
-            "if": "Bash(*git *)",
             "timeout": 5,
         }
+        assert "if" not in command_hook

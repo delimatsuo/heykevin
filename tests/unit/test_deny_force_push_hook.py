@@ -14,6 +14,8 @@ from scripts.deny_force_push_hook import (
     FIND_INPUT_SENTINEL,
     MAX_GIT_CONFIG_COUNT,
     XARGS_INPUT_SENTINEL,
+    _apply_export_unset_segment,
+    _apply_shell_state_segment,
     _build_git_config_env,
     _clean_command_segment,
     _extract_find_actions,
@@ -34,6 +36,7 @@ from scripts.deny_force_push_hook import (
     _parse_paren_body,
     _reconstruct_git_args,
     _scan_git_forcing_configs,
+    _ShellState,
     _split_into_commands,
     _tokenize_command,
     _tokenize_split_string,
@@ -174,6 +177,29 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git -c remote.origin.mirror=true push origin HEAD",
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0='+HEAD:main' git -c remote.origin.push=HEAD:other push origin",
     "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=true git push origin HEAD",
+    # Cross-command exported Git config environment protocol forced push
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0=alias.fp; export GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0='+HEAD:main'; git push origin",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true; git push origin",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; sh -c 'git fp origin HEAD'",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=status; GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "command export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "command -p export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "command -- export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "builtin export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "command -p git push -f",
+    "command -- git push -f",
+    "declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "declare -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "typeset -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "set -o allexport; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.fp; set -gx GIT_CONFIG_VALUE_0 'push -f'; git fp origin HEAD",
+    "set --global --export GIT_CONFIG_COUNT 1; set --global --export GIT_CONFIG_KEY_0 alias.fp; set --global --export GIT_CONFIG_VALUE_0 'push -f'; git fp origin HEAD",
+    "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'\"; git fp origin HEAD",
     # Shell alias outer CLI config propagation into nested git
     "git -c alias.inner='push -f' -c alias.outer='!git inner origin HEAD' outer",
     "git -c remote.origin.mirror=true -c alias.outer='!git push origin' outer",
@@ -231,6 +257,10 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "echo '# git push -f'",
     "echo 'rm -rf target'",
     "command rm -r target",
+    "command -v git push -f",
+    "command -V git push -f",
+    "command -v rm -rf target",
+    "command -V rm -rf target",
     "env rm -f target",
     "printf '%s' 'rm -rf target'",
     "true # comment\ngit push origin codex/c++",
@@ -256,6 +286,21 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git -c alias.fp=status fp",
     "GIT_CONFIG_KEYBOARD=1 git status",
     "FOO=bar git status",
+    # Cross-command safe exported and unset controls
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; env -i git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; env -u GIT_CONFIG_COUNT git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT; git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; export -n GIT_CONFIG_COUNT; git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true; export GIT_CONFIG_VALUE_0=false; git push origin",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; GIT_CONFIG_VALUE_0=status; git fp origin HEAD",
+    "command -v export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "command -V export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "exec export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "nohup export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "/usr/bin/time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+    "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=status\"; git fp origin HEAD",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; eval 'unset GIT_CONFIG_COUNT'; git fp origin HEAD",
     # Safe shell alias precedence and env isolation controls
     "git -c remote.origin.mirror=true -c alias.outer='!git -c remote.origin.mirror=false push origin' outer",
     "git -c alias.st=status -c alias.outer='!git st' outer",
@@ -329,6 +374,15 @@ BLOCKED_RM_COMMANDS = [
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' eval 'git wipe'",
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' find . -exec git wipe ';'",
     "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm --recursive --force target' git wipe",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'; git wipe",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!echo safe'; GIT_CONFIG_VALUE_0='!rm -rf target'; git wipe",
+    "command -p rm -rf target",
+    "command -- rm -rf target",
+    "declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'; git wipe",
+    "typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'; git wipe",
+    "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'; git wipe",
+    "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.wipe; set -gx GIT_CONFIG_VALUE_0 '!rm -rf target'; git wipe",
+    "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'\"; git wipe",
     # Multi-action find destructive rm and ordinary boundary controls
     "find /tmp/tree -exec echo {} \\; -exec rm -rf target \\;",
     "find /tmp/tree -exec echo {} ';' -exec rm -rf target ';'",
@@ -351,6 +405,8 @@ ALLOWED_RM_COMMANDS = [
     "echo 'rm -rf target'",
     "printf '%s' 'rm -rf target'",
     "command rm -r target",
+    "command -v rm -rf target",
+    "command -V rm -rf target",
     "env rm -f target",
     "rm target",
     "rm -r target",
@@ -383,6 +439,8 @@ ALLOWED_RM_COMMANDS = [
     "echo ')'",
     # Safe shell alias rm controls
     "git -c alias.inner='!echo safe' -c alias.outer='!git inner' outer",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'; GIT_CONFIG_VALUE_0='!echo safe'; git wipe",
+    "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target'\"; eval \"unset GIT_CONFIG_COUNT\"; git wipe",
     # Ignored alias.push safe rm control (Git ignores alias.push; does not execute shell alias)
     "git -c alias.push='!rm -rf target' push origin HEAD",
 ]
@@ -4580,3 +4638,1561 @@ class TestShellStdinPipeCLI:
         data = json.loads(res.stdout)
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+
+class TestExportedEnvironmentCrossSegment:
+    """Tests for cross-command exported environment state propagation (PR #212)."""
+
+    def test_reviewer_exact_command_pure(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is True
+
+    def test_reviewer_exact_command_cli(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_three_separate_export_commands(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1; "
+            "export GIT_CONFIG_KEY_0=alias.fp; "
+            "export GIT_CONFIG_VALUE_0='push -f'; "
+            "git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 && "
+                "export GIT_CONFIG_KEY_0=alias.fp && "
+                "export GIT_CONFIG_VALUE_0='push -f' && "
+                "git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1\n"
+                "export GIT_CONFIG_KEY_0=alias.fp\n"
+                "export GIT_CONFIG_VALUE_0='push -f'\n"
+                "git fp origin HEAD"
+            ),
+            (
+                "export -- GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_export_separators_and_double_dash(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; sh -c 'git fp origin HEAD'"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; bash -c 'git fp origin HEAD'"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; eval 'git fp origin HEAD'"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; find . -exec git fp origin HEAD ';'"
+            ),
+        ],
+    )
+    def test_export_state_followed_by_subshell_eval_find(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    def test_export_alias_destructive_rm_pure_and_cli(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+        )
+        assert contains_forbidden_rm(cmd) is True
+
+        # Nested shell wrapper
+        nested_cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; sh -c 'git wipe'"
+        )
+        assert contains_forbidden_rm(nested_cmd) is True
+
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_export_remote_origin_mirror_and_replacement(self) -> None:
+        cmd_true = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror "
+            "GIT_CONFIG_VALUE_0=true; git push origin"
+        )
+        assert contains_forced_git_push(cmd_true) is True
+
+        cmd_false = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror "
+            "GIT_CONFIG_VALUE_0=true; export GIT_CONFIG_VALUE_0=false; git push origin"
+        )
+        assert contains_forced_git_push(cmd_false) is False
+
+    def test_export_remote_origin_push_multivalued(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push "
+            "GIT_CONFIG_VALUE_0='+HEAD:main'; git push origin HEAD:other"
+        )
+        assert contains_forced_git_push(cmd) is True
+
+    def test_export_env_clearing_wrappers_safe(self) -> None:
+        cmd_i = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; env -i git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_i) is False
+
+        cmd_u = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; env -u GIT_CONFIG_COUNT git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_u) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset -v GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset -- GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset -v -- GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; export -n GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; export -n -- GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_export_unset_and_unexport_safe(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export GIT_CONFIG_COUNT; git status",
+            "export GIT_CONFIG_KEY_0; git status",
+            "export GIT_CONFIG_VALUE_0; git status",
+            "export -- GIT_CONFIG_COUNT; git status",
+        ],
+    )
+    def test_export_without_literal_assignment_fails_closed(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export -f GIT_CONFIG_COUNT=1; git status",
+            "export -x GIT_CONFIG_COUNT=1; git status",
+            "unset -f GIT_CONFIG_COUNT; git status",
+            "unset -x GIT_CONFIG_COUNT; git status",
+        ],
+    )
+    def test_unsupported_options_fail_closed_on_protocol_keys(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp '
+                'GIT_CONFIG_VALUE_0="$DYNAMIC"; git fp origin HEAD'
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='`hostname`'; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_dynamic_exported_protocol_value_fails_closed(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+
+    def test_malformed_exported_protocol_isolated(self) -> None:
+        assert contains_forced_git_push("export GIT_CONFIG_COUNT=abc; echo safe") is False
+        with pytest.raises(ValueError):
+            contains_forced_git_push("export GIT_CONFIG_COUNT=abc; git status")
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export FOO=bar; unset BAZ; git status",
+            "export UNRELATED; git status",
+            "export -f func_name; git status",
+            "unset -f func_name; git status",
+            "export -p; git status",
+        ],
+    )
+    def test_unrelated_exports_unsets_safe(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    def test_plain_standalone_assignment_not_exported(self) -> None:
+        cmd = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forced_git_push("GIT_CONFIG_COUNT=1; git status") is False
+
+    def test_caller_inherited_env_immutability(self) -> None:
+        caller_env = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        }
+        contains_forced_git_push("unset GIT_CONFIG_COUNT", _inherited_env=caller_env)
+        assert caller_env == {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        }
+        contains_forbidden_rm("unset GIT_CONFIG_COUNT", _inherited_env=caller_env)
+        assert caller_env == {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        }
+
+    def test_apply_export_unset_segment_direct(self) -> None:
+        env: dict[str, str] = {}
+        # Normal export
+        assert _apply_export_unset_segment(
+            ["export", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=alias.fp"], env
+        ) is True
+        assert env == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.fp"}
+
+        # Overwrite
+        assert _apply_export_unset_segment(
+            ["export", "GIT_CONFIG_KEY_0=alias.st"], env
+        ) is True
+        assert env["GIT_CONFIG_KEY_0"] == "alias.st"
+
+        # export -n
+        assert _apply_export_unset_segment(
+            ["export", "-n", "GIT_CONFIG_KEY_0"], env
+        ) is True
+        assert "GIT_CONFIG_KEY_0" not in env
+
+        # unset
+        assert _apply_export_unset_segment(
+            ["unset", "GIT_CONFIG_COUNT"], env
+        ) is True
+        assert env == {}
+
+        # Non-export segment
+        assert _apply_export_unset_segment(["git", "status"], env) is False
+        assert _apply_export_unset_segment([], env) is False
+
+    def test_reassigned_standalone_assignment_remains_exported(self) -> None:
+        cmd_true = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0=status; GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_true) is True
+
+        cmd_false = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; GIT_CONFIG_VALUE_0=status; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_false) is False
+
+        cmd_never_exported = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_never_exported) is False
+
+        # Destructive rm variants
+        rm_cmd_true = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!echo safe'; GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+        )
+        assert contains_forbidden_rm(rm_cmd_true) is True
+
+        rm_cmd_false = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; GIT_CONFIG_VALUE_0='!echo safe'; git wipe"
+        )
+        assert contains_forbidden_rm(rm_cmd_false) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "command -v export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "command -V export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "exec export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "nohup export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "/usr/bin/time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "command -v git push -f",
+            "command -V git push -f",
+            "command -v rm -rf target",
+            "command -V rm -rf target",
+            "command -v export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "command -V export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "exec export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "nohup export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "/usr/bin/time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+        ],
+    )
+    def test_query_and_non_shell_wrappers_not_propagated_or_executed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "command export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "command -p export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "command -- export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "builtin export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "command -p git push -f",
+            "command -- git push -f",
+            "exec git push -f",
+            "nohup git push -f",
+            "time git push -f",
+        ],
+    )
+    def test_executable_wrappers_propagated_and_blocked_git(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "command export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "command -p export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "command -- export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "builtin export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "command -p rm -rf target",
+            "command -- rm -rf target",
+            "exec rm -rf target",
+            "nohup rm -rf target",
+            "time rm -rf target",
+        ],
+    )
+    def test_executable_wrappers_propagated_and_blocked_rm(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "declare -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "typeset -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "declare -g -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "typeset -g -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+        ],
+    )
+    def test_declare_typeset_export_blocked(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "declare -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+            "typeset -gx GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe",
+        ],
+    )
+    def test_declare_typeset_export_destructive_rm_blocked(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; declare +x GIT_CONFIG_COUNT; git fp origin HEAD",
+            "typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; typeset +x GIT_CONFIG_COUNT; git fp origin HEAD",
+            "declare GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "typeset GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "declare -i UNRELATED=1; git status",
+            "typeset -i UNRELATED=1; git status",
+        ],
+    )
+    def test_declare_typeset_safe_controls(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "declare -i GIT_CONFIG_COUNT=1; git status",
+            "typeset -i GIT_CONFIG_COUNT=1; git status",
+            "declare -a GIT_CONFIG_KEY_0; git status",
+            "typeset -a GIT_CONFIG_KEY_0; git status",
+        ],
+    )
+    def test_declare_typeset_unsupported_options_on_protocol_keys_fail_closed(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "set -o allexport; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; set +a; git fp origin HEAD",
+            "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; set +o allexport; git fp origin HEAD",
+        ],
+    )
+    def test_allexport_blocked(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    def test_allexport_destructive_rm_blocked(self) -> None:
+        cmd = "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+        assert contains_forbidden_rm(cmd) is True
+
+    def test_allexport_disable_leaves_later_unexported(self) -> None:
+        cmd = "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp; set +a; GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        with pytest.raises(ValueError, match=r"Missing GIT_CONFIG_VALUE_0"):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.fp; "
+                "set -gx GIT_CONFIG_VALUE_0 'push -f'; git fp origin HEAD"
+            ),
+            (
+                "set --global --export GIT_CONFIG_COUNT 1; "
+                "set --global --export GIT_CONFIG_KEY_0 alias.fp; "
+                "set --global --export GIT_CONFIG_VALUE_0 'push -f'; git fp origin HEAD"
+            ),
+            (
+                "set -xg GIT_CONFIG_COUNT 1; set -xg GIT_CONFIG_KEY_0 alias.fp; "
+                "set -xg GIT_CONFIG_VALUE_0 'push -f'; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_fish_set_export_blocked(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    def test_fish_set_destructive_rm_blocked(self) -> None:
+        cmd = (
+            "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.wipe; "
+            "set -gx GIT_CONFIG_VALUE_0 '!rm -rf /'; git wipe"
+        )
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.fp; "
+                "set -gx GIT_CONFIG_VALUE_0 'push -f'; set -e GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            (
+                "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.fp; "
+                "set -gx GIT_CONFIG_VALUE_0 'push -f'; set --erase GIT_CONFIG_COUNT; git fp origin HEAD"
+            ),
+            "set -q UNRELATED; git status",
+            "set -l UNRELATED 1 2; git status",
+            "set --local UNRELATED 1 2; git status",
+        ],
+    )
+    def test_fish_set_safe_controls(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "set -gx GIT_CONFIG_COUNT 1 2; git status",
+            "set --global --export GIT_CONFIG_KEY_0 a b; git status",
+            "set -q GIT_CONFIG_COUNT; git status",
+            "set -n GIT_CONFIG_COUNT; git status",
+            "set -S GIT_CONFIG_COUNT; git status",
+        ],
+    )
+    def test_fish_set_unsupported_or_multiple_values_fail_closed(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+
+    def test_eval_payload_state_persistence(self) -> None:
+        cmd_true = (
+            "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'\"; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_true) is True
+
+        cmd_false = (
+            "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0=status\"; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_false) is False
+
+        cmd_unset = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; eval 'unset GIT_CONFIG_COUNT'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_unset) is False
+
+        # Destructive rm eval persistence
+        rm_eval_true = (
+            "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'\"; git wipe"
+        )
+        assert contains_forbidden_rm(rm_eval_true) is True
+
+        rm_eval_false = (
+            "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'\"; eval 'unset GIT_CONFIG_COUNT'; git wipe"
+        )
+        assert contains_forbidden_rm(rm_eval_false) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "sh -c 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0=\"push -f\"'; git fp origin HEAD"
+            ),
+            (
+                "bash -c 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0=\"push -f\"'; git fp origin HEAD"
+            ),
+            (
+                "zsh -c 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0=\"push -f\"'; git fp origin HEAD"
+            ),
+            (
+                "fish -c 'set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.fp; "
+                "set -gx GIT_CONFIG_VALUE_0 \"push -f\"'; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_child_shell_state_does_not_propagate_to_outer_shell(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    def test_caller_env_immutability_all_mechanisms(self) -> None:
+        caller_env = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        }
+        original = dict(caller_env)
+
+        contains_forced_git_push("eval 'unset GIT_CONFIG_COUNT'", _inherited_env=caller_env)
+        assert caller_env == original
+
+        contains_forced_git_push("export GIT_CONFIG_VALUE_0=status", _inherited_env=caller_env)
+        assert caller_env == original
+
+        contains_forced_git_push("declare -x GIT_CONFIG_VALUE_0=status", _inherited_env=caller_env)
+        assert caller_env == original
+
+        contains_forced_git_push("set -a; GIT_CONFIG_COUNT=2", _inherited_env=caller_env)
+        assert caller_env == original
+
+        contains_forced_git_push("set -gx GIT_CONFIG_COUNT 2", _inherited_env=caller_env)
+        assert caller_env == original
+
+        contains_forced_git_push("GIT_CONFIG_VALUE_0=status", _inherited_env=caller_env)
+        assert caller_env == original
+
+        contains_forbidden_rm("eval 'unset GIT_CONFIG_COUNT'", _inherited_env=caller_env)
+        assert caller_env == original
+
+    def test_shell_state_direct_unit(self) -> None:
+        state = _ShellState(inherited_env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.fp"})
+        assert state.get_exported_env() == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.fp"}
+
+        # Standalone assignment on exported var updates exported_env
+        assert _apply_shell_state_segment(["GIT_CONFIG_KEY_0=alias.st"], state) is True
+        assert state.get_exported_env()["GIT_CONFIG_KEY_0"] == "alias.st"
+
+        # Standalone assignment on unexported var does not export unless allexport
+        assert _apply_shell_state_segment(["GIT_CONFIG_VALUE_0=push -f"], state) is True
+        assert "GIT_CONFIG_VALUE_0" not in state.get_exported_env()
+
+        # export marks it exported
+        assert _apply_shell_state_segment(["export", "GIT_CONFIG_VALUE_0"], state) is True
+        assert state.get_exported_env()["GIT_CONFIG_VALUE_0"] == "push -f"
+
+        # declare +x unexports
+        assert _apply_shell_state_segment(["declare", "+x", "GIT_CONFIG_VALUE_0"], state) is True
+        assert "GIT_CONFIG_VALUE_0" not in state.get_exported_env()
+
+        # Fish set -gx exports
+        assert _apply_shell_state_segment(["set", "-gx", "GIT_CONFIG_VALUE_0", "push -f"], state) is True
+        assert state.get_exported_env()["GIT_CONFIG_VALUE_0"] == "push -f"
+
+        # Fish set -e erases
+        assert _apply_shell_state_segment(["set", "-e", "GIT_CONFIG_VALUE_0"], state) is True
+        assert "GIT_CONFIG_VALUE_0" not in state.get_exported_env()
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_decision"),
+        [
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=status; "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; "
+                    "GIT_CONFIG_VALUE_0=status; git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            (
+                (
+                    "command -v export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            (
+                (
+                    "command -V export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            ("command -v git push -f", "allow"),
+            ("command -V git push -f", "allow"),
+            ("command -v rm -rf target", "allow"),
+            ("command -V rm -rf target", "allow"),
+            (
+                (
+                    "command -p export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "builtin export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "time export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "set -a; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "set -gx GIT_CONFIG_COUNT 1; set -gx GIT_CONFIG_KEY_0 alias.fp; "
+                    "set -gx GIT_CONFIG_VALUE_0 'push -f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'\"; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; eval 'unset GIT_CONFIG_COUNT'; git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                    "GIT_CONFIG_VALUE_0='!echo safe'; GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "eval \"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                    "GIT_CONFIG_VALUE_0='!rm -rf /'\"; git wipe"
+                ),
+                "deny",
+            ),
+        ],
+    )
+    def test_cli_cross_segment_features(self, cmd: str, expected_decision: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        if expected_decision == "deny":
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        else:
+            assert res.stdout == ""
+
+
+class TestDefectAExportedStateSubstitutions:
+    """Tests for Defect A: Exported shell state inherited across later substitutions."""
+
+    def test_command_substitution_inherits_exported_env(self) -> None:
+        cmd_git = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; echo $(git fp origin HEAD)"
+        )
+        assert contains_forced_git_push(cmd_git) is True
+
+        cmd_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; echo $(git wipe)"
+        )
+        assert contains_forbidden_rm(cmd_rm) is True
+
+    def test_legacy_backticks_inherits_exported_env(self) -> None:
+        cmd_git = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; echo `git fp origin HEAD`"
+        )
+        assert contains_forced_git_push(cmd_git) is True
+
+        cmd_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; echo `git wipe`"
+        )
+        assert contains_forbidden_rm(cmd_rm) is True
+
+    def test_process_substitution_inherits_exported_env(self) -> None:
+        cmd_git_in = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; cat <(git fp origin HEAD)"
+        )
+        assert contains_forced_git_push(cmd_git_in) is True
+
+        cmd_git_out = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; tee >(git fp origin HEAD)"
+        )
+        assert contains_forced_git_push(cmd_git_out) is True
+
+        cmd_rm_in = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; diff <(git wipe) /dev/null"
+        )
+        assert contains_forbidden_rm(cmd_rm_in) is True
+
+    def test_unquoted_heredoc_inherits_exported_env(self) -> None:
+        cmd_git = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'\ncat <<EOF\n$(git fp origin HEAD)\nEOF"
+        )
+        assert contains_forced_git_push(cmd_git) is True
+
+        cmd_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'\ncat <<EOF\n`git wipe`\nEOF"
+        )
+        assert contains_forbidden_rm(cmd_rm) is True
+
+        # Quoted here-docs do not expand substitutions
+        cmd_quoted = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'\ncat <<'EOF'\n$(git fp origin HEAD)\nEOF"
+        )
+        assert contains_forced_git_push(cmd_quoted) is False
+
+    def test_child_substitution_does_not_mutate_parent(self) -> None:
+        cmd_git_cmdsub = (
+            "echo $(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'); git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_git_cmdsub) is False
+
+        cmd_git_backtick = (
+            "echo `export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'`; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_git_backtick) is False
+
+        cmd_git_procsub = (
+            "cat <(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'); git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_git_procsub) is False
+
+    def test_export_containing_substitution_eval_order(self) -> None:
+        cmd_git = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; export FOO=$(git fp origin HEAD)"
+        )
+        assert contains_forced_git_push(cmd_git) is True
+
+    def test_eval_find_subshell_with_exported_env(self) -> None:
+        cmd_subshell = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; (git fp origin HEAD)"
+        )
+        assert contains_forced_git_push(cmd_subshell) is True
+
+        cmd_eval = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; eval 'git fp origin HEAD'"
+        )
+        assert contains_forced_git_push(cmd_eval) is True
+
+        cmd_find_git = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; find . -exec git fp origin HEAD +"
+        )
+        assert contains_forced_git_push(cmd_find_git) is True
+
+        cmd_find_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; find . -exec git wipe +"
+        )
+        assert contains_forbidden_rm(cmd_find_rm) is True
+
+
+class TestDefectBAppendAssignments:
+    """Tests for Defect B: Literal append assignments (NAME+=value) for shell state."""
+
+    def test_standalone_append_on_exported_key(self) -> None:
+        cmd_count = (
+            "export GIT_CONFIG_COUNT=0 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; GIT_CONFIG_COUNT+=1; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_count) is True
+
+        cmd_val = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_val) is True
+
+        cmd_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm '; GIT_CONFIG_VALUE_0+='-rf /'; git wipe"
+        )
+        assert contains_forbidden_rm(cmd_rm) is True
+
+    def test_standalone_append_on_unexported_key(self) -> None:
+        cmd_unexp = (
+            "GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_unexp) is False
+
+        cmd_allexport = (
+            "set -a; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_allexport) is True
+
+    def test_export_and_declare_typeset_append(self) -> None:
+        cmd_export = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push '; export GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_export) is True
+
+        cmd_declare = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push '; declare -x GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_declare) is True
+
+        cmd_typeset = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push '; typeset -x GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_typeset) is True
+
+    def test_prefix_assignment_append(self) -> None:
+        cmd_direct = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push ' GIT_CONFIG_VALUE_0+='-f' git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_direct) is True
+
+        cmd_sudo = (
+            "sudo GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push ' GIT_CONFIG_VALUE_0+='-f' git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_sudo) is True
+
+        cmd_env = (
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push ' GIT_CONFIG_VALUE_0+='-f' git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_env) is True
+
+    def test_missing_prior_value_append_fails_closed(self) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push("GIT_CONFIG_COUNT+=1; git push")
+
+        with pytest.raises(ValueError):
+            contains_forced_git_push("export GIT_CONFIG_COUNT+=1; git push")
+
+        with pytest.raises(ValueError):
+            contains_forced_git_push("declare -x GIT_CONFIG_KEY_0+=alias.fp; git push")
+
+        with pytest.raises(ValueError):
+            contains_forced_git_push("GIT_CONFIG_VALUE_0+='-f' git push")
+
+    def test_dynamic_append_values_fail_closed(self) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='$FLAG'; git fp origin HEAD"
+            )
+
+        with pytest.raises(ValueError):
+            contains_forced_git_push(
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='`echo -f`'; git fp origin HEAD"
+            )
+
+    def test_non_identifier_plus_words_not_misclassified(self) -> None:
+        assert contains_forced_git_push("c++ -o main main.cpp") is False
+        assert contains_forced_git_push("VAR++") is False
+        assert contains_forced_git_push("git push c++") is False
+
+
+class TestDefectAAndBCLIContract:
+    """CLI contract tests verifying exit code and deny JSON outputs for Defects A & B."""
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_decision"),
+        [
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; echo $(git fp origin HEAD)"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                    "GIT_CONFIG_VALUE_0='!rm -rf /'; cat <(git wipe)"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "echo $(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'); git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=0 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; GIT_CONFIG_COUNT+=1; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp; "
+                    "GIT_CONFIG_VALUE_0='push '; export GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.fp; "
+                    "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            (
+                (
+                    "set -a; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.fp; "
+                    "GIT_CONFIG_VALUE_0='push '; GIT_CONFIG_VALUE_0+='-f'; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                "c++ -o main main.cpp",
+                "allow",
+            ),
+        ],
+    )
+    def test_cli_defect_a_and_b_scenarios(self, cmd: str, expected_decision: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        if expected_decision == "deny":
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        else:
+            assert res.stdout == ""
+
+
+class TestDefect75EvalStatePersistence:
+    """Tests for Defect #75: eval state mutations persisting to subsequent shell commands."""
+
+    def test_eval_export_persists_to_git_push(self) -> None:
+        cmd = (
+            'eval "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp '
+            "GIT_CONFIG_VALUE_0='push -f'\"; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is True
+
+    def test_eval_unset_persists_and_clears_git_push(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; eval 'unset GIT_CONFIG_COUNT'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is False
+
+    def test_eval_export_persists_to_rm(self) -> None:
+        cmd = (
+            'eval "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe '
+            "GIT_CONFIG_VALUE_0='!rm -rf /'\"; git wipe"
+        )
+        assert contains_forbidden_rm(cmd) is True
+
+    def test_eval_unset_persists_and_clears_rm(self) -> None:
+        cmd = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; eval 'unset GIT_CONFIG_COUNT'; git wipe"
+        )
+        assert contains_forbidden_rm(cmd) is False
+
+    def test_eval_set_allexport_persists(self) -> None:
+        cmd = (
+            "eval 'set -a'; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is True
+
+        cmd_off = (
+            "eval 'set +a'; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.fp; "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_off) is False
+
+    def test_eval_declare_typeset_export_persists(self) -> None:
+        cmd_declare = (
+            "eval 'declare -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            'GIT_CONFIG_VALUE_0="push -f"\'; git fp origin HEAD'
+        )
+        assert contains_forced_git_push(cmd_declare) is True
+
+        cmd_typeset = (
+            "eval 'typeset -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            'GIT_CONFIG_VALUE_0="push -f"\'; git fp origin HEAD'
+        )
+        assert contains_forced_git_push(cmd_typeset) is True
+
+    def test_eval_nested_eval_export_persists(self) -> None:
+        cmd = (
+            "eval \"eval 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            'GIT_CONFIG_VALUE_0=\\"push -f\\"\'"; git fp origin HEAD'
+        )
+        assert contains_forced_git_push(cmd) is True
+
+    def test_eval_append_chain_persists(self) -> None:
+        cmd = (
+            "eval 'GIT_CONFIG_COUNT=0'; eval 'GIT_CONFIG_COUNT+=1'; "
+            "eval 'GIT_CONFIG_KEY_0=alias.fp'; eval \"GIT_CONFIG_VALUE_0='push '\"; "
+            "eval \"GIT_CONFIG_VALUE_0+='-f'\"; "
+            "eval 'export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0'; "
+            "git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd) is True
+
+    def test_eval_subshell_substitution_does_not_leak_mutation(self) -> None:
+        cmd = (
+            "eval '$(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            'GIT_CONFIG_VALUE_0="push -f")\'; git fp origin HEAD'
+        )
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+
+    def test_cli_eval_scenarios(self) -> None:
+        for cmd, expected_decision in [
+            (
+                (
+                    'eval "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp '
+                    "GIT_CONFIG_VALUE_0='push -f'\"; git fp origin HEAD"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; eval 'unset GIT_CONFIG_COUNT'; git fp origin HEAD"
+                ),
+                "allow",
+            ),
+            (
+                (
+                    'eval "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe '
+                    "GIT_CONFIG_VALUE_0='!rm -rf /'\"; git wipe"
+                ),
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                    "GIT_CONFIG_VALUE_0='!rm -rf /'; eval 'unset GIT_CONFIG_COUNT'; git wipe"
+                ),
+                "allow",
+            ),
+        ]:
+            payload = json.dumps({"command": cmd})
+            res = subprocess.run(
+                [sys.executable, str(HOOK_SCRIPT_PATH)],
+                input=payload,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert res.returncode == 0
+            if expected_decision == "deny":
+                data = json.loads(res.stdout)
+                assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            else:
+                assert res.stdout == ""
+
+
+class TestDefect74HeredocIntegrity:
+    """Tests for Defect #74: here-doc masking preserving syntactically valid tokenizer input."""
+
+    def test_unquoted_heredoc_with_comment_header_blocked(self) -> None:
+        cmd_push = "cat <<EOF # comment\n$(git push -f origin HEAD)\nEOF"
+        assert contains_forced_git_push(cmd_push) is True
+
+        cmd_rm = "cat <<EOF # comment\n$(rm -rf /)\nEOF"
+        assert contains_forbidden_rm(cmd_rm) is True
+
+    def test_unquoted_heredoc_with_comment_header_safe(self) -> None:
+        cmd = "cat <<EOF # comment\nplain text git push -f\nEOF"
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    def test_multiple_pending_heredocs_middle_subst_blocked(self) -> None:
+        cmd = "cat <<EOF1 <<EOF2\nfirst body\nEOF1\n$(git push -f origin HEAD)\nEOF2"
+        assert contains_forced_git_push(cmd) is True
+
+    def test_multiple_pending_heredocs_all_safe(self) -> None:
+        cmd = "cat <<EOF1 <<EOF2\nfirst body git push -f\nEOF1\nsecond body rm -rf /\nEOF2"
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    def test_tab_stripped_heredoc_subst_blocked(self) -> None:
+        cmd = "cat <<-EOF\n\t$(git push -f origin HEAD)\n\tEOF"
+        assert contains_forced_git_push(cmd) is True
+
+    def test_nested_heredoc_in_subshell_blocked(self) -> None:
+        cmd = "echo $(cat <<EOF\n$(git push -f origin HEAD)\nEOF\n)"
+        assert contains_forced_git_push(cmd) is True
+
+
+class TestDefect76DynamicEvalPayload:
+    """Tests for Defect #76: Dynamic eval payload fails closed."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'cmd="git push -f origin HEAD"; eval "$cmd"',
+            'cmd="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=\'push -f\'"; eval "$cmd"; git fp origin HEAD',
+            'cmd="rm -rf /"; eval "$cmd"',
+            'cmd="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=\'!rm -rf /\'"; eval "$cmd"; git wipe',
+            'eval "$cmd"',
+            'eval "${cmd}"',
+            'eval "$(printf safe)"',
+            "eval '`printf safe`'",
+            "eval '$((1 + 1))'",
+            'eval "$foo" "echo safe"',
+            'eval "echo safe" "$foo"',
+            "eval '$(git push -f origin HEAD)'",
+            'eval "$(rm -rf /)"',
+            "eval '$(rm -rf /)'",
+        ],
+    )
+    def test_dynamic_eval_fails_closed_pure_function(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(eval argument containing shell expansion|eval payload containing shell expansion|shell expansion|xargs dynamic executable)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'cmd="rm -rf /"; eval "$cmd"',
+            'cmd="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=\'!rm -rf /\'"; eval "$cmd"; git wipe',
+            'eval "$cmd"',
+            'eval "${cmd}"',
+            'eval "$(printf safe)"',
+            "eval '`printf safe`'",
+            "eval '$((1 + 1))'",
+            "eval '$(rm -rf /)'",
+        ],
+    )
+    def test_dynamic_eval_fails_closed_pure_function_rm(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(eval argument containing shell expansion|eval payload containing shell expansion|shell expansion|xargs dynamic executable)",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "eval 'echo safe'",
+            'eval "echo safe"',
+            "eval echo safe",
+            "eval",
+            'eval ""',
+            "eval 'git push origin main'",
+            'eval "git push origin main"',
+            "eval 'rm target'",
+            'eval "rm target"',
+        ],
+    )
+    def test_literal_safe_eval_allowed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'eval "$(git push -f origin HEAD)"',
+            "eval 'git push -f origin HEAD'",
+            'eval "git push -f origin HEAD"',
+            "eval 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=\"push -f\"'; git fp origin HEAD",
+        ],
+    )
+    def test_literal_force_push_eval_detected(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'eval "$(rm -rf /)"',
+            "eval 'rm -rf /'",
+            'eval "rm -rf /"',
+            "eval 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=\"!rm -rf /\"'; git wipe",
+        ],
+    )
+    def test_literal_destructive_rm_eval_detected(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ('cmd="git push -f origin HEAD"; eval "$cmd"', 2, "error"),
+            (
+                'cmd="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=\'push -f\'"; eval "$cmd"; git fp origin HEAD',
+                2,
+                "error",
+            ),
+            ('eval "$cmd"', 2, "error"),
+            ('eval "${cmd}"', 2, "error"),
+            ('eval "$(printf safe)"', 2, "error"),
+            ('eval "$(git push -f origin HEAD)"', 2, "error"),
+            ('eval "$(rm -rf /)"', 2, "error"),
+            ("eval 'echo safe'", 0, "allow"),
+            ('eval "echo safe"', 0, "allow"),
+            ("eval 'git push -f origin HEAD'", 0, "deny"),
+            ("eval 'rm -rf /'", 0, "deny"),
+        ],
+    )
+    def test_cli_dynamic_and_literal_eval_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "deny":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect77DynamicExportVarNames:
+    """Tests for Defect #77: Dynamic export/state-mutation variable names fail closed."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "A=GIT_CONFIG_COUNT; B=GIT_CONFIG_KEY_0; C=GIT_CONFIG_VALUE_0; export $A=1 $B=alias.fp $C='push -f'; git fp origin HEAD",
+            "export $A=1",
+            "export ${A}=1",
+            "export $A+=1",
+            "export ${A}+=1",
+            "export $A",
+            "export ${A}",
+            "export PREFIX_$A=1",
+            "unset $A",
+            "unset ${A}",
+            "declare -x $A=1",
+            "declare -x ${A}=1",
+            "declare $A=1",
+            "declare $A",
+            "typeset -x $A=1",
+            "typeset $A=1",
+            "typeset $A",
+            "set -x $A 1",
+            "set -e $A",
+            "set $A 1",
+            "set --export $A 1",
+            "set --erase $A",
+        ],
+    )
+    def test_dynamic_var_names_fail_closed_pure_function(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"Dynamic variable name in (export|unset|declare/typeset|set|readonly|local) operand is not supported",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export FOO=$BAR; git push origin main",
+            'export FOO="$BAR"; git push origin main',
+            "unset FOO; git push origin main",
+            "declare FOO=$BAR; git push origin main",
+            "typeset FOO=$BAR; git push origin main",
+            "set FOO $BAR; git push origin main",
+            "set -x FOO $BAR; git push origin main",
+            "export FOO=$BAR; rm target",
+            "unset FOO; rm target",
+        ],
+    )
+    def test_literal_non_protocol_dynamic_value_allowed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export GIT_CONFIG_COUNT=$BAR; git push origin main",
+            "export GIT_CONFIG_KEY_0=$BAR; git push origin main",
+            "export GIT_CONFIG_VALUE_0=$BAR; git push origin main",
+        ],
+    )
+    def test_literal_protocol_dynamic_value_fails_closed_when_consumed(
+        self, cmd: str
+    ) -> None:
+        with pytest.raises(ValueError, match=r"(GIT_CONFIG_|shell expansion)"):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            (
+                "A=GIT_CONFIG_COUNT; B=GIT_CONFIG_KEY_0; C=GIT_CONFIG_VALUE_0; export $A=1 $B=alias.fp $C='push -f'; git fp origin HEAD",
+                2,
+                "error",
+            ),
+            ("export $A=1", 2, "error"),
+            ("unset $A", 2, "error"),
+            ("declare -x $A=1", 2, "error"),
+            ("typeset -x $A=1", 2, "error"),
+            ("set -x $A 1", 2, "error"),
+            ("export FOO=$BAR; git push origin main", 0, "allow"),
+            ("unset FOO; git push origin main", 0, "allow"),
+            ("set -x FOO $BAR; git push origin main", 0, "allow"),
+        ],
+    )
+    def test_cli_dynamic_export_var_names_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect78ReadonlyLocalExportBypass:
+    """Tests for Defect #78: readonly -x and local -x export bypasses."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "readonly -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "readonly -x GIT_CONFIG_COUNT=1",
+            "readonly -gx GIT_CONFIG_COUNT=1",
+            "readonly -rx GIT_CONFIG_COUNT=1",
+            "readonly -xr GIT_CONFIG_COUNT=1",
+            "readonly -x GIT_CONFIG_COUNT",
+            "local -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+            "local -x GIT_CONFIG_COUNT=1",
+            "local -gx GIT_CONFIG_COUNT=1",
+            "local -x GIT_CONFIG_KEY_0=alias.fp",
+            "readonly -x $A=1",
+            "readonly $A=1",
+            "readonly $A",
+            "local -x $A=1",
+            "local $A=1",
+            "local $A",
+        ],
+    )
+    def test_readonly_local_export_fails_closed_pure_function(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(with export flag targeting Git config protocol key|Dynamic variable name in (readonly|local) operand is not supported)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "readonly FOO=value; git push origin main",
+            "readonly -x FOO=value; git push origin main",
+            "local FOO=value; git push origin main",
+            "local -x FOO=value; git push origin main",
+            "readonly -p; git push origin main",
+            "readonly; git push origin main",
+            "readonly FOO=value; rm target",
+            "local FOO=value; rm target",
+        ],
+    )
+    def test_readonly_local_safe_controls_allowed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            (
+                "readonly -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD",
+                2,
+                "error",
+            ),
+            ("readonly -x GIT_CONFIG_COUNT=1", 2, "error"),
+            ("local -x GIT_CONFIG_COUNT=1", 2, "error"),
+            ("readonly -x $A=1", 2, "error"),
+            ("local -x $A=1", 2, "error"),
+            ("readonly FOO=value; git push origin main", 0, "allow"),
+            ("readonly -x FOO=value; git push origin main", 0, "allow"),
+            ("local FOO=value; git push origin main", 0, "allow"),
+            ("local -x FOO=value; git push origin main", 0, "allow"),
+        ],
+    )
+    def test_cli_readonly_local_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""

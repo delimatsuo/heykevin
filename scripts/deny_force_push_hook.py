@@ -119,6 +119,7 @@ FIND_INPUT_SENTINEL = "$FIND_INPUT"
 _LITERAL_SEMICOLON_SENTINEL = "__KEVIN_HOOK_LITERAL_SEMICOLON_SENTINEL_PR212__"
 _LITERAL_OPEN_PAREN_SENTINEL = "__KEVIN_HOOK_LITERAL_OPEN_PAREN_SENTINEL_PR212__"
 _LITERAL_CLOSE_PAREN_SENTINEL = "__KEVIN_HOOK_LITERAL_CLOSE_PAREN_SENTINEL_PR212__"
+_SUBST_SENTINEL_PREFIX = "__KEVIN_HOOK_SUBST_SENTINEL_"
 
 
 def _restore_sentinels(token: str) -> str:
@@ -191,6 +192,7 @@ def _extract_initial_dynamic_args(tokens: list[str]) -> list[str] | None:
     """If tokens start with a dynamic executable prefix, return trailing arguments.
 
     Recognizes:
+    - substitution sentinels: __KEVIN_HOOK_SUBST_SENTINEL_...
     - literal backtick: `...`
     - dollar + identifier token: $GIT, $RM
     - dollar + braced identifier token: ${GIT}, ${RM}
@@ -201,6 +203,9 @@ def _extract_initial_dynamic_args(tokens: list[str]) -> list[str] | None:
     """
     if not tokens:
         return None
+
+    if _SUBST_SENTINEL_PREFIX in tokens[0]:
+        return [_restore_sentinels(t) for t in tokens[1:]]
 
     if tokens[0] == "`":
         for idx in range(1, len(tokens)):
@@ -1224,12 +1229,26 @@ def _tokenize_split_string(split_str: str) -> list[str]:
     return shlex.split(split_str, posix=True)
 
 
+def _parse_assignment_str(token: str) -> tuple[str, str, bool] | None:
+    """Parse a single token as a variable assignment (NAME=val or NAME+=val).
+
+    Returns (name, val, is_append) if valid assignment, else None.
+    Variable name must be a valid identifier.
+    """
+    if "+=" in token:
+        name, val = token.split("+=", 1)
+        if name.isidentifier():
+            return name, val, True
+    if "=" in token:
+        name, val = token.split("=", 1)
+        if name.isidentifier():
+            return name, val, False
+    return None
+
+
 def _is_var_assignment(token: str) -> bool:
-    """Check if token is an environment variable assignment like FOO=bar."""
-    if "=" not in token:
-        return False
-    name = token.split("=", 1)[0]
-    return name.isidentifier()
+    """Check if token is an environment variable assignment like FOO=bar or FOO+=bar."""
+    return _parse_assignment_str(token) is not None
 
 
 def _is_redirection(token: str) -> bool:
@@ -1386,8 +1405,8 @@ def _clean_command_segment(tokens: list[str]) -> list[str]:
 
 
 def _has_shell_expansion(token: str) -> bool:
-    """Check if token contains unsupported shell expansion markers ($ or `)."""
-    return "$" in token or "`" in token
+    """Check if token contains unsupported shell expansion markers ($ or ` or substitution sentinels)."""
+    return "$" in token or "`" in token or _SUBST_SENTINEL_PREFIX in token
 
 
 def _is_forced_push_args(push_args: list[str]) -> bool:
@@ -1881,21 +1900,23 @@ def _parse_git_env_configs(
     return alias_configs, has_forcing
 
 
-def _consume_var_assignment(tokens: list[str]) -> tuple[str, str] | None:
-    """If tokens start with a variable assignment, pop it and return (name, val).
+def _consume_var_assignment(tokens: list[str]) -> tuple[str, str, bool] | None:
+    """If tokens start with a variable assignment, pop it and return (name, val, is_append).
 
     Handles:
-    - Normal assignments: VAR=val, VAR="val", VAR='val'
+    - Normal assignments: VAR=val, VAR+=val, VAR="val", VAR='val'
     - Split assignments: VAR= followed by $, `, or tokens
+    - Split append assignments: VAR+= or VAR+ = followed by tokens
     - Split with colons: VAR=+HEAD:main (where : was split by shlex)
     """
     if not tokens:
         return None
 
     tok0 = tokens[0]
-    if _is_var_assignment(tok0):
-        tok = tokens.pop(0)
-        name, val = tok.split("=", 1)
+    parsed_single = _parse_assignment_str(tok0)
+    if parsed_single is not None:
+        tokens.pop(0)
+        name, val, is_append = parsed_single
         if val == "" and tokens:
             if tokens[0] == "$":
                 tokens.pop(0)
@@ -1909,11 +1930,36 @@ def _consume_var_assignment(tokens: list[str]) -> tuple[str, str] | None:
             tokens.pop(0)
             if tokens:
                 val = val + ":" + tokens.pop(0)
-        return name, _restore_sentinels(val)
+        return name, _restore_sentinels(val), is_append
 
-    if len(tokens) >= 2 and tokens[0].isidentifier() and tokens[1] == "=":
+    # Multi-token patterns produced by shlex when wordchars includes '+'
+    if len(tokens) >= 2 and tokens[0].endswith("+") and tokens[1] == "=":
+        candidate_name = tokens[0][:-1]
+        if candidate_name.isidentifier():
+            name = candidate_name
+            is_append = True
+            tokens.pop(0)
+            tokens.pop(0)
+            val = ""
+            if tokens:
+                if tokens[0] == "$":
+                    tokens.pop(0)
+                    if tokens:
+                        val = "$" + tokens.pop(0)
+                    else:
+                        val = "$"
+                elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                    val = tokens.pop(0)
+            while tokens and tokens[0] == ":":
+                tokens.pop(0)
+                if tokens:
+                    val = val + ":" + tokens.pop(0)
+            return name, _restore_sentinels(val), is_append
+
+    if len(tokens) >= 2 and tokens[0].isidentifier() and tokens[1] == "+=":
         name = tokens.pop(0)
         tokens.pop(0)
+        is_append = True
         val = ""
         if tokens:
             if tokens[0] == "$":
@@ -1928,7 +1974,48 @@ def _consume_var_assignment(tokens: list[str]) -> tuple[str, str] | None:
             tokens.pop(0)
             if tokens:
                 val = val + ":" + tokens.pop(0)
-        return name, _restore_sentinels(val)
+        return name, _restore_sentinels(val), is_append
+
+    if len(tokens) >= 3 and tokens[0].isidentifier() and tokens[1] == "+" and tokens[2] == "=":
+        name = tokens.pop(0)
+        tokens.pop(0)
+        tokens.pop(0)
+        is_append = True
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        return name, _restore_sentinels(val), is_append
+
+    if len(tokens) >= 2 and tokens[0].isidentifier() and tokens[1] == "=":
+        name = tokens.pop(0)
+        tokens.pop(0)
+        is_append = False
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        return name, _restore_sentinels(val), is_append
 
     return None
 
@@ -1944,8 +2031,18 @@ def _unwrap_command_and_env(
     while tokens:
         assignment = _consume_var_assignment(tokens)
         if assignment is not None:
-            name, val = assignment
-            env_vars[name] = val
+            name, val, is_append = assignment
+            if is_append:
+                if _is_git_config_protocol_key(name):
+                    if name not in env_vars:
+                        raise ValueError(
+                            f"Missing prior value for append assignment to Git config protocol key {name!r}"
+                        )
+                    env_vars[name] = env_vars[name] + val
+                else:
+                    env_vars[name] = env_vars.get(name, "") + val
+            else:
+                env_vars[name] = val
             continue
 
         if XARGS_INPUT_SENTINEL in tokens[0] or FIND_INPUT_SENTINEL in tokens[0]:
@@ -1969,8 +2066,18 @@ def _unwrap_command_and_env(
                 else:
                     sub_assignment = _consume_var_assignment(tokens)
                     if sub_assignment is not None:
-                        name, val = sub_assignment
-                        env_vars[name] = val
+                        name, val, is_append = sub_assignment
+                        if is_append:
+                            if _is_git_config_protocol_key(name):
+                                if name not in env_vars:
+                                    raise ValueError(
+                                        f"Missing prior value for append assignment to Git config protocol key {name!r}"
+                                    )
+                                env_vars[name] = env_vars[name] + val
+                            else:
+                                env_vars[name] = env_vars.get(name, "") + val
+                        else:
+                            env_vars[name] = val
                     else:
                         break
             continue
@@ -2029,16 +2136,37 @@ def _unwrap_command_and_env(
                 else:
                     sub_assignment = _consume_var_assignment(tokens)
                     if sub_assignment is not None:
-                        name, val = sub_assignment
-                        env_vars[name] = val
+                        name, val, is_append = sub_assignment
+                        if is_append:
+                            if _is_git_config_protocol_key(name):
+                                if name not in env_vars:
+                                    raise ValueError(
+                                        f"Missing prior value for append assignment to Git config protocol key {name!r}"
+                                    )
+                                env_vars[name] = env_vars[name] + val
+                            else:
+                                env_vars[name] = env_vars.get(name, "") + val
+                        else:
+                            env_vars[name] = val
                     else:
                         break
             continue
 
         if cmd_word == "command":
-            tokens.pop(0)
-            while tokens and (tokens[0] in {"-p", "-v", "-V"} or tokens[0] == "--"):
-                tokens.pop(0)
+            idx = 1
+            has_query = False
+            while idx < len(tokens) and tokens[idx].startswith("-"):
+                opt = tokens[idx]
+                if opt == "--":
+                    idx += 1
+                    break
+                if any(c in "vV" for c in opt[1:]):
+                    has_query = True
+                    break
+                idx += 1
+            if has_query:
+                break
+            tokens = tokens[idx:]
             continue
 
         if cmd_word in {"nohup", "builtin", "exec"}:
@@ -2135,6 +2263,761 @@ def _unwrap_command_and_env(
     return env_vars, tokens
 
 
+class _ShellState:
+    """Explicit shell state representation tracking shell variables, export status, and allexport."""
+
+    __slots__ = ("allexport", "exported_keys", "shell_vars")
+
+    def __init__(
+        self,
+        inherited_env: dict[str, str] | None = None,
+        shell_vars: dict[str, str] | None = None,
+        exported_keys: set[str] | None = None,
+        allexport: bool = False,
+    ) -> None:
+        self.shell_vars: dict[str, str] = (
+            dict(shell_vars) if shell_vars is not None else {}
+        )
+        self.exported_keys: set[str] = (
+            set(exported_keys) if exported_keys is not None else set()
+        )
+        self.allexport: bool = allexport
+        if inherited_env:
+            for k, v in inherited_env.items():
+                if _is_git_config_protocol_key(k):
+                    self.shell_vars[k] = v
+                    self.exported_keys.add(k)
+
+    def apply_assignment(
+        self,
+        name: str,
+        val: str,
+        is_append: bool,
+        mark_exported: bool | None = None,
+    ) -> None:
+        """Apply variable assignment (set or append) to shell state.
+
+        If mark_exported is True, marks key as exported.
+        If mark_exported is False, marks key as unexported.
+        If mark_exported is None, retains current export status (or exports if allexport is active).
+        """
+        if not _is_git_config_protocol_key(name):
+            return
+
+        if is_append:
+            if name not in self.shell_vars:
+                raise ValueError(
+                    f"Missing prior value for append assignment to Git config protocol key {name!r}"
+                )
+            prior = self.shell_vars[name]
+            new_val = prior + val
+        else:
+            new_val = val
+
+        self.shell_vars[name] = new_val
+
+        if mark_exported is True:
+            self.exported_keys.add(name)
+        elif mark_exported is False:
+            self.exported_keys.discard(name)
+        elif mark_exported is None and self.allexport:
+            self.exported_keys.add(name)
+
+    def get_exported_env(self) -> dict[str, str]:
+        """Return the dictionary of currently exported Git config protocol environment variables."""
+        return {
+            k: self.shell_vars[k]
+            for k in self.exported_keys
+            if k in self.shell_vars
+        }
+
+    def copy(self) -> _ShellState:
+        """Create a shallow copy of the shell state."""
+        return _ShellState(
+            shell_vars=self.shell_vars,
+            exported_keys=self.exported_keys,
+            allexport=self.allexport,
+        )
+
+
+def _unwrap_builtin_wrappers(tokens: list[str]) -> list[str]:
+    """Unwrap shell builtin executable wrappers (builtin, command [-p] [--], literal time).
+
+    Does NOT unwrap query wrappers (command -v / command -V) or non-shell wrappers (exec, nohup, sudo, env, /usr/bin/time).
+    """
+    tok_list = list(tokens)
+    while tok_list:
+        tok0 = tok_list[0]
+        if tok0 == "builtin":
+            tok_list.pop(0)
+            if tok_list and tok_list[0] == "--":
+                tok_list.pop(0)
+            continue
+
+        if tok0 == "command":
+            idx = 1
+            has_query = False
+            while idx < len(tok_list) and tok_list[idx].startswith("-"):
+                opt = tok_list[idx]
+                if opt == "--":
+                    idx += 1
+                    break
+                if any(c in "vV" for c in opt[1:]):
+                    has_query = True
+                    break
+                idx += 1
+            if has_query:
+                return tokens
+            tok_list = tok_list[idx:]
+            continue
+
+        if tok0 == "time":
+            tok_list.pop(0)
+            if tok_list and tok_list[0] == "-p":
+                tok_list.pop(0)
+            if tok_list and tok_list[0] == "--":
+                tok_list.pop(0)
+            continue
+
+        break
+
+    return tok_list
+
+
+def _is_all_var_assignments(tokens: list[str]) -> bool:
+    """Return True if tokens consist entirely of variable assignments and redirections with no command word."""
+    if not tokens:
+        return False
+    toks = list(tokens)
+    has_assignment = False
+    while toks:
+        asgn = _consume_var_assignment(toks)
+        if asgn is not None:
+            has_assignment = True
+            continue
+        tok0 = toks[0]
+        if _is_redirection(tok0):
+            if tok0 in {
+                ">",
+                ">>",
+                "<",
+                "<>",
+                ">&",
+                "<&",
+                "&>",
+                ">|",
+                "1>",
+                "2>",
+                "1>>",
+                "2>>",
+                "<<",
+                "<<-",
+                "<<<",
+                "0<",
+                "0<<",
+                "0<<-",
+                "1<<",
+                "1<<-",
+                "2<<",
+                "2<<-",
+            } or (len(tok0) >= 2 and tok0[0].isdigit()):
+                toks.pop(0)
+                if toks:
+                    toks.pop(0)
+                continue
+            toks.pop(0)
+            continue
+        if tok0 in {"2>&1", "1>&2", ">&1", ">&2"}:
+            toks.pop(0)
+            continue
+        return False
+    return has_assignment
+
+
+def _parse_state_mutation_operand(
+    tokens: list[str],
+) -> tuple[str, str | None, bool, bool] | None:
+    """Parse the next operand from state mutation command tokens.
+
+    Returns (raw_name, val, is_append, is_dynamic_name) if an operand was consumed,
+    or None if tokens is empty.
+    - If assignment (NAME=val or NAME+=val), val is str, is_append indicates +=.
+    - If bare variable name (NAME), val is None, is_append is False.
+    - is_dynamic_name is True if raw_name contains any shell expansion ($ or ` or sentinels).
+    """
+    if not tokens:
+        return None
+
+    tok0 = tokens[0]
+
+    if "+=" in tok0:
+        tokens.pop(0)
+        lhs, rhs = tok0.split("+=", 1)
+        val = rhs
+        if val == "" and tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif tokens[0].startswith("$") or tokens[0].startswith("`"):
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        is_dynamic = _has_shell_expansion(lhs)
+        return lhs, _restore_sentinels(val), True, is_dynamic
+
+    if "=" in tok0:
+        tokens.pop(0)
+        lhs, rhs = tok0.split("=", 1)
+        val = rhs
+        if val == "" and tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif tokens[0].startswith("$") or tokens[0].startswith("`"):
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        is_dynamic = _has_shell_expansion(lhs)
+        return lhs, _restore_sentinels(val), False, is_dynamic
+
+    if len(tokens) >= 2 and tokens[0].endswith("+") and tokens[1] == "=":
+        lhs = tokens.pop(0)[:-1]
+        tokens.pop(0)
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        is_dynamic = _has_shell_expansion(lhs)
+        return lhs, _restore_sentinels(val), True, is_dynamic
+
+    if len(tokens) >= 2 and tokens[1] == "+=":
+        lhs = tokens.pop(0)
+        tokens.pop(0)
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        is_dynamic = _has_shell_expansion(lhs)
+        return lhs, _restore_sentinels(val), True, is_dynamic
+
+    if len(tokens) >= 3 and tokens[1] == "+" and tokens[2] == "=":
+        lhs = tokens.pop(0)
+        tokens.pop(0)
+        tokens.pop(0)
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        is_dynamic = _has_shell_expansion(lhs)
+        return lhs, _restore_sentinels(val), True, is_dynamic
+
+    if len(tokens) >= 2 and tokens[1] == "=":
+        lhs = tokens.pop(0)
+        tokens.pop(0)
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        is_dynamic = _has_shell_expansion(lhs)
+        return lhs, _restore_sentinels(val), False, is_dynamic
+
+    raw_tok = tokens.pop(0)
+    restored = _restore_sentinels(raw_tok)
+    is_dynamic = _has_shell_expansion(raw_tok)
+    return restored, None, False, is_dynamic
+
+
+def _apply_export_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply export command arguments to shell state."""
+    is_unexport = False
+    unsupported_options = False
+    opt_args: list[str] = []
+
+    i = 0
+    while i < len(args):
+        item = args[i]
+        if item == "--":
+            opt_args.extend(args[i + 1 :])
+            break
+        if item.startswith("-") and item != "-" and not _is_var_assignment(item):
+            opt_chars = set(item[1:])
+            if opt_chars and opt_chars.issubset({"n", "p"}):
+                if "n" in opt_chars:
+                    is_unexport = True
+            else:
+                unsupported_options = True
+            i += 1
+        else:
+            opt_args.extend(args[i:])
+            break
+
+    while opt_args:
+        parsed = _parse_state_mutation_operand(opt_args)
+        if parsed is None:
+            break
+        name, val, is_append, is_dynamic = parsed
+        if is_dynamic:
+            raise ValueError(
+                f"Dynamic variable name in export operand is not supported: {name!r}"
+            )
+
+        if _is_git_config_protocol_key(name):
+            if unsupported_options:
+                raise ValueError(
+                    f"Unsupported export option shape targeting Git config protocol key {name!r}"
+                )
+            if val is not None:
+                state.apply_assignment(
+                    name, val, is_append, mark_exported=not is_unexport
+                )
+            else:
+                if is_unexport:
+                    state.exported_keys.discard(name)
+                else:
+                    if name in state.shell_vars:
+                        state.exported_keys.add(name)
+                    else:
+                        raise ValueError(
+                            f"Export of Git config protocol key {name!r} without literal assignment is not supported"
+                        )
+
+
+def _apply_unset_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply unset command arguments to shell state."""
+    unsupported_options = False
+    opt_args: list[str] = []
+
+    i = 0
+    while i < len(args):
+        item = args[i]
+        if item == "--":
+            opt_args.extend(args[i + 1 :])
+            break
+        if item.startswith("-") and item != "-":
+            opt_chars = set(item[1:])
+            if opt_chars and opt_chars.issubset({"v"}):
+                pass
+            else:
+                unsupported_options = True
+            i += 1
+        else:
+            opt_args.extend(args[i:])
+            break
+
+    while opt_args:
+        parsed = _parse_state_mutation_operand(opt_args)
+        if parsed is None:
+            break
+        name, _val, _is_append, is_dynamic = parsed
+        if is_dynamic:
+            raise ValueError(
+                f"Dynamic variable name in unset operand is not supported: {name!r}"
+            )
+
+        if _is_git_config_protocol_key(name):
+            if unsupported_options:
+                raise ValueError(
+                    f"Unsupported unset option shape targeting Git config protocol key {name!r}"
+                )
+            state.shell_vars.pop(name, None)
+            state.exported_keys.discard(name)
+
+
+def _apply_declare_typeset_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply declare or typeset command arguments (Bash/Zsh) to shell state."""
+    is_export = False
+    is_unexport = False
+    unsupported_options = False
+    opt_args: list[str] = []
+
+    i = 0
+    while i < len(args):
+        item = args[i]
+        if item == "--":
+            opt_args.extend(args[i + 1 :])
+            break
+        if item.startswith(("-", "+")) and len(item) > 1 and not _is_var_assignment(item):
+            prefix = item[0]
+            opt_chars = set(item[1:])
+            if opt_chars and opt_chars.issubset({"x", "g", "p"}):
+                if prefix == "-" and "x" in opt_chars:
+                    is_export = True
+                elif prefix == "+" and "x" in opt_chars:
+                    is_unexport = True
+            else:
+                unsupported_options = True
+            i += 1
+        else:
+            opt_args.extend(args[i:])
+            break
+
+    while opt_args:
+        parsed = _parse_state_mutation_operand(opt_args)
+        if parsed is None:
+            break
+        name, val, is_append, is_dynamic = parsed
+        if is_dynamic:
+            raise ValueError(
+                f"Dynamic variable name in declare/typeset operand is not supported: {name!r}"
+            )
+
+        if _is_git_config_protocol_key(name):
+            if unsupported_options:
+                raise ValueError(
+                    f"Unsupported declare/typeset option shape targeting Git config protocol key {name!r}"
+                )
+            if val is not None:
+                if is_export:
+                    state.apply_assignment(name, val, is_append, mark_exported=True)
+                elif is_unexport:
+                    state.apply_assignment(name, val, is_append, mark_exported=False)
+                else:
+                    state.apply_assignment(name, val, is_append, mark_exported=None)
+            else:
+                if is_export:
+                    if name in state.shell_vars:
+                        state.exported_keys.add(name)
+                    else:
+                        raise ValueError(
+                            f"Export of Git config protocol key {name!r} without literal assignment is not supported"
+                        )
+                elif is_unexport:
+                    state.exported_keys.discard(name)
+
+
+def _apply_readonly_local_cmd(cmd: str, args: list[str], state: _ShellState) -> None:
+    """Apply readonly or local command arguments to shell state."""
+    has_export = False
+    opt_args: list[str] = []
+
+    i = 0
+    while i < len(args):
+        item = args[i]
+        if item == "--":
+            opt_args.extend(args[i + 1 :])
+            break
+        if item.startswith(("-", "+")) and len(item) > 1 and not _is_var_assignment(item):
+            prefix = item[0]
+            opt_chars = set(item[1:])
+            if prefix == "-" and "x" in opt_chars:
+                has_export = True
+            i += 1
+        else:
+            opt_args.extend(args[i:])
+            break
+
+    while opt_args:
+        parsed = _parse_state_mutation_operand(opt_args)
+        if parsed is None:
+            break
+        name, val, is_append, is_dynamic = parsed
+        if is_dynamic:
+            raise ValueError(
+                f"Dynamic variable name in {cmd} operand is not supported: {name!r}"
+            )
+
+        if _is_git_config_protocol_key(name):
+            if has_export:
+                raise ValueError(
+                    f"{cmd} with export flag targeting Git config protocol key {name!r} is not supported"
+                )
+            if val is not None:
+                state.apply_assignment(name, val, is_append, mark_exported=None)
+            else:
+                if name not in state.shell_vars:
+                    raise ValueError(
+                        f"{cmd} of Git config protocol key {name!r} without literal assignment is not supported"
+                    )
+
+
+def _apply_set_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply set command arguments (POSIX allexport and Fish variable manipulation) to shell state."""
+    is_fish_export = False
+    is_fish_unexport = False
+    is_fish_erase = False
+    is_allexport_enable = False
+    is_allexport_disable = False
+    unsupported_options = False
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg == "-o" and i + 1 < len(args):
+            opt_name = args[i + 1]
+            if opt_name == "allexport":
+                is_allexport_enable = True
+            i += 2
+            continue
+        if arg == "+o" and i + 1 < len(args):
+            opt_name = args[i + 1]
+            if opt_name == "allexport":
+                is_allexport_disable = True
+            i += 2
+            continue
+        if arg.startswith(("-", "+")) and len(arg) > 1:
+            prefix = arg[0]
+            if arg.startswith("--"):
+                if arg == "--export":
+                    is_fish_export = True
+                elif arg == "--unexport":
+                    is_fish_unexport = True
+                elif arg == "--erase":
+                    is_fish_erase = True
+                elif arg in {"--global", "--local", "--universal"}:
+                    pass
+                else:
+                    unsupported_options = True
+                i += 1
+                continue
+
+            flags = arg[1:]
+            if prefix == "-" and flags == "a":
+                is_allexport_enable = True
+                i += 1
+                continue
+            if prefix == "+" and flags == "a":
+                is_allexport_disable = True
+                i += 1
+                continue
+
+            recognized = True
+            for c in flags:
+                if prefix == "-":
+                    if c in "gxU":
+                        if c == "x":
+                            is_fish_export = True
+                    elif c == "u":
+                        is_fish_unexport = True
+                    elif c == "e":
+                        is_fish_erase = True
+                    elif c in "la":
+                        if c == "a":
+                            is_allexport_enable = True
+                    else:
+                        recognized = False
+                elif prefix == "+":
+                    if c == "a":
+                        is_allexport_disable = True
+                    elif c == "x":
+                        is_fish_unexport = True
+                    else:
+                        recognized = False
+            if not recognized:
+                unsupported_options = True
+            i += 1
+            continue
+        break
+
+    if is_allexport_enable:
+        state.allexport = True
+    if is_allexport_disable:
+        state.allexport = False
+
+    operands = args[i:]
+    if operands:
+        if _has_shell_expansion(operands[0]):
+            raise ValueError(
+                f"Dynamic variable name in set operand is not supported: {operands[0]!r}"
+            )
+        var_name = _restore_sentinels(operands[0])
+        var_values = [_restore_sentinels(v) for v in operands[1:]]
+        if _is_git_config_protocol_key(var_name):
+            if unsupported_options:
+                raise ValueError(
+                    f"Unsupported set option shape targeting Git config protocol key {var_name!r}"
+                )
+            if is_fish_erase:
+                state.shell_vars.pop(var_name, None)
+                state.exported_keys.discard(var_name)
+            elif is_fish_unexport:
+                if len(var_values) > 1:
+                    raise ValueError(
+                        f"Fish set targeting Git config protocol key {var_name!r} with multiple values is not supported"
+                    )
+                if len(var_values) == 1:
+                    val = var_values[0]
+                    state.shell_vars[var_name] = val
+                state.exported_keys.discard(var_name)
+            elif is_fish_export:
+                if len(var_values) > 1:
+                    raise ValueError(
+                        f"Fish set targeting Git config protocol key {var_name!r} with multiple values is not supported"
+                    )
+                if len(var_values) == 1:
+                    val = var_values[0]
+                    state.shell_vars[var_name] = val
+                    state.exported_keys.add(var_name)
+                elif len(var_values) == 0:
+                    if var_name in state.shell_vars:
+                        state.exported_keys.add(var_name)
+                    else:
+                        raise ValueError(
+                            f"Export of Git config protocol key {var_name!r} without literal value is not supported"
+                        )
+            else:
+                if len(var_values) > 1:
+                    if var_name in state.exported_keys or state.allexport:
+                        raise ValueError(
+                            f"Fish set targeting Git config protocol key {var_name!r} with multiple values is not supported"
+                        )
+                elif len(var_values) == 1:
+                    val = var_values[0]
+                    state.shell_vars[var_name] = val
+                    if state.allexport:
+                        state.exported_keys.add(var_name)
+
+
+def _apply_shell_state_segment(
+    tokens: list[str],
+    state: _ShellState,
+) -> bool:
+    """Recognize shell state mutation commands and update Git config protocol keys in state.
+
+    Returns True if the segment was recognized as a shell state mutation segment.
+    Raises ValueError if an exact Git config protocol key has an unknowable value or unsupported options.
+    """
+    if not tokens:
+        return False
+
+    if _is_all_var_assignments(tokens):
+        toks = list(tokens)
+        while toks:
+            asgn = _consume_var_assignment(toks)
+            if asgn is not None:
+                name, val, is_append = asgn
+                if _is_git_config_protocol_key(name):
+                    state.apply_assignment(name, val, is_append, mark_exported=None)
+                continue
+            tok0 = toks.pop(0)
+            if (
+                tok0
+                in {
+                    ">",
+                    ">>",
+                    "<",
+                    "<>",
+                    ">&",
+                    "<&",
+                    "&>",
+                    ">|",
+                    "1>",
+                    "2>",
+                    "1>>",
+                    "2>>",
+                    "<<",
+                    "<<-",
+                    "<<<",
+                    "0<",
+                    "0<<",
+                    "0<<-",
+                    "1<<",
+                    "1<<-",
+                    "2<<",
+                    "2<<-",
+                }
+                or (len(tok0) >= 2 and tok0[0].isdigit())
+            ) and toks:
+                toks.pop(0)
+        return True
+
+    unwrapped = _unwrap_builtin_wrappers(tokens)
+    if not unwrapped:
+        return False
+
+    cmd = os.path.basename(unwrapped[0])
+    args = unwrapped[1:]
+
+    if cmd == "export":
+        _apply_export_cmd(args, state)
+        return True
+
+    if cmd == "unset":
+        _apply_unset_cmd(args, state)
+        return True
+
+    if cmd in {"declare", "typeset"}:
+        _apply_declare_typeset_cmd(args, state)
+        return True
+
+    if cmd == "set":
+        _apply_set_cmd(args, state)
+        return True
+
+    if cmd in {"readonly", "local"}:
+        _apply_readonly_local_cmd(cmd, args, state)
+        return True
+
+    return False
+
+
+def _apply_export_unset_segment(
+    tokens: list[str],
+    env: dict[str, str] | _ShellState,
+) -> bool:
+    """Compatibility wrapper for recognizing export/unset/state commands and updating exact Git config keys."""
+    if isinstance(env, _ShellState):
+        return _apply_shell_state_segment(tokens, env)
+    temp_state = _ShellState(inherited_env=env)
+    res = _apply_shell_state_segment(tokens, temp_state)
+    if res:
+        env.clear()
+        env.update(temp_state.get_exported_env())
+    return res
+
+
 def _is_git_or_executes_git(tokens: list[str]) -> bool:
     """Return True if the tokens represent Git or a wrapper/executor that may execute Git."""
     if not tokens:
@@ -2196,8 +3079,18 @@ def _inspect_single_command_git(
 
     if cmd_word == "eval":
         tokens.pop(0)
+        for arg in tokens:
+            if _has_shell_expansion(arg):
+                raise ValueError(
+                    f"eval argument containing shell expansion is not supported: {arg!r}"
+                )
+        eval_payload = " ".join(_restore_sentinels(t) for t in tokens)
+        if _has_shell_expansion(eval_payload):
+            raise ValueError(
+                f"eval payload containing shell expansion is not supported: {eval_payload!r}"
+            )
         return contains_forced_git_push(
-            " ".join(_restore_sentinels(t) for t in tokens),
+            eval_payload,
             _depth=_depth + 1,
             _inherited_env=env_vars,
         )
@@ -2281,8 +3174,18 @@ def _inspect_single_command_rm(
 
     if cmd_word == "eval":
         tokens.pop(0)
+        for arg in tokens:
+            if _has_shell_expansion(arg):
+                raise ValueError(
+                    f"eval argument containing shell expansion is not supported: {arg!r}"
+                )
+        eval_payload = " ".join(_restore_sentinels(t) for t in tokens)
+        if _has_shell_expansion(eval_payload):
+            raise ValueError(
+                f"eval payload containing shell expansion is not supported: {eval_payload!r}"
+            )
         return contains_forbidden_rm(
-            " ".join(_restore_sentinels(t) for t in tokens),
+            eval_payload,
             _depth=_depth + 1,
             _inherited_env=env_vars,
         )
@@ -2857,6 +3760,338 @@ def _extract_raw_substitutions(command: str) -> list[tuple[str, str]]:
     return substitutions
 
 
+def _mask_and_collect_substitutions(
+    command: str, depth: int
+) -> tuple[str, dict[str, list[tuple[str, str]]]]:
+    """Lexically scan and replace executable substitutions with unique sentinels.
+
+    Returns (masked_command, subst_map) where subst_map maps sentinel token to
+    a list of (kind, body) tuples.
+    Raises ValueError on malformed or unclosed substitutions or unclosed here-docs.
+    """
+    if depth > MAX_SUBSTITUTION_DEPTH:
+        raise ValueError(
+            f"Maximum substitution nesting depth ({MAX_SUBSTITUTION_DEPTH}) exceeded"
+        )
+
+    masked_chars: list[str] = []
+    subst_map: dict[str, list[tuple[str, str]]] = {}
+    pending_heredocs: list[_HereDocTarget] = []
+    i = 0
+    n = len(command)
+    state = "NORMAL"
+    prev_char: str | None = None
+    subst_counter = 0
+
+    while i < n:
+        ch = command[i]
+
+        if state == "NORMAL":
+            if ch == "\\":
+                masked_chars.append(ch)
+                i += 1
+                if i < n:
+                    masked_chars.append(command[i])
+                    prev_char = command[i]
+                    i += 1
+                else:
+                    prev_char = ch
+                continue
+
+            elif ch == "'":
+                state = "SINGLE_QUOTE"
+                masked_chars.append(ch)
+                prev_char = "'"
+                i += 1
+                continue
+
+            elif ch == '"':
+                state = "DOUBLE_QUOTE"
+                masked_chars.append(ch)
+                prev_char = '"'
+                i += 1
+                continue
+
+            elif ch == "#" and (prev_char is None or prev_char in " \t\r\n;&|(){}<>"):
+                state = "COMMENT"
+                i += 1
+                continue
+
+            elif ch == "<" and i + 1 < n and command[i + 1] == "<":
+                if i + 2 < n and command[i + 2] == "<":
+                    masked_chars.append(command[i : i + 3])
+                    i += 3
+                    prev_char = "<"
+                    continue
+                target, next_i = _parse_heredoc_delimiter(command, i)
+                pending_heredocs.append(target)
+                masked_chars.append(command[i:next_i])
+                i = next_i
+                prev_char = target.delimiter[-1] if target.delimiter else ">"
+                continue
+
+            elif ch == "`":
+                body, next_i = _parse_backtick_body(command, i, in_double_quotes=False)
+                sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                subst_counter += 1
+                subst_map[sentinel] = [("backtick", body)]
+                masked_chars.append(sentinel)
+                i = next_i
+                prev_char = "`"
+                continue
+
+            elif ch == "$" and i + 1 < n:
+                if command[i + 1 : i + 3] == "((":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=3, is_arith=True
+                    )
+                    sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                    subst_counter += 1
+                    subst_map[sentinel] = [("arith", body)]
+                    masked_chars.append(sentinel)
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                elif command[i + 1] == "(":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=2, is_arith=False
+                    )
+                    sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                    subst_counter += 1
+                    subst_map[sentinel] = [("cmd", body)]
+                    masked_chars.append(sentinel)
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                else:
+                    masked_chars.append(ch)
+                    prev_char = ch
+                    i += 1
+                    continue
+
+            elif ch == "<" and i + 1 < n and command[i + 1] == "(":
+                body, next_i = _parse_paren_body(
+                    command, i, prefix_len=2, is_arith=False
+                )
+                sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                subst_counter += 1
+                subst_map[sentinel] = [("process_in", body)]
+                masked_chars.append(sentinel)
+                i = next_i
+                prev_char = ")"
+                continue
+
+            elif ch == ">" and i + 1 < n and command[i + 1] == "(":
+                body, next_i = _parse_paren_body(
+                    command, i, prefix_len=2, is_arith=False
+                )
+                sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                subst_counter += 1
+                subst_map[sentinel] = [("process_out", body)]
+                masked_chars.append(sentinel)
+                i = next_i
+                prev_char = ")"
+                continue
+
+            elif ch == "\n":
+                if pending_heredocs:
+                    next_start = i + 1
+                    for hd in pending_heredocs:
+                        body, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                        if not hd.is_quoted:
+                            hd_substs = _extract_heredoc_body_substitutions(body)
+                            if hd_substs:
+                                sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                                subst_counter += 1
+                                subst_map[sentinel] = hd_substs
+                                masked_chars.append(f" {sentinel} ")
+                    body_chunk = command[i + 1 : next_start]
+                    pending_heredocs.clear()
+                    masked_chars.append("\n")
+                    masked_chars.append(body_chunk)
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    masked_chars.append("\n")
+                    prev_char = "\n"
+                    i += 1
+                    continue
+
+            else:
+                masked_chars.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "SINGLE_QUOTE":
+            if ch == "'":
+                state = "NORMAL"
+                masked_chars.append(ch)
+                prev_char = "'"
+                i += 1
+                continue
+            else:
+                masked_chars.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "DOUBLE_QUOTE":
+            if ch == '"':
+                state = "NORMAL"
+                masked_chars.append(ch)
+                prev_char = '"'
+                i += 1
+                continue
+
+            elif ch == "\\":
+                if i + 1 < n and command[i + 1] in {"$", "`", '"', "\\", "\n"}:
+                    masked_chars.append(ch)
+                    masked_chars.append(command[i + 1])
+                    i += 2
+                    prev_char = command[i - 1]
+                    continue
+                else:
+                    masked_chars.append(ch)
+                    i += 1
+                    prev_char = "\\"
+                    continue
+
+            elif ch == "`":
+                body, next_i = _parse_backtick_body(command, i, in_double_quotes=True)
+                sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                subst_counter += 1
+                subst_map[sentinel] = [("backtick", body)]
+                masked_chars.append(sentinel)
+                i = next_i
+                prev_char = "`"
+                continue
+
+            elif ch == "$" and i + 1 < n:
+                if command[i + 1 : i + 3] == "((":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=3, is_arith=True
+                    )
+                    sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                    subst_counter += 1
+                    subst_map[sentinel] = [("arith", body)]
+                    masked_chars.append(sentinel)
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                elif command[i + 1] == "(":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=2, is_arith=False
+                    )
+                    sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                    subst_counter += 1
+                    subst_map[sentinel] = [("cmd", body)]
+                    masked_chars.append(sentinel)
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                else:
+                    masked_chars.append(ch)
+                    prev_char = ch
+                    i += 1
+                    continue
+
+            else:
+                masked_chars.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "COMMENT":
+            if ch == "\n":
+                if pending_heredocs:
+                    next_start = i + 1
+                    state = "NORMAL"
+                    for hd in pending_heredocs:
+                        body, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                        if not hd.is_quoted:
+                            hd_substs = _extract_heredoc_body_substitutions(body)
+                            if hd_substs:
+                                sentinel = f"{_SUBST_SENTINEL_PREFIX}{subst_counter}__"
+                                subst_counter += 1
+                                subst_map[sentinel] = hd_substs
+                                masked_chars.append(f" {sentinel} ")
+                    body_chunk = command[i + 1 : next_start]
+                    pending_heredocs.clear()
+                    masked_chars.append("\n")
+                    masked_chars.append(body_chunk)
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    state = "NORMAL"
+                    masked_chars.append("\n")
+                    prev_char = "\n"
+                    i += 1
+                    continue
+            i += 1
+            continue
+
+    if pending_heredocs:
+        raise ValueError("Unclosed here-doc body")
+
+    if state in {"SINGLE_QUOTE", "DOUBLE_QUOTE"}:
+        raise ValueError(f"Unclosed quote in command: {state}")
+
+    return "".join(masked_chars), subst_map
+
+
+def _extract_segment_sentinels(
+    tokens: list[str],
+    subst_map: dict[str, list[tuple[str, str]]],
+) -> list[str]:
+    """Extract substitution sentinels appearing in the token list in ascending index order."""
+    if not subst_map:
+        return []
+    found: set[str] = set()
+    for tok in tokens:
+        for sentinel in subst_map:
+            if sentinel in tok:
+                found.add(sentinel)
+    if not found:
+        return []
+    return sorted(
+        found,
+        key=lambda s: int(s[len(_SUBST_SENTINEL_PREFIX) : -2])
+        if s[len(_SUBST_SENTINEL_PREFIX) : -2].isdigit()
+        else 0,
+    )
+
+
+def _inspect_substitutions_with_env(
+    command: str,
+    checker_fn: Callable[..., bool],
+    depth: int,
+    inherited_env: dict[str, str] | None,
+) -> bool:
+    """Inspect executable shell substitutions in command inheriting environment."""
+    if depth > MAX_SUBSTITUTION_DEPTH:
+        raise ValueError(
+            f"Maximum substitution nesting depth ({MAX_SUBSTITUTION_DEPTH}) exceeded"
+        )
+
+    substitutions = _extract_raw_substitutions(command)
+    for kind, body in substitutions:
+        if kind == "arith":
+            if _inspect_substitutions_with_env(body, checker_fn, depth + 1, inherited_env):
+                return True
+        else:
+            if checker_fn(body, _depth=depth + 1, _inherited_env=inherited_env):
+                return True
+
+    return False
+
+
 def _inspect_substitutions(
     command: str,
     checker_fn: Callable[[str, int], bool],
@@ -2889,6 +4124,7 @@ def contains_forced_git_push(
     command: str,
     _depth: int = 0,
     _inherited_env: dict[str, str] | None = None,
+    _shell_state: _ShellState | None = None,
 ) -> bool:
     """Pure function checking whether a shell command contains a forced git push.
 
@@ -2903,14 +4139,63 @@ def contains_forced_git_push(
     if not command or not command.strip():
         return False
 
-    if _inspect_substitutions(command, contains_forced_git_push, _depth):
-        return True
+    state = (
+        _shell_state
+        if _shell_state is not None
+        else _ShellState(inherited_env=_inherited_env)
+    )
 
-    commands = _tokenize_command_raw(command)
+    masked_command, subst_map = _mask_and_collect_substitutions(command, _depth)
+    commands = _tokenize_command_raw(masked_command)
+
     for cmd_tokens in commands:
+        segment_sentinels = _extract_segment_sentinels(cmd_tokens, subst_map)
+        for sentinel in segment_sentinels:
+            for kind, body in subst_map[sentinel]:
+                if kind == "arith":
+                    if _inspect_substitutions_with_env(
+                        body,
+                        contains_forced_git_push,
+                        _depth + 1,
+                        state.get_exported_env(),
+                    ):
+                        return True
+                else:
+                    if contains_forced_git_push(
+                        body,
+                        _depth=_depth + 1,
+                        _inherited_env=state.get_exported_env(),
+                    ):
+                        return True
+
         cleaned = _clean_command_segment(cmd_tokens)
+        if not cleaned:
+            continue
+        if _apply_shell_state_segment(cleaned, state):
+            continue
+
+        unwrapped_eval = _unwrap_builtin_wrappers(cleaned)
+        if unwrapped_eval and os.path.basename(unwrapped_eval[0]) == "eval":
+            eval_args = unwrapped_eval[1:]
+            for arg in eval_args:
+                if _has_shell_expansion(arg):
+                    raise ValueError(
+                        f"eval argument containing shell expansion is not supported: {arg!r}"
+                    )
+            eval_payload = " ".join(_restore_sentinels(t) for t in eval_args)
+            if _has_shell_expansion(eval_payload):
+                raise ValueError(
+                    f"eval payload containing shell expansion is not supported: {eval_payload!r}"
+                )
+            if contains_forced_git_push(
+                eval_payload, _depth=_depth + 1, _shell_state=state
+            ):
+                return True
+            continue
+
+        current_env = state.get_exported_env()
         if _inspect_single_command_git(
-            cleaned, _depth=_depth, _inherited_env=_inherited_env
+            cleaned, _depth=_depth, _inherited_env=current_env
         ):
             return True
 
@@ -2921,6 +4206,7 @@ def contains_forbidden_rm(
     command: str,
     _depth: int = 0,
     _inherited_env: dict[str, str] | None = None,
+    _shell_state: _ShellState | None = None,
 ) -> bool:
     """Pure function checking whether a shell command contains a forbidden destructive rm invocation.
 
@@ -2935,14 +4221,63 @@ def contains_forbidden_rm(
     if not command or not command.strip():
         return False
 
-    if _inspect_substitutions(command, contains_forbidden_rm, _depth):
-        return True
+    state = (
+        _shell_state
+        if _shell_state is not None
+        else _ShellState(inherited_env=_inherited_env)
+    )
 
-    commands = _tokenize_command_raw(command)
+    masked_command, subst_map = _mask_and_collect_substitutions(command, _depth)
+    commands = _tokenize_command_raw(masked_command)
+
     for cmd_tokens in commands:
+        segment_sentinels = _extract_segment_sentinels(cmd_tokens, subst_map)
+        for sentinel in segment_sentinels:
+            for kind, body in subst_map[sentinel]:
+                if kind == "arith":
+                    if _inspect_substitutions_with_env(
+                        body,
+                        contains_forbidden_rm,
+                        _depth + 1,
+                        state.get_exported_env(),
+                    ):
+                        return True
+                else:
+                    if contains_forbidden_rm(
+                        body,
+                        _depth=_depth + 1,
+                        _inherited_env=state.get_exported_env(),
+                    ):
+                        return True
+
         cleaned = _clean_command_segment(cmd_tokens)
+        if not cleaned:
+            continue
+        if _apply_shell_state_segment(cleaned, state):
+            continue
+
+        unwrapped_eval = _unwrap_builtin_wrappers(cleaned)
+        if unwrapped_eval and os.path.basename(unwrapped_eval[0]) == "eval":
+            eval_args = unwrapped_eval[1:]
+            for arg in eval_args:
+                if _has_shell_expansion(arg):
+                    raise ValueError(
+                        f"eval argument containing shell expansion is not supported: {arg!r}"
+                    )
+            eval_payload = " ".join(_restore_sentinels(t) for t in eval_args)
+            if _has_shell_expansion(eval_payload):
+                raise ValueError(
+                    f"eval payload containing shell expansion is not supported: {eval_payload!r}"
+                )
+            if contains_forbidden_rm(
+                eval_payload, _depth=_depth + 1, _shell_state=state
+            ):
+                return True
+            continue
+
+        current_env = state.get_exported_env()
         if _inspect_single_command_rm(
-            cleaned, _depth=_depth, _inherited_env=_inherited_env
+            cleaned, _depth=_depth, _inherited_env=current_env
         ):
             return True
 

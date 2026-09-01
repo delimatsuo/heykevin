@@ -1261,6 +1261,7 @@ def _is_redirection(token: str) -> bool:
         ">&",
         "<&",
         "&>",
+        "&>>",
         ">|",
         "1>",
         "2>",
@@ -1281,6 +1282,98 @@ def _is_redirection(token: str) -> bool:
     if len(token) >= 2 and token[0].isdigit() and (token[1] in {">", "<"} or token[1:3] in {">>", "<<"}):
         return True
     return False
+
+
+_VALID_SHELL_OPERATORS_BY_LENGTH = (
+    # Length 3
+    ";;&",
+    "<<-",
+    "<<<",
+    "&>>",
+    # Length 2
+    ";;",
+    ";&",
+    "&&",
+    "||",
+    "|&",
+    ">>",
+    ">&",
+    "<&",
+    "&>",
+    ">|",
+    "<>",
+    "<<",
+    # Length 1
+    ";",
+    "&",
+    "|",
+    "(",
+    ")",
+    ">",
+    "<",
+)
+
+
+def _decompose_punctuation_run(tok: str) -> list[str]:
+    """Decompose a structural punctuation run into longest valid shell operators.
+
+    Raises ValueError if the punctuation run is malformed or ambiguous.
+    """
+    if not tok:
+        return []
+    if not all(c in "();<>|&" for c in tok):
+        return [tok]
+
+    if tok in {
+        ";",
+        "&",
+        "|",
+        "(",
+        ")",
+        ">",
+        "<",
+        "&&",
+        "||",
+        "|&",
+        ";;",
+        ";&",
+        ";;&",
+        ">>",
+        ">&",
+        "<&",
+        "&>",
+        ">|",
+        "<>",
+        "<<",
+        "<<-",
+        "<<<",
+        "&>>",
+    }:
+        return [tok]
+
+    decomposed: list[str] = []
+    pos = 0
+    n = len(tok)
+    while pos < n:
+        matched = False
+        for op in _VALID_SHELL_OPERATORS_BY_LENGTH:
+            if tok.startswith(op, pos):
+                decomposed.append(op)
+                pos += len(op)
+                matched = True
+                break
+        if not matched:
+            raise ValueError(f"Malformed or ambiguous punctuation sequence: {tok!r}")
+
+    return decomposed
+
+
+def _normalize_raw_tokens(raw_tokens: list[str]) -> list[str]:
+    """Normalize a list of raw shell tokens by decomposing compound structural punctuation runs."""
+    normalized: list[str] = []
+    for tok in raw_tokens:
+        normalized.extend(_decompose_punctuation_run(tok))
+    return normalized
 
 
 def _split_into_commands(tokens: list[str]) -> list[list[str]]:
@@ -1367,6 +1460,9 @@ def _clean_command_segment(tokens: list[str]) -> list[str]:
     i = 0
     while i < len(tokens):
         token = tokens[i]
+        if token.isdigit() and i + 1 < len(tokens) and _is_redirection(tokens[i + 1]):
+            i += 1
+            continue
         if _is_redirection(token):
             if token in {
                 ">",
@@ -1376,6 +1472,7 @@ def _clean_command_segment(tokens: list[str]) -> list[str]:
                 ">&",
                 "<&",
                 "&>",
+                "&>>",
                 ">|",
                 "1>",
                 "2>",
@@ -1646,7 +1743,7 @@ def _inspect_fish_invocation(
 
 def _inspect_posix_shell_invocation(
     tokens: list[str],
-    checker_fn: Callable[[str], bool],
+    checker_fn: Callable[..., bool],
 ) -> bool:
     """Inspect a POSIX shell invocation (sh, bash, zsh, dash, ksh).
 
@@ -1657,6 +1754,8 @@ def _inspect_posix_shell_invocation(
     reads_stdin = False
     i = 0
     n = len(args)
+    shell_binary = os.path.basename(tokens[0])
+    expand_aliases_opt: bool | None = None
 
     while i < n:
         arg = args[i]
@@ -1686,37 +1785,83 @@ def _inspect_posix_shell_invocation(
                     i += 1
                 elif arg == "--command":
                     if i + 1 < n:
-                        return checker_fn(_restore_sentinels(args[i + 1]))
+                        init_expand = (
+                            expand_aliases_opt
+                            if expand_aliases_opt is not None
+                            else (shell_binary in {"sh", "dash", "zsh", "ksh"})
+                        )
+                        return checker_fn(
+                            _restore_sentinels(args[i + 1]),
+                            _init_expand_aliases=init_expand,
+                        )
                     raise ValueError("Shell invocation -c flag is missing command argument")
                 elif arg.startswith("--command="):
-                    return checker_fn(_restore_sentinels(arg.split("=", 1)[1]))
+                    init_expand = (
+                        expand_aliases_opt
+                        if expand_aliases_opt is not None
+                        else (shell_binary in {"sh", "dash", "zsh", "ksh"})
+                    )
+                    return checker_fn(
+                        _restore_sentinels(arg.split("=", 1)[1]),
+                        _init_expand_aliases=init_expand,
+                    )
                 else:
                     i += 1
                 continue
 
             if arg == "-c":
                 if i + 1 < n:
-                    return checker_fn(_restore_sentinels(args[i + 1]))
+                    init_expand = (
+                        expand_aliases_opt
+                        if expand_aliases_opt is not None
+                        else (shell_binary in {"sh", "dash", "zsh", "ksh"})
+                    )
+                    return checker_fn(
+                        _restore_sentinels(args[i + 1]),
+                        _init_expand_aliases=init_expand,
+                    )
                 raise ValueError("Shell invocation -c flag is missing command argument")
 
             if arg.startswith("-c") and not arg.startswith("-C"):
-                return checker_fn(_restore_sentinels(arg[2:]))
+                init_expand = (
+                    expand_aliases_opt
+                    if expand_aliases_opt is not None
+                    else (shell_binary in {"sh", "dash", "zsh", "ksh"})
+                )
+                return checker_fn(
+                    _restore_sentinels(arg[2:]),
+                    _init_expand_aliases=init_expand,
+                )
 
             if arg in {"-o", "-O"}:
                 if i + 1 < n:
+                    opt_val = args[i + 1]
+                    if arg == "-O" and opt_val == "expand_aliases":
+                        expand_aliases_opt = True
                     i += 2
                 else:
                     raise ValueError(f"Shell invocation {arg} flag is missing option argument")
                 continue
 
             if arg.startswith("-O") and len(arg) > 2:
+                opt_val = arg[2:]
+                if opt_val == "expand_aliases":
+                    expand_aliases_opt = True
                 i += 1
                 continue
 
             flags = arg[1:]
             if "c" in flags:
                 if i + 1 < n:
-                    return checker_fn(_restore_sentinels(args[i + 1]))
+                    init_expand = (
+                        expand_aliases_opt
+                        if expand_aliases_opt is not None
+                        else (shell_binary in {"sh", "dash", "zsh", "ksh"})
+                    )
+                    return checker_fn(
+                        _restore_sentinels(args[i + 1]),
+                        _init_expand_aliases=init_expand,
+                    )
                 raise ValueError("Shell invocation -c flag is missing command argument")
 
             if "s" in flags:
@@ -1729,6 +1874,8 @@ def _inspect_posix_shell_invocation(
                     raise ValueError("Shell invocation -o flag is missing option argument")
             elif "O" in flags and flags.endswith("O"):
                 if i + 1 < n:
+                    if args[i + 1] == "expand_aliases":
+                        expand_aliases_opt = True
                     i += 2
                 else:
                     raise ValueError("Shell invocation -O flag is missing option argument")
@@ -1739,12 +1886,16 @@ def _inspect_posix_shell_invocation(
         if arg.startswith("+") and len(arg) > 1:
             if arg in {"+o", "+O"}:
                 if i + 1 < n:
+                    if arg == "+O" and args[i + 1] == "expand_aliases":
+                        expand_aliases_opt = False
                     i += 2
                 else:
                     raise ValueError(f"Shell invocation {arg} flag is missing option argument")
                 continue
 
             if arg.startswith("+O") and len(arg) > 2:
+                if arg[2:] == "expand_aliases":
+                    expand_aliases_opt = False
                 i += 1
                 continue
 
@@ -1756,6 +1907,8 @@ def _inspect_posix_shell_invocation(
                     raise ValueError("Shell invocation +o flag is missing option argument")
             elif "O" in flags and flags.endswith("O"):
                 if i + 1 < n:
+                    if args[i + 1] == "expand_aliases":
+                        expand_aliases_opt = False
                     i += 2
                 else:
                     raise ValueError("Shell invocation +O flag is missing option argument")
@@ -1772,7 +1925,7 @@ def _inspect_posix_shell_invocation(
 
 def _inspect_shell_invocation(
     tokens: list[str],
-    checker_fn: Callable[[str], bool],
+    checker_fn: Callable[..., bool],
 ) -> bool:
     """Inspect a shell invocation (e.g. sh, bash, zsh, dash, ksh, fish).
 
@@ -2264,9 +2417,15 @@ def _unwrap_command_and_env(
 
 
 class _ShellState:
-    """Explicit shell state representation tracking shell variables, export status, and allexport."""
+    """Explicit shell state representation tracking shell variables, export status, allexport, and alias expansion."""
 
-    __slots__ = ("allexport", "exported_keys", "shell_vars")
+    __slots__ = (
+        "allexport",
+        "defined_aliases",
+        "expand_aliases",
+        "exported_keys",
+        "shell_vars",
+    )
 
     def __init__(
         self,
@@ -2274,6 +2433,8 @@ class _ShellState:
         shell_vars: dict[str, str] | None = None,
         exported_keys: set[str] | None = None,
         allexport: bool = False,
+        expand_aliases: bool = False,
+        defined_aliases: set[str] | None = None,
     ) -> None:
         self.shell_vars: dict[str, str] = (
             dict(shell_vars) if shell_vars is not None else {}
@@ -2282,6 +2443,10 @@ class _ShellState:
             set(exported_keys) if exported_keys is not None else set()
         )
         self.allexport: bool = allexport
+        self.expand_aliases: bool = expand_aliases
+        self.defined_aliases: set[str] = (
+            set(defined_aliases) if defined_aliases is not None else set()
+        )
         if inherited_env:
             for k, v in inherited_env.items():
                 if _is_git_config_protocol_key(k):
@@ -2337,6 +2502,8 @@ class _ShellState:
             shell_vars=self.shell_vars,
             exported_keys=self.exported_keys,
             allexport=self.allexport,
+            expand_aliases=self.expand_aliases,
+            defined_aliases=self.defined_aliases,
         )
 
 
@@ -2920,6 +3087,135 @@ def _apply_set_cmd(args: list[str], state: _ShellState) -> None:
                         state.exported_keys.add(var_name)
 
 
+def _apply_shopt_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply shopt command arguments (tracking expand_aliases) to shell state."""
+    if not args:
+        return
+
+    is_enable = False
+    is_disable = False
+    opt_names: list[str] = []
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            opt_names.extend(args[i + 1 :])
+            break
+        if arg.startswith("-") and len(arg) > 1:
+            flags = arg[1:]
+            for c in flags:
+                if c == "s":
+                    is_enable = True
+                elif c == "u":
+                    is_disable = True
+            i += 1
+            continue
+        opt_names.extend(args[i:])
+        break
+
+    for opt in opt_names:
+        if _has_shell_expansion(opt):
+            raise ValueError(
+                f"Dynamic option name in shopt operand is not supported: {opt!r}"
+            )
+        opt_clean = _restore_sentinels(opt).strip()
+        if opt_clean == "expand_aliases":
+            if is_enable:
+                if state.defined_aliases:
+                    raise ValueError(
+                        "Shell alias expansion enabled after literal alias definitions"
+                    )
+                state.expand_aliases = True
+            elif is_disable:
+                state.expand_aliases = False
+
+
+def _extract_alias_definitions(args: list[str]) -> list[tuple[str, str]]:
+    """Extract alias definitions (name, value) from alias command arguments.
+
+    Returns a list of (name, val) definitions. Ignores query forms (bare names or flags).
+    """
+    definitions: list[tuple[str, str]] = []
+    i = 0
+    parsing_options = True
+    while i < len(args):
+        arg = args[i]
+        if parsing_options and arg == "--":
+            parsing_options = False
+            i += 1
+            continue
+        if parsing_options and arg == "-p":
+            i += 1
+            continue
+        if _has_shell_expansion(arg):
+            raise ValueError(
+                f"Dynamic alias operand is not supported: {arg!r}"
+            )
+        if "=" in arg:
+            name, val = arg.split("=", 1)
+            name_clean = name.rstrip("+").strip()
+            if name_clean:
+                definitions.append((name_clean, val))
+            i += 1
+            continue
+        if i + 1 < len(args) and args[i + 1] == "=":
+            name_clean = arg.rstrip("+").strip()
+            val = args[i + 2] if i + 2 < len(args) else ""
+            if name_clean:
+                definitions.append((name_clean, val))
+            i += 3
+            continue
+        if i + 1 < len(args) and args[i + 1].startswith("="):
+            name_clean = arg.rstrip("+").strip()
+            val = args[i + 1][1:]
+            if name_clean:
+                definitions.append((name_clean, val))
+            i += 2
+            continue
+        i += 1
+    return definitions
+
+
+def _apply_alias_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply alias command arguments to shell state."""
+    definitions = _extract_alias_definitions(args)
+    if not definitions:
+        return
+
+    if state.expand_aliases:
+        raise ValueError(
+            "Literal shell alias defined while alias expansion is enabled"
+        )
+
+    for name, _val in definitions:
+        state.defined_aliases.add(name)
+
+
+def _apply_unalias_cmd(args: list[str], state: _ShellState) -> None:
+    """Apply unalias command arguments to shell state."""
+    if not args:
+        return
+    i = 0
+    parsing_options = True
+    while i < len(args):
+        arg = args[i]
+        if parsing_options and arg == "--":
+            parsing_options = False
+            i += 1
+            continue
+        if parsing_options and arg == "-a":
+            state.defined_aliases.clear()
+            i += 1
+            continue
+        if _has_shell_expansion(arg):
+            raise ValueError(
+                f"Dynamic unalias operand is not supported: {arg!r}"
+            )
+        state.defined_aliases.discard(_restore_sentinels(arg))
+        i += 1
+
+
 def _apply_shell_state_segment(
     tokens: list[str],
     state: _ShellState,
@@ -3000,6 +3296,369 @@ def _apply_shell_state_segment(
         _apply_readonly_local_cmd(cmd, args, state)
         return True
 
+    if cmd == "shopt":
+        _apply_shopt_cmd(args, state)
+        return True
+
+    if cmd == "alias":
+        _apply_alias_cmd(args, state)
+        return True
+
+    if cmd == "unalias":
+        _apply_unalias_cmd(args, state)
+        return True
+
+    return False
+
+
+class _CommandSegment:
+    """Represents a single command segment and its adjacent boundary operators."""
+
+    __slots__ = ("following_op", "preceding_op", "subshell_depth", "tokens")
+
+    def __init__(
+        self,
+        tokens: list[str],
+        preceding_op: str | None,
+        following_op: str | None,
+        subshell_depth: int,
+    ) -> None:
+        self.tokens = tokens
+        self.preceding_op = preceding_op
+        self.following_op = following_op
+        self.subshell_depth = subshell_depth
+
+
+SEPARATORS_UNCONDITIONAL = {";", "\n"}
+SEPARATORS_CONDITIONAL = {"&&", "||"}
+SEPARATORS_PIPELINE = {"|", "|&"}
+SEPARATORS_BACKGROUND = {"&"}
+SEPARATORS_CASE = {";;", ";&", ";;&"}
+ALL_SEPARATORS = (
+    SEPARATORS_UNCONDITIONAL
+    | SEPARATORS_CONDITIONAL
+    | SEPARATORS_PIPELINE
+    | SEPARATORS_BACKGROUND
+    | SEPARATORS_CASE
+)
+
+
+def _parse_command_segments(tokens: list[str]) -> list[_CommandSegment]:
+    """Parse a token stream into command segments tracking boundaries and subshell depth."""
+    normalized_tokens = _normalize_raw_tokens(tokens)
+    segments: list[_CommandSegment] = []
+    current_tokens: list[str] = []
+    subshell_depth = 0
+    current_preceding_op: str | None = None
+    i = 0
+    token_list = list(normalized_tokens)
+
+    while i < len(token_list):
+        tok = token_list[i]
+
+        if (
+            tok == "$"
+            and i + 1 < len(token_list)
+            and _is_all_parens(token_list[i + 1])
+            and token_list[i + 1].startswith("(")
+        ):
+            next_tok = token_list[i + 1]
+            paren_depth = 0
+            for char in next_tok:
+                if char == "(":
+                    paren_depth += 1
+                elif char == ")":
+                    paren_depth -= 1
+            if paren_depth <= 0:
+                raise ValueError(f"Malformed command substitution: '${next_tok}'")
+            current_tokens.append("$")
+            current_tokens.append(next_tok)
+            i += 2
+            while i < len(token_list) and paren_depth > 0:
+                inner_tok = token_list[i]
+                if _is_all_parens(inner_tok):
+                    closed_idx = None
+                    for p_idx, char in enumerate(inner_tok):
+                        if char == "(":
+                            paren_depth += 1
+                        elif char == ")":
+                            paren_depth -= 1
+                            if paren_depth == 0:
+                                closed_idx = p_idx
+                                break
+                    if closed_idx is not None:
+                        part_consumed = inner_tok[: closed_idx + 1]
+                        current_tokens.append(part_consumed)
+                        remainder = inner_tok[closed_idx + 1 :]
+                        i += 1
+                        if remainder:
+                            token_list.insert(i, remainder)
+                        break
+                    else:
+                        current_tokens.append(inner_tok)
+                        i += 1
+                else:
+                    current_tokens.append(inner_tok)
+                    i += 1
+            if paren_depth > 0:
+                raise ValueError("Unmatched '$(' in command substitution")
+            continue
+
+        if _is_all_parens(tok):
+            for char in tok:
+                if char == "(":
+                    if current_tokens:
+                        segments.append(
+                            _CommandSegment(
+                                tokens=current_tokens,
+                                preceding_op=current_preceding_op,
+                                following_op="(",
+                                subshell_depth=subshell_depth,
+                            )
+                        )
+                        current_tokens = []
+                    current_preceding_op = "("
+                    subshell_depth += 1
+                elif char == ")":
+                    if subshell_depth <= 0:
+                        raise ValueError("Unmatched closing parenthesis in command")
+                    if current_tokens:
+                        segments.append(
+                            _CommandSegment(
+                                tokens=current_tokens,
+                                preceding_op=current_preceding_op,
+                                following_op=")",
+                                subshell_depth=subshell_depth,
+                            )
+                        )
+                        current_tokens = []
+                    current_preceding_op = ")"
+                    subshell_depth -= 1
+            i += 1
+            continue
+
+        if tok in ALL_SEPARATORS:
+            if current_tokens:
+                segments.append(
+                    _CommandSegment(
+                        tokens=current_tokens,
+                        preceding_op=current_preceding_op,
+                        following_op=tok,
+                        subshell_depth=subshell_depth,
+                    )
+                )
+                current_tokens = []
+            current_preceding_op = tok
+            i += 1
+            continue
+
+        current_tokens.append(tok)
+        i += 1
+
+    if subshell_depth != 0:
+        raise ValueError("Unmatched opening parenthesis in command")
+
+    if current_tokens:
+        segments.append(
+            _CommandSegment(
+                tokens=current_tokens,
+                preceding_op=current_preceding_op,
+                following_op=None,
+                subshell_depth=subshell_depth,
+            )
+        )
+
+    return segments
+
+
+def _segment_participates_in_boundary(seg: _CommandSegment) -> bool:
+    """Return True if segment participates in conditional, subshell, or pipeline boundary."""
+    if seg.subshell_depth > 0:
+        return True
+
+    uncertain_operators = {"||", "|", "|&", "&", "(", ")", ";;", ";&", ";;&"}
+    if seg.preceding_op in uncertain_operators or seg.following_op in uncertain_operators:
+        return True
+
+    control_keywords = {
+        "if",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "while",
+        "until",
+        "for",
+        "do",
+        "done",
+        "case",
+        "esac",
+        "select",
+    }
+    return any(tok in control_keywords for tok in seg.tokens)
+
+
+def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
+    """Return True if tokens represent mutation targeting safety-relevant keys or aliases."""
+    if not tokens:
+        return False
+
+    if _is_all_var_assignments(tokens):
+        toks = list(tokens)
+        while toks:
+            asgn = _consume_var_assignment(toks)
+            if asgn is not None:
+                name, _val, _is_append = asgn
+                if _is_git_config_protocol_key(name) or _has_shell_expansion(name):
+                    return True
+                continue
+            toks.pop(0)
+        return False
+
+    cleaned = _clean_command_segment(tokens)
+    if not cleaned:
+        return False
+
+    unwrapped = _unwrap_builtin_wrappers(cleaned)
+    if not unwrapped:
+        return False
+
+    cmd = os.path.basename(unwrapped[0])
+    args = unwrapped[1:]
+
+    if cmd == "export":
+        opt_args: list[str] = []
+        i = 0
+        while i < len(args):
+            item = args[i]
+            if item == "--":
+                opt_args.extend(args[i + 1 :])
+                break
+            if item.startswith("-") and item != "-" and not _is_var_assignment(item):
+                i += 1
+            else:
+                opt_args.extend(args[i:])
+                break
+        while opt_args:
+            parsed = _parse_state_mutation_operand(opt_args)
+            if parsed is None:
+                break
+            name, _val, _is_append, is_dynamic = parsed
+            if is_dynamic or _is_git_config_protocol_key(name):
+                return True
+        return False
+
+    if cmd == "unset":
+        opt_args = []
+        i = 0
+        while i < len(args):
+            item = args[i]
+            if item == "--":
+                opt_args.extend(args[i + 1 :])
+                break
+            if item.startswith("-") and item != "-":
+                i += 1
+            else:
+                opt_args.extend(args[i:])
+                break
+        while opt_args:
+            parsed = _parse_state_mutation_operand(opt_args)
+            if parsed is None:
+                break
+            name, _val, _is_append, is_dynamic = parsed
+            if is_dynamic or _is_git_config_protocol_key(name):
+                return True
+        return False
+
+    if cmd in {"declare", "typeset", "readonly", "local"}:
+        opt_args = []
+        i = 0
+        while i < len(args):
+            item = args[i]
+            if item == "--":
+                opt_args.extend(args[i + 1 :])
+                break
+            if (
+                item.startswith(("-", "+"))
+                and len(item) > 1
+                and not _is_var_assignment(item)
+            ):
+                i += 1
+            else:
+                opt_args.extend(args[i:])
+                break
+        while opt_args:
+            parsed = _parse_state_mutation_operand(opt_args)
+            if parsed is None:
+                break
+            name, _val, _is_append, is_dynamic = parsed
+            if is_dynamic or _is_git_config_protocol_key(name):
+                return True
+        return False
+
+    if cmd == "set":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                i += 1
+                break
+            if arg in {"-o", "+o"} and i + 1 < len(args):
+                if args[i + 1] == "allexport":
+                    return True
+                i += 2
+                continue
+            if arg.startswith(("-", "+")) and len(arg) > 1:
+                flags = arg[1:]
+                if "a" in flags:
+                    return True
+                if arg in {"--export", "--unexport", "--erase"}:
+                    pass
+                i += 1
+                continue
+            break
+        operands = args[i:]
+        if operands:
+            if _has_shell_expansion(operands[0]):
+                return True
+            var_name = _restore_sentinels(operands[0])
+            if _is_git_config_protocol_key(var_name):
+                return True
+        return False
+
+    if cmd == "shopt":
+        is_mut = False
+        opt_names: list[str] = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                opt_names.extend(args[i + 1 :])
+                break
+            if arg.startswith("-") and len(arg) > 1:
+                flags = arg[1:]
+                if "s" in flags or "u" in flags:
+                    is_mut = True
+                i += 1
+                continue
+            opt_names.extend(args[i:])
+            break
+        if is_mut:
+            for opt in opt_names:
+                if (
+                    _has_shell_expansion(opt)
+                    or _restore_sentinels(opt).strip() == "expand_aliases"
+                ):
+                    return True
+        return False
+
+    if cmd == "alias":
+        definitions = _extract_alias_definitions(args)
+        return bool(definitions)
+
+    if cmd == "unalias":
+        return bool(args)
+
     return False
 
 
@@ -3072,8 +3731,11 @@ def _inspect_single_command_git(
     if cmd_word in SHELL_BINARIES:
         return _inspect_shell_invocation(
             tokens,
-            lambda cmd: contains_forced_git_push(
-                cmd, _depth=_depth + 1, _inherited_env=env_vars
+            lambda cmd, _init_expand_aliases=False: contains_forced_git_push(
+                cmd,
+                _depth=_depth + 1,
+                _inherited_env=env_vars,
+                _init_expand_aliases=_init_expand_aliases,
             ),
         )
 
@@ -3167,8 +3829,11 @@ def _inspect_single_command_rm(
     if cmd_word in SHELL_BINARIES:
         return _inspect_shell_invocation(
             tokens,
-            lambda cmd: contains_forbidden_rm(
-                cmd, _depth=_depth + 1, _inherited_env=env_vars
+            lambda cmd, _init_expand_aliases=False: contains_forbidden_rm(
+                cmd,
+                _depth=_depth + 1,
+                _inherited_env=env_vars,
+                _init_expand_aliases=_init_expand_aliases,
             ),
         )
 
@@ -4125,6 +4790,7 @@ def contains_forced_git_push(
     _depth: int = 0,
     _inherited_env: dict[str, str] | None = None,
     _shell_state: _ShellState | None = None,
+    _init_expand_aliases: bool = False,
 ) -> bool:
     """Pure function checking whether a shell command contains a forced git push.
 
@@ -4142,13 +4808,27 @@ def contains_forced_git_push(
     state = (
         _shell_state
         if _shell_state is not None
-        else _ShellState(inherited_env=_inherited_env)
+        else _ShellState(
+            inherited_env=_inherited_env,
+            expand_aliases=_init_expand_aliases,
+        )
     )
 
     masked_command, subst_map = _mask_and_collect_substitutions(command, _depth)
-    commands = _tokenize_command_raw(masked_command)
+    cleaned = _strip_comments_preserving_newlines(masked_command)
+    lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
+    lexer.wordchars += "+%{}"
+    raw_tokens = list(lexer)
+    if not raw_tokens:
+        return False
 
-    for cmd_tokens in commands:
+    segments = _parse_command_segments(raw_tokens)
+    valid_mutation_and_chain = True
+
+    for seg in segments:
+        cmd_tokens = seg.tokens
         segment_sentinels = _extract_segment_sentinels(cmd_tokens, subst_map)
         for sentinel in segment_sentinels:
             for kind, body in subst_map[sentinel]:
@@ -4168,13 +4848,36 @@ def contains_forced_git_push(
                     ):
                         return True
 
-        cleaned = _clean_command_segment(cmd_tokens)
-        if not cleaned:
-            continue
-        if _apply_shell_state_segment(cleaned, state):
+        if seg.preceding_op in SEPARATORS_UNCONDITIONAL or seg.preceding_op is None:
+            valid_mutation_and_chain = True
+
+        is_safety_mutation = _is_safety_relevant_mutation_segment(cmd_tokens)
+
+        if is_safety_mutation:
+            if _segment_participates_in_boundary(seg):
+                op_desc = seg.preceding_op or seg.following_op or "subshell/control"
+                raise ValueError(
+                    "Safety-relevant shell state mutation participates in uncertain "
+                    f"execution boundary ({op_desc})"
+                )
+            if seg.preceding_op == "&&" and not valid_mutation_and_chain:
+                raise ValueError(
+                    "Safety-relevant shell state mutation participates in uncertain "
+                    "execution boundary (&&)"
+                )
+
+        cleaned_cmd = _clean_command_segment(cmd_tokens)
+        if not cleaned_cmd:
             continue
 
-        unwrapped_eval = _unwrap_builtin_wrappers(cleaned)
+        if _apply_shell_state_segment(cleaned_cmd, state):
+            if seg.following_op in {"||", "|", "|&", "&", ";;", ";&", ";;&"}:
+                valid_mutation_and_chain = False
+            continue
+
+        valid_mutation_and_chain = False
+
+        unwrapped_eval = _unwrap_builtin_wrappers(cleaned_cmd)
         if unwrapped_eval and os.path.basename(unwrapped_eval[0]) == "eval":
             eval_args = unwrapped_eval[1:]
             for arg in eval_args:
@@ -4195,7 +4898,7 @@ def contains_forced_git_push(
 
         current_env = state.get_exported_env()
         if _inspect_single_command_git(
-            cleaned, _depth=_depth, _inherited_env=current_env
+            cleaned_cmd, _depth=_depth, _inherited_env=current_env
         ):
             return True
 
@@ -4207,6 +4910,7 @@ def contains_forbidden_rm(
     _depth: int = 0,
     _inherited_env: dict[str, str] | None = None,
     _shell_state: _ShellState | None = None,
+    _init_expand_aliases: bool = False,
 ) -> bool:
     """Pure function checking whether a shell command contains a forbidden destructive rm invocation.
 
@@ -4224,13 +4928,27 @@ def contains_forbidden_rm(
     state = (
         _shell_state
         if _shell_state is not None
-        else _ShellState(inherited_env=_inherited_env)
+        else _ShellState(
+            inherited_env=_inherited_env,
+            expand_aliases=_init_expand_aliases,
+        )
     )
 
     masked_command, subst_map = _mask_and_collect_substitutions(command, _depth)
-    commands = _tokenize_command_raw(masked_command)
+    cleaned = _strip_comments_preserving_newlines(masked_command)
+    lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
+    lexer.wordchars += "+%{}"
+    raw_tokens = list(lexer)
+    if not raw_tokens:
+        return False
 
-    for cmd_tokens in commands:
+    segments = _parse_command_segments(raw_tokens)
+    valid_mutation_and_chain = True
+
+    for seg in segments:
+        cmd_tokens = seg.tokens
         segment_sentinels = _extract_segment_sentinels(cmd_tokens, subst_map)
         for sentinel in segment_sentinels:
             for kind, body in subst_map[sentinel]:
@@ -4250,13 +4968,36 @@ def contains_forbidden_rm(
                     ):
                         return True
 
-        cleaned = _clean_command_segment(cmd_tokens)
-        if not cleaned:
-            continue
-        if _apply_shell_state_segment(cleaned, state):
+        if seg.preceding_op in SEPARATORS_UNCONDITIONAL or seg.preceding_op is None:
+            valid_mutation_and_chain = True
+
+        is_safety_mutation = _is_safety_relevant_mutation_segment(cmd_tokens)
+
+        if is_safety_mutation:
+            if _segment_participates_in_boundary(seg):
+                op_desc = seg.preceding_op or seg.following_op or "subshell/control"
+                raise ValueError(
+                    "Safety-relevant shell state mutation participates in uncertain "
+                    f"execution boundary ({op_desc})"
+                )
+            if seg.preceding_op == "&&" and not valid_mutation_and_chain:
+                raise ValueError(
+                    "Safety-relevant shell state mutation participates in uncertain "
+                    "execution boundary (&&)"
+                )
+
+        cleaned_cmd = _clean_command_segment(cmd_tokens)
+        if not cleaned_cmd:
             continue
 
-        unwrapped_eval = _unwrap_builtin_wrappers(cleaned)
+        if _apply_shell_state_segment(cleaned_cmd, state):
+            if seg.following_op in {"||", "|", "|&", "&", ";;", ";&", ";;&"}:
+                valid_mutation_and_chain = False
+            continue
+
+        valid_mutation_and_chain = False
+
+        unwrapped_eval = _unwrap_builtin_wrappers(cleaned_cmd)
         if unwrapped_eval and os.path.basename(unwrapped_eval[0]) == "eval":
             eval_args = unwrapped_eval[1:]
             for arg in eval_args:
@@ -4277,7 +5018,7 @@ def contains_forbidden_rm(
 
         current_env = state.get_exported_env()
         if _inspect_single_command_rm(
-            cleaned, _depth=_depth, _inherited_env=current_env
+            cleaned_cmd, _depth=_depth, _inherited_env=current_env
         ):
             return True
 

@@ -6196,3 +6196,877 @@ class TestDefect78ReadonlyLocalExportBypass:
         elif decision == "allow":
             assert res.returncode == 0
             assert res.stdout == ""
+
+
+class TestDefect82ConditionalStateBoundaries:
+    """Tests for Defect #82: Conditional, pipeline, background, and subshell boundaries."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; false && unset GIT_CONFIG_COUNT; "
+                "git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; true || unset GIT_CONFIG_COUNT; "
+                "git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; printf x | unset GIT_CONFIG_COUNT; "
+                "git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT | cat; "
+                "git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT & git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT &"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; (unset GIT_CONFIG_COUNT); "
+                "git fp origin HEAD"
+            ),
+            (
+                "(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'); git fp origin HEAD"
+            ),
+            (
+                "false && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+            ),
+            (
+                "true && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+            ),
+            "if true; then unset GIT_CONFIG_COUNT; fi; git fp origin HEAD",
+            (
+                "if false; then export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; fi; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_conditional_state_boundaries_fail_closed_push(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell|Dynamic variable name)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; false && unset GIT_CONFIG_COUNT; "
+                "git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; true || unset GIT_CONFIG_COUNT; "
+                "git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; printf x | unset GIT_CONFIG_COUNT; "
+                "git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; unset GIT_CONFIG_COUNT | cat; "
+                "git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; unset GIT_CONFIG_COUNT & git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; unset GIT_CONFIG_COUNT &"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; (unset GIT_CONFIG_COUNT); "
+                "git wipe"
+            ),
+            (
+                "(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'); git wipe"
+            ),
+            (
+                "false && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+            ),
+            (
+                "true && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+            ),
+            "if true; then unset GIT_CONFIG_COUNT; fi; git wipe",
+            (
+                "if false; then export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; fi; git wipe"
+            ),
+        ],
+    )
+    def test_conditional_state_boundaries_fail_closed_rm(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell|Dynamic variable name)",
+        ):
+            contains_forbidden_rm(cmd)
+
+    def test_unconditional_state_mutation_controls(self) -> None:
+        cmd_safe_push = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_safe_push) is False
+
+        cmd_safe_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; unset GIT_CONFIG_COUNT; git wipe"
+        )
+        assert contains_forbidden_rm(cmd_safe_rm) is False
+
+        cmd_detect_push = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_detect_push) is True
+
+        cmd_detect_rm = (
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+            "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+        )
+        assert contains_forbidden_rm(cmd_detect_rm) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "false && unset FOO; git push origin main",
+            "false && unset FOO; rm target",
+            "false && export FOO=bar; git push origin main",
+            "echo 'false && unset GIT_CONFIG_COUNT'",
+            'echo "false && unset GIT_CONFIG_COUNT"',
+            "printf '%s' 'true || unset GIT_CONFIG_COUNT'",
+            "# false && unset GIT_CONFIG_COUNT\ngit push origin main",
+            "git push origin feature/--force-docs && git status",
+        ],
+    )
+    def test_safe_boundary_controls_allowed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    def test_unrelated_conditional_still_detects_dangerous_action(self) -> None:
+        assert contains_forced_git_push("false && unset FOO; git push -f") is True
+        assert contains_forbidden_rm("false && unset FOO; rm -rf target") is True
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; false && unset GIT_CONFIG_COUNT; "
+                    "git fp origin HEAD"
+                ),
+                2,
+                "error",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                    "GIT_CONFIG_VALUE_0='!rm -rf /'; false && unset GIT_CONFIG_COUNT; "
+                    "git wipe"
+                ),
+                2,
+                "error",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; true || unset GIT_CONFIG_COUNT; "
+                    "git fp origin HEAD"
+                ),
+                2,
+                "error",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; unset GIT_CONFIG_COUNT; "
+                    "git fp origin HEAD"
+                ),
+                0,
+                "allow",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                0,
+                "deny",
+            ),
+            ("false && unset FOO; git push origin main", 0, "allow"),
+            ("false && unset FOO; git push -f", 0, "deny"),
+            ("false && unset FOO; rm -rf target", 0, "deny"),
+        ],
+    )
+    def test_cli_defect82_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "deny":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect83ShellAliasExpansion:
+    """Tests for Defect #83: Literal shell alias definition and expansion mode tracking."""
+
+    def test_exact_reviewer_multiline_bash_stream_fails_closed(self) -> None:
+        cmd_bash = "shopt -s expand_aliases\nalias fp='git push -f origin HEAD'\nfp"
+        with pytest.raises(
+            ValueError,
+            match=r"(Literal shell alias defined while alias expansion is enabled|alias expansion)",
+        ):
+            contains_forced_git_push(cmd_bash)
+
+        cmd_rm = "shopt -s expand_aliases\nalias wipe='rm -rf /'\nwipe"
+        with pytest.raises(
+            ValueError,
+            match=r"(Literal shell alias defined while alias expansion is enabled|alias expansion)",
+        ):
+            contains_forbidden_rm(cmd_rm)
+
+    def test_alias_before_enable_ordering_fails_closed(self) -> None:
+        cmd_push = "alias fp='git push -f'\nshopt -s expand_aliases\nfp"
+        with pytest.raises(
+            ValueError,
+            match=r"(Shell alias expansion enabled after literal alias definitions|alias expansion)",
+        ):
+            contains_forced_git_push(cmd_push)
+
+        cmd_rm = "alias wipe='rm -rf /'\nshopt -s expand_aliases\nwipe"
+        with pytest.raises(
+            ValueError,
+            match=r"(Shell alias expansion enabled after literal alias definitions|alias expansion)",
+        ):
+            contains_forbidden_rm(cmd_rm)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'bash -O expand_aliases -c "alias fp=\'git push -f origin HEAD\'; fp"',
+            'bash -O expand_aliases -c "alias wipe=\'rm -rf /\'; wipe"',
+            'sh -c "alias fp=\'git push -f origin HEAD\'; fp"',
+            'sh -c "alias wipe=\'rm -rf /\'; wipe"',
+            'dash -c "alias fp=\'git push -f origin HEAD\'; fp"',
+            'dash -c "alias wipe=\'rm -rf /\'; wipe"',
+        ],
+    )
+    def test_nested_expansion_capable_shells_fail_closed(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(Literal shell alias defined while alias expansion is enabled|alias expansion)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "shopt -s expand_aliases",
+            "shopt -s expand_aliases; git push origin main",
+            "shopt -s expand_aliases\ngit push origin main",
+            "alias fp='git push -f origin HEAD'; git push origin main",
+            "alias wipe='rm -rf /'; rm target",
+            "shopt -s expand_aliases; shopt -u expand_aliases",
+            (
+                "shopt -s expand_aliases; shopt -u expand_aliases; "
+                "alias fp='git push -f'; git push origin main"
+            ),
+            "alias",
+            "alias -p",
+            "alias fp",
+            "alias -p fp",
+            "shopt -s expand_aliases; alias; git push origin main",
+            "shopt -s expand_aliases; alias -p; git push origin main",
+            "echo \"alias fp='git push -f'\"",
+            'echo "shopt -s expand_aliases"',
+            "# shopt -s expand_aliases\n# alias fp='git push -f'\ngit push origin main",
+            'git log --grep="shopt -s expand_aliases"',
+            'bash -c "alias fp=\'git push -f\'; git push origin main"',
+        ],
+    )
+    def test_safe_alias_controls_allowed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "false && shopt -s expand_aliases",
+            "true || alias fp='git push -f'",
+            "shopt -s expand_aliases | cat",
+            "(shopt -s expand_aliases)",
+            "(alias fp='git push -f')",
+        ],
+    )
+    def test_conditional_alias_mutations_fail_closed(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("shopt -s expand_aliases\nalias fp='git push -f origin HEAD'\nfp", 2, "error"),
+            ("shopt -s expand_aliases\nalias wipe='rm -rf /'\nwipe", 2, "error"),
+            ("alias fp='git push -f'\nshopt -s expand_aliases\nfp", 2, "error"),
+            ('bash -O expand_aliases -c "alias fp=\'git push -f\'; fp"', 2, "error"),
+            ('sh -c "alias fp=\'git push -f\'; fp"', 2, "error"),
+            ('dash -c "alias fp=\'git push -f\'; fp"', 2, "error"),
+            ("shopt -s expand_aliases", 0, "allow"),
+            ("alias fp='git push -f origin HEAD'; git push origin main", 0, "allow"),
+            ("shopt -s expand_aliases; alias; git push origin main", 0, "allow"),
+            ('echo "alias fp=\'git push -f\'"', 0, "allow"),
+        ],
+    )
+    def test_cli_defect83_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect84LiteralExportChains:
+    """Tests for Defect #84: Propagation of recognized literal export/mutation chains over &&."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 && "
+                "export GIT_CONFIG_KEY_0=alias.fp && "
+                "export GIT_CONFIG_VALUE_0='push -f' && "
+                "git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1; "
+                "export GIT_CONFIG_KEY_0=alias.fp && "
+                "export GIT_CONFIG_VALUE_0='push -f' && "
+                "git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_allowed_recognized_export_chains_push(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "GIT_CONFIG_COUNT=1 && "
+                "GIT_CONFIG_KEY_0=alias.fp && "
+                "GIT_CONFIG_VALUE_0='push -f' && "
+                "git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_unexported_assignment_chains_do_not_propagate_push(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 && "
+                "export GIT_CONFIG_KEY_0=alias.wipe && "
+                "export GIT_CONFIG_VALUE_0='!rm -rf /' && "
+                "git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1; "
+                "export GIT_CONFIG_KEY_0=alias.wipe && "
+                "export GIT_CONFIG_VALUE_0='!rm -rf /' && "
+                "git wipe"
+            ),
+        ],
+    )
+    def test_allowed_recognized_export_chains_rm(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "GIT_CONFIG_COUNT=1 && "
+                "GIT_CONFIG_KEY_0=alias.wipe && "
+                "GIT_CONFIG_VALUE_0='!rm -rf /' && "
+                "git wipe"
+            ),
+        ],
+    )
+    def test_unexported_assignment_chains_do_not_propagate_rm(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is False
+
+    def test_unsetting_in_export_chain_clears_state(self) -> None:
+        cmd_push = (
+            "export GIT_CONFIG_COUNT=1 && "
+            "export GIT_CONFIG_KEY_0=alias.fp && "
+            "export GIT_CONFIG_VALUE_0='push -f' && "
+            "unset GIT_CONFIG_COUNT && "
+            "git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_push) is False
+
+        cmd_rm = (
+            "export GIT_CONFIG_COUNT=1 && "
+            "export GIT_CONFIG_KEY_0=alias.wipe && "
+            "export GIT_CONFIG_VALUE_0='!rm -rf /' && "
+            "unset GIT_CONFIG_COUNT && "
+            "git wipe"
+        )
+        assert contains_forbidden_rm(cmd_rm) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "false && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+            ),
+            (
+                "true && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+            ),
+            (
+                "echo hi && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 || "
+                "export GIT_CONFIG_KEY_0=alias.fp; git fp origin HEAD"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 | "
+                "export GIT_CONFIG_KEY_0=alias.fp; git fp origin HEAD"
+            ),
+        ],
+    )
+    def test_rejected_conditional_export_mutations_push(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell|Dynamic variable name)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "false && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+            ),
+            (
+                "true && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+            ),
+            (
+                "echo hi && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 || "
+                "export GIT_CONFIG_KEY_0=alias.wipe; git wipe"
+            ),
+            (
+                "export GIT_CONFIG_COUNT=1 | "
+                "export GIT_CONFIG_KEY_0=alias.wipe; git wipe"
+            ),
+        ],
+    )
+    def test_rejected_conditional_export_mutations_rm(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell|Dynamic variable name)",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 && "
+                    "export GIT_CONFIG_KEY_0=alias.fp && "
+                    "export GIT_CONFIG_VALUE_0='push -f' && "
+                    "git fp origin HEAD"
+                ),
+                0,
+                "deny",
+            ),
+            (
+                (
+                    "export GIT_CONFIG_COUNT=1 && "
+                    "export GIT_CONFIG_KEY_0=alias.wipe && "
+                    "export GIT_CONFIG_VALUE_0='!rm -rf /' && "
+                    "git wipe"
+                ),
+                0,
+                "deny",
+            ),
+            (
+                (
+                    "GIT_CONFIG_COUNT=1 && "
+                    "GIT_CONFIG_KEY_0=alias.fp && "
+                    "GIT_CONFIG_VALUE_0='push -f' && "
+                    "git fp origin HEAD"
+                ),
+                0,
+                "allow",
+            ),
+            (
+                (
+                    "GIT_CONFIG_COUNT=1 && "
+                    "GIT_CONFIG_KEY_0=alias.wipe && "
+                    "GIT_CONFIG_VALUE_0='!rm -rf /' && "
+                    "git wipe"
+                ),
+                0,
+                "allow",
+            ),
+            (
+                (
+                    "false && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                2,
+                "error",
+            ),
+            (
+                (
+                    "true && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                    "GIT_CONFIG_VALUE_0='push -f'; git fp origin HEAD"
+                ),
+                2,
+                "error",
+            ),
+        ],
+    )
+    def test_cli_defect84_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "deny":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect85GroupedPunctuationParsing:
+    """Tests for Defect #85: Decomposition of grouped punctuation runs and subshell boundary handling."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'; (unset GIT_CONFIG_COUNT); "
+                "git fp origin HEAD"
+            ),
+            (
+                "(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+                "GIT_CONFIG_VALUE_0='push -f'); git fp origin HEAD"
+            ),
+            ("((unset GIT_CONFIG_COUNT)); git fp origin HEAD"),
+            ("(unset GIT_CONFIG_COUNT)&&git fp origin HEAD"),
+            ("(unset GIT_CONFIG_COUNT)&git fp origin HEAD"),
+            ("printf x|&(unset GIT_CONFIG_COUNT);git fp origin HEAD"),
+        ],
+    )
+    def test_grouped_punctuation_subshell_push_fails_closed(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forced_git_push(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            (
+                "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'; (unset GIT_CONFIG_COUNT); "
+                "git wipe"
+            ),
+            (
+                "(export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe "
+                "GIT_CONFIG_VALUE_0='!rm -rf /'); git wipe"
+            ),
+            ("((unset GIT_CONFIG_COUNT)); git wipe"),
+            ("(unset GIT_CONFIG_COUNT)&&git wipe"),
+            ("(unset GIT_CONFIG_COUNT)&git wipe"),
+            ("printf x|&(unset GIT_CONFIG_COUNT);git wipe"),
+        ],
+    )
+    def test_grouped_punctuation_subshell_rm_fails_closed(self, cmd: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin main 2>&1",
+            "git push origin main >file",
+            "git push origin main >>file",
+            "git push origin main <file",
+            "git push origin main <<EOF\nEOF",
+            "git push origin main <&0",
+            "git push origin main &>file",
+            "git push origin main >|file",
+        ],
+    )
+    def test_redirections_preserved_safe_push(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push -f origin main 2>&1",
+            "git push -f origin main &>file",
+            "git push origin main --force 2>&1",
+        ],
+    )
+    def test_redirections_preserved_forced_push(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "rm -rf target 2>&1",
+            "rm -rf target &>file",
+            "rm -rf target >/dev/null 2>&1",
+        ],
+    )
+    def test_redirections_preserved_forbidden_rm(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("(unset GIT_CONFIG_COUNT)&&git fp origin HEAD", 2, "error"),
+            ("printf x|&(unset GIT_CONFIG_COUNT);git fp origin HEAD", 2, "error"),
+            ("git push origin main 2>&1", 0, "allow"),
+            ("git push -f origin main 2>&1", 0, "deny"),
+            ("rm -rf target 2>&1", 0, "deny"),
+        ],
+    )
+    def test_cli_defect85_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "deny":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect86UnaliasDoubleDashOptionParsing:
+    """Tests for Defect #86: Literal -- terminating unalias option parsing."""
+
+    def test_unalias_double_dash_does_not_clear_aliases_push(self) -> None:
+        cmd_bypass = (
+            "alias fp='git push -f'; unalias -- -a; shopt -s expand_aliases; fp"
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"(Shell alias expansion enabled after literal alias definitions|Literal shell alias defined while alias expansion is enabled|alias expansion)",
+        ):
+            contains_forced_git_push(cmd_bypass)
+
+        assert (
+            contains_forced_git_push(
+                "alias fp='git push -f'; unalias -a; shopt -s expand_aliases; fp"
+            )
+            is False
+        )
+        assert (
+            contains_forced_git_push(
+                "alias fp='git push -f'; unalias -- fp; shopt -s expand_aliases; fp"
+            )
+            is False
+        )
+        assert (
+            contains_forced_git_push(
+                "alias fp='git push -f'; unalias fp; shopt -s expand_aliases; fp"
+            )
+            is False
+        )
+        assert (
+            contains_forced_git_push(
+                "alias fp='git push -f'; unalias -- -a; shopt -u expand_aliases; fp"
+            )
+            is False
+        )
+
+    def test_unalias_double_dash_does_not_clear_aliases_rm(self) -> None:
+        cmd_bypass = (
+            "alias wipe='rm -rf /'; unalias -- -a; shopt -s expand_aliases; wipe"
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"(Shell alias expansion enabled after literal alias definitions|Literal shell alias defined while alias expansion is enabled|alias expansion)",
+        ):
+            contains_forbidden_rm(cmd_bypass)
+
+        assert (
+            contains_forbidden_rm(
+                "alias wipe='rm -rf /'; unalias -a; shopt -s expand_aliases; wipe"
+            )
+            is False
+        )
+        assert (
+            contains_forbidden_rm(
+                "alias wipe='rm -rf /'; unalias -- wipe; shopt -s expand_aliases; wipe"
+            )
+            is False
+        )
+        assert (
+            contains_forbidden_rm(
+                "alias wipe='rm -rf /'; unalias wipe; shopt -s expand_aliases; wipe"
+            )
+            is False
+        )
+        assert (
+            contains_forbidden_rm(
+                "alias wipe='rm -rf /'; unalias -- -a; shopt -u expand_aliases; wipe"
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            (
+                "alias fp='git push -f'; unalias -- -a; shopt -s expand_aliases; fp",
+                2,
+                "error",
+            ),
+            (
+                "alias wipe='rm -rf /'; unalias -- -a; shopt -s expand_aliases; wipe",
+                2,
+                "error",
+            ),
+            (
+                "alias fp='git push -f'; unalias -a; shopt -s expand_aliases; fp",
+                0,
+                "allow",
+            ),
+            (
+                "alias fp='git push -f'; unalias -- fp; shopt -s expand_aliases; fp",
+                0,
+                "allow",
+            ),
+            (
+                "alias fp='git push -f'; unalias fp; shopt -s expand_aliases; fp",
+                0,
+                "allow",
+            ),
+            (
+                "alias fp='git push -f'; unalias -- -a; shopt -u expand_aliases; fp",
+                0,
+                "allow",
+            ),
+        ],
+    )
+    def test_cli_defect86_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""

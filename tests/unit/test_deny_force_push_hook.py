@@ -8371,3 +8371,330 @@ class TestDefect102WatchWrapper:
                 "destructive"
                 in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
             )
+
+
+class TestDefect105FlockWrapper:
+    """Tests for Defect #105: util-linux flock wrapper support."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock git push --force origin HEAD",
+            "flock /tmp/lock git push -fu origin main",
+            "/usr/bin/flock -F /tmp/lock git push --mirror origin",
+            "flock -n -- /tmp/lock git push -f origin HEAD",
+            "flock -senoxFu /tmp/lock git push +HEAD:main origin",
+            "flock -w1 -E2 /tmp/lock git push -f origin HEAD",
+            "flock -w 1 -E 2 /tmp/lock git push -f origin HEAD",
+            "flock --timeout 1 --conflict-exit-code=2 --fcntl --start 0 --length=1 --verbose /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock -c 'git push -f origin HEAD'",
+            "flock /tmp/lock --command 'git push --force origin HEAD'",
+            "flock --fd 9 git push -f origin HEAD",
+            "flock --fd=9 git push -f origin HEAD",
+            "flock --fd 9 -c 'git push -f origin HEAD'",
+            "flock --fd=9 --command 'git push -f origin HEAD'",
+            "flock --shared /tmp/lock git push -f origin HEAD",
+            "flock --exclusive /tmp/lock git push -f origin HEAD",
+            "flock --unlock /tmp/lock git push -f origin HEAD",
+            "flock --nonblocking /tmp/lock git push -f origin HEAD",
+            "flock --nb /tmp/lock git push -f origin HEAD",
+            "flock --close /tmp/lock git push -f origin HEAD",
+            "flock --no-fork /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock git push origin main --force",
+            "flock /tmp/lock git push origin +main",
+            "flock --fd 9 git push --mirror origin",
+            "flock --fd 9 -w 10 git push -f origin HEAD",
+            "flock -w 10 --fd 9 git push -f origin HEAD",
+            "flock --fd 9 -w 10 -c 'git push -f origin HEAD'",
+            "flock /tmp/lock 'git' push -f origin HEAD",
+            "env FOO=1 flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock env FOO=1 git push -f origin HEAD",
+            "sudo flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock sudo git push -f origin HEAD",
+            "timeout 30 flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock timeout 30 git push -f origin HEAD",
+            "nice -n 10 flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock nice -n 10 git push -f origin HEAD",
+            "stdbuf -oL flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock stdbuf -oL git push -f origin HEAD",
+            "nohup flock /tmp/lock git push -f origin HEAD",
+            "time flock /tmp/lock git push -f origin HEAD",
+            "setsid -f flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock setsid -f git push -f origin HEAD",
+            "ionice -c 3 flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock ionice -c 3 git push -f origin HEAD",
+            "watch -x flock /tmp/lock git push -f origin HEAD",
+            "flock /tmp/lock watch -x git push -f origin HEAD",
+            "flock /tmp/lock flock /tmp/lock2 git push -f origin HEAD",
+            "find /tmp -exec flock /tmp/lock git push -f origin HEAD ';'",
+            'bash -c "flock /tmp/lock git push -f origin HEAD"',
+            'eval "flock /tmp/lock git push -f origin HEAD"',
+            "flock /tmp/lock -c 'echo 1; git push -f origin HEAD'",
+            'flock /tmp/lock -c \'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0="push -f" git fp origin HEAD\'',
+            "flock -- -custom_tool git push -f origin HEAD",
+        ],
+    )
+    def test_dangerous_push_wrapped_by_flock_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "flock /tmp/lock rm -rf target",
+            "flock -n -- /tmp/lock rm -fr target",
+            "flock -w1 -E2 /tmp/lock rm -rf target",
+            "flock /tmp/lock --command 'rm -rf target'",
+            "flock --fd=9 rm -rf target",
+            "flock --fd=9 --command 'rm -rf target'",
+            "/bin/flock /tmp/lock rm -rf target",
+            "/usr/bin/flock -F /tmp/lock rm -rf target",
+            "flock -senoxFu /tmp/lock rm --recursive --force target",
+            "flock --timeout 1 --conflict-exit-code=2 --fcntl --start 0 --length=1 --verbose /tmp/lock rm -rf target",
+            "flock /tmp/lock -c 'rm -rf target'",
+            "flock --fd 9 rm -rf target",
+            "flock --fd 9 -c 'rm -rf target'",
+            "flock --fd 9 -c 'rm -fr target'",
+            "flock -w 1 -E 2 /tmp/lock rm -rf target",
+            "flock --shared /tmp/lock rm -rf target",
+            "flock --exclusive /tmp/lock rm -rf target",
+            "flock --unlock /tmp/lock rm -rf target",
+            "flock --nonblocking /tmp/lock rm -rf target",
+            "flock --nb /tmp/lock rm -rf target",
+            "flock --close /tmp/lock rm -rf target",
+            "flock --no-fork /tmp/lock rm -rf target",
+            "env FOO=1 flock /tmp/lock rm -rf target",
+            "flock /tmp/lock env FOO=1 rm -rf target",
+            "sudo flock /tmp/lock rm -rf target",
+            "flock /tmp/lock sudo rm -rf target",
+            "timeout 30 flock /tmp/lock rm -rf target",
+            "flock /tmp/lock timeout 30 rm -rf target",
+            "nice -n 10 flock /tmp/lock rm -rf target",
+            "flock /tmp/lock nice -n 10 rm -rf target",
+            "stdbuf -oL flock /tmp/lock rm -rf target",
+            "flock /tmp/lock stdbuf -oL rm -rf target",
+            "nohup flock /tmp/lock rm -rf target",
+            "time flock /tmp/lock rm -rf target",
+            "setsid -f flock /tmp/lock rm -rf target",
+            "flock /tmp/lock setsid -f rm -rf target",
+            "ionice -c 3 flock /tmp/lock rm -rf target",
+            "flock /tmp/lock ionice -c 3 rm -rf target",
+            "watch -x flock /tmp/lock rm -rf target",
+            "flock /tmp/lock watch -x rm -rf target",
+            "flock /tmp/lock flock /tmp/lock2 rm -rf target",
+            "find /tmp -exec flock /tmp/lock rm -rf target ';'",
+            'bash -c "flock /tmp/lock rm -rf target"',
+            'eval "flock /tmp/lock rm -rf target"',
+            "flock /tmp/lock -c 'echo 1; rm -rf target'",
+            "flock -- -custom_tool rm -rf target",
+        ],
+    )
+    def test_dangerous_rm_wrapped_by_flock_pure(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "flock /tmp/lock git push origin main",
+            "flock /tmp/lock rm -f target",
+            "flock /tmp/lock echo harmless",
+            "flock 9",
+            "flock /tmp/lock",
+            "flock --fd 9",
+            "flock --help git push -f origin HEAD",
+            'flock --help "$CMD"',
+            "flock --version rm -rf target",
+            'flock --version "$CMD"',
+            "flock -h git push -f origin HEAD",
+            'flock -h "$CMD"',
+            "flock -V rm -rf target",
+            'flock -V "$CMD"',
+            "flock -sh git push -f origin HEAD",
+            "flock -Vh rm -rf target",
+            "flock",
+            "flock -s",
+            "flock -e",
+            "flock -x",
+            "flock -n",
+            "flock -o",
+            "flock -F",
+            "flock -u",
+            "flock --shared",
+            "flock --exclusive",
+            "flock --unlock",
+            "flock --nonblocking",
+            "flock --nb",
+            "flock --close",
+            "flock --no-fork",
+            "flock --verbose",
+            "flock --fcntl",
+            "flock -w 10",
+            "flock -w",
+            "flock -E",
+            "flock --timeout",
+            "flock --wait",
+            "flock --conflict-exit-code",
+            "flock --start",
+            "flock --length",
+            "flock --fd",
+            "flock --timeout 10",
+            "flock --timeout=10",
+            "flock /tmp/lock echo git push -f origin HEAD",
+            "flock /tmp/lock -n git push -f origin HEAD",
+            "flock /tmp/lock -c 'git push -f origin HEAD' extra",
+            "flock --fd 9 -c 'rm -rf target' extra",
+            "flock -c 'git push -f origin HEAD'",
+            "flock --command 'rm -rf target'",
+            "flock /tmp/lock -c",
+            "flock --fd 9 -c",
+            "flock -- /tmp/lock echo harmless",
+            "flock --fd 9 -- -custom_tool rm -rf target",
+        ],
+    )
+    def test_safe_and_terminal_flock_controls_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "flock --unknown /tmp/lock git push -f origin HEAD",
+            "flock -z /tmp/lock rm -rf target",
+            "flock -xz /tmp/lock git push -f origin HEAD",
+            "flock -zx /tmp/lock rm -rf target",
+            "flock -w$WAIT /tmp/lock git push -f origin HEAD",
+            "flock -wpre${WAIT}post /tmp/lock rm -rf target",
+            "flock -w $WAIT /tmp/lock git push -f origin HEAD",
+            "flock -w $WAIT",
+            "flock -E$CODE /tmp/lock rm -rf target",
+            "flock -E $CODE /tmp/lock rm -rf target",
+            "flock --timeout=$WAIT /tmp/lock git push -f origin HEAD",
+            "flock --timeout $WAIT /tmp/lock git push -f origin HEAD",
+            "flock --wait=$WAIT /tmp/lock rm -rf target",
+            "flock --wait $WAIT /tmp/lock rm -rf target",
+            "flock --conflict-exit-code=$CODE /tmp/lock git push -f origin HEAD",
+            "flock --conflict-exit-code $CODE /tmp/lock git push -f origin HEAD",
+            "flock --start=$START /tmp/lock git push -f origin HEAD",
+            "flock --start $START /tmp/lock git push -f origin HEAD",
+            "flock --length=$LEN /tmp/lock git push -f origin HEAD",
+            "flock --length $LEN /tmp/lock git push -f origin HEAD",
+            "flock --fd=$FD git push -f origin HEAD",
+            "flock --fd $FD git push -f origin HEAD",
+            'flock "$LOCK" echo harmless',
+            "flock $LOCK echo harmless",
+            'flock /tmp/lock "$CMD"',
+            "flock /tmp/lock $CMD",
+            'flock /tmp/lock echo "$ARG"',
+            "flock /tmp/lock echo ${ARG}",
+            'flock /tmp/lock -c "$CMD"',
+            "flock /tmp/lock -c $CMD",
+            "flock /tmp/lock --command $CMD",
+            'flock --fd 9 -c "$CMD"',
+            "flock --fd 9 -c $CMD",
+            "flock --fd 9 --command $CMD",
+            'flock --fd 9 -c "$(printf value)"',
+            "flock --fd 9 -c 'echo `date`'",
+            "flock -w `echo 1` /tmp/lock git push -f origin HEAD",
+            "flock --shared=yes /tmp/lock git push -f origin HEAD",
+            "flock --verbose=1 /tmp/lock git push -f origin HEAD",
+            "flock --help=foo /tmp/lock git push -f origin HEAD",
+            "flock --version=foo /tmp/lock rm -rf target",
+            "flock --fd 9 -z rm -rf target",
+            "flock --fd 9 --unknown git push -f origin HEAD",
+            'flock --fd 9 "$CMD"',
+            "flock --fd 9 $CMD",
+        ],
+    )
+    def test_unknown_options_and_dynamic_operands_fail_closed_pure(
+        self, cmd: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("flock /tmp/lock git push -f origin HEAD", 0, "deny_push"),
+            ("/usr/bin/flock -F /tmp/lock git push --mirror origin", 0, "deny_push"),
+            ("flock -senoxFu /tmp/lock git push +HEAD:main origin", 0, "deny_push"),
+            ("flock --timeout 1 --conflict-exit-code=2 --fcntl --start 0 --length=1 --verbose /tmp/lock git push -f origin HEAD", 0, "deny_push"),
+            ("flock /tmp/lock -c 'git push -f origin HEAD'", 0, "deny_push"),
+            ("flock --fd 9 git push -f origin HEAD", 0, "deny_push"),
+            ("flock --fd 9 -c 'git push -f origin HEAD'", 0, "deny_push"),
+            ("flock -- -custom_tool git push -f origin HEAD", 0, "deny_push"),
+            ("flock /tmp/lock rm -rf target", 0, "deny_rm"),
+            ("flock -n -- /tmp/lock rm -fr target", 0, "deny_rm"),
+            ("flock -w1 -E2 /tmp/lock rm -rf target", 0, "deny_rm"),
+            ("flock /tmp/lock --command 'rm -rf target'", 0, "deny_rm"),
+            ("flock --fd=9 rm -rf target", 0, "deny_rm"),
+            ("flock --fd=9 --command 'rm -rf target'", 0, "deny_rm"),
+            ("flock -- -custom_tool rm -rf target", 0, "deny_rm"),
+            ("flock /tmp/lock git push origin main", 0, "allow"),
+            ("flock /tmp/lock rm -f target", 0, "allow"),
+            ("flock /tmp/lock echo harmless", 0, "allow"),
+            ("flock 9", 0, "allow"),
+            ("flock /tmp/lock", 0, "allow"),
+            ("flock --fd 9", 0, "allow"),
+            ("flock --fd 9 -- -custom_tool rm -rf target", 0, "allow"),
+            ("flock --help git push -f origin HEAD", 0, "allow"),
+            ('flock --help "$CMD"', 0, "allow"),
+            ("flock --version rm -rf target", 0, "allow"),
+            ("flock -h git push -f origin HEAD", 0, "allow"),
+            ('flock -h "$CMD"', 0, "allow"),
+            ("flock -V rm -rf target", 0, "allow"),
+            ("flock /tmp/lock echo git push -f origin HEAD", 0, "allow"),
+            ("flock /tmp/lock -n git push -f origin HEAD", 0, "allow"),
+            ("flock /tmp/lock -c 'git push -f origin HEAD' extra", 0, "allow"),
+            ("flock --fd 9 -c 'rm -rf target' extra", 0, "allow"),
+            ("flock -c 'git push -f origin HEAD'", 0, "allow"),
+            ("flock --unknown /tmp/lock git push -f origin HEAD", 2, "error"),
+            ("flock -z /tmp/lock rm -rf target", 2, "error"),
+            ("flock -w$WAIT /tmp/lock git push -f origin HEAD", 2, "error"),
+            ("flock --fd=$FD git push -f origin HEAD", 2, "error"),
+            ('flock "$LOCK" echo harmless', 2, "error"),
+            ('flock /tmp/lock "$CMD"', 2, "error"),
+            ("flock /tmp/lock -c $CMD", 2, "error"),
+            ("flock /tmp/lock --command $CMD", 2, "error"),
+            ("flock --fd 9 -c $CMD", 2, "error"),
+            ("flock --fd 9 --command $CMD", 2, "error"),
+            ('flock /tmp/lock echo "$ARG"', 2, "error"),
+            ('flock /tmp/lock -c "$CMD"', 2, "error"),
+            ('flock --fd 9 -c "$(printf value)"', 2, "error"),
+        ],
+    )
+    def test_cli_flock_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )

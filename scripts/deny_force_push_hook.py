@@ -107,6 +107,37 @@ XARGS_OPT_LONG_OPTS = {
 
 XARGS_INPUT_SENTINEL = "$XARGS_INPUT"
 
+FLOCK_NO_ARG_SHORT_OPTS = {"s", "e", "x", "n", "o", "F", "u"}
+FLOCK_REQ_ARG_SHORT_OPTS = {"w", "E"}
+FLOCK_TERMINAL_SHORT_OPTS = {"h", "V"}
+
+FLOCK_NO_ARG_LONG_OPTS = {
+    "--shared",
+    "--exclusive",
+    "--unlock",
+    "--nonblocking",
+    "--nb",
+    "--close",
+    "--no-fork",
+    "--verbose",
+    "--fcntl",
+}
+
+FLOCK_REQ_ARG_LONG_OPTS = {
+    "--timeout",
+    "--wait",
+    "--conflict-exit-code",
+    "--start",
+    "--length",
+    "--fd",
+}
+
+FLOCK_TERMINAL_LONG_OPTS = {
+    "--help",
+    "--version",
+}
+
+
 FIND_EXEC_ACTIONS = {
     "-exec",
     "-execdir",
@@ -2835,6 +2866,178 @@ def _unwrap_command_and_env(
                 cmd_str = " ".join(_restore_sentinels(t) for t in tokens)
                 tokens = ["sh", "-c", cmd_str]
                 break
+
+            continue
+
+        if cmd_word == "flock":
+            tokens.pop(0)
+            is_terminal = False
+            has_fd = False
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t == "-":
+                    break
+                if t in {"-c", "--command"}:
+                    if not has_fd:
+                        is_terminal = True
+                        tokens.clear()
+                        break
+                    tokens.pop(0)
+                    if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                        raise ValueError(
+                            f"flock command contains shell expansion: {tokens[0]!r}"
+                        )
+                    if len(tokens) != 1:
+                        is_terminal = True
+                        tokens.clear()
+                        break
+                    cmd_str = tokens[0]
+                    if _has_shell_expansion(cmd_str) or cmd_str == "$":
+                        raise ValueError(
+                            f"flock command contains shell expansion: {cmd_str!r}"
+                        )
+                    tokens = ["sh", "-c", _restore_sentinels(cmd_str)]
+                    break
+                if t.startswith("--"):
+                    if t in FLOCK_TERMINAL_LONG_OPTS:
+                        is_terminal = True
+                        tokens.clear()
+                        break
+                    if t in FLOCK_NO_ARG_LONG_OPTS:
+                        tokens.pop(0)
+                        continue
+                    if any(t.startswith(f"{opt}=") for opt in FLOCK_REQ_ARG_LONG_OPTS):
+                        opt_name, val = t.split("=", 1)
+                        if _has_shell_expansion(val) or val == "$":
+                            raise ValueError(
+                                f"flock option operand contains shell expansion: {val!r}"
+                            )
+                        tokens.pop(0)
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"flock option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        if opt_name == "--fd":
+                            has_fd = True
+                        continue
+                    if t in FLOCK_REQ_ARG_LONG_OPTS:
+                        opt_name = tokens.pop(0)
+                        if not tokens:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        val = tokens.pop(0)
+                        if _has_shell_expansion(val) or val == "$":
+                            raise ValueError(
+                                f"flock option operand contains shell expansion: {val!r}"
+                            )
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"flock option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        if opt_name == "--fd":
+                            has_fd = True
+                        continue
+                    raise ValueError(f"Unknown flock option: {t!r}")
+
+                if t.startswith("-") and len(t) > 1:
+                    tok = tokens.pop(0)
+                    idx = 1
+                    while idx < len(tok):
+                        ch = tok[idx]
+                        if ch in FLOCK_TERMINAL_SHORT_OPTS:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        if ch in FLOCK_NO_ARG_SHORT_OPTS:
+                            idx += 1
+                            continue
+                        if ch in FLOCK_REQ_ARG_SHORT_OPTS:
+                            rest = tok[idx + 1 :]
+                            if rest:
+                                operand = rest
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"flock option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"flock option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                            else:
+                                if not tokens:
+                                    is_terminal = True
+                                    tokens.clear()
+                                    break
+                                operand = tokens.pop(0)
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"flock option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"flock option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                            break
+                        raise ValueError(f"Unknown flock option: -{ch}")
+                    if is_terminal:
+                        break
+                    continue
+
+                break
+
+            if is_terminal:
+                tokens.clear()
+                continue
+
+            if tokens and tokens[0] == "sh" and len(tokens) == 3 and tokens[1] == "-c":
+                break
+
+            if not tokens:
+                continue
+
+            if has_fd:
+                for payload_tok in tokens:
+                    if _has_shell_expansion(payload_tok) or payload_tok == "$":
+                        raise ValueError(
+                            f"flock command contains shell expansion: {payload_tok!r}"
+                        )
+                continue
+
+            lock_target = tokens.pop(0)
+            if _has_shell_expansion(lock_target) or lock_target == "$":
+                raise ValueError(
+                    f"flock lock target contains shell expansion: {lock_target!r}"
+                )
+
+            if not tokens:
+                continue
+
+            if tokens[0] in {"-c", "--command"}:
+                tokens.pop(0)
+                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                    raise ValueError(
+                        f"flock command contains shell expansion: {tokens[0]!r}"
+                    )
+                if len(tokens) != 1:
+                    tokens.clear()
+                    continue
+                cmd_str = tokens[0]
+                if _has_shell_expansion(cmd_str) or cmd_str == "$":
+                    raise ValueError(
+                        f"flock command contains shell expansion: {cmd_str!r}"
+                    )
+                tokens = ["sh", "-c", _restore_sentinels(cmd_str)]
+                break
+
+            for payload_tok in tokens:
+                if _has_shell_expansion(payload_tok) or payload_tok == "$":
+                    raise ValueError(
+                        f"flock command contains shell expansion: {payload_tok!r}"
+                    )
 
             continue
 

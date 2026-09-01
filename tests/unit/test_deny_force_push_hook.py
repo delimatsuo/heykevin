@@ -39,6 +39,7 @@ from scripts.deny_force_push_hook import (
     _scan_git_forcing_configs,
     _ShellState,
     _split_into_commands,
+    _strip_function_definition_prefix,
     _tokenize_command,
     _tokenize_split_string,
     _unwrap_command_and_env,
@@ -8729,3 +8730,415 @@ class TestDefect105FlockWrapper:
 
         cmd_fd = "flock --nonblock --fd 9 rm -rf target"
         assert contains_forbidden_rm(cmd_fd) is True
+
+
+class TestShellFunctionDefinitions:
+    """Tests for Bash and POSIX shell function definition detection and safety repair (PR #212 Defect #110)."""
+
+    def test_defect_110_exact_reviewer_commands(self) -> None:
+        """Exact reviewer test commands from defect #110."""
+        cmd_push = "function fp { git push -f origin HEAD; }; fp"
+        assert contains_forced_git_push(cmd_push) is True
+        assert contains_forbidden_rm(cmd_push) is False
+
+        cmd_rm = "function zap { rm -rf target; }; zap"
+        assert contains_forced_git_push(cmd_rm) is False
+        assert contains_forbidden_rm(cmd_rm) is True
+
+    def test_pass71_time_function_definitions_defect_audit_pinned(self) -> None:
+        """Exact reviewer test commands and pinned values for Pass 71 time function definition defect."""
+        # Pinned 1: time function fp { git push -f origin HEAD; }
+        assert contains_forced_git_push("time function fp { git push -f origin HEAD; }") is True
+        assert contains_forbidden_rm("time function fp { git push -f origin HEAD; }") is False
+
+        # Pinned 2: time -p function fp { git push --force origin main; }
+        assert contains_forced_git_push("time -p function fp { git push --force origin main; }") is True
+        assert contains_forbidden_rm("time -p function fp { git push --force origin main; }") is False
+
+        # Pinned 3: time ! function fp { git push --mirror origin; }
+        assert contains_forced_git_push("time ! function fp { git push --mirror origin; }") is True
+        assert contains_forbidden_rm("time ! function fp { git push --mirror origin; }") is False
+
+        # Pinned 4: time function zap { rm -rf target; }
+        assert contains_forced_git_push("time function zap { rm -rf target; }") is False
+        assert contains_forbidden_rm("time function zap { rm -rf target; }") is True
+
+        # Pinned 5: time -p function zap { rm --recursive --force target; }
+        assert contains_forced_git_push("time -p function zap { rm --recursive --force target; }") is False
+        assert contains_forbidden_rm("time -p function zap { rm --recursive --force target; }") is True
+
+        # Pinned 6: time ! function zap { rm -r -f target; }
+        assert contains_forced_git_push("time ! function zap { rm -r -f target; }") is False
+        assert contains_forbidden_rm("time ! function zap { rm -r -f target; }") is True
+
+    def test_strip_function_definition_prefix_unit(self) -> None:
+        """Direct unit tests for _strip_function_definition_prefix."""
+        assert _strip_function_definition_prefix(
+            ["function", "fp", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["function", "fp", "()", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["function", "fp", "(", ")", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["function", "outer", "{", "function", "inner", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["{", "function", "fp", "{", "echo", "hi"]
+        ) == ["echo", "hi"]
+        assert _strip_function_definition_prefix(
+            ["time", "function", "fp", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["time", "-p", "function", "fp", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["time", "!", "function", "fp", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["time", "-p", "!", "function", "fp", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["!", "time", "-p", "function", "fp", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["{", "time", "function", "fp", "{", "echo", "hi"]
+        ) == ["echo", "hi"]
+        assert _strip_function_definition_prefix(
+            ["time", "function", "fp", "()", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(
+            ["time", "function", "fp", "(", ")", "{", "git", "push", "-f"]
+        ) == ["git", "push", "-f"]
+        assert _strip_function_definition_prefix(["time", "git", "push", "-f"]) == [
+            "time",
+            "git",
+            "push",
+            "-f",
+        ]
+        assert _strip_function_definition_prefix(
+            ["time", "-p", "git", "push", "-f"]
+        ) == ["time", "-p", "git", "push", "-f"]
+        assert _strip_function_definition_prefix(["echo", "function"]) == ["echo", "function"]
+        assert _strip_function_definition_prefix(["function", "fp"]) == []
+        assert _strip_function_definition_prefix(["time", "function", "fp"]) == []
+        assert _strip_function_definition_prefix(["time", "-p", "function", "fp"]) == []
+        assert _strip_function_definition_prefix([]) == []
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "function fp { git push -f origin HEAD; }; fp",
+            "function fp { git push -f; }",
+            "function fp { git push --force origin main; }; fp",
+            "function fp { git push -fu origin HEAD; }; fp",
+            "function fp { git push origin +main; }; fp",
+            "function fp { git push origin +HEAD:main; }; fp",
+            "function fp { git push origin -- +main; }; fp",
+            "function fp () { git push -f origin HEAD; }; fp",
+            "function fp() { git push -f origin HEAD; }; fp",
+            "function fp ( ) { git push -f origin HEAD; }; fp",
+            "function fp { git push -f origin HEAD; }",
+            "function fp () { git push -f origin HEAD; }",
+            "function fp() { git push -f origin HEAD; }",
+            "function fp ( ) { git push -f origin HEAD; }",
+            "function fp { /usr/bin/git push -f; }",
+            "function fp { git -C /repo push -f; }",
+            "function fp { git -c alias.fp='push -f' fp origin HEAD; }",
+            "function fp { git push --mirror origin; }",
+            "function fp { git push --force-with-lease origin main; }",
+            "function fp { git push --force-if-includes origin main; }",
+            "time function fp { git push -f origin HEAD; }",
+            "time function fp { git push -f origin HEAD; }; fp",
+            "time -p function fp { git push --force origin main; }",
+            "time -p function fp { git push --force origin main; }; fp",
+            "time ! function fp { git push --mirror origin; }",
+            "time ! function fp { git push --mirror origin; }; fp",
+            "time -p ! function fp { git push -fu origin HEAD; }; fp",
+            "time function fp () { git push -f origin HEAD; }",
+            "time function fp() { git push -f origin HEAD; }",
+            "time function fp ( ) { git push -f origin HEAD; }",
+        ],
+    )
+    def test_dangerous_git_push_functions_detected(self, cmd: str) -> None:
+        """Matrix of dangerous git push commands within shell functions."""
+        assert contains_forced_git_push(cmd) is True
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "function zap { rm -rf target; }; zap",
+            "function zap { rm -rf /; }; zap",
+            "function zap { rm -r -f target; }; zap",
+            "function zap { rm --recursive --force target; }; zap",
+            "function zap () { rm -rf target; }; zap",
+            "function zap() { rm -rf target; }; zap",
+            "function zap ( ) { rm -rf target; }; zap",
+            "function zap { rm -rf target; }",
+            "function zap () { rm -rf target; }",
+            "function zap() { rm -rf target; }",
+            "function zap ( ) { rm -rf target; }",
+            "function zap { /bin/rm -rf target; }",
+            "function zap { rm -rf target1 target2; }",
+            "function zap { rm -fr target; }; zap",
+            "time function zap { rm -rf target; }",
+            "time function zap { rm -rf target; }; zap",
+            "time -p function zap { rm --recursive --force target; }",
+            "time -p function zap { rm --recursive --force target; }; zap",
+            "time ! function zap { rm -r -f target; }",
+            "time ! function zap { rm -r -f target; }; zap",
+            "time -p ! function zap { rm -fr target; }; zap",
+            "time function zap () { rm -rf target; }",
+            "time function zap() { rm -rf target; }",
+            "time function zap ( ) { rm -rf target; }",
+        ],
+    )
+    def test_dangerous_rm_functions_detected(self, cmd: str) -> None:
+        """Matrix of dangerous rm commands within shell functions."""
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("fp () { git push -f origin HEAD; }; fp", True, False),
+            ("fp() { git push -f origin HEAD; }; fp", True, False),
+            ("fp ( ) { git push -f origin HEAD; }; fp", True, False),
+            ("fp () { git push -f origin HEAD; }", True, False),
+            ("fp() { git push -f origin HEAD; }", True, False),
+            ("fp ( ) { git push -f origin HEAD; }", True, False),
+            ("zap () { rm -rf target; }; zap", False, True),
+            ("zap() { rm -rf target; }; zap", False, True),
+            ("zap ( ) { rm -rf target; }; zap", False, True),
+            ("zap () { rm -rf target; }", False, True),
+            ("zap() { rm -rf target; }", False, True),
+            ("zap ( ) { rm -rf target; }", False, True),
+        ],
+    )
+    def test_existing_posix_functions_coverage(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Existing POSIX function definition syntax remains covered."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("function fp { command git push -f origin HEAD; }; fp", True, False),
+            ("function fp { env FOO=1 git push -f origin HEAD; }; fp", True, False),
+            ("function fp { VAR=1 git push -f origin HEAD; }; fp", True, False),
+            ("function fp { sudo git push -f; }; fp", True, False),
+            ("function fp { exec git push -f; }; fp", True, False),
+            ("function fp { eval 'git push -f'; }; fp", True, False),
+            ("function fp { time -f %E git push -f origin HEAD; }; fp", True, False),
+            ("function fp { timeout 30 git push -f origin HEAD; }; fp", True, False),
+            ("function fp { nohup git push -f origin HEAD; }; fp", True, False),
+            ("function zap { command rm -rf target; }; zap", False, True),
+            ("function zap { sudo rm -rf target; }; zap", False, True),
+            ("function zap { env rm -rf target; }; zap", False, True),
+            ("function zap { timeout 10 rm -rf target; }; zap", False, True),
+            ("function zap { nohup rm -rf target; }; zap", False, True),
+            ("function zap { exec rm -rf target; }; zap", False, True),
+        ],
+    )
+    def test_wrapped_first_body_command_detected(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """First body command wrapped by shell utilities or assignments remains detected."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("function fp {\n  git push -f origin HEAD\n}; fp", True, False),
+            ("function fp {\ngit push -f origin HEAD\n}", True, False),
+            ("function fp\n{\ngit push -f origin HEAD\n}", True, False),
+            ("function zap {\n  rm -rf target\n}; zap", False, True),
+            ("function zap\n{\nrm -rf target\n}", False, True),
+            ("function zap () {\n  rm -rf target\n}", False, True),
+            ("zap () {\n  rm -rf target\n}", False, True),
+            ("function fp { git push -f origin HEAD\n  echo done\n}", True, False),
+            ("function zap { rm -rf target\n  echo done\n}", False, True),
+        ],
+    )
+    def test_multiline_function_definitions_detected(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Multiline literal function bodies are detected."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            (
+                "function outer { function inner { git push -f origin HEAD; }; }",
+                True,
+                False,
+            ),
+            (
+                "function outer { function inner { rm -rf target; }; }",
+                False,
+                True,
+            ),
+            (
+                "outer () { function inner { git push -f origin HEAD; }; }",
+                True,
+                False,
+            ),
+            (
+                "function outer { inner () { git push -f origin HEAD; }; }",
+                True,
+                False,
+            ),
+            (
+                "function outer { inner () { rm -rf target; }; }",
+                False,
+                True,
+            ),
+            (
+                "outer () { inner () { rm -rf target; }; }",
+                False,
+                True,
+            ),
+            (
+                "function outer { function inner { echo harmless; }; }",
+                False,
+                False,
+            ),
+        ],
+    )
+    def test_nested_function_definitions_detected(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Nested literal function definitions with dangerous payload are detected."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "function safe { echo harmless; }; safe",
+            "function safe { git push origin main; }; safe",
+            "function safe { rm target; }; safe",
+            "function safe { git push; }",
+            "function safe () { echo harmless; }",
+            "function safe() { git push origin main; }",
+            "function safe ( ) { echo harmless; }",
+            "time function safe { echo harmless; }",
+            "time function safe { echo harmless; }; safe",
+            "time -p function safe { git push origin main; }",
+            "time -p function safe { git push origin main; }; safe",
+            "time ! function safe { rm target; }",
+            "time ! function safe { rm target; }; safe",
+            "time function safe () { echo harmless; }",
+            "time function safe() { git push origin main; }",
+            "time function safe ( ) { echo harmless; }",
+            "time function empty { }",
+            "time function empty () { }",
+            "safe () { echo harmless; }; safe",
+            "safe () { git push origin main; }; safe",
+            "safe () { rm target; }; safe",
+            "function empty { }",
+            "function empty () { }",
+            "echo function",
+            'git log --grep="function"',
+            "cat function",
+            "function_name=test",
+            "printf '%s\\n' function",
+            "command echo function",
+            "function safe { git push origin main; git status; }",
+            "echo time function fp '{' git push -f origin HEAD ';' '}'",
+            "printf '%s\\n' 'time function fp { git push -f origin HEAD; }'",
+        ],
+    )
+    def test_safe_functions_and_commands_allowed(self, cmd: str) -> None:
+        """Literal safe function bodies and ordinary commands containing 'function' remain allowed."""
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "function $NAME { git push -f origin HEAD; }",
+            "function ${NAME} { git push -f origin HEAD; }",
+            "function $(get_name) { git push -f origin HEAD; }",
+            "function `get_name` { git push -f origin HEAD; }",
+            "function $NAME { rm -rf target; }",
+            "function ${NAME} { rm -rf target; }",
+            "time function $NAME { git push -f origin HEAD; }",
+            "time -p function ${NAME} { git push -f origin HEAD; }",
+            "time ! function $(get_name) { git push -f origin HEAD; }",
+            "time function `get_name` { git push -f origin HEAD; }",
+            "time function $NAME { rm -rf target; }",
+            "time -p function ${NAME} { rm -rf target; }",
+        ],
+    )
+    def test_dynamic_function_definition_names_fail_closed(self, cmd: str) -> None:
+        """Dynamic function definition names fail closed with ValueError."""
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("function fp { git push -f origin HEAD; }; fp", 0, "deny_push"),
+            ("function fp () { git push -f origin HEAD; }; fp", 0, "deny_push"),
+            ("function fp { git push -f origin HEAD; }", 0, "deny_push"),
+            ("time function fp { git push -f origin HEAD; }", 0, "deny_push"),
+            ("fp () { git push -f origin HEAD; }; fp", 0, "deny_push"),
+            ("function zap { rm -rf target; }; zap", 0, "deny_rm"),
+            ("function zap () { rm -rf target; }; zap", 0, "deny_rm"),
+            ("function zap { rm -rf target; }", 0, "deny_rm"),
+            ("time -p function zap { rm -rf target; }", 0, "deny_rm"),
+            ("zap () { rm -rf target; }; zap", 0, "deny_rm"),
+            ("function safe { echo harmless; }; safe", 0, "allow"),
+            ("function safe { git push origin main; }; safe", 0, "allow"),
+            ("time function safe { echo harmless; }", 0, "allow"),
+            ("echo function", 0, "allow"),
+            ("function $NAME { git push -f origin HEAD; }", 2, "error"),
+            ("time function $NAME { git push -f origin HEAD; }", 2, "error"),
+        ],
+    )
+    def test_cli_function_definitions_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        """CLI entrypoint contract tests for shell function definitions."""
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )

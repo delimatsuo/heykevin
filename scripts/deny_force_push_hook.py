@@ -1592,12 +1592,64 @@ def _split_into_commands(tokens: list[str]) -> list[list[str]]:
     return commands
 
 
-def _clean_command_segment(tokens: list[str]) -> list[str]:
-    """Strip shell keywords, redirections, and assignments from a single command segment."""
+def _strip_function_definition_prefix(tokens: list[str]) -> list[str]:
+    """Repeatedly strip shell keywords, time prefixes, and literal function NAME { definition prefixes."""
+    current = list(tokens)
+    while current:
+        idx = 0
+        while idx < len(current):
+            if current[idx] in SHELL_KEYWORDS:
+                idx += 1
+                continue
+            if current[idx] == "time":
+                time_idx = idx + 1
+                if time_idx < len(current) and current[time_idx] == "-p":
+                    time_idx += 1
+                while time_idx < len(current) and current[time_idx] in SHELL_KEYWORDS:
+                    time_idx += 1
+                if time_idx < len(current) and current[time_idx] == "function":
+                    idx = time_idx
+                    continue
+            break
+
+        current = current[idx:]
+        if not current:
+            break
+
+        if current[0] == "function":
+            if len(current) == 1:
+                break
+            name_tok = current[1]
+            if _has_shell_expansion(name_tok):
+                raise ValueError(
+                    f"Unsupported dynamic function definition name: {name_tok!r}"
+                )
+            curr = 2
+            if curr < len(current) and current[curr] == "()":
+                curr += 1
+            elif (
+                curr + 1 < len(current)
+                and current[curr] == "("
+                and current[curr + 1] == ")"
+            ):
+                curr += 2
+            if curr < len(current) and current[curr] == "{":
+                current = current[curr + 1 :]
+                continue
+            if curr == len(current):
+                current = []
+                break
+        break
+
     idx = 0
-    while idx < len(tokens) and tokens[idx] in SHELL_KEYWORDS:
+    while idx < len(current) and current[idx] in SHELL_KEYWORDS:
         idx += 1
-    tokens = tokens[idx:]
+    return current[idx:]
+
+
+def _clean_command_segment(tokens: list[str]) -> list[str]:
+    """Strip shell keywords, function definition prefixes, redirections, and assignments from a single command segment."""
+    tokens = _strip_function_definition_prefix(tokens)
 
     cleaned: list[str] = []
     i = 0

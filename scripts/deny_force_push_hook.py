@@ -1341,7 +1341,7 @@ def _tokenize_command_raw(command: str) -> list[list[str]]:
     lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"
     lexer.commenters = ""
-    lexer.wordchars += "+%{}"
+    lexer.wordchars += "+%{},"
 
     tokens = list(lexer)
     if not tokens:
@@ -2140,6 +2140,12 @@ def _inspect_shell_invocation(
     return _inspect_posix_shell_invocation(tokens, checker_fn)
 
 
+GIT_CONFIG_FILE_SELECTORS = {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"}
+GIT_CONFIG_USER_SEARCH_PATH_INPUTS = {"HOME", "XDG_CONFIG_HOME"}
+GIT_CONFIG_SEARCH_PATH_INPUTS = GIT_CONFIG_USER_SEARCH_PATH_INPUTS
+INITIAL_ASSUMED_EXPORTED_KEYS = frozenset(GIT_CONFIG_USER_SEARCH_PATH_INPUTS)
+
+
 def _is_git_config_protocol_key(key: str) -> bool:
     """Return True if key is an exact Git environment config protocol key."""
     return (
@@ -2155,6 +2161,57 @@ def _is_git_config_protocol_key(key: str) -> bool:
     )
 
 
+def _is_git_config_file_selector(key: str) -> bool:
+    """Return True if key is an exact Git file-backed config selector."""
+    return key in GIT_CONFIG_FILE_SELECTORS
+
+
+def _is_git_config_user_search_path_input(key: str) -> bool:
+    """Return True if key is an exact Git user config search-path input."""
+    return key in GIT_CONFIG_USER_SEARCH_PATH_INPUTS
+
+
+_is_git_config_search_path_input = _is_git_config_user_search_path_input
+
+
+def _is_tracked_git_env_key(key: str) -> bool:
+    """Return True if key is a Git config protocol key, file selector, or search-path input."""
+    return (
+        _is_git_config_protocol_key(key)
+        or _is_git_config_file_selector(key)
+        or _is_git_config_user_search_path_input(key)
+    )
+
+
+def _validate_git_config_file_selectors(env_vars: dict[str, str]) -> None:
+    """Validate that file-backed Git config selectors are not set to unsafe paths.
+
+    If GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM is set to any value other than the
+    exact literal platform null device (os.devnull), fail closed with ValueError.
+    """
+    for selector in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        if selector in env_vars and env_vars[selector] != os.devnull:
+            raise ValueError(
+                f"File-backed Git config via {selector} is unsupported/uninspectable"
+            )
+
+
+def _validate_git_config_user_search_path_inputs(env_vars: dict[str, str]) -> None:
+    """Validate that explicit user Git config search-path inputs are not present.
+
+    If HOME or XDG_CONFIG_HOME is explicitly present in the effective environment,
+    fail closed with ValueError as any value is unsupported/uninspectable.
+    """
+    for selector in ("HOME", "XDG_CONFIG_HOME"):
+        if selector in env_vars:
+            raise ValueError(
+                f"User Git config search-path via {selector} is unsupported/uninspectable"
+            )
+
+
+_validate_git_config_search_path_inputs = _validate_git_config_user_search_path_inputs
+
+
 def _parse_git_env_details(
     env_vars: dict[str, str],
 ) -> tuple[
@@ -2165,8 +2222,11 @@ def _parse_git_env_details(
     """Parse and validate Git config environment protocol variables into structured configs.
 
     Returns (alias_configs, mirror_configs, push_configs).
-    Raises ValueError on missing required indexed members, out-of-bounds count, or dynamically expanded protocol variables.
+    Raises ValueError on missing required indexed members, out-of-bounds count, dynamically expanded protocol variables, unsupported file-backed config selectors, or explicit user config search-path inputs.
     """
+    _validate_git_config_file_selectors(env_vars)
+    _validate_git_config_user_search_path_inputs(env_vars)
+
     for k, v in env_vars.items():
         if _is_git_config_protocol_key(k) and _has_shell_expansion(v):
             raise ValueError(f"{k} contains shell expansion: {v!r}")
@@ -3127,7 +3187,9 @@ class _ShellState:
             dict(shell_vars) if shell_vars is not None else {}
         )
         self.exported_keys: set[str] = (
-            set(exported_keys) if exported_keys is not None else set()
+            set(exported_keys)
+            if exported_keys is not None
+            else set(INITIAL_ASSUMED_EXPORTED_KEYS)
         )
         self.allexport: bool = allexport
         self.expand_aliases: bool = expand_aliases
@@ -3136,7 +3198,7 @@ class _ShellState:
         )
         if inherited_env:
             for k, v in inherited_env.items():
-                if _is_git_config_protocol_key(k):
+                if _is_tracked_git_env_key(k):
                     self.shell_vars[k] = v
                     self.exported_keys.add(k)
 
@@ -3153,15 +3215,19 @@ class _ShellState:
         If mark_exported is False, marks key as unexported.
         If mark_exported is None, retains current export status (or exports if allexport is active).
         """
-        if not _is_git_config_protocol_key(name):
+        if not _is_tracked_git_env_key(name):
             return
 
         if is_append:
             if name not in self.shell_vars:
-                raise ValueError(
-                    f"Missing prior value for append assignment to Git config protocol key {name!r}"
-                )
-            prior = self.shell_vars[name]
+                if _is_git_config_protocol_key(name):
+                    raise ValueError(
+                        f"Missing prior value for append assignment to Git config protocol key {name!r}"
+                    )
+                else:
+                    prior = ""
+            else:
+                prior = self.shell_vars[name]
             new_val = prior + val
         else:
             new_val = val
@@ -3176,7 +3242,7 @@ class _ShellState:
             self.exported_keys.add(name)
 
     def get_exported_env(self) -> dict[str, str]:
-        """Return the dictionary of currently exported Git config protocol environment variables."""
+        """Return the dictionary of currently exported Git config protocol and selector environment variables."""
         return {
             k: self.shell_vars[k]
             for k in self.exported_keys
@@ -3464,11 +3530,16 @@ def _apply_export_cmd(args: list[str], state: _ShellState) -> None:
             raise ValueError(
                 f"Dynamic variable name in export operand is not supported: {name!r}"
             )
+        if "{" in name or "}" in name:
+            raise ValueError(
+                f"Unsupported brace-expanded variable name in export operand: {name!r}"
+            )
 
-        if _is_git_config_protocol_key(name):
+        if _is_tracked_git_env_key(name):
+            key_desc = "protocol key" if _is_git_config_protocol_key(name) else "variable"
             if unsupported_options:
                 raise ValueError(
-                    f"Unsupported export option shape targeting Git config protocol key {name!r}"
+                    f"Unsupported export option shape targeting Git config {key_desc} {name!r}"
                 )
             if val is not None:
                 state.apply_assignment(
@@ -3482,7 +3553,7 @@ def _apply_export_cmd(args: list[str], state: _ShellState) -> None:
                         state.exported_keys.add(name)
                     else:
                         raise ValueError(
-                            f"Export of Git config protocol key {name!r} without literal assignment is not supported"
+                            f"Export of Git config {key_desc} {name!r} without literal assignment is not supported"
                         )
 
 
@@ -3517,11 +3588,16 @@ def _apply_unset_cmd(args: list[str], state: _ShellState) -> None:
             raise ValueError(
                 f"Dynamic variable name in unset operand is not supported: {name!r}"
             )
+        if "{" in name or "}" in name:
+            raise ValueError(
+                f"Unsupported brace-expanded variable name in unset operand: {name!r}"
+            )
 
-        if _is_git_config_protocol_key(name):
+        if _is_tracked_git_env_key(name):
+            key_desc = "protocol key" if _is_git_config_protocol_key(name) else "variable"
             if unsupported_options:
                 raise ValueError(
-                    f"Unsupported unset option shape targeting Git config protocol key {name!r}"
+                    f"Unsupported unset option shape targeting Git config {key_desc} {name!r}"
                 )
             state.shell_vars.pop(name, None)
             state.exported_keys.discard(name)
@@ -3564,11 +3640,16 @@ def _apply_declare_typeset_cmd(args: list[str], state: _ShellState) -> None:
             raise ValueError(
                 f"Dynamic variable name in declare/typeset operand is not supported: {name!r}"
             )
+        if "{" in name or "}" in name:
+            raise ValueError(
+                f"Unsupported brace-expanded variable name in declare/typeset operand: {name!r}"
+            )
 
-        if _is_git_config_protocol_key(name):
+        if _is_tracked_git_env_key(name):
+            key_desc = "protocol key" if _is_git_config_protocol_key(name) else "variable"
             if unsupported_options:
                 raise ValueError(
-                    f"Unsupported declare/typeset option shape targeting Git config protocol key {name!r}"
+                    f"Unsupported declare/typeset option shape targeting Git config {key_desc} {name!r}"
                 )
             if val is not None:
                 if is_export:
@@ -3583,7 +3664,7 @@ def _apply_declare_typeset_cmd(args: list[str], state: _ShellState) -> None:
                         state.exported_keys.add(name)
                     else:
                         raise ValueError(
-                            f"Export of Git config protocol key {name!r} without literal assignment is not supported"
+                            f"Export of Git config {key_desc} {name!r} without literal assignment is not supported"
                         )
                 elif is_unexport:
                     state.exported_keys.discard(name)
@@ -3619,18 +3700,23 @@ def _apply_readonly_local_cmd(cmd: str, args: list[str], state: _ShellState) -> 
             raise ValueError(
                 f"Dynamic variable name in {cmd} operand is not supported: {name!r}"
             )
+        if "{" in name or "}" in name:
+            raise ValueError(
+                f"Unsupported brace-expanded variable name in {cmd} operand: {name!r}"
+            )
 
-        if _is_git_config_protocol_key(name):
+        if _is_tracked_git_env_key(name):
+            key_desc = "protocol key" if _is_git_config_protocol_key(name) else "variable"
             if has_export:
                 raise ValueError(
-                    f"{cmd} with export flag targeting Git config protocol key {name!r} is not supported"
+                    f"{cmd} with export flag targeting Git config {key_desc} {name!r} is not supported"
                 )
             if val is not None:
                 state.apply_assignment(name, val, is_append, mark_exported=None)
             else:
                 if name not in state.shell_vars:
                     raise ValueError(
-                        f"{cmd} of Git config protocol key {name!r} without literal assignment is not supported"
+                        f"{cmd} of Git config {key_desc} {name!r} without literal assignment is not supported"
                     )
 
 
@@ -3727,11 +3813,16 @@ def _apply_set_cmd(args: list[str], state: _ShellState) -> None:
                 f"Dynamic variable name in set operand is not supported: {operands[0]!r}"
             )
         var_name = _restore_sentinels(operands[0])
+        if "{" in var_name or "}" in var_name:
+            raise ValueError(
+                f"Unsupported brace-expanded variable name in set operand: {var_name!r}"
+            )
         var_values = [_restore_sentinels(v) for v in operands[1:]]
-        if _is_git_config_protocol_key(var_name):
+        if _is_tracked_git_env_key(var_name):
+            key_desc = "protocol key" if _is_git_config_protocol_key(var_name) else "variable"
             if unsupported_options:
                 raise ValueError(
-                    f"Unsupported set option shape targeting Git config protocol key {var_name!r}"
+                    f"Unsupported set option shape targeting Git config {key_desc} {var_name!r}"
                 )
             if is_fish_erase:
                 state.shell_vars.pop(var_name, None)
@@ -3739,7 +3830,7 @@ def _apply_set_cmd(args: list[str], state: _ShellState) -> None:
             elif is_fish_unexport:
                 if len(var_values) > 1:
                     raise ValueError(
-                        f"Fish set targeting Git config protocol key {var_name!r} with multiple values is not supported"
+                        f"Fish set targeting Git config {key_desc} {var_name!r} with multiple values is not supported"
                     )
                 if len(var_values) == 1:
                     val = var_values[0]
@@ -3748,7 +3839,7 @@ def _apply_set_cmd(args: list[str], state: _ShellState) -> None:
             elif is_fish_export:
                 if len(var_values) > 1:
                     raise ValueError(
-                        f"Fish set targeting Git config protocol key {var_name!r} with multiple values is not supported"
+                        f"Fish set targeting Git config {key_desc} {var_name!r} with multiple values is not supported"
                     )
                 if len(var_values) == 1:
                     val = var_values[0]
@@ -3759,13 +3850,13 @@ def _apply_set_cmd(args: list[str], state: _ShellState) -> None:
                         state.exported_keys.add(var_name)
                     else:
                         raise ValueError(
-                            f"Export of Git config protocol key {var_name!r} without literal value is not supported"
+                            f"Export of Git config {key_desc} {var_name!r} without literal value is not supported"
                         )
             else:
                 if len(var_values) > 1:
                     if var_name in state.exported_keys or state.allexport:
                         raise ValueError(
-                            f"Fish set targeting Git config protocol key {var_name!r} with multiple values is not supported"
+                            f"Fish set targeting Git config {key_desc} {var_name!r} with multiple values is not supported"
                         )
                 elif len(var_values) == 1:
                     val = var_values[0]
@@ -3921,7 +4012,7 @@ def _apply_shell_state_segment(
             asgn = _consume_var_assignment(toks)
             if asgn is not None:
                 name, val, is_append = asgn
-                if _is_git_config_protocol_key(name):
+                if _is_tracked_git_env_key(name):
                     state.apply_assignment(name, val, is_append, mark_exported=None)
                 continue
             tok0 = toks.pop(0)
@@ -4196,7 +4287,12 @@ def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
             asgn = _consume_var_assignment(toks)
             if asgn is not None:
                 name, _val, _is_append = asgn
-                if _is_git_config_protocol_key(name) or _has_shell_expansion(name):
+                if (
+                    _is_tracked_git_env_key(name)
+                    or _has_shell_expansion(name)
+                    or "{" in name
+                    or "}" in name
+                ):
                     return True
                 continue
             toks.pop(0)
@@ -4231,7 +4327,12 @@ def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
             if parsed is None:
                 break
             name, _val, _is_append, is_dynamic = parsed
-            if is_dynamic or _is_git_config_protocol_key(name):
+            if (
+                is_dynamic
+                or "{" in name
+                or "}" in name
+                or _is_tracked_git_env_key(name)
+            ):
                 return True
         return False
 
@@ -4253,7 +4354,12 @@ def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
             if parsed is None:
                 break
             name, _val, _is_append, is_dynamic = parsed
-            if is_dynamic or _is_git_config_protocol_key(name):
+            if (
+                is_dynamic
+                or "{" in name
+                or "}" in name
+                or _is_tracked_git_env_key(name)
+            ):
                 return True
         return False
 
@@ -4279,7 +4385,12 @@ def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
             if parsed is None:
                 break
             name, _val, _is_append, is_dynamic = parsed
-            if is_dynamic or _is_git_config_protocol_key(name):
+            if (
+                is_dynamic
+                or "{" in name
+                or "}" in name
+                or _is_tracked_git_env_key(name)
+            ):
                 return True
         return False
 
@@ -4306,10 +4417,14 @@ def _is_safety_relevant_mutation_segment(tokens: list[str]) -> bool:
             break
         operands = args[i:]
         if operands:
-            if _has_shell_expansion(operands[0]):
+            if (
+                _has_shell_expansion(operands[0])
+                or "{" in operands[0]
+                or "}" in operands[0]
+            ):
                 return True
             var_name = _restore_sentinels(operands[0])
-            if _is_git_config_protocol_key(var_name):
+            if _is_tracked_git_env_key(var_name):
                 return True
         return False
 
@@ -5506,7 +5621,7 @@ def contains_forced_git_push(
     lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"
     lexer.commenters = ""
-    lexer.wordchars += "+%{}"
+    lexer.wordchars += "+%{},"
     raw_tokens = list(lexer)
     if not raw_tokens:
         return False
@@ -5626,7 +5741,7 @@ def contains_forbidden_rm(
     lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
     lexer.whitespace = " \t\r"
     lexer.commenters = ""
-    lexer.wordchars += "+%{}"
+    lexer.wordchars += "+%{},"
     raw_tokens = list(lexer)
     if not raw_tokens:
         return False

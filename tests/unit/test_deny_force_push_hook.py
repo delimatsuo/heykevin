@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,10 +14,13 @@ import pytest
 from scripts.deny_force_push_hook import (
     FIND_EXEC_ACTIONS,
     FIND_INPUT_SENTINEL,
+    INITIAL_ASSUMED_EXPORTED_KEYS,
     MAX_GIT_CONFIG_COUNT,
     XARGS_INPUT_SENTINEL,
+    _apply_export_cmd,
     _apply_export_unset_segment,
     _apply_shell_state_segment,
+    _apply_unset_cmd,
     _build_git_config_env,
     _clean_command_segment,
     _extract_find_actions,
@@ -30,7 +34,10 @@ from scripts.deny_force_push_hook import (
     _inspect_shell_invocation,
     _is_all_parens,
     _is_forced_push_args,
+    _is_git_config_file_selector,
     _is_git_config_protocol_key,
+    _is_git_config_user_search_path_input,
+    _is_tracked_git_env_key,
     _parse_backtick_body,
     _parse_git_env_configs,
     _parse_git_global_configs,
@@ -41,9 +48,12 @@ from scripts.deny_force_push_hook import (
     _split_into_commands,
     _strip_function_definition_prefix,
     _tokenize_command,
+    _tokenize_command_raw,
     _tokenize_split_string,
     _unwrap_command_and_env,
     _unwrap_xargs,
+    _validate_git_config_file_selectors,
+    _validate_git_config_user_search_path_inputs,
     contains_forbidden_rm,
     contains_forced_git_push,
 )
@@ -9123,6 +9133,1248 @@ class TestShellFunctionDefinitions:
         if decision == "error":
             assert "Shell tokenization failed" in res.stderr
             assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+
+
+class TestDefect116GitConfigFileSelectors:
+    """Tests for Defect #116: Bounded Git config file selectors (GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git fp origin HEAD",
+            "GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git fp origin HEAD",
+            "env GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git fp origin HEAD",
+            "sudo GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git fp origin HEAD",
+            "export GIT_CONFIG_GLOBAL=/tmp/attacker.cfg; git fp origin HEAD",
+            "declare -x GIT_CONFIG_SYSTEM=/tmp/attacker.cfg; git fp origin HEAD",
+            "set -a; GIT_CONFIG_GLOBAL=/tmp/attacker.cfg; git fp origin HEAD",
+            "set -gx GIT_CONFIG_SYSTEM /tmp/attacker.cfg; git fp origin HEAD",
+            "GIT_CONFIG_GLOBAL=/tmp/attacker.cfg sh -c 'git fp origin HEAD'",
+            "GIT_CONFIG_SYSTEM=/tmp/attacker.cfg eval 'git fp origin HEAD'",
+            "GIT_CONFIG_GLOBAL=/tmp/attacker.cfg find . -exec git fp origin HEAD ';'",
+            "GIT_CONFIG_GLOBAL=$CFG git status",
+            "GIT_CONFIG_SYSTEM=${CFG} git status",
+            "GIT_CONFIG_GLOBAL= git status",
+            "GIT_CONFIG_SYSTEM= git status",
+            "GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git push origin HEAD",
+            "GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git push -f origin HEAD",
+        ],
+    )
+    def test_pinned_unsafe_values_fail_closed(self, cmd: str) -> None:
+        """Pinned unsafe values for GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM must fail closed with ValueError."""
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_(GLOBAL|SYSTEM) is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_(GLOBAL|SYSTEM) is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("GIT_CONFIG_GLOBAL=/tmp/attacker.cfg echo safe", False, False),
+            ("GIT_CONFIG_SYSTEM=/tmp/attacker.cfg printf safe", False, False),
+            ("GIT_CONFIG_NOSYSTEM=1 git status", False, False),
+            ("GIT_CONFIG=/tmp/config git status", False, False),
+            ("GIT_CONFIG_KEYBOARD=/tmp/config git status", False, False),
+            ("export GIT_CONFIG_GLOBAL=/tmp/attacker.cfg; unset GIT_CONFIG_GLOBAL; git status", False, False),
+            ("export GIT_CONFIG_SYSTEM=/tmp/attacker.cfg; export -n GIT_CONFIG_SYSTEM; git status", False, False),
+            ("GIT_CONFIG_GLOBAL=/tmp/attacker.cfg env -u GIT_CONFIG_GLOBAL git status", False, False),
+            ("GIT_CONFIG_SYSTEM=/tmp/attacker.cfg env -i git status", False, False),
+            ("export NORMAL=value; echo safe", False, False),
+            ("unset NORMAL; git status", False, False),
+        ],
+    )
+    def test_pinned_safe_and_unchanged_values(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Pinned safe and unchanged values preserve expected allow/deny results."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("GIT_CONFIG_GLOBAL=/dev/null git status", False, False),
+            ("GIT_CONFIG_SYSTEM=/dev/null git status", False, False),
+            ("GIT_CONFIG_GLOBAL=/dev/null git push -f origin HEAD", True, False),
+            ("GIT_CONFIG_SYSTEM=/dev/null rm -rf target", False, True),
+            ("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git status", False, False),
+        ],
+    )
+    def test_posix_devnull_safe_controls(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Literal /dev/null is permitted on POSIX platforms where os.devnull == '/dev/null'."""
+        if os.devnull == "/dev/null":
+            assert contains_forced_git_push(cmd) is is_push
+            assert contains_forbidden_rm(cmd) is is_rm
+
+    def test_cross_platform_devnull_safe_controls(self) -> None:
+        """Exact literal os.devnull is permitted on all platforms and preserves underlying inspection."""
+        cmd_global_status = f"GIT_CONFIG_GLOBAL={os.devnull} git status"
+        cmd_system_status = f"GIT_CONFIG_SYSTEM={os.devnull} git status"
+        cmd_both_status = f"GIT_CONFIG_GLOBAL={os.devnull} GIT_CONFIG_SYSTEM={os.devnull} git status"
+        cmd_global_push = f"GIT_CONFIG_GLOBAL={os.devnull} git push -f origin HEAD"
+        cmd_system_rm = f"GIT_CONFIG_SYSTEM={os.devnull} rm -rf target"
+
+        assert contains_forced_git_push(cmd_global_status) is False
+        assert contains_forbidden_rm(cmd_global_status) is False
+
+        assert contains_forced_git_push(cmd_system_status) is False
+        assert contains_forbidden_rm(cmd_system_status) is False
+
+        assert contains_forced_git_push(cmd_both_status) is False
+        assert contains_forbidden_rm(cmd_both_status) is False
+
+        assert contains_forced_git_push(cmd_global_push) is True
+        assert contains_forbidden_rm(cmd_global_push) is False
+
+        assert contains_forced_git_push(cmd_system_rm) is False
+        assert contains_forbidden_rm(cmd_system_rm) is True
+
+        cmd_export_global = f"export GIT_CONFIG_GLOBAL={os.devnull}; git status"
+        cmd_export_system = f"export GIT_CONFIG_SYSTEM={os.devnull}; git status"
+        cmd_export_both = (
+            f"export GIT_CONFIG_GLOBAL={os.devnull}; export GIT_CONFIG_SYSTEM={os.devnull}; git status"
+        )
+        assert contains_forced_git_push(cmd_export_global) is False
+        assert contains_forbidden_rm(cmd_export_global) is False
+        assert contains_forced_git_push(cmd_export_system) is False
+        assert contains_forbidden_rm(cmd_export_system) is False
+        assert contains_forced_git_push(cmd_export_both) is False
+        assert contains_forbidden_rm(cmd_export_both) is False
+
+    def test_helpers_unit_contracts(self) -> None:
+        """Unit test helper predicates and validation functions for protocol and selector keys."""
+        assert _is_git_config_protocol_key("GIT_CONFIG_COUNT") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_KEY_0") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_VALUE_0") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_GLOBAL") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_SYSTEM") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_NOSYSTEM") is False
+
+        assert _is_git_config_file_selector("GIT_CONFIG_GLOBAL") is True
+        assert _is_git_config_file_selector("GIT_CONFIG_SYSTEM") is True
+        assert _is_git_config_file_selector("GIT_CONFIG_COUNT") is False
+        assert _is_git_config_file_selector("GIT_CONFIG") is False
+        assert _is_git_config_file_selector("GIT_CONFIG_NOSYSTEM") is False
+
+        assert _is_tracked_git_env_key("GIT_CONFIG_COUNT") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG_KEY_0") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG_VALUE_0") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG_GLOBAL") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG_SYSTEM") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG") is False
+        assert _is_tracked_git_env_key("GIT_CONFIG_NOSYSTEM") is False
+
+        # Safe devnull passes validation
+        _validate_git_config_file_selectors({"GIT_CONFIG_GLOBAL": os.devnull})
+        _validate_git_config_file_selectors({"GIT_CONFIG_SYSTEM": os.devnull})
+        _validate_git_config_file_selectors(
+            {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+        )
+
+        # Unsafe selectors raise ValueError identifying exact selector
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_GLOBAL is unsupported/uninspectable",
+        ):
+            _validate_git_config_file_selectors({"GIT_CONFIG_GLOBAL": "/tmp/unsafe.cfg"})
+
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_SYSTEM is unsupported/uninspectable",
+        ):
+            _validate_git_config_file_selectors({"GIT_CONFIG_SYSTEM": "/tmp/unsafe.cfg"})
+
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_GLOBAL is unsupported/uninspectable",
+        ):
+            _validate_git_config_file_selectors({"GIT_CONFIG_GLOBAL": ""})
+
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_SYSTEM is unsupported/uninspectable",
+        ):
+            _validate_git_config_file_selectors({"GIT_CONFIG_SYSTEM": "$VAR"})
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "nohup GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git fp origin HEAD",
+            "timeout 10 GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git status",
+            "nice GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git status",
+            "time GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git status",
+            "stdbuf -oL GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git status",
+            "command GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git status",
+            "builtin GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git status",
+            "bash -c 'GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git status'",
+            "zsh -c 'GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git status'",
+        ],
+    )
+    def test_wrapped_commands_with_unsafe_selectors_fail_closed(self, cmd: str) -> None:
+        """Wrapper utilities wrapping unsafe Git config selectors must fail closed."""
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_(GLOBAL|SYSTEM) is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"File-backed Git config via GIT_CONFIG_(GLOBAL|SYSTEM) is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(cmd)
+
+    def test_subshell_and_state_boundaries(self) -> None:
+        """Subshells and conditional boundaries with safety-relevant mutations fail closed."""
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forced_git_push("(export GIT_CONFIG_GLOBAL=/tmp/attacker.cfg); git status")
+
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forbidden_rm("(export GIT_CONFIG_GLOBAL=/tmp/attacker.cfg); git status")
+
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forced_git_push("false && export GIT_CONFIG_GLOBAL=/tmp/attacker.cfg; git status")
+
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forbidden_rm("true || export GIT_CONFIG_SYSTEM=/tmp/attacker.cfg; git status")
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export GIT_CONFIG_{GLOBAL,SYSTEM}=/tmp/attacker.cfg; git fp origin HEAD",
+            "export GIT_CONFIG_GLOB{AL,US}=/tmp/attacker.cfg; git fp origin HEAD",
+            "declare -x GIT_CONFIG_{GLOBAL,SYSTEM}=/tmp/attacker.cfg; git fp origin HEAD",
+            "typeset -x GIT_CONFIG_{GLOBAL,SYSTEM}=/tmp/attacker.cfg; git fp origin HEAD",
+            "readonly GIT_CONFIG_{GLOBAL,SYSTEM}=/tmp/attacker.cfg; git fp origin HEAD",
+            "local GIT_CONFIG_{GLOBAL,SYSTEM}=/tmp/attacker.cfg; git fp origin HEAD",
+            "unset GIT_CONFIG_{GLOBAL,SYSTEM}; git status",
+            "set -gx GIT_CONFIG_{GLOBAL,SYSTEM} /tmp/attacker.cfg; git fp origin HEAD",
+        ],
+    )
+    def test_brace_expanded_variable_targets_fail_closed(self, cmd: str) -> None:
+        """Brace-expanded variable targets must fail closed with ValueError identifying unsupported brace expansion."""
+        with pytest.raises(
+            ValueError,
+            match=r"Unsupported brace-expanded variable name",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"Unsupported brace-expanded variable name",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision", "expected_err_token"),
+        [
+            (
+                "GIT_CONFIG_GLOBAL=/tmp/attacker.cfg git fp origin HEAD",
+                2,
+                "error",
+                "GIT_CONFIG_GLOBAL",
+            ),
+            (
+                "GIT_CONFIG_SYSTEM=/tmp/attacker.cfg git fp origin HEAD",
+                2,
+                "error",
+                "GIT_CONFIG_SYSTEM",
+            ),
+            (
+                "export GIT_CONFIG_GLOBAL=/tmp/attacker.cfg; git fp origin HEAD",
+                2,
+                "error",
+                "GIT_CONFIG_GLOBAL",
+            ),
+            (
+                "GIT_CONFIG_GLOBAL=$CFG git status",
+                2,
+                "error",
+                "GIT_CONFIG_GLOBAL",
+            ),
+            (
+                "GIT_CONFIG_SYSTEM= git status",
+                2,
+                "error",
+                "GIT_CONFIG_SYSTEM",
+            ),
+            (
+                "GIT_CONFIG_GLOBAL=/dev/null git status",
+                0,
+                "allow" if os.devnull == "/dev/null" else "error",
+                None,
+            ),
+            (
+                "GIT_CONFIG_GLOBAL=/dev/null git push -f origin HEAD",
+                0 if os.devnull == "/dev/null" else 2,
+                "deny_push" if os.devnull == "/dev/null" else "error",
+                None,
+            ),
+            (
+                "GIT_CONFIG_SYSTEM=/dev/null rm -rf target",
+                0 if os.devnull == "/dev/null" else 2,
+                "deny_rm" if os.devnull == "/dev/null" else "error",
+                None,
+            ),
+            (
+                f"GIT_CONFIG_GLOBAL={os.devnull} git status",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                f"GIT_CONFIG_GLOBAL={os.devnull} git push -f origin HEAD",
+                0,
+                "deny_push",
+                None,
+            ),
+            (
+                f"GIT_CONFIG_SYSTEM={os.devnull} rm -rf target",
+                0,
+                "deny_rm",
+                None,
+            ),
+            (
+                "GIT_CONFIG_GLOBAL=/tmp/attacker.cfg echo safe",
+                0,
+                "allow",
+                None,
+            ),
+        ],
+    )
+    def test_cli_file_selectors_contract(
+        self,
+        cmd: str,
+        expected_code: int,
+        decision: str,
+        expected_err_token: str | None,
+    ) -> None:
+        """CLI contract tests for Git config file selectors."""
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+            if expected_err_token:
+                assert expected_err_token in res.stderr
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+
+
+class TestDefect120GitConfigSearchPathInputs:
+    """Tests for Defect #120: User Git config search-path bypass (HOME and XDG_CONFIG_HOME)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "HOME=/tmp/attacker git fp origin HEAD",
+            "XDG_CONFIG_HOME=/tmp/attacker git fp origin HEAD",
+            "env HOME=/tmp/attacker git status",
+            "env XDG_CONFIG_HOME=/tmp/attacker git status",
+            "sudo HOME=/tmp/attacker git status",
+            "export HOME=/tmp/attacker; git fp origin HEAD",
+            "export XDG_CONFIG_HOME=/tmp/attacker; git fp origin HEAD",
+            "declare -x HOME=/tmp/attacker; git status",
+            "typeset -x XDG_CONFIG_HOME=/tmp/attacker; git status",
+            "set -a; HOME=/tmp/attacker; git status",
+            "set -a; XDG_CONFIG_HOME=/tmp/attacker; git status",
+            "set -o allexport; HOME=/tmp/attacker; git status",
+            "set -gx HOME /tmp/attacker; git status",
+            "set -gx XDG_CONFIG_HOME /tmp/attacker; git status",
+            "XDG_CONFIG_HOME=/tmp/attacker sh -c 'git fp origin HEAD'",
+            "HOME=/tmp/attacker bash -c 'git status'",
+            "XDG_CONFIG_HOME=/tmp/attacker zsh -c 'git status'",
+            "HOME=/tmp/attacker eval 'git fp origin HEAD'",
+            "XDG_CONFIG_HOME=/tmp/attacker find . -exec git fp origin HEAD ';'",
+            "HOME=$CFG git status",
+            "HOME=${CFG} git status",
+            "XDG_CONFIG_HOME=$CFG git status",
+            "XDG_CONFIG_HOME=${CFG} git status",
+            "HOME= git status",
+            "XDG_CONFIG_HOME= git status",
+            "HOME=/tmp/attacker git push origin HEAD",
+            "HOME=/tmp/attacker git push -f origin HEAD",
+            "XDG_CONFIG_HOME=/tmp/attacker git push origin HEAD",
+            "XDG_CONFIG_HOME=/tmp/attacker git push -f origin HEAD",
+            "HOME=/dev/null git status",
+            f"HOME={os.devnull} git status",
+            "XDG_CONFIG_HOME=/dev/null git status",
+            f"XDG_CONFIG_HOME={os.devnull} git status",
+            f"GIT_CONFIG_GLOBAL={os.devnull} HOME=/tmp/attacker git status",
+            f"GIT_CONFIG_GLOBAL={os.devnull} XDG_CONFIG_HOME=/tmp/attacker git status",
+            "HOME=relative/path git status",
+            "XDG_CONFIG_HOME=relative/path git status",
+            "HOME=/tmp/attacker; git status",
+            "XDG_CONFIG_HOME=/tmp/attacker; git status",
+            "HOME=/tmp/attacker; git fp origin HEAD",
+            "XDG_CONFIG_HOME=/tmp/attacker; git fp origin HEAD",
+            "HOME=/tmp/attacker\ngit status",
+            "XDG_CONFIG_HOME=/tmp/attacker\ngit status",
+            "HOME=/tmp/attacker\ngit fp origin HEAD",
+            "XDG_CONFIG_HOME=/tmp/attacker\ngit fp origin HEAD",
+            "HOME+=/tmp/attacker; git status",
+            "XDG_CONFIG_HOME+=/tmp/attacker; git status",
+            "HOME+=/tmp/attacker; git fp origin HEAD",
+            "XDG_CONFIG_HOME+=/tmp/attacker; git fp origin HEAD",
+            "HOME+=/tmp/attacker\ngit status",
+            "XDG_CONFIG_HOME+=/tmp/attacker\ngit status",
+            "HOME+=/tmp/attacker\ngit fp origin HEAD",
+            "XDG_CONFIG_HOME+=/tmp/attacker\ngit fp origin HEAD",
+        ],
+    )
+    def test_pinned_unsafe_values_fail_closed(self, cmd: str) -> None:
+        """Pinned unsafe values for HOME and XDG_CONFIG_HOME must fail closed with ValueError in both classifiers."""
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("HOME=/tmp/attacker echo safe", False, False),
+            ("XDG_CONFIG_HOME=/tmp/attacker printf safe", False, False),
+            ("export HOME=/tmp/attacker; unset HOME; git status", False, False),
+            ("export XDG_CONFIG_HOME=/tmp/attacker; unset XDG_CONFIG_HOME; git status", False, False),
+            ("export HOME=/tmp/attacker; export -n HOME; git status", False, False),
+            ("export XDG_CONFIG_HOME=/tmp/attacker; export -n XDG_CONFIG_HOME; git status", False, False),
+            ("HOME=/tmp/attacker env -u HOME git status", False, False),
+            ("XDG_CONFIG_HOME=/tmp/attacker env -u XDG_CONFIG_HOME git status", False, False),
+            ("HOME=/tmp/attacker env -i git status", False, False),
+            ("unset HOME; HOME=/tmp/attacker; git status", False, False),
+            ("unset XDG_CONFIG_HOME; XDG_CONFIG_HOME=/tmp/attacker; git status", False, False),
+            ("export -n HOME; HOME=/tmp/attacker; git status", False, False),
+            ("export -n XDG_CONFIG_HOME; XDG_CONFIG_HOME=/tmp/attacker; git status", False, False),
+            ("HOME=/tmp/attacker env -u HOME git push -f origin HEAD", True, False),
+            ("XDG_CONFIG_HOME=/tmp/attacker env -i rm -rf target", False, True),
+            ("GIT_CONFIG_NOSYSTEM=1 git status", False, False),
+            ("GIT_CONFIG=/tmp/config git status", False, False),
+            ("HOMEPATH=/tmp/home git status", False, False),
+            ("XDG_DATA_HOME=/tmp/data git status", False, False),
+        ],
+    )
+    def test_pinned_safe_and_unchanged_values(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Pinned safe and unchanged values preserve expected allow/deny results."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    def test_helpers_unit_contracts(self) -> None:
+        """Unit test helper predicates and validation functions distinguishing file selectors from user search-path inputs."""
+        # Protocol keys
+        assert _is_git_config_protocol_key("HOME") is False
+        assert _is_git_config_protocol_key("XDG_CONFIG_HOME") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_GLOBAL") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_SYSTEM") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_COUNT") is True
+
+        # File selectors
+        assert _is_git_config_file_selector("GIT_CONFIG_GLOBAL") is True
+        assert _is_git_config_file_selector("GIT_CONFIG_SYSTEM") is True
+        assert _is_git_config_file_selector("HOME") is False
+        assert _is_git_config_file_selector("XDG_CONFIG_HOME") is False
+        assert _is_git_config_file_selector("GIT_CONFIG") is False
+
+        # User search-path inputs
+        assert _is_git_config_user_search_path_input("HOME") is True
+        assert _is_git_config_user_search_path_input("XDG_CONFIG_HOME") is True
+        assert _is_git_config_user_search_path_input("GIT_CONFIG_GLOBAL") is False
+        assert _is_git_config_user_search_path_input("GIT_CONFIG_SYSTEM") is False
+        assert _is_git_config_user_search_path_input("GIT_CONFIG_COUNT") is False
+        assert _is_git_config_user_search_path_input("GIT_CONFIG") is False
+        assert _is_git_config_user_search_path_input("HOMEPATH") is False
+
+        # Tracked keys include all four names plus protocol keys
+        assert _is_tracked_git_env_key("GIT_CONFIG_GLOBAL") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG_SYSTEM") is True
+        assert _is_tracked_git_env_key("HOME") is True
+        assert _is_tracked_git_env_key("XDG_CONFIG_HOME") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG_COUNT") is True
+        assert _is_tracked_git_env_key("GIT_CONFIG") is False
+        assert _is_tracked_git_env_key("GIT_CONFIG_NOSYSTEM") is False
+        assert _is_tracked_git_env_key("HOMEPATH") is False
+
+        # Initial assumed exported keys include exactly HOME and XDG_CONFIG_HOME
+        assert INITIAL_ASSUMED_EXPORTED_KEYS == frozenset({"HOME", "XDG_CONFIG_HOME"})
+
+        # Validation passes on absent / empty dict / safe variables
+        _validate_git_config_user_search_path_inputs({})
+        _validate_git_config_user_search_path_inputs({"SAFE_VAR": "val"})
+
+        # Validation fails closed on any explicit presence of HOME or XDG_CONFIG_HOME
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            _validate_git_config_user_search_path_inputs({"HOME": "/tmp/attacker"})
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via XDG_CONFIG_HOME is unsupported/uninspectable",
+        ):
+            _validate_git_config_user_search_path_inputs({"XDG_CONFIG_HOME": "/tmp/attacker"})
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            _validate_git_config_user_search_path_inputs({"HOME": ""})
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            _validate_git_config_user_search_path_inputs({"HOME": os.devnull})
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "nohup HOME=/tmp/attacker git fp origin HEAD",
+            "timeout 10 XDG_CONFIG_HOME=/tmp/attacker git status",
+            "nice HOME=/tmp/attacker git status",
+            "time XDG_CONFIG_HOME=/tmp/attacker git status",
+            "stdbuf -oL HOME=/tmp/attacker git status",
+            "command XDG_CONFIG_HOME=/tmp/attacker git status",
+            "builtin HOME=/tmp/attacker git status",
+            "bash -c 'HOME=/tmp/attacker git status'",
+            "zsh -c 'XDG_CONFIG_HOME=/tmp/attacker git status'",
+        ],
+    )
+    def test_wrapped_commands_with_unsafe_user_search_paths(self, cmd: str) -> None:
+        """Wrapper utilities wrapping unsafe Git config user search-paths must fail closed."""
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(cmd)
+
+    def test_subshell_and_state_boundaries(self) -> None:
+        """Subshells and conditional boundaries with user search-path mutations fail closed."""
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forced_git_push("(export HOME=/tmp/attacker); git status")
+
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forbidden_rm("(export HOME=/tmp/attacker); git status")
+
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forced_git_push("false && export HOME=/tmp/attacker; git status")
+
+        with pytest.raises(
+            ValueError,
+            match=r"(uncertain execution boundary|subshell)",
+        ):
+            contains_forbidden_rm("true || export XDG_CONFIG_HOME=/tmp/attacker; git status")
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "export {HOME,XDG_CONFIG_HOME}=/tmp/attacker; git fp origin HEAD",
+            "export HO{ME,USE}=/tmp/attacker; git fp origin HEAD",
+            "declare -x {HOME,XDG_CONFIG_HOME}=/tmp/attacker; git fp origin HEAD",
+            "typeset -x {HOME,XDG_CONFIG_HOME}=/tmp/attacker; git fp origin HEAD",
+            "readonly {HOME,XDG_CONFIG_HOME}=/tmp/attacker; git fp origin HEAD",
+            "local {HOME,XDG_CONFIG_HOME}=/tmp/attacker; git fp origin HEAD",
+            "unset {HOME,XDG_CONFIG_HOME}; git status",
+            "set -gx {HOME,XDG_CONFIG_HOME} /tmp/attacker; git fp origin HEAD",
+        ],
+    )
+    def test_brace_expanded_variable_targets_fail_closed(self, cmd: str) -> None:
+        """Brace-expanded variable targets must fail closed with ValueError identifying unsupported brace expansion."""
+        with pytest.raises(
+            ValueError,
+            match=r"Unsupported brace-expanded variable name",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"Unsupported brace-expanded variable name",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision", "expected_err_token"),
+        [
+            (
+                "HOME=/tmp/attacker git fp origin HEAD",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "XDG_CONFIG_HOME=/tmp/attacker git fp origin HEAD",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "export HOME=/tmp/attacker; git fp origin HEAD",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "export XDG_CONFIG_HOME=/tmp/attacker; git status",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "HOME=$CFG git status",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "XDG_CONFIG_HOME= git status",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "HOME=/tmp/attacker echo safe",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "XDG_CONFIG_HOME=/tmp/attacker echo safe",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "HOME=/tmp/attacker env -u HOME git status",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "export XDG_CONFIG_HOME=/tmp/attacker; unset XDG_CONFIG_HOME; git status",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "HOME=/tmp/attacker env -u HOME git push -f origin HEAD",
+                0,
+                "deny_push",
+                None,
+            ),
+            (
+                "XDG_CONFIG_HOME=/tmp/attacker env -i rm -rf target",
+                0,
+                "deny_rm",
+                None,
+            ),
+            (
+                "HOME=/tmp/attacker; git fp origin HEAD",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "HOME=/tmp/attacker; git status",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "XDG_CONFIG_HOME=/tmp/attacker; git fp origin HEAD",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "unset HOME; HOME=/tmp/attacker; git status",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "export -n HOME; HOME=/tmp/attacker; git status",
+                0,
+                "allow",
+                None,
+            ),
+        ],
+    )
+    def test_cli_user_search_paths_contract(
+        self,
+        cmd: str,
+        expected_code: int,
+        decision: str,
+        expected_err_token: str | None,
+    ) -> None:
+        """CLI contract tests for Git config user search-path inputs."""
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+            if expected_err_token:
+                assert expected_err_token in res.stderr
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+
+    def test_mutation_effective_bypass_demonstration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Demonstrate that bypassing user search-path validation reproduces the reviewer bypass and restoring it fails closed."""
+        repro_cmd = "XDG_CONFIG_HOME=/tmp/attacker git fp origin HEAD"
+
+        # Under normal operation, it raises ValueError identifying XDG_CONFIG_HOME
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via XDG_CONFIG_HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via XDG_CONFIG_HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+        # Temporarily bypass search-path validation to prove that without this check,
+        # the command would slip through and return False (the reviewer reproduction).
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._validate_git_config_user_search_path_inputs",
+            lambda env: None,
+        )
+
+        assert contains_forced_git_push(repro_cmd) is False
+        assert contains_forbidden_rm(repro_cmd) is False
+
+        # Restore validation and prove fail-closed protection is active again
+        monkeypatch.undo()
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via XDG_CONFIG_HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via XDG_CONFIG_HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+
+class TestDefect121InheritedExportAttributeBypass:
+    """Tests for Defect #121: Inherited export-attribute bypass on bare assignment (HOME and XDG_CONFIG_HOME)."""
+
+    def test_shell_state_initial_assumed_export_contract(self) -> None:
+        """A fresh root _ShellState starts with HOME and XDG_CONFIG_HOME in exported_keys but absent from shell_vars and get_exported_env()."""
+        state = _ShellState()
+        assert "HOME" in state.exported_keys
+        assert "XDG_CONFIG_HOME" in state.exported_keys
+        assert state.exported_keys == INITIAL_ASSUMED_EXPORTED_KEYS
+        assert "HOME" not in state.shell_vars
+        assert "XDG_CONFIG_HOME" not in state.shell_vars
+        assert state.shell_vars == {}
+        assert state.get_exported_env() == {}
+
+    def test_shell_state_bare_assignment_retains_assumed_export(self) -> None:
+        """Bare assignment to HOME or XDG_CONFIG_HOME gives the key a value and keeps it exported in get_exported_env()."""
+        state = _ShellState()
+        state.apply_assignment("HOME", "/tmp/attacker", is_append=False)
+        assert state.shell_vars["HOME"] == "/tmp/attacker"
+        assert "HOME" in state.exported_keys
+        assert state.get_exported_env() == {"HOME": "/tmp/attacker"}
+
+        state2 = _ShellState()
+        state2.apply_assignment("XDG_CONFIG_HOME", "/tmp/attacker", is_append=False)
+        assert state2.shell_vars["XDG_CONFIG_HOME"] == "/tmp/attacker"
+        assert "XDG_CONFIG_HOME" in state2.exported_keys
+        assert state2.get_exported_env() == {"XDG_CONFIG_HOME": "/tmp/attacker"}
+
+    def test_shell_state_explicit_unset_and_unexport_clears_export(self) -> None:
+        """Explicit unset or export -n removes export status and a later bare assignment stays unexported."""
+        # Unset followed by bare assignment
+        state = _ShellState()
+        _apply_unset_cmd(["HOME"], state)
+        assert "HOME" not in state.exported_keys
+        assert "HOME" not in state.shell_vars
+        state.apply_assignment("HOME", "/tmp/attacker", is_append=False)
+        assert state.shell_vars["HOME"] == "/tmp/attacker"
+        assert "HOME" not in state.exported_keys
+        assert state.get_exported_env() == {}
+
+        # Export -n followed by bare assignment
+        state2 = _ShellState()
+        _apply_export_cmd(["-n", "XDG_CONFIG_HOME"], state2)
+        assert "XDG_CONFIG_HOME" not in state2.exported_keys
+        state2.apply_assignment("XDG_CONFIG_HOME", "/tmp/attacker", is_append=False)
+        assert state2.shell_vars["XDG_CONFIG_HOME"] == "/tmp/attacker"
+        assert "XDG_CONFIG_HOME" not in state2.exported_keys
+        assert state2.get_exported_env() == {}
+
+    def test_shell_state_copy_preserves_exact_state_without_readding(self) -> None:
+        """Copying _ShellState preserves exact state without re-adding removed keys."""
+        state = _ShellState()
+        _apply_unset_cmd(["HOME"], state)
+        assert "HOME" not in state.exported_keys
+        copied = state.copy()
+        assert "HOME" not in copied.exported_keys
+        assert "XDG_CONFIG_HOME" in copied.exported_keys
+        copied.apply_assignment("HOME", "/tmp/attacker", is_append=False)
+        assert copied.get_exported_env() == {}
+
+    def test_shell_state_explicit_empty_exported_keys(self) -> None:
+        """An explicitly supplied empty exported_keys=set() remains empty and does not default to assumed exports."""
+        state = _ShellState(exported_keys=set())
+        assert state.exported_keys == set()
+        assert state.get_exported_env() == {}
+        state.apply_assignment("HOME", "/tmp/attacker", is_append=False)
+        assert state.shell_vars["HOME"] == "/tmp/attacker"
+        assert state.exported_keys == set()
+        assert state.get_exported_env() == {}
+
+    def test_mutation_effective_inherited_export_bypass_demonstration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Temporarily disabling initial assumed exports reproduces the reviewer bypass where bare assignment returns False; restoring it fails closed."""
+        repro_cmd = "HOME=/tmp/attacker; git fp origin HEAD"
+
+        # Under normal root behavior, it raises ValueError naming HOME
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+        # Temporarily remove initial-assumed-export set to prove that without this guard,
+        # the bare assignment is treated as unexported and the command bypasses the hook (returning False)
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook.INITIAL_ASSUMED_EXPORTED_KEYS",
+            frozenset(),
+        )
+
+        assert contains_forced_git_push(repro_cmd) is False
+        assert contains_forbidden_rm(repro_cmd) is False
+
+        # Restore initial assumed exports and prove fail-closed protection is active again
+        monkeypatch.undo()
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+
+class TestDefect122BraceValueUserSearchPathBypass:
+    """Tests for Defect #122: User Git config search-path bypass with brace-bearing values (HOME and XDG_CONFIG_HOME)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "HOME=/{tmp,a}; git fp origin HEAD",
+            "XDG_CONFIG_HOME=/{tmp,a}; git fp origin HEAD",
+            "HOME=/tmp{,x}; git fp origin HEAD",
+            "XDG_CONFIG_HOME=/tmp{,x}; git fp origin HEAD",
+            "export HOME=/{tmp,a}; git fp origin HEAD",
+            "export XDG_CONFIG_HOME=/{tmp,a}; git fp origin HEAD",
+            "export HOME=/tmp{,x}; git fp origin HEAD",
+            "export XDG_CONFIG_HOME=/tmp{,x}; git fp origin HEAD",
+            "declare -x HOME=/{tmp,a}; git fp origin HEAD",
+            "typeset -x XDG_CONFIG_HOME=/{tmp,a}; git fp origin HEAD",
+            "readonly HOME=/{tmp,a}; git fp origin HEAD",
+            "local XDG_CONFIG_HOME=/{tmp,a}; git fp origin HEAD",
+            "set -gx HOME /{tmp,a}; git fp origin HEAD",
+            "set -gx XDG_CONFIG_HOME /tmp{,x}; git fp origin HEAD",
+            "set -a; HOME=/{tmp,a}; git status",
+            "set -a; XDG_CONFIG_HOME=/tmp{,x}; git status",
+            "HOME+=/{tmp,a}; git fp origin HEAD",
+            "XDG_CONFIG_HOME+=/tmp{,x}; git fp origin HEAD",
+            "HOME=/{tmp,a}\ngit fp origin HEAD",
+            "XDG_CONFIG_HOME=/{tmp,a}\ngit fp origin HEAD",
+            "HOME=/{tmp,a} git fp origin HEAD",
+            "XDG_CONFIG_HOME=/{tmp,a} git fp origin HEAD",
+            "HOME=/tmp{,x} git fp origin HEAD",
+            "XDG_CONFIG_HOME=/tmp{,x} git fp origin HEAD",
+            "HOME=/{tmp,a}; git status",
+            "XDG_CONFIG_HOME=/{tmp,a}; git status",
+            "HOME=/tmp{,x}; git status",
+            "XDG_CONFIG_HOME=/tmp{,x}; git status",
+            "HOME={/tmp,a}; git fp origin HEAD",
+            "XDG_CONFIG_HOME={/tmp,a}; git fp origin HEAD",
+            "HOME=/tmp/{a,b}; git fp origin HEAD",
+            "XDG_CONFIG_HOME=/tmp/{a,b}; git fp origin HEAD",
+            "HOME=/{tmp,a}; command git status",
+            "HOME=/{tmp,a}; eval 'git status'",
+            "HOME=/{tmp,a}; find . -exec git status \\;",
+            "GIT_CONFIG_GLOBAL=/dev/null HOME=/{tmp,a}; git status",
+        ],
+    )
+    def test_pinned_unsafe_brace_values_fail_closed(self, cmd: str) -> None:
+        """Pinned unsafe brace-bearing values for HOME and XDG_CONFIG_HOME must fail closed with ValueError in both classifiers."""
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via (HOME|XDG_CONFIG_HOME) is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "is_push", "is_rm"),
+        [
+            ("HOME=/{tmp,a} echo safe", False, False),
+            ("HOME=/{tmp,a} printf ok", False, False),
+            ("XDG_CONFIG_HOME=/{tmp,a} printf safe", False, False),
+            ("export HOME=/{tmp,a}; unset HOME; git status", False, False),
+            ("export XDG_CONFIG_HOME=/{tmp,a}; unset XDG_CONFIG_HOME; git status", False, False),
+            ("export HOME=/{tmp,a}; export -n HOME; git status", False, False),
+            ("export XDG_CONFIG_HOME=/{tmp,a}; export -n XDG_CONFIG_HOME; git status", False, False),
+            ("export -n XDG_CONFIG_HOME; XDG_CONFIG_HOME=/tmp{,x}; git status", False, False),
+            ("HOME=/{tmp,a} env -u HOME git status", False, False),
+            ("XDG_CONFIG_HOME=/{tmp,a} env -u XDG_CONFIG_HOME git status", False, False),
+            ("HOME=/{tmp,a} env -i git status", False, False),
+            ("env -u HOME git status", False, False),
+            ("env -i git status", False, False),
+            ("unset HOME; HOME=/{tmp,a}; git status", False, False),
+            ("unset XDG_CONFIG_HOME; XDG_CONFIG_HOME=/{tmp,a}; git status", False, False),
+            ("export -n HOME; HOME=/{tmp,a}; git status", False, False),
+            ("export -n XDG_CONFIG_HOME; XDG_CONFIG_HOME=/{tmp,a}; git status", False, False),
+            ("HOME=/{tmp,a} env -u HOME git push -f origin HEAD", True, False),
+            ("XDG_CONFIG_HOME=/{tmp,a} env -i rm -rf target", False, True),
+            ("GIT_CONFIG_GLOBAL=/dev/null git push -f", True, False),
+            ("GIT_CONFIG_SYSTEM=/dev/null rm -rf /tmp/x", False, True),
+            ("OTHER=/{tmp,a}; git status", False, False),
+            ("OTHER_VAR=/{tmp,a}; git status", False, False),
+            ("FOO=/tmp{,x}; git status", False, False),
+        ],
+    )
+    def test_pinned_safe_and_unchanged_brace_values(
+        self, cmd: str, is_push: bool, is_rm: bool
+    ) -> None:
+        """Pinned safe and unchanged brace-bearing values preserve expected allow/deny results."""
+        assert contains_forced_git_push(cmd) is is_push
+        assert contains_forbidden_rm(cmd) is is_rm
+
+    def test_tokenizer_keeps_brace_and_comma_assignment_as_single_token(self) -> None:
+        """Verify the resulting tokenizer keeps HOME=/{tmp,a} as one assignment token and preserves ordinary comma-bearing shell words."""
+        tokens = _tokenize_command_raw("HOME=/{tmp,a}; git fp origin HEAD")
+        assert tokens == [["HOME=/{tmp,a}"], ["git", "fp", "origin", "HEAD"]]
+
+        tokens_xdg = _tokenize_command_raw("XDG_CONFIG_HOME=/tmp{,x}; git fp origin HEAD")
+        assert tokens_xdg == [["XDG_CONFIG_HOME=/tmp{,x}"], ["git", "fp", "origin", "HEAD"]]
+
+        tokens_comma = _tokenize_command_raw("echo a,b,c foo,bar")
+        assert tokens_comma == [["echo", "a,b,c", "foo,bar"]]
+
+    def test_shell_state_brace_values_retained_in_export(self) -> None:
+        """Brace-bearing variable assignments retain export status in shell state and get_exported_env()."""
+        state = _ShellState()
+        state.apply_assignment("HOME", "/{tmp,a}", is_append=False)
+        assert state.shell_vars["HOME"] == "/{tmp,a}"
+        assert "HOME" in state.exported_keys
+        assert state.get_exported_env() == {"HOME": "/{tmp,a}"}
+
+        state2 = _ShellState()
+        state2.apply_assignment("XDG_CONFIG_HOME", "/tmp{,x}", is_append=False)
+        assert state2.shell_vars["XDG_CONFIG_HOME"] == "/tmp{,x}"
+        assert "XDG_CONFIG_HOME" in state2.exported_keys
+        assert state2.get_exported_env() == {"XDG_CONFIG_HOME": "/tmp{,x}"}
+
+    def test_mutation_effective_comma_in_wordchars_bypass_demonstration(self) -> None:
+        """Demonstrate that removing comma from lexer wordchars splits the assignment and reproduces the bypass."""
+        import shlex
+
+        cleaned = "HOME=/{tmp,a}; git fp origin HEAD"
+        lexer_with_comma = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
+        lexer_with_comma.whitespace = " \t\r"
+        lexer_with_comma.commenters = ""
+        lexer_with_comma.wordchars += "+%{},"
+        tokens_with_comma = list(lexer_with_comma)
+        assert tokens_with_comma == ["HOME=/{tmp,a}", ";", "git", "fp", "origin", "HEAD"]
+
+        lexer_without_comma = shlex.shlex(cleaned, posix=True, punctuation_chars=True)
+        lexer_without_comma.whitespace = " \t\r"
+        lexer_without_comma.commenters = ""
+        lexer_without_comma.wordchars += "+%{}"
+        tokens_without_comma = list(lexer_without_comma)
+        assert tokens_without_comma == ["HOME=/{tmp", ",", "a}", ";", "git", "fp", "origin", "HEAD"]
+
+    def test_mutation_effective_brace_value_bypass_demonstration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Demonstrate that bypassing either initial assumed exports or search-path validation reproduces the reviewer bypass; restoring it fails closed."""
+        repro_cmd = "HOME=/{tmp,a}; git fp origin HEAD"
+
+        # Under normal root behavior, it raises ValueError naming HOME
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+        # Temporarily remove initial-assumed-export set to prove that without this guard,
+        # the bare assignment is treated as unexported and the command bypasses the hook (returning False)
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook.INITIAL_ASSUMED_EXPORTED_KEYS",
+            frozenset(),
+        )
+
+        assert contains_forced_git_push(repro_cmd) is False
+        assert contains_forbidden_rm(repro_cmd) is False
+
+        # Restore initial assumed exports and prove fail-closed protection is active again
+        monkeypatch.undo()
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+        # Temporarily bypass user search-path validation to prove that without the validator,
+        # the exported variable bypasses detection and returns False
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._validate_git_config_user_search_path_inputs",
+            lambda env: None,
+        )
+
+        assert contains_forced_git_push(repro_cmd) is False
+        assert contains_forbidden_rm(repro_cmd) is False
+
+        # Restore validation and prove fail-closed protection is active again
+        monkeypatch.undo()
+
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forced_git_push(repro_cmd)
+        with pytest.raises(
+            ValueError,
+            match=r"User Git config search-path via HOME is unsupported/uninspectable",
+        ):
+            contains_forbidden_rm(repro_cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision", "expected_err_token"),
+        [
+            (
+                "HOME=/{tmp,a}; git fp origin HEAD",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "XDG_CONFIG_HOME=/{tmp,a}; git fp origin HEAD",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "HOME=/tmp{,x}; git fp origin HEAD",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "XDG_CONFIG_HOME=/tmp{,x}; git fp origin HEAD",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "export HOME=/{tmp,a}; git fp origin HEAD",
+                2,
+                "error",
+                "HOME",
+            ),
+            (
+                "export XDG_CONFIG_HOME=/{tmp,a}; git fp origin HEAD",
+                2,
+                "error",
+                "XDG_CONFIG_HOME",
+            ),
+            (
+                "HOME=/{tmp,a} echo safe",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "unset HOME; HOME=/{tmp,a}; git status",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "export -n HOME; HOME=/{tmp,a}; git status",
+                0,
+                "allow",
+                None,
+            ),
+            (
+                "HOME=/{tmp,a} env -u HOME git push -f origin HEAD",
+                0,
+                "deny_push",
+                None,
+            ),
+            (
+                "XDG_CONFIG_HOME=/{tmp,a} env -i rm -rf target",
+                0,
+                "deny_rm",
+                None,
+            ),
+        ],
+    )
+    def test_cli_brace_values_contract(
+        self,
+        cmd: str,
+        expected_code: int,
+        decision: str,
+        expected_err_token: str | None,
+    ) -> None:
+        """CLI contract tests for Git config user search-paths with brace-bearing values."""
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+            if expected_err_token:
+                assert expected_err_token in res.stderr
         elif decision == "allow":
             assert res.returncode == 0
             assert res.stdout == ""

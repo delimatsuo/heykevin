@@ -17,7 +17,8 @@
       "Bash(/usr/bin/rm *)",
       "Bash(git push *-f*)",
       "Bash(git push *--force*)",
-      "Bash(git push *--force-with-lease*)"
+      "Bash(git push *--force-with-lease*)",
+      "Bash(git push *+*)"
     ]
   },
   "sandbox": {

@@ -1,8 +1,6 @@
 # Hey Kevin — Canonical Source Roadmap & Reconciliation
 
-**Candidate branch:** `codex/google-calendar-reschedule-fencing`
-**Candidate base:** `origin/main` (`63fe3e195a45f0b368c4a4d1599825c0392fa2f7`)
-**Pre-repair candidate HEAD:** `5ba200af899683bf1191df0d960625c7b14e00d1`
+**Reconciled source baseline:** `main` (`10af26bb065e904799257d2f47b9b5c45431c997`)
 **Project:** Kevin (`delimatsuo/heykevin`)
 
 ---
@@ -10,9 +8,9 @@
 ## 1. Evidence Ceiling & Verification Scope
 
 This document is the canonical source roadmap for the Hey Kevin repository. The
-Google Calendar reschedule-fencing section describes the candidate branch above;
-the pull request records the exact reviewed diff hash and final commit after review
-repairs. Evidence is limited to source, automated tests, and Git history.
+Google Calendar reschedule-fencing section describes the merged source slice; PR
+#209 records the reviewed history and merge commit. Evidence is limited to source,
+automated tests, and Git history.
 
 > [!IMPORTANT]
 > **Evidence Ceiling**: Source implementation and automated unit tests prove repository code correctness and simulated contracts only. They do **not** prove:
@@ -45,7 +43,11 @@ The following discrete backend hardening slices have been merged to `main` and v
 
 4. **International Owner-Phone Canonicalization (PR #207 / merge `4a77364`)**
    - **Core paths:** [`app/api/contractors.py`](../app/api/contractors.py), [`app/db/contractors.py`](../app/db/contractors.py), [`tests/test_apple_auth.py`](../tests/test_apple_auth.py), [`tests/unit/test_account_dedupe.py`](../tests/unit/test_account_dedupe.py), [`tests/unit/test_audit_pr_a.py`](../tests/unit/test_audit_pr_a.py).
-   - **Outcome:** Implemented for account creation and deduplication boundaries only: canonicalizes international owner phone numbers and persists `owner_phone_e164` to prevent multi-region format aliasing and duplicate tenant creation. `PATCH /api/contractors/{contractor_id}` accepts `owner_phone` via `ContractorUpdate` without canonicalization or recomputing `owner_phone_e164`; PATCH synchronization remains an explicit source gap.
+   - **Outcome:** Implemented for account creation and deduplication boundaries: canonicalizes international owner phone numbers and persists `owner_phone_e164` to prevent multi-region format aliasing and duplicate tenant creation. `owner_phone` and `owner_phone_e164` remain strictly protected from generic `PATCH /api/contractors/{contractor_id}` under F-04; any future owner phone mutation requires a separately designed possession-verified rebind flow with collision checks and atomic pair update.
+
+5. **Provider-Safe Google Calendar Reschedule Fencing (PR #209 / merge `10af26bb065e904799257d2f47b9b5c45431c997`)**
+   - **Core paths:** [`app/db/contractors.py`](../app/db/contractors.py), [`app/db/service_requests.py`](../app/db/service_requests.py), [`app/services/calendar.py`](../app/services/calendar.py), [`app/services/google_calendar_request_provider.py`](../app/services/google_calendar_request_provider.py), [`app/services/integration_tokens.py`](../app/services/integration_tokens.py), [`app/services/integration_token_mutations.py`](../app/services/integration_token_mutations.py), [`app/services/service_request_recovery.py`](../app/services/service_request_recovery.py), [`app/services/service_request_repository.py`](../app/services/service_request_repository.py), [`tests/unit/test_calendar_appointment_mutations.py`](../tests/unit/test_calendar_appointment_mutations.py), [`tests/unit/test_contractor_protected_fields.py`](../tests/unit/test_contractor_protected_fields.py), [`tests/unit/test_google_calendar_request_provider.py`](../tests/unit/test_google_calendar_request_provider.py), [`tests/unit/test_integration_token_envelope.py`](../tests/unit/test_integration_token_envelope.py), [`tests/unit/test_service_request_repository.py`](../tests/unit/test_service_request_repository.py), [`tests/unit/test_service_request_recovery.py`](../tests/unit/test_service_request_recovery.py), [`tests/unit/test_service_request_firestore.py`](../tests/unit/test_service_request_firestore.py).
+   - **Outcome:** Delivered provider-safe Google Calendar reschedule fencing in backend services with fresh ETag invariant, UTC whole-second comparison, atomic recovery finalization, and fail-closed uncertainty classification.
 
 ---
 
@@ -60,8 +62,8 @@ The internationalization plan ([`docs/superpowers/plans/2026-04-07-international
 | **Task 3** | Regional Dial-In Routing | **Partial** | `get_dial_in_number(country_code)` helper implemented in [`app/config.py`](../app/config.py) and consumed in [`app/services/warm_transfer.py`](../app/services/warm_transfer.py). | `DIAL_IN_NUMBERS` environment variable provisioning, regional number inventory, and live conference testing are owner-gated. |
 | **Task 4** | Language Voice Mapping | **Implemented** | `GEMINI_VOICES` mapping per ISO language code implemented in [`app/services/gemini_pipeline.py`](../app/services/gemini_pipeline.py). | Live audible voice quality and latency qualification over Twilio Media Streams are owner-gated. |
 | **Task 5** | Forwarding Instructions API | **Partial** | `GET /api/forwarding-instructions` endpoint with GSM codes per country implemented in [`app/api/forwarding.py`](../app/api/forwarding.py). **Source Gap**: iOS client ([`OnboardingView.swift`](../ios/Kevin/Views/OnboardingView.swift)) still hardcodes US/Verizon codes and does not call this endpoint. | Carrier-network validation across international operators is owner-gated. |
-| **Task 6** | International Phone Normalization | **Partial** | Implemented for account creation and deduplication only: E.164 normalization logic in [`app/utils/phone.py`](../app/utils/phone.py); contractor creation canonicalization and account deduplication verified by PR #207 tests ([`tests/unit/test_account_dedupe.py`](../tests/unit/test_account_dedupe.py)). **Source Gap**: `PATCH /api/contractors/{contractor_id}` does not canonicalize `owner_phone` or sync `owner_phone_e164`. | Verified in creation unit tests. |
-| **Task 7** | Settings Country Code Update | **Partial** | `PUT /api/settings` updates root contractor `country_code` in [`app/api/settings.py`](../app/api/settings.py). **Source Gap**: `GET /api/settings` does not return `country_code`, direct country_code API tests are missing, and iOS settings UI lacks a country selection control. | Source-inspected; direct country_code API tests missing. |
+| **Task 6** | International Phone Normalization | **Partial** | Implemented for account creation and deduplication: E.164 normalization logic in [`app/utils/phone.py`](../app/utils/phone.py); contractor creation canonicalization and account deduplication verified by PR #207 tests ([`tests/unit/test_account_dedupe.py`](../tests/unit/test_account_dedupe.py)). `owner_phone` and `owner_phone_e164` remain in `PROTECTED_FIELDS` under F-04 to prevent account hijacking via generic PATCH. Any future phone update requires a possession-verified rebind flow. | Verified in creation unit tests. |
+| **Task 7** | Settings Country Code Update | **Partial** | `GET /api/settings` returns root-authoritative canonical `country_code` with fallback to `US`; `PUT /api/settings` validates and updates root contractor `country_code` with normalization and direct unit test coverage in [`tests/unit/test_settings_country.py`](../tests/unit/test_settings_country.py). **Source Gap**: iOS settings UI lacks a country selection control. | Verified in direct backend unit tests; iOS country selection UI remains pending. |
 | **Task 8** | Staging / Production Qualification | **Owner-Gated** | Multi-country test matrix defined in plan. | Requires staging deployment, active credentials, real phone numbers, and physical device testing. |
 
 ---
@@ -85,9 +87,9 @@ The internationalization plan ([`docs/superpowers/plans/2026-04-07-international
 
 ---
 
-## 5. Implemented Candidate Pending Review/Merge: Provider-Safe Google Calendar Reschedule Fencing
+## 5. Completed Slices: Provider-Safe Google Calendar Reschedule Fencing (PR #209 / merge `10af26bb065e904799257d2f47b9b5c45431c997`)
 
-**Objective:** Deliver provider-safe Google Calendar reschedule fencing in backend services, default-off with zero live activation. The source candidate is implemented on the branch above and remains pending reviewed-clean merge.
+**Objective:** Deliver provider-safe Google Calendar reschedule fencing in backend services, default-off with zero live activation. Merged to `main` via PR #209 (`10af26bb065e904799257d2f47b9b5c45431c997`).
 
 ### Reschedule Fencing Contract
 1. **Durable Bases & Fresh ETag Invariant:**
@@ -182,8 +184,8 @@ customer-data qualification.
 ## 6. Categorization: Remaining Source Gaps vs. Owner / Live Gates
 
 ### A. Remaining Source Gaps (Repository Code & Tests)
-- **PATCH Owner Phone Canonicalization:** Update `PATCH /api/contractors/{contractor_id}` in [`app/api/contractors.py`](../app/api/contractors.py) to canonicalize `owner_phone` and recompute `owner_phone_e164`.
-- **Settings Country Exposure & Tests:** Update `GET /api/settings` in [`app/api/settings.py`](../app/api/settings.py) to return `country_code` from the contractor document, add direct unit tests for `PUT /api/settings` `country_code` validation and updates, and add country selection controls to iOS `SettingsView.swift`.
+- **Possession-Verified Phone Rebind Flow:** Design and implement a dedicated possession-verified rebind flow with collision checks and atomic `owner_phone`/`owner_phone_e164` updates; generic PATCH must keep both fields protected under F-04.
+- **Settings Country Exposure & Tests:** Backend `GET /api/settings` and `PUT /api/settings` country code exposure, normalization, validation, and direct unit tests are implemented ([`app/api/settings.py`](../app/api/settings.py), [`tests/unit/test_settings_country.py`](../tests/unit/test_settings_country.py)); iOS `SettingsView.swift` country selection control remains pending.
 - **iOS Call Forwarding Integration:** Update [`OnboardingView.swift`](../ios/Kevin/Views/OnboardingView.swift) and [`SettingsView.swift`](../ios/Kevin/Views/SettingsView.swift) to fetch per-country forwarding dial codes dynamically from `GET /api/forwarding-instructions` instead of hardcoded US carrier strings.
 - **iOS International Address Capture:** Add business street address and city input fields to iOS onboarding/settings for accounts in regulatory countries (`DE`, `FR`, `IT`, `ES`, `PT`, `BR`).
 - **Regulatory Provisioning Unit Tests:** Expand unit test coverage for international regulatory bundle creation edge cases and error sanitization.

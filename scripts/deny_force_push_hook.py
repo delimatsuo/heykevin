@@ -115,6 +115,7 @@ FLOCK_NO_ARG_LONG_OPTS = {
     "--shared",
     "--exclusive",
     "--unlock",
+    "--nonblock",
     "--nonblocking",
     "--nb",
     "--close",

@@ -8397,6 +8397,7 @@ class TestDefect105FlockWrapper:
             "flock --shared /tmp/lock git push -f origin HEAD",
             "flock --exclusive /tmp/lock git push -f origin HEAD",
             "flock --unlock /tmp/lock git push -f origin HEAD",
+            "flock --nonblock /tmp/lock git push -f origin HEAD",
             "flock --nonblocking /tmp/lock git push -f origin HEAD",
             "flock --nb /tmp/lock git push -f origin HEAD",
             "flock --close /tmp/lock git push -f origin HEAD",
@@ -8427,6 +8428,7 @@ class TestDefect105FlockWrapper:
             "watch -x flock /tmp/lock git push -f origin HEAD",
             "flock /tmp/lock watch -x git push -f origin HEAD",
             "flock /tmp/lock flock /tmp/lock2 git push -f origin HEAD",
+            "/usr/bin/flock --nonblock /tmp/lock flock --nonblocking /tmp/lock2 git push -f origin HEAD",
             "find /tmp -exec flock /tmp/lock git push -f origin HEAD ';'",
             'bash -c "flock /tmp/lock git push -f origin HEAD"',
             'eval "flock /tmp/lock git push -f origin HEAD"',
@@ -8459,6 +8461,8 @@ class TestDefect105FlockWrapper:
             "flock --shared /tmp/lock rm -rf target",
             "flock --exclusive /tmp/lock rm -rf target",
             "flock --unlock /tmp/lock rm -rf target",
+            "flock --nonblock /tmp/lock rm -rf target",
+            "flock --nonblock --fd 9 rm -rf target",
             "flock --nonblocking /tmp/lock rm -rf target",
             "flock --nb /tmp/lock rm -rf target",
             "flock --close /tmp/lock rm -rf target",
@@ -8498,6 +8502,7 @@ class TestDefect105FlockWrapper:
             "flock /tmp/lock git push origin main",
             "flock /tmp/lock rm -f target",
             "flock /tmp/lock echo harmless",
+            "flock --nonblock /tmp/lock echo harmless",
             "flock 9",
             "flock /tmp/lock",
             "flock --fd 9",
@@ -8522,6 +8527,7 @@ class TestDefect105FlockWrapper:
             "flock --shared",
             "flock --exclusive",
             "flock --unlock",
+            "flock --nonblock",
             "flock --nonblocking",
             "flock --nb",
             "flock --close",
@@ -8559,6 +8565,8 @@ class TestDefect105FlockWrapper:
         "cmd",
         [
             "flock --unknown /tmp/lock git push -f origin HEAD",
+            "flock --nonblo /tmp/lock git push -f origin HEAD",
+            "flock --nonblo /tmp/lock rm -rf target",
             "flock -z /tmp/lock rm -rf target",
             "flock -xz /tmp/lock git push -f origin HEAD",
             "flock -zx /tmp/lock rm -rf target",
@@ -8617,6 +8625,7 @@ class TestDefect105FlockWrapper:
         ("cmd", "expected_code", "decision"),
         [
             ("flock /tmp/lock git push -f origin HEAD", 0, "deny_push"),
+            ("flock --nonblock /tmp/lock git push -f origin HEAD", 0, "deny_push"),
             ("/usr/bin/flock -F /tmp/lock git push --mirror origin", 0, "deny_push"),
             ("flock -senoxFu /tmp/lock git push +HEAD:main origin", 0, "deny_push"),
             ("flock --timeout 1 --conflict-exit-code=2 --fcntl --start 0 --length=1 --verbose /tmp/lock git push -f origin HEAD", 0, "deny_push"),
@@ -8625,6 +8634,7 @@ class TestDefect105FlockWrapper:
             ("flock --fd 9 -c 'git push -f origin HEAD'", 0, "deny_push"),
             ("flock -- -custom_tool git push -f origin HEAD", 0, "deny_push"),
             ("flock /tmp/lock rm -rf target", 0, "deny_rm"),
+            ("flock --nonblock /tmp/lock rm -rf target", 0, "deny_rm"),
             ("flock -n -- /tmp/lock rm -fr target", 0, "deny_rm"),
             ("flock -w1 -E2 /tmp/lock rm -rf target", 0, "deny_rm"),
             ("flock /tmp/lock --command 'rm -rf target'", 0, "deny_rm"),
@@ -8632,6 +8642,7 @@ class TestDefect105FlockWrapper:
             ("flock --fd=9 --command 'rm -rf target'", 0, "deny_rm"),
             ("flock -- -custom_tool rm -rf target", 0, "deny_rm"),
             ("flock /tmp/lock git push origin main", 0, "allow"),
+            ("flock --nonblock /tmp/lock echo harmless", 0, "allow"),
             ("flock /tmp/lock rm -f target", 0, "allow"),
             ("flock /tmp/lock echo harmless", 0, "allow"),
             ("flock 9", 0, "allow"),
@@ -8650,6 +8661,7 @@ class TestDefect105FlockWrapper:
             ("flock --fd 9 -c 'rm -rf target' extra", 0, "allow"),
             ("flock -c 'git push -f origin HEAD'", 0, "allow"),
             ("flock --unknown /tmp/lock git push -f origin HEAD", 2, "error"),
+            ("flock --nonblo /tmp/lock git push -f origin HEAD", 2, "error"),
             ("flock -z /tmp/lock rm -rf target", 2, "error"),
             ("flock -w$WAIT /tmp/lock git push -f origin HEAD", 2, "error"),
             ("flock --fd=$FD git push -f origin HEAD", 2, "error"),
@@ -8698,3 +8710,22 @@ class TestDefect105FlockWrapper:
                 "destructive"
                 in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
             )
+
+    def test_flock_nonblock_exact_contract_pure(self) -> None:
+        cmd_push = "flock --nonblock /tmp/lock git push -f origin HEAD"
+        assert contains_forced_git_push(cmd_push) is True
+        assert contains_forbidden_rm(cmd_push) is False
+
+        cmd_rm = "flock --nonblock /tmp/lock rm -rf target"
+        assert contains_forced_git_push(cmd_rm) is False
+        assert contains_forbidden_rm(cmd_rm) is True
+
+        cmd_safe = "flock --nonblock /tmp/lock echo harmless"
+        assert contains_forced_git_push(cmd_safe) is False
+        assert contains_forbidden_rm(cmd_safe) is False
+
+        cmd_nested = "/usr/bin/flock --nonblock /tmp/lock flock --nonblocking /tmp/lock2 git push -f origin HEAD"
+        assert contains_forced_git_push(cmd_nested) is True
+
+        cmd_fd = "flock --nonblock --fd 9 rm -rf target"
+        assert contains_forbidden_rm(cmd_fd) is True

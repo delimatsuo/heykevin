@@ -15,10 +15,14 @@
       "Bash(/bin/rm *)",
       "Bash(/usr/bin/rm)",
       "Bash(/usr/bin/rm *)",
-      "Bash(git push *-f*)",
-      "Bash(git push *--force*)",
-      "Bash(git push *--force-with-lease*)",
-      "Bash(git push *+*)"
+      "Bash(git push -f)",
+      "Bash(git push -f *)",
+      "Bash(git push * -f)",
+      "Bash(git push * -f *)",
+      "Bash(git push --force*)",
+      "Bash(git push * --force*)",
+      "Bash(git push +*)",
+      "Bash(git push * +*)"
     ]
   },
   "sandbox": {

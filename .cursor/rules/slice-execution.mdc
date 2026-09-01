@@ -11,8 +11,12 @@ alwaysApply: true
 3. Reduce in code (SHAs, test counts). Do not LLM-“combine.”
 4. Fresh-context reviewer on `origin/main...HEAD`. Worker ≠ reviewer.
 5. `git push -u origin HEAD` → `gh pr create --repo delimatsuo/heykevin` →
-   `gh pr merge --merge` if reviewed-clean and not owner-gated. Feature rebase:
-   `git push --force-with-lease origin <feature-branch>` only.
+   `gh pr merge --merge` if reviewed-clean and not owner-gated. No branch may be
+   force-pushed; rebasing is allowed only before the first publication; after a
+   branch is published, update it by merging the latest target branch into the
+   feature branch and pushing normally; if history replacement is truly needed,
+   create a new branch and replacement PR instead of rewriting the published
+   branch.
 6. Stage explicit paths. Never `git add -A`, `--no-verify`, or git config.
 7. Before “done”:
    `PATH="<clone>/.venv/bin:$PATH" python -m pytest -q`

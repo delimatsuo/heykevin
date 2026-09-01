@@ -9,7 +9,7 @@
 ## 2. Model Routing
 - **Master Model Role:** Owns architecture, specification, brief creation, ambiguous judgment, independent audit, and all Git operations.
 - **Builder Defaults:** Pinned implementation work defaults to `agy gemini-3.7-flash-high`.
-- **Low/Medium Tiers:** `flash-low` and `flash-medium` are reserved exclusively for mechanical scaffolds, renames, boilerplate, count checks, and configuration changes.
+- **Low/Medium Tiers:** `gemini-3.7-flash-low` and `gemini-3.7-flash-medium` are reserved exclusively for mechanical scaffolds, renames, boilerplate, count checks, and configuration changes.
 - **Prohibited Models:** Never route implementation or audit tasks to agy Claude 4.6 models.
 - **Delegation Test:** If every expected value and invariant can be deterministically pinned, delegate the task to the builder; otherwise, pinning remains master model work.
 
@@ -59,7 +59,7 @@ Audit disposition: <pass/fail/remediated>
 The following actions are strictly forbidden:
 - Executing `rm -rf` in any form.
 - Reading `.env` or `.env.*` files.
-- Executing `git push -f`, `--force`, or `--force-with-lease`.
+- Executing `git push -f`, `--force`, or `--force-with-lease`. No branch may be force-pushed; rebasing is allowed only before the first publication; after a branch is published, update it by merging the latest target branch into the feature branch and pushing normally; if history replacement is truly needed, create a new branch and replacement PR instead of rewriting the published branch.
 - Creating provider accounts, invoking paid APIs, or incurring spend outside the Ultra plan.
 - Accepting third-party terms of service or legal agreements.
 - Accessing Apple accounts, device qualification, or code signing without a fresh envelope.

@@ -143,8 +143,11 @@ Prefer `cursor-grok-4.6-xhigh` for implementation if opus/sonnet fail.
    `gh pr merge --merge` when reviewed-clean and not owner-gated. If merge is
    permission-blocked, paste the exact command — only then.
 6. Stage explicit paths. Never `git add -A`. Never `--no-verify`. Never update
-   git config. Never force-push `main` or `staging`. Feature-branch rebase
-   updates use `git push --force-with-lease origin <feature-branch>` only.
+   git config. No branch may be force-pushed; rebasing is allowed only before the
+   first publication; after a branch is published, update it by merging the
+   latest target branch into the feature branch and pushing normally; if history
+   replacement is truly needed, create a new branch and replacement PR instead
+   of rewriting the published branch.
 7. Required checks before “done”. From the current clone or worktree, put
    that clone’s `.venv/bin` on PATH (Deli’s Mac example:
    `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`):

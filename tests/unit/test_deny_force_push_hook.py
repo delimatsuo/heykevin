@@ -24,6 +24,7 @@ from scripts.deny_force_push_hook import (
     _has_shell_expansion,
     _inspect_git_invocation,
     _inspect_git_invocation_for_rm,
+    _inspect_shell_invocation,
     _is_all_parens,
     _is_forced_push_args,
     _is_git_config_protocol_key,
@@ -3902,3 +3903,680 @@ class TestHereDocSubstitutions:
             )
             assert res.returncode == 0
             assert res.stdout == ""
+
+
+class TestInspectShellInvocation:
+    """Unit tests for the _inspect_shell_invocation pure helper."""
+
+    def test_evaluates_c_command_with_checker_fn(self) -> None:
+        assert _inspect_shell_invocation(["sh", "-c", "git push -f"], contains_forced_git_push)
+        assert _inspect_shell_invocation(["sh", "-c", "rm -rf target"], contains_forbidden_rm)
+        assert not _inspect_shell_invocation(["sh", "-c", "echo safe"], contains_forced_git_push)
+        assert not _inspect_shell_invocation(["sh", "-c", "echo safe"], contains_forbidden_rm)
+        assert _inspect_shell_invocation(
+            ["bash", "-lc", "git push --mirror origin"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["zsh", "-lc", "rm --recursive --force target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-c", "git push -f"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["bash", "-C", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["bash", "-C", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "-C", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "-C", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["bash", "-O", "extglob", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["bash", "+O", "extglob", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "-O", "extglob", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "+O", "extglob", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "git push -f origin HEAD", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "-c", "echo safe2"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "-c", "echo safe2"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd", "git push -f origin HEAD", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd=git push -f origin HEAD", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd", "rm -rf target", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd=rm -rf target", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd", "echo safe", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd=echo safe", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd", "echo safe", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd=echo safe", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd", "echo safe", "-c", "echo safe2"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd", "echo safe", "-c", "echo safe2"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd=echo safe", "-c", "echo safe2"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd=echo safe", "-c", "echo safe2"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-C", "echo safe1", "--init-cmd", "echo safe2", "--init-command=echo safe3", "-c", "echo safe4"],
+            contains_forced_git_push,
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-C", "echo safe1", "--init-cmd", "echo safe2", "--init-command=echo safe3", "-c", "echo safe4"],
+            contains_forbidden_rm,
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "echo safe1", "--init-cmd", "git push -f origin HEAD", "--init-command=echo safe3", "-c", "echo safe4"],
+            contains_forced_git_push,
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "echo safe1", "--init-cmd=rm -rf target", "--init-command=echo safe3", "-c", "echo safe4"],
+            contains_forbidden_rm,
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-P", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--private", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-D", "3", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames", "3", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames=3", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-N", "-c", "git push -f origin HEAD"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-P", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--private", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-D", "3", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames", "3", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames=3", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-N", "-c", "rm -rf target"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-P", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-P", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--private", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--private", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-D", "3", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-D", "3", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames", "3", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames", "3", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames=3", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames=3", "-c", "echo safe"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-N", "-c", "echo safe"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-N", "-c", "echo safe"], contains_forbidden_rm
+        )
+
+    def test_allows_explicit_script_operand(self) -> None:
+        assert not _inspect_shell_invocation(
+            ["sh", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["sh", "-x", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["sh", "--", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["sh", "-o", "errexit", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["sh", "+x", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "-C", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "-O", "extglob", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["bash", "+O", "extglob", "scripts/check.sh"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "git push -f origin HEAD", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd", "echo safe", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd", "echo safe", "scripts/check.fish"], contains_forbidden_rm
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd=echo safe", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--init-cmd=echo safe", "scripts/check.fish"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd", "git push -f origin HEAD", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd=git push -f origin HEAD", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd", "rm -rf target", "scripts/check.fish"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "--init-cmd=rm -rf target", "scripts/check.fish"], contains_forbidden_rm
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "--init-cmd", "git push -f origin HEAD", "scripts/check.fish"],
+            contains_forced_git_push,
+        )
+        assert _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "--init-cmd=rm -rf target", "scripts/check.fish"],
+            contains_forbidden_rm,
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-C", "echo safe", "--init-cmd", "echo safe2", "scripts/check.fish"],
+            contains_forced_git_push,
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-P", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--private", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-N", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "-D", "3", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames", "3", "scripts/check.fish"], contains_forced_git_push
+        )
+        assert not _inspect_shell_invocation(
+            ["fish", "--debug-stack-frames=3", "scripts/check.fish"], contains_forced_git_push
+        )
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [
+            ["sh"],
+            ["sh", "--"],
+            ["bash", "-s"],
+            ["bash", "-sx"],
+            ["bash", "-s", "foo"],
+            ["zsh"],
+            ["dash"],
+            ["ksh"],
+            ["fish"],
+            ["sh", "-x"],
+            ["sh", "-o", "errexit"],
+            ["sh", "-"],
+            ["sh", "-c"],
+            ["bash", "-C"],
+            ["bash", "-O", "extglob"],
+            ["bash", "+O", "extglob"],
+            ["sh", "+o", "errexit"],
+            ["fish", "-C", "echo safe"],
+            ["fish", "--init-command=echo safe"],
+            ["fish", "--init-cmd", "echo safe"],
+            ["fish", "--init-cmd=echo safe"],
+            ["fish", "--init-cmd"],
+            ["fish", "--init-command"],
+            ["fish", "-P"],
+            ["fish", "--private"],
+            ["fish", "-N"],
+            ["fish", "--no-config"],
+            ["fish", "-D"],
+            ["fish", "--debug-stack-frames"],
+            ["fish", "-d"],
+            ["fish", "--debug"],
+            ["fish", "--debug-categories"],
+            ["fish", "-o"],
+            ["fish", "--debug-output"],
+            ["fish", "-p"],
+            ["fish", "--profile"],
+            ["fish", "--profile-startup"],
+            ["fish", "-f"],
+            ["fish", "--features"],
+        ],
+    )
+    def test_raises_value_error_for_stdin_reading(self, tokens: list[str]) -> None:
+        with pytest.raises(ValueError, match=r"(reads command text from stdin|missing command|missing argument)"):
+            _inspect_shell_invocation(tokens, contains_forced_git_push)
+
+
+class TestShellStdinPipePure:
+    """Pure-function tests for shell stdin pipeline and bare shell remediation."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "printf 'git push -f origin HEAD\\n' | sh",
+            "printf 'rm -rf target\\n' | sh",
+            "printf 'echo safe\\n' | sh",
+            "sh",
+            "sh --",
+            "bash -s",
+            "bash -sx",
+            "zsh",
+            "dash",
+            "ksh",
+            "fish",
+            "env sh",
+            "command sh",
+            "timeout 1 sh",
+            "nice sh",
+            "stdbuf -o0 sh",
+            "time sh",
+            "sudo sh",
+            "sudo env sh",
+            "sh < scripts/check.sh",
+            "sh <<'EOF'\necho safe\nEOF",
+            "bash -C",
+            "bash -O extglob",
+            "bash +O extglob",
+            "sh -o errexit",
+            "sh +o errexit",
+            "fish -C 'echo safe'",
+            "fish --init-command='echo safe'",
+            "fish --init-cmd 'echo safe'",
+            "fish --init-cmd='echo safe'",
+            "fish --init-cmd",
+            "fish --init-command",
+            "fish -P",
+            "fish --private",
+            "fish -N",
+            "fish --no-config",
+            "fish -D",
+            "fish --debug-stack-frames",
+            "fish -d",
+            "fish --debug",
+            "fish --debug-categories",
+            "fish -o",
+            "fish --debug-output",
+            "fish -p",
+            "fish --profile",
+            "fish --profile-startup",
+            "fish -f",
+            "fish --features",
+        ],
+    )
+    def test_pinned_fail_closed_both_guards(self, command: str) -> None:
+        with pytest.raises(ValueError, match=r"(reads command text from stdin|missing command|missing argument)"):
+            contains_forced_git_push(command)
+        with pytest.raises(ValueError, match=r"(reads command text from stdin|missing command|missing argument)"):
+            contains_forbidden_rm(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sh scripts/check.sh",
+            "sh -x scripts/check.sh",
+            "printf 'data\\n' | sh -c cat",
+            "sh -c 'echo safe'",
+            "sh -- scripts/check.sh",
+            "bash scripts/check.sh",
+            "zsh scripts/check.sh",
+            "dash scripts/check.sh",
+            "ksh scripts/check.sh",
+            "fish scripts/check.fish",
+            "env sh scripts/check.sh",
+            "command sh scripts/check.sh",
+            "sudo sh scripts/check.sh",
+            "timeout 10 sh scripts/check.sh",
+            "nice sh scripts/check.sh",
+            "stdbuf -oL sh scripts/check.sh",
+            "time sh scripts/check.sh",
+            "sh -o errexit scripts/check.sh",
+            "sh +x scripts/check.sh",
+            "bash -C -c 'echo safe'",
+            "bash -C scripts/check.sh",
+            "bash -O extglob -c 'echo safe'",
+            "bash +O extglob -c 'echo safe'",
+            "bash -O extglob scripts/check.sh",
+            "bash +O extglob scripts/check.sh",
+            "fish -C 'echo safe' -c 'echo safe2'",
+            "fish -C 'echo safe' scripts/check.fish",
+            "fish --init-command='echo safe' --command='echo safe2'",
+            "fish --init-command='echo safe' scripts/check.fish",
+            "fish --init-cmd 'echo safe' -c 'echo safe2'",
+            "fish --init-cmd='echo safe' -c 'echo safe2'",
+            "fish --init-cmd 'echo safe' scripts/check.fish",
+            "fish --init-cmd='echo safe' scripts/check.fish",
+            "fish -C 'echo safe1' --init-cmd 'echo safe2' scripts/check.fish",
+            "fish -P -c 'echo safe'",
+            "fish --private -c 'echo safe'",
+            "fish -D 3 -c 'echo safe'",
+            "fish --debug-stack-frames 3 -c 'echo safe'",
+            "fish --debug-stack-frames=3 -c 'echo safe'",
+            "fish -N -c 'echo safe'",
+            "fish -P scripts/check.fish",
+            "fish --private scripts/check.fish",
+            "fish -N scripts/check.fish",
+            "fish -D 3 scripts/check.fish",
+            "fish --debug-stack-frames 3 scripts/check.fish",
+            "fish --debug-stack-frames=3 scripts/check.fish",
+        ],
+    )
+    def test_pinned_safe_controls_both_guards(self, command: str) -> None:
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sh -c 'git push -f origin HEAD'",
+            "bash -lc 'git push --mirror origin'",
+            "zsh -c 'git push --force origin main'",
+            "env sh -c 'git push -f origin HEAD'",
+            "timeout 10 sh -c 'git push -f origin HEAD'",
+            "bash -C -c 'git push -f origin HEAD'",
+            "bash -O extglob -c 'git push -f origin HEAD'",
+            "bash +O extglob -c 'git push -f origin HEAD'",
+            "fish -C 'git push -f origin HEAD'",
+            "fish -C 'git push -f origin HEAD' -c 'echo safe'",
+            "fish -C 'echo safe' -c 'git push -f origin HEAD'",
+            "fish -C 'git push -f origin HEAD' scripts/check.fish",
+            "fish --init-command='git push -f origin HEAD' --command='echo safe'",
+            "fish --init-cmd 'git push -f origin HEAD' scripts/check.fish",
+            "fish --init-cmd='git push -f origin HEAD' scripts/check.fish",
+            "fish --init-cmd 'git push -f origin HEAD' -c 'echo safe'",
+            "fish --init-cmd='git push -f origin HEAD' -c 'echo safe'",
+            "fish --init-cmd 'echo safe' -c 'git push -f origin HEAD'",
+            "fish --init-cmd='echo safe' -c 'git push -f origin HEAD'",
+            "fish -C 'echo safe' --init-cmd 'git push -f origin HEAD' scripts/check.fish",
+            "fish -P -c 'git push -f origin HEAD'",
+            "fish --private -c 'git push -f origin HEAD'",
+            "fish -D 3 -c 'git push -f origin HEAD'",
+            "fish --debug-stack-frames 3 -c 'git push -f origin HEAD'",
+            "fish --debug-stack-frames=3 -c 'git push -f origin HEAD'",
+            "fish -N -c 'git push -f origin HEAD'",
+        ],
+    )
+    def test_pinned_blocked_git_push(self, command: str) -> None:
+        assert contains_forced_git_push(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sh -c 'rm -rf target'",
+            "zsh -lc 'rm --recursive --force target'",
+            "bash -c 'rm -fr target'",
+            "env sh -c 'rm -rf target'",
+            "timeout 5 sh -c 'rm -rf target'",
+            "bash -C -c 'rm -rf target'",
+            "bash -O extglob -c 'rm -rf target'",
+            "bash +O extglob -c 'rm -rf target'",
+            "fish -C 'rm -rf target'",
+            "fish -C 'rm -rf target' -c 'echo safe'",
+            "fish -C 'echo safe' -c 'rm -rf target'",
+            "fish -C 'rm -rf target' scripts/check.fish",
+            "fish --init-command='rm -rf target' --command='echo safe'",
+            "fish --init-cmd 'rm -rf target' scripts/check.fish",
+            "fish --init-cmd='rm -rf target' scripts/check.fish",
+            "fish --init-cmd 'rm -rf target' -c 'echo safe'",
+            "fish --init-cmd='rm -rf target' -c 'echo safe'",
+            "fish --init-cmd 'echo safe' -c 'rm -rf target'",
+            "fish --init-cmd='echo safe' -c 'rm -rf target'",
+            "fish -C 'echo safe' --init-cmd 'rm -rf target' scripts/check.fish",
+            "fish -P -c 'rm -rf target'",
+            "fish --private -c 'rm -rf target'",
+            "fish -D 3 -c 'rm -rf target'",
+            "fish --debug-stack-frames 3 -c 'rm -rf target'",
+            "fish --debug-stack-frames=3 -c 'rm -rf target'",
+            "fish -N -c 'rm -rf target'",
+        ],
+    )
+    def test_pinned_blocked_rm(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is True
+
+
+class TestShellStdinPipeCLI:
+    """CLI end-to-end tests for shell stdin pipeline and bare shell remediation."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "printf 'git push -f origin HEAD\\n' | sh",
+            "printf 'rm -rf target\\n' | sh",
+            "printf 'echo safe\\n' | sh",
+            "sh",
+            "sh --",
+            "bash -s",
+            "bash -sx",
+            "zsh",
+            "env sh",
+            "command sh",
+            "timeout 1 sh",
+            "nice sh",
+            "stdbuf -o0 sh",
+            "time sh",
+            "sh < scripts/check.sh",
+            "sh <<'EOF'\necho safe\nEOF",
+            "bash -C",
+            "bash -O extglob",
+            "bash +O extglob",
+            "sh -o errexit",
+            "sh +o errexit",
+            "fish -C 'echo safe'",
+            "fish --init-command='echo safe'",
+            "fish --init-cmd 'echo safe'",
+            "fish --init-cmd='echo safe'",
+            "fish --init-cmd",
+            "fish -P",
+            "fish --private",
+            "fish -N",
+            "fish -D",
+            "fish --debug-stack-frames",
+            "fish -d",
+            "fish -o",
+            "fish -p",
+            "fish --profile-startup",
+            "fish -f",
+        ],
+    )
+    def test_cli_pinned_fail_closed_payloads(self, command: str) -> None:
+        for payload_dict in [
+            {"command": command},
+            {"tool_input": {"command": command}},
+            {"toolInput": {"command": command}},
+        ]:
+            payload = json.dumps(payload_dict)
+            res = subprocess.run(
+                [sys.executable, str(HOOK_SCRIPT_PATH)],
+                input=payload,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert res.returncode == 2
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sh scripts/check.sh",
+            "sh -x scripts/check.sh",
+            "printf 'data\\n' | sh -c cat",
+            "sh -c 'echo safe'",
+            "bash -C -c 'echo safe'",
+            "bash -C scripts/check.sh",
+            "bash -O extglob -c 'echo safe'",
+            "bash +O extglob -c 'echo safe'",
+            "bash -O extglob scripts/check.sh",
+            "fish -C 'echo safe' -c 'echo safe2'",
+            "fish -C 'echo safe' scripts/check.fish",
+            "fish --init-command='echo safe' --command='echo safe2'",
+            "fish --init-cmd 'echo safe' -c 'echo safe2'",
+            "fish --init-cmd='echo safe' -c 'echo safe2'",
+            "fish --init-cmd 'echo safe' scripts/check.fish",
+            "fish --init-cmd='echo safe' scripts/check.fish",
+            "fish -P -c 'echo safe'",
+            "fish --private -c 'echo safe'",
+            "fish -D 3 -c 'echo safe'",
+            "fish --debug-stack-frames 3 -c 'echo safe'",
+            "fish --debug-stack-frames=3 -c 'echo safe'",
+            "fish -N -c 'echo safe'",
+            "fish -P scripts/check.fish",
+            "fish --private scripts/check.fish",
+            "fish -N scripts/check.fish",
+            "fish -D 3 scripts/check.fish",
+            "fish --debug-stack-frames 3 scripts/check.fish",
+            "fish --debug-stack-frames=3 scripts/check.fish",
+        ],
+    )
+    def test_cli_pinned_safe_controls(self, command: str) -> None:
+        payload = json.dumps({"command": command})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sh -c 'git push -f origin HEAD'",
+            "bash -lc 'git push --mirror origin'",
+            "bash -C -c 'git push -f origin HEAD'",
+            "bash -O extglob -c 'git push -f origin HEAD'",
+            "fish -C 'git push -f origin HEAD' -c 'echo safe'",
+            "fish -C 'echo safe' -c 'git push -f origin HEAD'",
+            "fish --init-cmd 'git push -f origin HEAD' scripts/check.fish",
+            "fish --init-cmd='git push -f origin HEAD' scripts/check.fish",
+            "fish --init-cmd 'git push -f origin HEAD' -c 'echo safe'",
+            "fish --init-cmd 'echo safe' -c 'git push -f origin HEAD'",
+            "fish -P -c 'git push -f origin HEAD'",
+            "fish --private -c 'git push -f origin HEAD'",
+            "fish -D 3 -c 'git push -f origin HEAD'",
+            "fish --debug-stack-frames 3 -c 'git push -f origin HEAD'",
+            "fish --debug-stack-frames=3 -c 'git push -f origin HEAD'",
+            "fish -N -c 'git push -f origin HEAD'",
+        ],
+    )
+    def test_cli_pinned_blocked_git_push(self, command: str) -> None:
+        payload = json.dumps({"command": command})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sh -c 'rm -rf target'",
+            "zsh -lc 'rm --recursive --force target'",
+            "bash -C -c 'rm -rf target'",
+            "bash -O extglob -c 'rm -rf target'",
+            "fish -C 'rm -rf target' -c 'echo safe'",
+            "fish -C 'echo safe' -c 'rm -rf target'",
+            "fish --init-cmd 'rm -rf target' scripts/check.fish",
+            "fish --init-cmd='rm -rf target' scripts/check.fish",
+            "fish --init-cmd 'rm -rf target' -c 'echo safe'",
+            "fish --init-cmd 'echo safe' -c 'rm -rf target'",
+            "fish -P -c 'rm -rf target'",
+            "fish --private -c 'rm -rf target'",
+            "fish -D 3 -c 'rm -rf target'",
+            "fish --debug-stack-frames 3 -c 'rm -rf target'",
+            "fish --debug-stack-frames=3 -c 'rm -rf target'",
+            "fish -N -c 'rm -rf target'",
+        ],
+    )
+    def test_cli_pinned_blocked_rm(self, command: str) -> None:
+        payload = json.dumps({"command": command})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()

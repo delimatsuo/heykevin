@@ -67,6 +67,7 @@ SHELL_BINARIES = {
     "zsh",
     "ksh",
     "dash",
+    "fish",
 }
 
 XARGS_REQ_SHORT_OPTS = {
@@ -1462,6 +1463,316 @@ def _is_forbidden_rm_args(rm_args: list[str]) -> bool:
 MAX_GIT_CONFIG_COUNT = 1000
 
 
+def _inspect_fish_invocation(
+    tokens: list[str],
+    checker_fn: Callable[[str], bool],
+) -> bool:
+    """Inspect a fish shell invocation.
+
+    Fish supports:
+    - -c, --command, --command=<cmd> for main command strings.
+    - -C, --init-command, --init-cmd, --init-command=<cmd>, --init-cmd=<cmd> for initial command strings executed before main input.
+    - Options with arguments: -d, --debug, --debug-categories, -D, --debug-stack-frames,
+      -o, --debug-output, -p, --profile, --profile-startup, -f, --features.
+    - Flags without arguments: -P, --private, -N, --no-config, -i, --interactive,
+      -l, --login, -n, --no-execute, -v, --version, -h, --help, -s, --stdin.
+    - Explicit script operand is allowed if all init commands are safe.
+    - If any init command or main command is dangerous, block (return True).
+    - If all init commands are safe but no -c/--command or script operand is provided,
+      the shell reads from stdin, so raise ValueError to fail closed.
+    """
+    args = tokens[1:]
+    i = 0
+    n = len(args)
+    init_commands: list[str] = []
+    main_command: str | None = None
+    script_operand: str | None = None
+    reads_stdin = False
+
+    fish_opts_with_arg = {
+        "-d",
+        "--debug",
+        "--debug-categories",
+        "-D",
+        "--debug-stack-frames",
+        "-o",
+        "--debug-output",
+        "-p",
+        "--profile",
+        "--profile-startup",
+        "-f",
+        "--features",
+    }
+
+    while i < n:
+        arg = args[i]
+
+        if arg == "--":
+            i += 1
+            if i < n:
+                script_operand = args[i]
+                i += 1
+            else:
+                reads_stdin = True
+            break
+
+        if arg == "-":
+            i += 1
+            if i < n:
+                script_operand = args[i]
+                i += 1
+            else:
+                reads_stdin = True
+            break
+
+        if arg in {"-C", "--init-command", "--init-cmd"}:
+            if i + 1 < n:
+                init_commands.append(_restore_sentinels(args[i + 1]))
+                i += 2
+                continue
+            raise ValueError("Fish shell -C/--init-command is missing command argument")
+
+        if arg.startswith(("--init-command=", "--init-cmd=")):
+            init_commands.append(_restore_sentinels(arg.split("=", 1)[1]))
+            i += 1
+            continue
+
+        if arg.startswith("-C") and len(arg) > 2:
+            init_commands.append(_restore_sentinels(arg[2:]))
+            i += 1
+            continue
+
+        if arg in {"-c", "--command"}:
+            if i + 1 < n:
+                main_command = _restore_sentinels(args[i + 1])
+                i += 2
+                continue
+            raise ValueError("Fish shell -c/--command is missing command argument")
+
+        if arg.startswith("--command="):
+            main_command = _restore_sentinels(arg.split("=", 1)[1])
+            i += 1
+            continue
+
+        if arg.startswith("-c") and len(arg) > 2:
+            main_command = _restore_sentinels(arg[2:])
+            i += 1
+            continue
+
+        if arg in fish_opts_with_arg:
+            if i + 1 < n:
+                i += 2
+                continue
+            raise ValueError(f"Fish option {arg!r} is missing argument")
+
+        if any(
+            arg.startswith(opt + "=")
+            for opt in fish_opts_with_arg
+            if opt.startswith("--")
+        ):
+            i += 1
+            continue
+
+        if arg.startswith(("-d", "-D", "-o", "-p", "-f")) and len(arg) > 2:
+            i += 1
+            continue
+
+        if arg.startswith("-") and len(arg) > 1:
+            if arg.startswith("--"):
+                if arg == "--stdin":
+                    reads_stdin = True
+                i += 1
+                continue
+
+            flags = arg[1:]
+            if "C" in flags:
+                if i + 1 < n:
+                    init_commands.append(_restore_sentinels(args[i + 1]))
+                    i += 2
+                    continue
+                raise ValueError("Fish shell -C flag is missing command argument")
+            if "c" in flags:
+                if i + 1 < n:
+                    main_command = _restore_sentinels(args[i + 1])
+                    i += 2
+                    continue
+                raise ValueError("Fish shell -c flag is missing command argument")
+            if "s" in flags:
+                reads_stdin = True
+            if flags.endswith(("d", "D", "o", "p", "f")):
+                if i + 1 < n:
+                    i += 2
+                    continue
+                raise ValueError(f"Fish option {arg!r} is missing argument")
+            i += 1
+            continue
+
+        # Positional operand (script file)
+        script_operand = arg
+        i += 1
+        break
+
+    for init_cmd in init_commands:
+        if checker_fn(init_cmd):
+            return True
+
+    if main_command is not None:
+        return checker_fn(main_command)
+
+    if script_operand is not None and not reads_stdin:
+        return False
+
+    raise ValueError("Shell invocation reads command text from stdin")
+
+
+def _inspect_posix_shell_invocation(
+    tokens: list[str],
+    checker_fn: Callable[[str], bool],
+) -> bool:
+    """Inspect a POSIX shell invocation (sh, bash, zsh, dash, ksh).
+
+    Handles options such as -c, -o/+o, -O/+O, --rcfile/--init-file, --command, -s, etc.
+    Uppercase -C is noclobber, NOT a command option.
+    """
+    args = tokens[1:]
+    reads_stdin = False
+    i = 0
+    n = len(args)
+
+    while i < n:
+        arg = args[i]
+
+        if arg == "--":
+            if reads_stdin:
+                raise ValueError("Shell invocation reads command text from stdin")
+            if i + 1 < n:
+                return False
+            raise ValueError("Shell invocation reads command text from stdin")
+
+        if arg == "-":
+            if reads_stdin:
+                raise ValueError("Shell invocation reads command text from stdin")
+            if i + 1 < n:
+                return False
+            raise ValueError("Shell invocation reads command text from stdin")
+
+        if arg.startswith("-") and len(arg) > 1:
+            if arg.startswith("--"):
+                if arg == "--stdin":
+                    reads_stdin = True
+                    i += 1
+                elif arg in {"--rcfile", "--init-file"}:
+                    i += 2
+                elif arg.startswith(("--rcfile=", "--init-file=")):
+                    i += 1
+                elif arg == "--command":
+                    if i + 1 < n:
+                        return checker_fn(_restore_sentinels(args[i + 1]))
+                    raise ValueError("Shell invocation -c flag is missing command argument")
+                elif arg.startswith("--command="):
+                    return checker_fn(_restore_sentinels(arg.split("=", 1)[1]))
+                else:
+                    i += 1
+                continue
+
+            if arg == "-c":
+                if i + 1 < n:
+                    return checker_fn(_restore_sentinels(args[i + 1]))
+                raise ValueError("Shell invocation -c flag is missing command argument")
+
+            if arg.startswith("-c") and not arg.startswith("-C"):
+                return checker_fn(_restore_sentinels(arg[2:]))
+
+            if arg in {"-o", "-O"}:
+                if i + 1 < n:
+                    i += 2
+                else:
+                    raise ValueError(f"Shell invocation {arg} flag is missing option argument")
+                continue
+
+            if arg.startswith("-O") and len(arg) > 2:
+                i += 1
+                continue
+
+            flags = arg[1:]
+            if "c" in flags:
+                if i + 1 < n:
+                    return checker_fn(_restore_sentinels(args[i + 1]))
+                raise ValueError("Shell invocation -c flag is missing command argument")
+
+            if "s" in flags:
+                reads_stdin = True
+
+            if "o" in flags and flags.endswith("o"):
+                if i + 1 < n:
+                    i += 2
+                else:
+                    raise ValueError("Shell invocation -o flag is missing option argument")
+            elif "O" in flags and flags.endswith("O"):
+                if i + 1 < n:
+                    i += 2
+                else:
+                    raise ValueError("Shell invocation -O flag is missing option argument")
+            else:
+                i += 1
+            continue
+
+        if arg.startswith("+") and len(arg) > 1:
+            if arg in {"+o", "+O"}:
+                if i + 1 < n:
+                    i += 2
+                else:
+                    raise ValueError(f"Shell invocation {arg} flag is missing option argument")
+                continue
+
+            if arg.startswith("+O") and len(arg) > 2:
+                i += 1
+                continue
+
+            flags = arg[1:]
+            if "o" in flags and flags.endswith("o"):
+                if i + 1 < n:
+                    i += 2
+                else:
+                    raise ValueError("Shell invocation +o flag is missing option argument")
+            elif "O" in flags and flags.endswith("O"):
+                if i + 1 < n:
+                    i += 2
+                else:
+                    raise ValueError("Shell invocation +O flag is missing option argument")
+            else:
+                i += 1
+            continue
+
+        if reads_stdin:
+            raise ValueError("Shell invocation reads command text from stdin")
+        return False
+
+    raise ValueError("Shell invocation reads command text from stdin")
+
+
+def _inspect_shell_invocation(
+    tokens: list[str],
+    checker_fn: Callable[[str], bool],
+) -> bool:
+    """Inspect a shell invocation (e.g. sh, bash, zsh, dash, ksh, fish).
+
+    If the invocation specifies a command string via -c (or grouped short options
+    containing 'c'), evaluate the command string using checker_fn.
+    If the invocation specifies an explicit script operand, return False (allow).
+    If the invocation reads command text from stdin (bare shell, -s option,
+    options-only without script operand, etc.), raise ValueError to fail closed.
+    """
+    if not tokens:
+        return False
+
+    shell_binary = os.path.basename(tokens[0])
+    if shell_binary == "fish":
+        return _inspect_fish_invocation(tokens, checker_fn)
+
+    return _inspect_posix_shell_invocation(tokens, checker_fn)
+
+
 def _is_git_config_protocol_key(key: str) -> bool:
     """Return True if key is an exact Git environment config protocol key."""
     return (
@@ -1876,22 +2187,12 @@ def _inspect_single_command_git(
         return False
 
     if cmd_word in SHELL_BINARIES:
-        for i in range(1, len(tokens) - 1):
-            token = tokens[i]
-            if token == "--":
-                break
-            if (
-                token.startswith("-")
-                and not token.startswith("--")
-                and len(token) > 1
-                and "c" in token[1:]
-            ):
-                return contains_forced_git_push(
-                    _restore_sentinels(tokens[i + 1]),
-                    _depth=_depth + 1,
-                    _inherited_env=env_vars,
-                )
-        return False
+        return _inspect_shell_invocation(
+            tokens,
+            lambda cmd: contains_forced_git_push(
+                cmd, _depth=_depth + 1, _inherited_env=env_vars
+            ),
+        )
 
     if cmd_word == "eval":
         tokens.pop(0)
@@ -1971,22 +2272,12 @@ def _inspect_single_command_rm(
         return False
 
     if cmd_word in SHELL_BINARIES:
-        for i in range(1, len(tokens) - 1):
-            token = tokens[i]
-            if token == "--":
-                break
-            if (
-                token.startswith("-")
-                and not token.startswith("--")
-                and len(token) > 1
-                and "c" in token[1:]
-            ):
-                return contains_forbidden_rm(
-                    _restore_sentinels(tokens[i + 1]),
-                    _depth=_depth + 1,
-                    _inherited_env=env_vars,
-                )
-        return False
+        return _inspect_shell_invocation(
+            tokens,
+            lambda cmd: contains_forbidden_rm(
+                cmd, _depth=_depth + 1, _inherited_env=env_vars
+            ),
+        )
 
     if cmd_word == "eval":
         tokens.pop(0)

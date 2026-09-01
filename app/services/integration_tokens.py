@@ -52,6 +52,7 @@ OPERATION_INTENT_BASE_KEYS = frozenset({
     "operation_intent_generation",
     "operation_intent_lifecycle_epoch",
     "operation_intent_credentials_fingerprint",
+    "operation_intent_bound_operation_id",
 })
 
 LEGACY_CLAIM_BASE_KEYS = frozenset({
@@ -84,11 +85,12 @@ QUARANTINE_BASE_KEYS = frozenset({
 })
 
 VALID_INTENT_KINDS = frozenset({"business", "refresh", "connect", "reconnect"})
-VALID_INTENT_PHASES = frozenset({"reserved", "provider_request_started"})
+VALID_INTENT_PHASES = frozenset({"reserved", "provider_request_started", "provider_outcome_uncertain"})
 _CANONICAL_STATE_REGEX = re.compile(r"^[0-9a-zA-Z_-]{1,128}\Z")
 
 
 def get_provider_operation_intent_keys(provider: str) -> frozenset[str]:
+
     """Return all operation-intent, legacy claim, quarantine, and reauthorization attempt field names for a provider."""
     keys = {f"{provider}_{k}" for k in OPERATION_INTENT_BASE_KEYS}
     keys.update({f"{provider}_{k}" for k in LEGACY_CLAIM_BASE_KEYS})
@@ -143,7 +145,7 @@ def parse_provider_reauthorization_attempt(
         return "malformed", None, "Invalid reauthorization_attempt_kind"
 
     raw_phase = data[k_phase]
-    if type(raw_phase) is not str or raw_phase not in VALID_INTENT_PHASES:
+    if type(raw_phase) is not str or raw_phase not in frozenset({"reserved", "provider_request_started"}):
         return "malformed", None, "Invalid reauthorization_attempt_phase"
 
     raw_exp = data[k_exp]
@@ -256,6 +258,7 @@ def parse_provider_operation_intent(
     k_gen = f"{provider}_operation_intent_generation"
     k_epoch = f"{provider}_operation_intent_lifecycle_epoch"
     k_fp = f"{provider}_operation_intent_credentials_fingerprint"
+    k_bound = f"{provider}_operation_intent_bound_operation_id"
 
     k_leg_id = f"{provider}_refresh_claim_id"
     k_leg_phase = f"{provider}_refresh_claim_phase"
@@ -272,6 +275,10 @@ def parse_provider_operation_intent(
         required_canonical = {k_id, k_kind, k_phase, k_exp, k_acq, k_gen, k_epoch, k_fp}
         if not required_canonical.issubset(present_intent_keys):
             return "malformed", None, "Missing required canonical intent fields"
+
+        allowed_intent_keys = required_canonical | {k_bound}
+        if present_intent_keys - allowed_intent_keys:
+            return "malformed", None, "Disallowed canonical intent keys present"
 
         raw_id = data[k_id]
         if type(raw_id) is not str or type(raw_id) is bool or not _CANONICAL_STATE_REGEX.fullmatch(raw_id):
@@ -305,8 +312,23 @@ def parse_provider_operation_intent(
         if type(raw_fp) is not str or type(raw_fp) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", raw_fp):
             return "malformed", None, "Invalid operation_intent_credentials_fingerprint"
 
+        bound_operation_id: str | None = None
+        if k_bound in present_intent_keys:
+            if provider != "google_calendar" or raw_kind != "business":
+                return "malformed", None, "Bound operation ID is permitted ONLY for google_calendar business intents"
+            raw_bound = data[k_bound]
+            if type(raw_bound) is not str or type(raw_bound) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", raw_bound):
+                return "malformed", None, "Invalid operation_intent_bound_operation_id: must be 64 lowercase hex characters"
+            bound_operation_id = raw_bound
+
+        if raw_phase == "provider_outcome_uncertain":
+            if provider != "google_calendar" or raw_kind != "business" or bound_operation_id is None:
+                return "malformed", None, "provider_outcome_uncertain phase is valid ONLY for google_calendar business intents with a bound operation id"
+
         # Check paired legacy aliases if any are present
         if present_legacy_keys:
+            if bound_operation_id is not None or raw_phase == "provider_outcome_uncertain":
+                return "malformed", None, "Legacy refresh claim fields cannot coexist with bound or uncertain intent"
             leg_set = {k_leg_id, k_leg_phase, k_leg_exp, k_leg_gen}
             if present_legacy_keys != leg_set:
                 return "malformed", None, "Incomplete paired legacy refresh claim fields"
@@ -334,6 +356,7 @@ def parse_provider_operation_intent(
             "generation": raw_gen,
             "lifecycle_epoch": raw_epoch,
             "credentials_fingerprint": raw_fp,
+            "bound_operation_id": bound_operation_id,
             "is_legacy": False,
         }
         return "valid", parsed, None
@@ -349,7 +372,7 @@ def parse_provider_operation_intent(
             return "malformed", None, "Invalid legacy refresh_claim_id"
 
         raw_phase = data[k_leg_phase]
-        if type(raw_phase) is not str or raw_phase not in VALID_INTENT_PHASES:
+        if type(raw_phase) is not str or raw_phase not in frozenset({"reserved", "provider_request_started"}):
             return "malformed", None, "Invalid legacy refresh_claim_phase"
 
         raw_exp = data[k_leg_exp]
@@ -369,6 +392,7 @@ def parse_provider_operation_intent(
             "generation": raw_gen,
             "lifecycle_epoch": 0,
             "credentials_fingerprint": None,
+            "bound_operation_id": None,
             "is_legacy": True,
         }
         return "valid", parsed, None
@@ -377,6 +401,7 @@ def parse_provider_operation_intent(
 
 
 def parse_bounded_counter(
+
     data: Any,
     key: str,
     *,

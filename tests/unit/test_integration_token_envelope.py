@@ -13217,3 +13217,1046 @@ async def test_18qh_missing_contractor_real_orchestration_public_404_and_service
         integrations.logger.handlers = orig_logger_handlers
         integrations.logger.propagate = orig_logger_propagate
         root_logger.handlers = orig_root_handlers
+
+
+@pytest.mark.asyncio
+async def test_terminalize_provider_operation_intent_allows_newer_replacement_intent_post_read(monkeypatch):
+    """Prove terminalize_provider_operation_intent_cas confirms True when a newer valid intent appears post-commit,
+    and returns False when the same claim id reappears or the post-read is malformed."""
+    _setup_keyring(monkeypatch)
+
+    for provider in ("jobber", "google_calendar"):
+        cid = f"c-term-race-{provider}"
+        initial_claim_id = "claim_initial_12345678"
+        replacement_claim_id = "claim_replacement_87654321"
+
+        initial_intent_fields = {
+            f"{provider}_operation_intent_id": initial_claim_id,
+            f"{provider}_operation_intent_kind": "business",
+            f"{provider}_operation_intent_phase": "provider_request_started",
+            f"{provider}_operation_intent_expires_at": 9999999999.0,
+            f"{provider}_operation_intent_acquired_at": 100.0,
+            f"{provider}_operation_intent_generation": 0,
+            f"{provider}_operation_intent_lifecycle_epoch": 0,
+            f"{provider}_operation_intent_credentials_fingerprint": "a" * 64,
+        }
+
+        replacement_intent_fields = {
+            f"{provider}_operation_intent_id": replacement_claim_id,
+            f"{provider}_operation_intent_kind": "refresh",
+            f"{provider}_operation_intent_phase": "reserved",
+            f"{provider}_operation_intent_expires_at": 9999999999.0,
+            f"{provider}_operation_intent_acquired_at": 200.0,
+            f"{provider}_operation_intent_generation": 0,
+            f"{provider}_operation_intent_lifecycle_epoch": 0,
+            f"{provider}_operation_intent_credentials_fingerprint": "b" * 64,
+        }
+
+        # 1. Success case: Valid replacement intent appears strictly after commit and before post-read.
+        doc_data = {
+            "active": True,
+            "contractor_id": cid,
+            f"{provider}_connected": True,
+            f"{provider}_generation": 0,
+            f"{provider}_lifecycle_epoch": 0,
+            f"{provider}_access_token": "acc_token_123",
+            f"{provider}_refresh_token": "ref_token_123",
+            **initial_intent_fields,
+        }
+
+        c_doc = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db = _FakeFirestore({"contractors": {cid: c_doc}})
+
+        def _make_tracking_txn(inject_fields):
+            def _tracking_transaction():
+                txn = _FakeTransaction(db)
+                orig_commit = txn.commit
+
+                def _commit_with_race():
+                    orig_commit()
+                    for k, v in inject_fields.items():
+                        c_doc.data[k] = v
+
+                txn.commit = _commit_with_race
+                return txn
+            return _tracking_transaction
+
+        monkeypatch.setattr(db, "transaction", _make_tracking_txn(replacement_intent_fields))
+
+        result = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db,
+        )
+
+        assert result is True
+        for k, expected_v in replacement_intent_fields.items():
+            assert c_doc.data[k] == expected_v, f"Replacement field {k} was corrupted"
+
+        # 2. Same-claim reappearance: returns False and keeps same claim intact.
+        c_doc_same = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_same = _FakeFirestore({"contractors": {cid: c_doc_same}})
+
+        def _make_same_claim_txn():
+            def _tracking_transaction():
+                txn = _FakeTransaction(db_same)
+                orig_commit = txn.commit
+
+                def _commit_with_same_claim():
+                    orig_commit()
+                    for k, v in initial_intent_fields.items():
+                        c_doc_same.data[k] = v
+
+                txn.commit = _commit_with_same_claim
+                return txn
+            return _tracking_transaction
+
+        monkeypatch.setattr(db_same, "transaction", _make_same_claim_txn())
+
+        result_same = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_same,
+        )
+
+        assert result_same is False
+        for k, expected_v in initial_intent_fields.items():
+            assert c_doc_same.data[k] == expected_v
+
+        # 3. Malformed intent reappearance: returns False.
+        c_doc_malformed = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_malformed = _FakeFirestore({"contractors": {cid: c_doc_malformed}})
+        malformed_fields = {f"{provider}_operation_intent_id": "malformed_claim_123"}
+
+        def _make_malformed_txn():
+            def _tracking_transaction():
+                txn = _FakeTransaction(db_malformed)
+                orig_commit = txn.commit
+
+                def _commit_with_malformed():
+                    orig_commit()
+                    for k, v in malformed_fields.items():
+                        c_doc_malformed.data[k] = v
+
+                txn.commit = _commit_with_malformed
+                return txn
+            return _tracking_transaction
+
+        monkeypatch.setattr(db_malformed, "transaction", _make_malformed_txn())
+
+        result_malformed = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_malformed,
+        )
+
+        assert result_malformed is False
+
+        # 4. Existing post-read snapshot with to_dict()->None: returns False.
+        c_doc_none = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_none = _FakeFirestore({"contractors": {cid: c_doc_none}})
+
+        orig_none_get = c_doc_none.get
+        def _get_with_none_dict(*args, transaction=None, **kwargs):
+            snap = orig_none_get(*args, transaction=transaction, **kwargs)
+            if transaction is None:
+                class _ExistingNoneSnap:
+                    exists = True
+                    read_time = snap.read_time
+                    def to_dict(self):
+                        return None
+                return _ExistingNoneSnap()
+            return snap
+
+        c_doc_none.get = _get_with_none_dict
+
+        result_none = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_none,
+        )
+
+        assert result_none is False
+
+        # 5. Existing post-read snapshot with to_dict()->non-dict: returns False.
+        c_doc_nondict = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_nondict = _FakeFirestore({"contractors": {cid: c_doc_nondict}})
+
+        orig_nondict_get = c_doc_nondict.get
+        def _get_with_nondict(*args, transaction=None, **kwargs):
+            snap = orig_nondict_get(*args, transaction=transaction, **kwargs)
+            if transaction is None:
+                class _ExistingNonDictSnap:
+                    exists = True
+                    read_time = snap.read_time
+                    def to_dict(self):
+                        return "corrupted_non_dict_payload"
+                return _ExistingNonDictSnap()
+            return snap
+
+        c_doc_nondict.get = _get_with_nondict
+
+        result_nondict = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_nondict,
+        )
+
+        assert result_nondict is False
+
+        # 6. Missing post-read snapshot (exists=False): confirms True.
+        c_doc_missing = _FakeDocRef(dict(doc_data), doc_id=cid)
+        db_missing = _FakeFirestore({"contractors": {cid: c_doc_missing}})
+
+        orig_missing_get = c_doc_missing.get
+        def _get_with_missing(*args, transaction=None, **kwargs):
+            snap = orig_missing_get(*args, transaction=transaction, **kwargs)
+            if transaction is None:
+                class _MissingSnap:
+                    exists = False
+                    read_time = snap.read_time
+                    def to_dict(self):
+                        return {}
+                return _MissingSnap()
+            return snap
+
+        c_doc_missing.get = _get_with_missing
+
+        result_missing = await it_mutations.terminalize_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=initial_claim_id,
+            kind="business",
+            db=db_missing,
+        )
+
+        assert result_missing is True
+
+
+def test_parse_provider_operation_intent_bound_operation_id_and_uncertain_phase():
+    """Parser strictly validates bound_operation_id and provider_outcome_uncertain phase."""
+    from app.services.integration_tokens import parse_provider_operation_intent
+
+    valid_bound_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    now = 1700000000.0
+
+    def _make_intent_doc(provider: str, kind: str, phase: str, bound_id: Any = None, extra: dict | None = None):
+        doc = {
+            f"{provider}_operation_intent_id": "test_claim_id_123",
+            f"{provider}_operation_intent_kind": kind,
+            f"{provider}_operation_intent_phase": phase,
+            f"{provider}_operation_intent_expires_at": now + 60.0,
+            f"{provider}_operation_intent_acquired_at": now,
+            f"{provider}_operation_intent_generation": 1,
+            f"{provider}_operation_intent_lifecycle_epoch": 1,
+            f"{provider}_operation_intent_credentials_fingerprint": "a" * 64,
+        }
+        if bound_id is not None:
+            doc[f"{provider}_operation_intent_bound_operation_id"] = bound_id
+        if extra:
+            doc.update(extra)
+        return doc
+
+    # 1. Valid google_calendar business intents with bound_id across valid phases
+    for phase in ("reserved", "provider_request_started", "provider_outcome_uncertain"):
+        doc = _make_intent_doc("google_calendar", "business", phase, bound_id=valid_bound_id)
+        st, parsed, err = parse_provider_operation_intent(doc, "google_calendar")
+        assert st == "valid", f"Expected valid for phase {phase}, got err: {err}"
+        assert parsed is not None
+        assert parsed["bound_operation_id"] == valid_bound_id
+        assert parsed["phase"] == phase
+        assert parsed["kind"] == "business"
+
+    # 2. Valid google_calendar business intents without bound_id (reserved, provider_request_started)
+    for phase in ("reserved", "provider_request_started"):
+        doc = _make_intent_doc("google_calendar", "business", phase, bound_id=None)
+        st, parsed, err = parse_provider_operation_intent(doc, "google_calendar")
+        assert st == "valid"
+        assert parsed is not None
+        assert parsed["bound_operation_id"] is None
+
+    # 3. provider_outcome_uncertain requires bound_id (fails without it)
+    doc_uncertain_no_bound = _make_intent_doc("google_calendar", "business", "provider_outcome_uncertain", bound_id=None)
+    st, _, err = parse_provider_operation_intent(doc_uncertain_no_bound, "google_calendar")
+    assert st == "malformed"
+
+    # 4. bound_id rejected on Jobber and non-business Google Calendar intents
+    for bad_provider, bad_kind in (
+        ("jobber", "business"),
+        ("jobber", "refresh"),
+        ("jobber", "connect"),
+        ("google_calendar", "refresh"),
+        ("google_calendar", "connect"),
+        ("google_calendar", "reconnect"),
+    ):
+        doc_bad = _make_intent_doc(bad_provider, bad_kind, "reserved", bound_id=valid_bound_id)
+        st, _, err = parse_provider_operation_intent(doc_bad, bad_provider)
+        assert st == "malformed", f"Expected malformed for {bad_provider}:{bad_kind} with bound_id"
+
+    # 5. provider_outcome_uncertain rejected on Jobber and non-business Google Calendar
+    for bad_provider, bad_kind in (
+        ("jobber", "business"),
+        ("jobber", "refresh"),
+        ("google_calendar", "refresh"),
+        ("google_calendar", "connect"),
+    ):
+        doc_bad_phase = _make_intent_doc(bad_provider, bad_kind, "provider_outcome_uncertain", bound_id=valid_bound_id)
+        st, _, err = parse_provider_operation_intent(doc_bad_phase, bad_provider)
+        assert st == "malformed", f"Expected malformed for {bad_provider}:{bad_kind} with provider_outcome_uncertain"
+
+    # 6. Malformed bound_id formats (uppercase, short, long, non-hex, bool, int, float)
+    bad_bound_ids = [
+        "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",  # uppercase
+        "0123456789abcdef",  # short
+        "0" * 65,  # too long
+        "g" * 64,  # non-hex
+        True,  # bool
+        False,  # bool
+        12345,  # int
+        3.14,  # float
+    ]
+    for bad_id in bad_bound_ids:
+        doc_bad_format = _make_intent_doc("google_calendar", "business", "reserved", bound_id=bad_id)
+        st, _, err = parse_provider_operation_intent(doc_bad_format, "google_calendar")
+        assert st == "malformed", f"Expected malformed for bound_id={bad_id}"
+
+    # 7. Disallowed coexisting legacy aliases with bound_id or uncertain phase
+    doc_legacy_bound = _make_intent_doc(
+        "google_calendar", "business", "reserved", bound_id=valid_bound_id,
+        extra={"google_calendar_refresh_claim_id": "test_claim_id_123"}
+    )
+    st, _, err = parse_provider_operation_intent(doc_legacy_bound, "google_calendar")
+    assert st == "malformed"
+
+
+@pytest.mark.asyncio
+async def test_acquire_and_started_transition_with_bound_operation_id(monkeypatch):
+    """Acquire and transition to started persist and postread-verify bound_operation_id."""
+    import app.services.integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    cid = "c-gc-bound-test"
+    provider = "google_calendar"
+    valid_bound_id = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
+    mismatched_bound_id = "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa"
+
+    enc_access = it_mutations.encrypt_integration_token("fake-gc-access", contractor_id=cid, provider=provider, token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token("fake-gc-refresh", contractor_id=cid, provider=provider, token_kind="refresh")
+
+    doc_data = {
+        "contractor_id": cid,
+        "active": True,
+        f"{provider}_connected": True,
+        f"{provider}_access_token": enc_access,
+        f"{provider}_refresh_token": enc_refresh,
+        f"{provider}_generation": 1,
+        f"{provider}_lifecycle_epoch": 1,
+    }
+    c_doc = _FakeDocRef(dict(doc_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+
+    # 1. Acquire with bound_operation_id
+    claim_id, expires_at = await it_mutations.acquire_provider_operation_intent_cas(
+        contractor_id=cid,
+        provider=provider,
+        kind="business",
+        bound_operation_id=valid_bound_id,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        lease_duration=60.0,
+        db=db,
+    )
+    assert claim_id is not None
+    assert c_doc.data.get(f"{provider}_operation_intent_bound_operation_id") == valid_bound_id
+    assert c_doc.data.get(f"{provider}_operation_intent_phase") == "reserved"
+
+    # 2. Transition to started with matching bound_operation_id
+    _, started_exp = await it_mutations.transition_provider_operation_intent_to_started_cas(
+        contractor_id=cid,
+        provider=provider,
+        claim_id=claim_id,
+        kind="business",
+        bound_operation_id=valid_bound_id,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        lease_duration=60.0,
+        db=db,
+    )
+    assert started_exp > 0.0
+    assert c_doc.data.get(f"{provider}_operation_intent_phase") == "provider_request_started"
+    assert c_doc.data.get(f"{provider}_operation_intent_bound_operation_id") == valid_bound_id
+
+    # 3. Transition to started with mismatched bound_operation_id raises IntegrationTokenLeaseError
+    c_doc.data[f"{provider}_operation_intent_phase"] = "reserved"
+    with pytest.raises(it_mutations.IntegrationTokenLeaseError):
+        await it_mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id=cid,
+            provider=provider,
+            claim_id=claim_id,
+            kind="business",
+            bound_operation_id=mismatched_bound_id,
+            observed_generation=1,
+            observed_lifecycle_epoch=1,
+            db=db,
+        )
+
+    # 4. Acquire with bound_operation_id on Jobber or refresh fails validation
+    with pytest.raises(it_mutations.IntegrationTokenEnvelopeError):
+        await it_mutations.acquire_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider="jobber",
+            kind="business",
+            bound_operation_id=valid_bound_id,
+            db=db,
+        )
+
+    with pytest.raises(it_mutations.IntegrationTokenEnvelopeError):
+        await it_mutations.acquire_provider_operation_intent_cas(
+            contractor_id=cid,
+            provider=provider,
+            kind="refresh",
+            bound_operation_id=valid_bound_id,
+            db=db,
+        )
+
+
+@pytest.mark.asyncio
+async def test_google_calendar_uncertain_transition_guarded_and_preserves_credentials(monkeypatch):
+    """transition_google_calendar_operation_intent_to_outcome_uncertain_cas is strictly guarded."""
+    import app.services.integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    cid = "c-gc-uncertain-test"
+    provider = "google_calendar"
+    valid_bound_id = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+    wrong_bound_id = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+    enc_access = it_mutations.encrypt_integration_token("token-a", contractor_id=cid, provider=provider, token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token("token-r", contractor_id=cid, provider=provider, token_kind="refresh")
+    fp = it_mutations.compute_raw_credentials_fingerprint(enc_access, enc_refresh)
+
+    claim_id = "claim-started-123"
+    base_data = {
+        "contractor_id": cid,
+        "active": True,
+        f"{provider}_connected": True,
+        f"{provider}_access_token": enc_access,
+        f"{provider}_refresh_token": enc_refresh,
+        f"{provider}_generation": 2,
+        f"{provider}_lifecycle_epoch": 1,
+        f"{provider}_operation_intent_id": claim_id,
+        f"{provider}_operation_intent_kind": "business",
+        f"{provider}_operation_intent_phase": "provider_request_started",
+        f"{provider}_operation_intent_expires_at": 2000000000.0,
+        f"{provider}_operation_intent_acquired_at": 1900000000.0,
+        f"{provider}_operation_intent_generation": 2,
+        f"{provider}_operation_intent_lifecycle_epoch": 1,
+        f"{provider}_operation_intent_credentials_fingerprint": fp,
+        f"{provider}_operation_intent_bound_operation_id": valid_bound_id,
+    }
+
+    # 1. Success path: exact match transitions to provider_outcome_uncertain; credentials preserved
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+
+    ok = await it_mutations.transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        observed_generation=2,
+        observed_lifecycle_epoch=1,
+        db=db,
+    )
+    assert ok is True
+    assert c_doc.data.get(f"{provider}_operation_intent_phase") == "provider_outcome_uncertain"
+    assert c_doc.data.get(f"{provider}_access_token") == enc_access
+    assert c_doc.data.get(f"{provider}_refresh_token") == enc_refresh
+
+    # 2. Reject wrong claim id
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+    ok = await it_mutations.transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+        contractor_id=cid,
+        claim_id="wrong-claim-id",
+        bound_operation_id=valid_bound_id,
+        db=db,
+    )
+    assert ok is False
+    assert c_doc.data.get(f"{provider}_operation_intent_phase") == "provider_request_started"
+
+    # 3. Reject wrong bound_operation_id
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+    ok = await it_mutations.transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=wrong_bound_id,
+        db=db,
+    )
+    assert ok is False
+
+    # 4. Reject wrong phase (e.g. reserved)
+    data_reserved = dict(base_data)
+    data_reserved[f"{provider}_operation_intent_phase"] = "reserved"
+    c_doc = _FakeDocRef(data_reserved, doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+    ok = await it_mutations.transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        db=db,
+    )
+    assert ok is False
+
+    # 5. Reject lifecycle generation conflict
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+    ok = await it_mutations.transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        observed_generation=999,
+        db=db,
+    )
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_load_google_calendar_reconciliation_snapshot(monkeypatch):
+    """load_google_calendar_reconciliation_snapshot authorizes expired started/uncertain claims with zero writes."""
+    import datetime
+    import app.services.integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    cid = "c-gc-recon-test"
+    provider = "google_calendar"
+    valid_bound_id = "3344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00"
+    claim_id = "claim-recon-4567"
+
+    enc_access = it_mutations.encrypt_integration_token("plain-recon-access", contractor_id=cid, provider=provider, token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token("plain-recon-refresh", contractor_id=cid, provider=provider, token_kind="refresh")
+    fp = it_mutations.compute_raw_credentials_fingerprint(enc_access, enc_refresh)
+
+    base_data = {
+        "contractor_id": cid,
+        "active": True,
+        f"{provider}_connected": True,
+        f"{provider}_access_token": enc_access,
+        f"{provider}_refresh_token": enc_refresh,
+        f"{provider}_token_envelope_required": True,
+        f"{provider}_scope": it_mutations.CANONICAL_GOOGLE_CALENDAR_SCOPE,
+        f"{provider}_token_expires_at": 1800000000.0,
+        f"{provider}_generation": 3,
+        f"{provider}_lifecycle_epoch": 2,
+        f"{provider}_operation_intent_id": claim_id,
+        f"{provider}_operation_intent_kind": "business",
+        f"{provider}_operation_intent_phase": "provider_request_started",
+        f"{provider}_operation_intent_expires_at": 100.0,  # Far in past (expired)
+        f"{provider}_operation_intent_acquired_at": 50.0,
+        f"{provider}_operation_intent_generation": 3,
+        f"{provider}_operation_intent_lifecycle_epoch": 2,
+        f"{provider}_operation_intent_credentials_fingerprint": fp,
+        f"{provider}_operation_intent_bound_operation_id": valid_bound_id,
+    }
+
+    # 1. Loads successfully for started phase even though expired; zero mutations to doc
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+
+    snap = await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        observed_generation=3,
+        observed_lifecycle_epoch=2,
+        db=db,
+    )
+    assert snap is not None
+    assert snap["authorization_status"] == "matching_claim"
+    assert snap["access_token"] == "plain-recon-access"
+    assert snap["generation"] == 3
+    assert snap["lifecycle_epoch"] == 2
+    assert snap["claim_id"] == claim_id
+    assert snap["bound_operation_id"] == valid_bound_id
+    assert snap["phase"] == "provider_request_started"
+    assert snap["credentials_fingerprint"] == fp
+    assert c_doc.data == base_data  # Zero writes
+
+    # 2. Loads successfully for provider_outcome_uncertain phase
+    data_uncertain = dict(base_data)
+    data_uncertain[f"{provider}_operation_intent_phase"] = "provider_outcome_uncertain"
+    c_doc_unc = _FakeDocRef(data_uncertain, doc_id=cid)
+    db_unc = _FakeFirestore({"contractors": {cid: c_doc_unc}})
+
+    snap_unc = await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        db=db_unc,
+    )
+    assert snap_unc is not None
+    assert snap_unc["authorization_status"] == "matching_claim"
+    assert snap_unc["phase"] == "provider_outcome_uncertain"
+
+    # Exact durable absence is the only non-claim state that authorizes the
+    # recovery worker to attempt the ordinary provider operation.
+    absent_data = {
+        key: value
+        for key, value in base_data.items()
+        if "_operation_intent_" not in key
+    }
+    absent_doc = _FakeDocRef(absent_data, doc_id=cid)
+    absent_db = _FakeFirestore({"contractors": {cid: absent_doc}})
+    snap_absent = await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid,
+        bound_operation_id=valid_bound_id,
+        db=absent_db,
+    )
+    assert snap_absent is not None
+    assert snap_absent["authorization_status"] == "verified_absent"
+    assert "claim_id" not in snap_absent
+    assert absent_doc.data == absent_data
+
+    # One-sided decryption success is indeterminate, not verified absence.
+    wrong_context_refresh = it_mutations.encrypt_integration_token(
+        "wrong-context-refresh",
+        contractor_id="different-contractor",
+        provider=provider,
+        token_kind="refresh",
+    )
+    decrypt_blocked_data = dict(absent_data)
+    decrypt_blocked_data[f"{provider}_refresh_token"] = wrong_context_refresh
+    decrypt_blocked_db = _FakeFirestore(
+        {
+            "contractors": {
+                cid: _FakeDocRef(decrypt_blocked_data, doc_id=cid),
+            }
+        }
+    )
+    assert await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid,
+        bound_operation_id=valid_bound_id,
+        db=decrypt_blocked_db,
+    ) is None
+
+    # 3. Comprehensive Negative Table: All return None and preserve durable dict with zero writes
+    negative_variations = [
+        # floor=True plus plaintext pair
+        ("floor_true_plaintext", {
+            f"{provider}_access_token": "plain-access",
+            f"{provider}_refresh_token": "plain-refresh",
+        }),
+        # malformed floor
+        ("floor_string", {f"{provider}_token_envelope_required": "true"}),
+        ("floor_int", {f"{provider}_token_envelope_required": 1}),
+        ("floor_none_with_envelopes", {f"{provider}_token_envelope_required": None}),
+        # encrypted pair with missing or False floor (needs promotion)
+        ("floor_false_with_envelopes", {f"{provider}_token_envelope_required": False}),
+        # explicit reduced scope and malformed scope
+        ("reduced_scope_readonly", {f"{provider}_scope": "https://www.googleapis.com/auth/calendar.readonly"}),
+        ("reduced_scope_email", {f"{provider}_scope": "https://www.googleapis.com/auth/userinfo.email"}),
+        ("malformed_scope_int", {f"{provider}_scope": 12345}),
+        ("malformed_scope_bool", {f"{provider}_scope": True}),
+        ("malformed_scope_empty", {f"{provider}_scope": ""}),
+        # expiry bool and non-positive / non-finite values
+        ("expiry_bool_true", {f"{provider}_token_expires_at": True}),
+        ("expiry_bool_false", {f"{provider}_token_expires_at": False}),
+        ("expiry_zero", {f"{provider}_token_expires_at": 0.0}),
+        ("expiry_negative", {f"{provider}_token_expires_at": -100.0}),
+        ("expiry_inf", {f"{provider}_token_expires_at": float("inf")}),
+        ("expiry_nan", {f"{provider}_token_expires_at": float("nan")}),
+        # wrong-AAD encrypted pair
+        ("wrong_aad_contractor", {
+            f"{provider}_access_token": it_mutations.encrypt_integration_token(
+                "plain-a", contractor_id="other-cid", provider=provider, token_kind="access"
+            ),
+        }),
+        # active False or connected False
+        ("inactive", {"active": False}),
+        ("disconnected", {f"{provider}_connected": False}),
+        # lifecycle epoch / generation mismatch
+        ("generation_mismatch", {f"{provider}_generation": 4}),
+        ("epoch_mismatch", {f"{provider}_lifecycle_epoch": 3}),
+        # reserved phase
+        ("reserved_phase", {f"{provider}_operation_intent_phase": "reserved"}),
+        # quarantine / reauth required
+        ("reauth_required", {f"{provider}_reauthorization_required": True}),
+        ("outcome_unknown", {f"{provider}_refresh_outcome_unknown": True}),
+    ]
+
+    for label, updates in negative_variations:
+        data_neg = dict(base_data)
+        data_neg.update(updates)
+        expected_neg = dict(data_neg)
+        neg_doc = _FakeDocRef(data_neg, doc_id=cid)
+        neg_db = _FakeFirestore({"contractors": {cid: neg_doc}})
+
+        res = await it_mutations.load_google_calendar_reconciliation_snapshot(
+            contractor_id=cid,
+            claim_id=claim_id,
+            bound_operation_id=valid_bound_id,
+            db=neg_db,
+        )
+        assert res is None, f"Expected None for negative case {label}, got {res}"
+        assert neg_doc.data == expected_neg, f"Durable data mutated for {label}"
+
+    # Missing floor key (actual absent key)
+    missing_floor_data = dict(base_data)
+    missing_floor_data.pop(f"{provider}_token_envelope_required", None)
+    assert f"{provider}_token_envelope_required" not in missing_floor_data
+    expected_missing_floor_data = dict(missing_floor_data)
+    missing_floor_doc = _FakeDocRef(missing_floor_data, doc_id=cid)
+    missing_floor_db = _FakeFirestore({"contractors": {cid: missing_floor_doc}})
+    res_missing_floor = await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        db=missing_floor_db,
+    )
+    assert res_missing_floor is None
+    assert f"{provider}_token_envelope_required" not in missing_floor_doc.data
+    assert missing_floor_doc.data == expected_missing_floor_data
+
+    # 4. read_time negative tests (missing, naive, numeric, bool, malformed, non-positive)
+    class _CustomReadTimeDoc(_FakeDocRef):
+        def __init__(self, data, read_time_val, doc_id="fake-id"):
+            super().__init__(data, doc_id=doc_id)
+            self._custom_read_time = read_time_val
+
+        def get(self, *args, transaction=None, **kwargs):
+            snap = super().get(*args, transaction=transaction, **kwargs)
+            snap.read_time = self._custom_read_time
+            return snap
+
+    read_time_cases = [
+        ("missing_read_time", None),
+        ("naive_read_time", datetime.datetime(2026, 8, 24, 18, 0, 0)),
+        ("numeric_read_time", 1700000000.0),
+        ("bool_read_time", True),
+        ("malformed_read_time", "2026-08-24T18:00:00Z"),
+        ("non_positive_read_time", datetime.datetime.fromtimestamp(0.0, datetime.UTC)),
+    ]
+
+    for rt_label, rt_val in read_time_cases:
+        rt_doc = _CustomReadTimeDoc(dict(base_data), rt_val, doc_id=cid)
+        rt_db = _FakeFirestore({"contractors": {cid: rt_doc}})
+        res_rt = await it_mutations.load_google_calendar_reconciliation_snapshot(
+            contractor_id=cid,
+            claim_id=claim_id,
+            bound_operation_id=valid_bound_id,
+            db=rt_db,
+        )
+        assert res_rt is None, f"Expected None for read_time case {rt_label}"
+        assert rt_doc.data == base_data
+
+    # 5. Wrong claim and wrong bound_id
+    assert await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid, claim_id="bad-claim", bound_operation_id=valid_bound_id, db=db
+    ) is None
+
+    assert await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid, claim_id=claim_id, bound_operation_id="0" * 64, db=db
+    ) is None
+
+    # 6. Read failure remains indeterminate / blocked
+    class _UnreadableDoc(_FakeDocRef):
+        def get(self, *args, **kwargs):
+            raise RuntimeError("injected durable read failure")
+
+    unreadable_db = _FakeFirestore(
+        {"contractors": {cid: _UnreadableDoc(base_data, doc_id=cid)}}
+    )
+    assert await it_mutations.load_google_calendar_reconciliation_snapshot(
+        contractor_id=cid,
+        bound_operation_id=valid_bound_id,
+        db=unreadable_db,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_clear_reconciled_google_calendar_operation_intent_cas(monkeypatch):
+    """clear_reconciled_google_calendar_operation_intent_cas clears only exact claim with replacement-safe postread."""
+    import app.services.integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    cid = "c-gc-clear-test"
+    provider = "google_calendar"
+    valid_bound_id = "5566778899001122334455667788990011223344556677889900112233445566"
+    claim_id = "claim-to-clear-789"
+
+    enc_access = it_mutations.encrypt_integration_token("plain-a", contractor_id=cid, provider=provider, token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token("plain-r", contractor_id=cid, provider=provider, token_kind="refresh")
+    fp = it_mutations.compute_raw_credentials_fingerprint(enc_access, enc_refresh)
+
+    base_data = {
+        "contractor_id": cid,
+        "active": True,
+        f"{provider}_connected": True,
+        f"{provider}_access_token": enc_access,
+        f"{provider}_refresh_token": enc_refresh,
+        f"{provider}_generation": 1,
+        f"{provider}_lifecycle_epoch": 1,
+        f"{provider}_operation_intent_id": claim_id,
+        f"{provider}_operation_intent_kind": "business",
+        f"{provider}_operation_intent_phase": "provider_outcome_uncertain",
+        f"{provider}_operation_intent_expires_at": 2000000000.0,
+        f"{provider}_operation_intent_acquired_at": 1900000000.0,
+        f"{provider}_operation_intent_generation": 1,
+        f"{provider}_operation_intent_lifecycle_epoch": 1,
+        f"{provider}_operation_intent_credentials_fingerprint": fp,
+        f"{provider}_operation_intent_bound_operation_id": valid_bound_id,
+    }
+
+    # 1. Clean clear: intent fields deleted, credentials retained, returns True
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+
+    ok = await it_mutations.clear_reconciled_google_calendar_operation_intent_cas(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id=valid_bound_id,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        db=db,
+    )
+    assert ok is True
+    for key in it_mutations.get_provider_operation_intent_keys(provider):
+        assert key not in c_doc.data
+    assert c_doc.data.get(f"{provider}_access_token") == enc_access
+
+    # 2. Rejects wrong claim or wrong bound_id
+    c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: c_doc}})
+    assert await it_mutations.clear_reconciled_google_calendar_operation_intent_cas(
+        contractor_id=cid,
+        claim_id="different-claim",
+        bound_operation_id=valid_bound_id,
+        db=db,
+    ) is False
+
+    assert await it_mutations.clear_reconciled_google_calendar_operation_intent_cas(
+        contractor_id=cid,
+        claim_id=claim_id,
+        bound_operation_id="f" * 64,
+        db=db,
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_expired_bound_started_or_uncertain_claims_remain_hard_fences(monkeypatch):
+    """Expired bound started or uncertain claims form a hard fence against preflight, acquire, disconnect, and connect."""
+    import app.services.integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    cid = "c-gc-fence-test"
+    provider = "google_calendar"
+    valid_bound_id = "7788990011223344556677889900112233445566778899001122334455667788"
+    claim_id = "claim-fenced-000"
+
+    enc_access = it_mutations.encrypt_integration_token("plain-a", contractor_id=cid, provider=provider, token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token("plain-r", contractor_id=cid, provider=provider, token_kind="refresh")
+    fp = it_mutations.compute_raw_credentials_fingerprint(enc_access, enc_refresh)
+
+    for phase in ("provider_request_started", "provider_outcome_uncertain"):
+        base_data = {
+            "contractor_id": cid,
+            "active": True,
+            f"{provider}_connected": True,
+            f"{provider}_access_token": enc_access,
+            f"{provider}_refresh_token": enc_refresh,
+            f"{provider}_generation": 1,
+            f"{provider}_lifecycle_epoch": 1,
+            f"{provider}_operation_intent_id": claim_id,
+            f"{provider}_operation_intent_kind": "business",
+            f"{provider}_operation_intent_phase": phase,
+            f"{provider}_operation_intent_expires_at": 100.0,  # Expired
+            f"{provider}_operation_intent_acquired_at": 50.0,
+            f"{provider}_operation_intent_generation": 1,
+            f"{provider}_operation_intent_lifecycle_epoch": 1,
+            f"{provider}_operation_intent_credentials_fingerprint": fp,
+            f"{provider}_operation_intent_bound_operation_id": valid_bound_id,
+        }
+
+        # A. Preflight is blocked with zero writes / quarantine
+        c_doc_pref = _FakeDocRef(dict(base_data), doc_id=cid)
+        db_pref = _FakeFirestore({"contractors": {cid: c_doc_pref}})
+        disposition, detail = await it_mutations.check_and_recover_expired_intent_preflight_cas(
+            contractor_id=cid,
+            provider=provider,
+            db=db_pref,
+        )
+        assert disposition == "blocked"
+        assert detail == "active_intent_in_progress"
+        assert f"{provider}_reauthorization_required" not in c_doc_pref.data
+        assert c_doc_pref.data.get(f"{provider}_operation_intent_phase") == phase
+
+        # B. Generic acquire is blocked with zero quarantine writes
+        c_doc_acq = _FakeDocRef(dict(base_data), doc_id=cid)
+        db_acq = _FakeFirestore({"contractors": {cid: c_doc_acq}})
+        with pytest.raises(it_mutations.IntegrationTokenLeaseError):
+            await it_mutations.acquire_provider_operation_intent_cas(
+                contractor_id=cid,
+                provider=provider,
+                kind="business",
+                db=db_acq,
+            )
+        assert f"{provider}_reauthorization_required" not in c_doc_acq.data
+        assert c_doc_acq.data.get(f"{provider}_operation_intent_phase") == phase
+
+        # C. Disconnect is rejected with zero tombstone/revocation writes
+        c_doc_disc = _FakeDocRef(dict(base_data), doc_id=cid)
+        db_disc = _FakeFirestore({"contractors": {cid: c_doc_disc}, "integration_lifecycle_audit": {}, "integration_revocation_outbox": {}})
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict):
+            await it_mutations.disconnect_provider_envelope_cas(
+                contractor_id=cid,
+                provider=provider,
+                db=db_disc,
+            )
+        assert c_doc_disc.data.get(f"{provider}_connected") is True
+        assert c_doc_disc.data.get(f"{provider}_operation_intent_phase") == phase
+
+        # D. Connect commit is blocked with zero contractor mutation
+        c_doc_conn = _FakeDocRef(dict(base_data), doc_id=cid)
+        db_conn = _FakeFirestore({
+            "contractors": {cid: c_doc_conn},
+            "integration_lifecycle_audit": {},
+        })
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict):
+            await it_mutations.connect_provider_cas(
+                contractor_id=cid,
+                provider=provider,
+                access_token="replacement-access",
+                refresh_token="replacement-refresh",
+                observed_generation=1,
+                observed_lifecycle_epoch=1,
+                observed_access_raw=enc_access,
+                observed_refresh_raw=enc_refresh,
+                claim_id=claim_id,
+                db=db_conn,
+            )
+        assert c_doc_conn.data.get(f"{provider}_operation_intent_phase") == phase
+        assert f"{provider}_reauthorization_required" not in c_doc_conn.data
+
+
+@pytest.mark.asyncio
+async def test_classify_google_calendar_reconciliation_record(monkeypatch):
+    """Pure classifier validates canonical credentials, scope, floor, expiry, and intent."""
+    import app.services.integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    cid = "c-classify-test"
+    provider = "google_calendar"
+    bound_id = "1" * 64
+    assert len(bound_id) == 64
+    claim_id = "claim-cls-123"
+
+    enc_acc = it_mutations.encrypt_integration_token("plain-a", contractor_id=cid, provider=provider, token_kind="access")
+    enc_ref = it_mutations.encrypt_integration_token("plain-r", contractor_id=cid, provider=provider, token_kind="refresh")
+    fp = it_mutations.compute_raw_credentials_fingerprint(enc_acc, enc_ref)
+
+    valid_started_data = {
+        "contractor_id": cid,
+        "active": True,
+        f"{provider}_connected": True,
+        f"{provider}_access_token": enc_acc,
+        f"{provider}_refresh_token": enc_ref,
+        f"{provider}_token_envelope_required": True,
+        f"{provider}_scope": it_mutations.CANONICAL_GOOGLE_CALENDAR_SCOPE,
+        f"{provider}_token_expires_at": 1800000000.0,
+        f"{provider}_generation": 2,
+        f"{provider}_lifecycle_epoch": 1,
+        f"{provider}_operation_intent_id": claim_id,
+        f"{provider}_operation_intent_kind": "business",
+        f"{provider}_operation_intent_phase": "provider_request_started",
+        f"{provider}_operation_intent_expires_at": 100.0,
+        f"{provider}_operation_intent_acquired_at": 50.0,
+        f"{provider}_operation_intent_generation": 2,
+        f"{provider}_operation_intent_lifecycle_epoch": 1,
+        f"{provider}_operation_intent_credentials_fingerprint": fp,
+        f"{provider}_operation_intent_bound_operation_id": bound_id,
+    }
+
+    # 1. Valid matching claim
+    res = it_mutations.classify_google_calendar_reconciliation_record(
+        valid_started_data,
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+        claim_id=claim_id,
+    )
+    assert res is not None
+    assert res["authorization_status"] == "matching_claim"
+    assert res["access_token"] == "plain-a"
+    assert res["generation"] == 2
+    assert res["lifecycle_epoch"] == 1
+    assert res["claim_id"] == claim_id
+    assert res["bound_operation_id"] == bound_id
+    assert res["phase"] == "provider_request_started"
+    assert res["credentials_fingerprint"] == fp
+    assert res["google_calendar_scope"] == it_mutations.CANONICAL_GOOGLE_CALENDAR_SCOPE
+    assert res["google_calendar_token_expires_at"] == 1800000000.0
+
+    # 2. Valid absent claim
+    absent_data = {k: v for k, v in valid_started_data.items() if "_operation_intent_" not in k}
+    res_absent = it_mutations.classify_google_calendar_reconciliation_record(
+        absent_data,
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    )
+    assert res_absent is not None
+    assert res_absent["authorization_status"] == "verified_absent"
+    assert "claim_id" not in res_absent
+    assert res_absent["access_token"] == "plain-a"
+
+    # 3. Invalid cases return None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        None, contractor_id=cid, bound_operation_id=bound_id
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        valid_started_data, contractor_id="bad contractor id!", bound_operation_id=bound_id
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        valid_started_data, contractor_id=cid, bound_operation_id="not-hex"
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        valid_started_data, contractor_id=cid, bound_operation_id=bound_id, claim_id="bad claim!"
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        {**valid_started_data, f"{provider}_token_envelope_required": False},
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        {**valid_started_data, f"{provider}_scope": "https://www.googleapis.com/auth/calendar.readonly"},
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        {**valid_started_data, f"{provider}_token_expires_at": -5.0},
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        {**valid_started_data, f"{provider}_reauthorization_required": True},
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        {**valid_started_data, "active": False},
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    ) is None
+    assert it_mutations.classify_google_calendar_reconciliation_record(
+        {**valid_started_data, f"{provider}_connected": False},
+        contractor_id=cid,
+        bound_operation_id=bound_id,
+    ) is None

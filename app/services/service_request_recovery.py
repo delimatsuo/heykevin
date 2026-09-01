@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -22,11 +23,13 @@ from app.services.google_calendar_request_provider import (
     GOOGLE_CALENDAR_PROVIDER_KIND,
     GoogleCalendarRequestProvider,
 )
+from app.services.service_request import ServiceRequestOperation
 from app.services.service_request_repository import (
     PreparedProviderCreate,
     PreparedProviderOperation,
     ProviderMutationAdapter,
     _invoke_prepared_provider_operation,
+    _parse_datetime,
 )
 from app.utils.logging import get_logger
 
@@ -49,6 +52,14 @@ class ProviderRecoveryRepository(Protocol):
     ) -> tuple[LeasedProviderRecovery, ...]: ...
 
     async def finalize_provider_recovery(self, lease: LeasedProviderRecovery) -> bool: ...
+
+    async def finalize_reconciled_provider_recovery(
+        self,
+        lease: LeasedProviderRecovery,
+        *,
+        claim_id: str,
+        bound_operation_id: str,
+    ) -> bool: ...
 
     async def release_provider_recovery(
         self,
@@ -109,23 +120,152 @@ class ServiceRequestRecoveryWorker:
         finalized = 0
         deferred = 0
         for lease in leases:
+            canonical_finalized = False
             try:
-                confirmed = await self._invoke_provider(lease)
+                preparation = lease.preparation
+                if preparation.binding.kind != GOOGLE_CALENDAR_PROVIDER_KIND:
+                    await self._release(lease)
+                    deferred += 1
+                    continue
+
+                contractor = await asyncio.wait_for(
+                    self._contractor_loader(lease.contractor_id),
+                    timeout=CONTRACTOR_LOAD_TIMEOUT_SECONDS,
+                )
+                if (
+                    not isinstance(contractor, dict)
+                    or contractor.get("contractor_id") != lease.contractor_id
+                ):
+                    await self._release(lease)
+                    deferred += 1
+                    continue
+
+                adapter = self._adapter_factory(contractor)
+
+                # Special uncertainty reconciliation for RESCHEDULE operations
+                if (
+                    isinstance(preparation, PreparedProviderOperation)
+                    and preparation.operation is ServiceRequestOperation.RESCHEDULE
+                ):
+                    reconcile_reschedule = getattr(
+                        adapter,
+                        "reconcile_reschedule",
+                        None,
+                    )
+                    if not callable(reconcile_reschedule):
+                        await self._release(lease)
+                        deferred += 1
+                        continue
+                    arguments = dict(preparation.arguments)
+                    scheduled_start = _parse_datetime(arguments["scheduled_start"], "scheduled_start")
+                    scheduled_end = _parse_datetime(arguments["scheduled_end"], "scheduled_end")
+                    reconciliation = await asyncio.wait_for(
+                        reconcile_reschedule(
+                            binding=preparation.binding,
+                            request=preparation.base_request,
+                            scheduled_start=scheduled_start,
+                            scheduled_end=scheduled_end,
+                            logical_operation_id=preparation.logical_operation_id,
+                        ),
+                        timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
+                    )
+                    authorization_status = getattr(
+                        reconciliation,
+                        "authorization_status",
+                        None,
+                    )
+                    if authorization_status == "matching_claim":
+                        claim_id = getattr(reconciliation, "claim_id", None)
+                        if (
+                            reconciliation.has_matching_claim is not True
+                            or type(reconciliation.confirmed) is not bool
+                            or getattr(reconciliation, "logical_operation_id", None)
+                            != preparation.logical_operation_id
+                            or type(claim_id) is not str
+                            or re.fullmatch(r"[0-9A-Za-z_-]{1,128}", claim_id) is None
+                        ):
+                            await self._release(lease)
+                            deferred += 1
+                            continue
+                        if not reconciliation.confirmed:
+                            # Bound claim exists but remote desired is not confirmed:
+                            # Issue zero PATCH, release/defer under attempt policy, retain claim.
+                            await self._release(lease)
+                            deferred += 1
+                            continue
+
+                        # Desired confirmed: one Firestore transaction must finalize
+                        # canonical state and clear the exact provider fence together.
+                        atomic_finalize = getattr(
+                            self._repository,
+                            "finalize_reconciled_provider_recovery",
+                            None,
+                        )
+                        if not callable(atomic_finalize):
+                            await self._release(lease)
+                            deferred += 1
+                            continue
+                        finalize_ok = await atomic_finalize(
+                            lease,
+                            claim_id=claim_id,
+                            bound_operation_id=preparation.logical_operation_id,
+                        )
+                        if finalize_ok:
+                            canonical_finalized = True
+                            finalized += 1
+                        else:
+                            await self._release(lease)
+                            deferred += 1
+                        continue
+                    if (
+                        authorization_status != "verified_absent"
+                        or reconciliation.has_matching_claim is not False
+                        or reconciliation.confirmed is not False
+                        or getattr(reconciliation, "claim_id", None) is not None
+                        or getattr(reconciliation, "logical_operation_id", None) is not None
+                    ):
+                        await self._release(lease)
+                        deferred += 1
+                        continue
+
+                # Standard provider execution for other operations or reschedule without matching claim
+                confirmed = False
+                if isinstance(preparation, PreparedProviderCreate):
+                    confirmed = await asyncio.wait_for(
+                        adapter.create(
+                            binding=preparation.binding,
+                            request=preparation.result.request,
+                            title=preparation.title,
+                            description=preparation.description,
+                            idempotency_key=preparation.logical_operation_id,
+                        ),
+                        timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
+                    )
+                elif isinstance(preparation, PreparedProviderOperation):
+                    confirmed = await asyncio.wait_for(
+                        _invoke_prepared_provider_operation(adapter, preparation),
+                        timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
+                    )
+
                 if confirmed is True:
                     if await self._repository.finalize_provider_recovery(lease):
                         finalized += 1
                     else:
                         deferred += 1
                     continue
+
                 await self._release(lease)
                 deferred += 1
             except asyncio.CancelledError:
-                # Desired-state provider operations are replay-safe. Releasing the
-                # lease lets another worker reconcile an uncertain cancellation.
-                with suppress(Exception):
-                    await self._release(lease)
+                # Once canonical finalization commits, releasing the lease could
+                # make a second worker replay an operation that is already done.
+                if not canonical_finalized:
+                    with suppress(Exception):
+                        await self._release(lease)
                 raise
             except Exception as error:  # noqa: BLE001 - recovery must fail closed
+                if canonical_finalized:
+                    continue
                 logger.warning(
                     "service_request_recovery outcome=deferred exception_type=%s",
                     type(error).__name__,

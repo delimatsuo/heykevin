@@ -47,6 +47,7 @@ def test_integration_fields_in_protected_fields():
         "jobber_operation_intent_generation",
         "jobber_operation_intent_lifecycle_epoch",
         "jobber_operation_intent_credentials_fingerprint",
+        "jobber_operation_intent_bound_operation_id",
         # Google Calendar credentials & lifecycle
         "google_calendar_access_token",
         "google_calendar_refresh_token",
@@ -74,6 +75,7 @@ def test_integration_fields_in_protected_fields():
         "google_calendar_operation_intent_generation",
         "google_calendar_operation_intent_lifecycle_epoch",
         "google_calendar_operation_intent_credentials_fingerprint",
+        "google_calendar_operation_intent_bound_operation_id",
     }
     missing = required_fields - PROTECTED_FIELDS
     assert not missing, f"Missing integration fields in PROTECTED_FIELDS: {missing}"

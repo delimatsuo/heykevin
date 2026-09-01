@@ -870,3 +870,91 @@ async def test_firestore_provider_create_finalize_failure_leaves_only_hidden_int
     document = next(iter(client.store.values()))
     assert document["status"] == "open"
     assert "aggregate" in document and "provider_binding" in document
+
+
+@pytest.mark.asyncio
+async def test_firestore_reschedule_preserves_base_and_desired_without_persisting_etag(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.db.service_requests.firestore.transactional",
+        lambda fn: lambda tx: fn(tx),
+    )
+    client = _Client()
+    repo = FirestoreServiceRequestRepository(client)
+    customer_key = customer_key_for_phone("+16175550123")
+    binding = ProviderBinding(kind="google_calendar", resource_id="provider-event-1")
+    created = await _create_provider_backed(repo, customer_key=customer_key, binding=binding)
+
+    base_start = NOW + timedelta(days=1)
+    base_end = NOW + timedelta(days=1, hours=1)
+    desired_start = NOW + timedelta(days=2)
+    desired_end = NOW + timedelta(days=2, hours=1)
+
+    prepared = await repo.prepare_provider_operation(
+        contractor_id="c1",
+        customer_key=customer_key,
+        request_id="request-1",
+        idempotency_key="reschedule-transport-1",
+        mutation=lambda current: current.reschedule(
+            scheduled_start=desired_start,
+            scheduled_end=desired_end,
+            expected_revision=created.request.revision,
+            idempotency_key="reschedule-transport-1",
+            occurred_at=NOW + timedelta(minutes=1),
+        ),
+    )
+    assert prepared.base_request.scheduled_start == base_start
+
+    document = next(iter(client.store.values()))
+    assert document["status"] == "open"
+    canonical_base = ServiceRequest.from_dict(document["aggregate"])
+    assert canonical_base.scheduled_start == base_start
+    assert canonical_base.scheduled_end == base_end
+    assert canonical_base.revision == 1
+
+    proposal = document["pending_provider_operation"]["proposal"]
+    assert proposal["operation"] == "reschedule"
+    assert (
+        proposal["arguments"]["scheduled_start"]
+        == desired_start.astimezone(UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    assert (
+        proposal["arguments"]["scheduled_end"]
+        == desired_end.astimezone(UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+    def _assert_no_etag(val):
+        if isinstance(val, dict):
+            for k, v in val.items():
+                assert "etag" not in k.lower(), f"Unexpected ETag key: {k}"
+                _assert_no_etag(v)
+        elif isinstance(val, (list, tuple)):
+            for item in val:
+                _assert_no_etag(item)
+
+    _assert_no_etag(document)
+
+    restarted_repo = FirestoreServiceRequestRepository(client)
+    recovered = await restarted_repo.recover_provider_operation(
+        contractor_id="c1",
+        customer_key=customer_key,
+        request_id="request-1",
+    )
+    assert recovered is not None
+    assert recovered.base_request.scheduled_start == base_start
+    assert recovered.base_request.scheduled_end == base_end
+    assert recovered.result.request.scheduled_start == desired_start
+    assert recovered.result.request.scheduled_end == desired_end
+
+    finalized = await restarted_repo.finalize_provider_operation(recovered)
+    assert finalized.request.scheduled_start == desired_start
+    assert finalized.request.scheduled_end == desired_end
+    assert finalized.request.revision == 2
+
+    document_final = next(iter(client.store.values()))
+    _assert_no_etag(document_final)

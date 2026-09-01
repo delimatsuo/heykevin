@@ -122,6 +122,7 @@ ALLOWED_EXTRA_UPDATES = {
 }
 
 _CANONICAL_STATE_REGEX = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
+_PERSISTED_OPERATION_INTENT_ID_REGEX = re.compile(r"^[0-9A-Za-z_-]{1,128}\Z")
 LEASE_DURATION_SECONDS = 60.0
 _UNCHECKED = object()
 
@@ -671,9 +672,14 @@ async def check_and_recover_expired_intent_preflight_cas(
             server_now = _extract_snapshot_server_time(doc_snap)
             held_exp = parsed_intent["expires_at"]
             held_phase = parsed_intent["phase"]
+            held_bound = parsed_intent.get("bound_operation_id")
+            if held_bound is not None and held_phase in ("provider_request_started", "provider_outcome_uncertain"):
+                preflight_box[0] = ("blocked", "active_intent_in_progress")
+                return
             if held_exp > server_now:
                 preflight_box[0] = ("blocked", "active_intent_in_progress")
                 return
+
             else:
                 # Expired intent recovery
                 updates = {}
@@ -864,6 +870,7 @@ async def acquire_provider_operation_intent_cas(
     contractor_id: str,
     provider: str,
     kind: str,
+    bound_operation_id: str | None = None,
     observed_generation: int | None = None,
     observed_lifecycle_epoch: int | None = None,
     observed_access_raw: Any = None,
@@ -893,6 +900,12 @@ async def acquire_provider_operation_intent_cas(
 
     if type(kind) is not str or kind not in ("business", "refresh", "connect"):
         raise IntegrationTokenEnvelopeError(f"Invalid operation intent kind: {kind}")
+
+    if bound_operation_id is not None:
+        if provider != "google_calendar" or kind != "business":
+            raise IntegrationTokenEnvelopeError("bound_operation_id is valid ONLY for provider=google_calendar and kind=business")
+        if type(bound_operation_id) is not str or type(bound_operation_id) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", bound_operation_id):
+            raise IntegrationTokenEnvelopeError("Invalid bound_operation_id: must be 64 lowercase hex characters")
 
     if observed_generation is not None:
         if type(observed_generation) is not int or type(observed_generation) is bool or not (0 <= observed_generation <= MAX_KEY_VERSION):
@@ -986,6 +999,10 @@ async def acquire_provider_operation_intent_cas(
             raise IntegrationTokenCASConflict("Malformed existing refresh claim record / operation intent")
         elif intent_status == "valid":
             assert parsed_intent is not None
+            held_bound = parsed_intent.get("bound_operation_id")
+            if held_bound is not None and parsed_intent["phase"] in ("provider_request_started", "provider_outcome_uncertain"):
+                raise IntegrationTokenLeaseError("Provider operation intent actively held by bound operation")
+
             if parsed_intent["expires_at"] > server_now:
                 raise IntegrationTokenLeaseError("Provider operation intent actively held by another process")
 
@@ -1009,6 +1026,9 @@ async def acquire_provider_operation_intent_cas(
             f"{provider}_operation_intent_lifecycle_epoch": current_epoch,
             f"{provider}_operation_intent_credentials_fingerprint": fp,
         }
+
+        if bound_operation_id is not None:
+            intent_updates[f"{provider}_operation_intent_bound_operation_id"] = bound_operation_id
 
         if kind == "refresh":
             intent_updates[f"{provider}_refresh_claim_id"] = claim_id
@@ -1055,12 +1075,19 @@ async def acquire_provider_operation_intent_cas(
         raise IntegrationTokenLeaseError("Intent expires_at mismatch on postread")
     if post_intent["kind"] != kind:
         raise IntegrationTokenLeaseError("Intent kind mismatch on postread")
+    if bound_operation_id is not None:
+        if post_intent.get("bound_operation_id") != bound_operation_id:
+            raise IntegrationTokenLeaseError("Intent bound operation ID mismatch on postread")
+    else:
+        if post_intent.get("bound_operation_id") is not None:
+            raise IntegrationTokenLeaseError("Intent bound operation ID unexpected on postread")
     if post_intent["generation"] != current_gen_box[0]:
         raise IntegrationTokenLeaseError("Intent generation mismatch on postread")
     if post_intent["lifecycle_epoch"] != current_epoch_box[0]:
         raise IntegrationTokenLeaseError("Intent lifecycle epoch mismatch on postread")
 
     return claim_id, final_expires_at_box[0]
+
 
 
 async def acquire_refresh_claim_cas(
@@ -1092,6 +1119,7 @@ async def transition_provider_operation_intent_to_started_cas(
     provider: str,
     claim_id: str,
     kind: str | None = None,
+    bound_operation_id: str | None = None,
     observed_generation: int | None = None,
     observed_lifecycle_epoch: int | None = None,
     observed_access_raw: Any = None,
@@ -1121,6 +1149,10 @@ async def transition_provider_operation_intent_to_started_cas(
         or not _CANONICAL_STATE_REGEX.fullmatch(claim_id)
     ):
         raise IntegrationTokenEnvelopeError("Invalid claim_id")
+
+    if bound_operation_id is not None:
+        if type(bound_operation_id) is not str or type(bound_operation_id) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", bound_operation_id):
+            raise IntegrationTokenEnvelopeError("Invalid bound_operation_id: must be 64 lowercase hex characters")
 
     doc_ref = db.collection("contractors").document(valid_cid)
     final_expires_at_box: list[float] = [0.0]
@@ -1169,6 +1201,9 @@ async def transition_provider_operation_intent_to_started_cas(
 
         if kind is not None and parsed_intent["kind"] != kind:
             raise IntegrationTokenLeaseError("Provider operation intent kind mismatch")
+
+        if bound_operation_id is not None and parsed_intent.get("bound_operation_id") != bound_operation_id:
+            raise IntegrationTokenLeaseError("Provider operation intent bound operation ID mismatch on transition to started")
 
         if parsed_intent["generation"] != current_gen or parsed_intent["lifecycle_epoch"] != current_epoch:
             raise IntegrationTokenLeaseError("Provider operation intent generation/epoch mismatch")
@@ -1221,8 +1256,11 @@ async def transition_provider_operation_intent_to_started_cas(
         raise IntegrationTokenLeaseError("Intent expires_at mismatch on postread")
     if kind is not None and post_intent["kind"] != kind:
         raise IntegrationTokenLeaseError("Intent kind mismatch on postread")
+    if bound_operation_id is not None and post_intent.get("bound_operation_id") != bound_operation_id:
+        raise IntegrationTokenLeaseError("Intent bound operation ID mismatch on postread")
 
     return claim_id, final_expires_at_box[0]
+
 
 
 async def transition_refresh_claim_to_started_cas(
@@ -1341,6 +1379,7 @@ async def terminalize_provider_operation_intent_cas(
     provider: str,
     claim_id: str,
     kind: str | None = None,
+    bound_operation_id: str | None = None,
     db: Any = None,
 ) -> bool:
     """Atomically terminalize (clear) a provider operation intent in any phase."""
@@ -1358,6 +1397,10 @@ async def terminalize_provider_operation_intent_cas(
         return False
     if valid_cid is None or provider not in VALID_PROVIDERS:
         return False
+
+    if bound_operation_id is not None:
+        if type(bound_operation_id) is not str or type(bound_operation_id) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", bound_operation_id):
+            return False
 
     doc_ref = db.collection("contractors").document(valid_cid)
     mutated_box = [False]
@@ -1378,6 +1421,8 @@ async def terminalize_provider_operation_intent_cas(
             return
         if kind is not None and parsed_intent["kind"] != kind:
             return
+        if bound_operation_id is not None and parsed_intent.get("bound_operation_id") != bound_operation_id:
+            return
         updates = {f: DELETE_FIELD for f in get_provider_operation_intent_keys(provider)}
         transaction.update(doc_ref, updates)
         mutated_box[0] = True
@@ -1393,12 +1438,458 @@ async def terminalize_provider_operation_intent_cas(
         return False
 
     post_snap = doc_ref.get()
-    post_data = post_snap.to_dict() if getattr(post_snap, "exists", False) else None
-    if post_data is not None:
-        p_status, _, _ = parse_provider_operation_intent(post_data, provider)
-        if p_status != "absent":
+    if not getattr(post_snap, "exists", False):
+        return True
+    post_data = post_snap.to_dict()
+    if type(post_data) is not dict:
+        return False
+    p_status, p_parsed, _ = parse_provider_operation_intent(post_data, provider)
+    if p_status == "absent":
+        return True
+    if p_status == "valid" and p_parsed is not None and p_parsed["id"] != claim_id:
+        return True
+    return False
+
+
+async def transition_google_calendar_operation_intent_to_outcome_uncertain_cas(
+    *,
+    contractor_id: str,
+    claim_id: str,
+    bound_operation_id: str,
+    observed_generation: int | None = None,
+    observed_lifecycle_epoch: int | None = None,
+    observed_access_raw: Any = None,
+    observed_refresh_raw: Any = None,
+    db: Any = None,
+) -> bool:
+    """Transition a Google Calendar business claim from started to provider_outcome_uncertain."""
+    if db is None:
+        try:
+            db = get_firestore_client()
+        except Exception:
             return False
+    if db is None:
+        return False
+
+    try:
+        valid_cid = validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return False
+    if valid_cid is None:
+        return False
+
+    if (
+        type(claim_id) is not str
+        or type(claim_id) is bool
+        or not _PERSISTED_OPERATION_INTENT_ID_REGEX.fullmatch(claim_id)
+    ):
+        return False
+
+    if type(bound_operation_id) is not str or type(bound_operation_id) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", bound_operation_id):
+        return False
+
+    provider = "google_calendar"
+    doc_ref = db.collection("contractors").document(valid_cid)
+    mutated_box = [False]
+    current_gen_box = [0]
+    current_epoch_box = [0]
+    fp_box = [""]
+
+    @transactional
+    def _uncertain_txn(transaction):
+        mutated_box[0] = False
+        doc_snap = _get_doc_snapshot_in_txn(doc_ref, transaction)
+        if not getattr(doc_snap, "exists", False):
+            return
+        d_data = doc_snap.to_dict()
+        if type(d_data) is not dict or d_data.get("active") is not True:
+            return
+
+        lifecycle_ok, current_gen, current_epoch, _, _ = parse_durable_lifecycle_counters(d_data, provider)
+        if not lifecycle_ok:
+            return
+
+        if observed_generation is not None and current_gen != observed_generation:
+            return
+        if observed_lifecycle_epoch is not None and current_epoch != observed_lifecycle_epoch:
+            return
+
+        stored_access = d_data.get(f"{provider}_access_token")
+        stored_refresh = d_data.get(f"{provider}_refresh_token")
+        if observed_access_raw is not None and not _exact_raw_credential_equal(stored_access, observed_access_raw):
+            return
+        if observed_refresh_raw is not None and not _exact_raw_credential_equal(stored_refresh, observed_refresh_raw):
+            return
+
+        try:
+            computed_fp = compute_raw_credentials_fingerprint(stored_access, stored_refresh)
+        except Exception:
+            return
+
+        intent_status, parsed_intent, _ = parse_provider_operation_intent(d_data, provider)
+        if intent_status != "valid" or parsed_intent is None:
+            return
+        if parsed_intent["id"] != claim_id:
+            return
+        if parsed_intent["kind"] != "business":
+            return
+        if parsed_intent.get("bound_operation_id") != bound_operation_id:
+            return
+        if parsed_intent["phase"] != "provider_request_started":
+            return
+        if parsed_intent["generation"] != current_gen or parsed_intent["lifecycle_epoch"] != current_epoch:
+            return
+        if parsed_intent["credentials_fingerprint"] != computed_fp:
+            return
+
+        updates = {
+            f"{provider}_operation_intent_phase": "provider_outcome_uncertain",
+        }
+        transaction.update(doc_ref, updates)
+        mutated_box[0] = True
+        current_gen_box[0] = current_gen
+        current_epoch_box[0] = current_epoch
+        fp_box[0] = computed_fp
+
+    loop = asyncio.get_running_loop()
+    try:
+        transaction = db.transaction()
+        await loop.run_in_executor(None, lambda: _uncertain_txn(transaction))
+    except Exception:
+        return False
+
+    if not mutated_box[0]:
+        return False
+
+    post_snap = doc_ref.get()
+    if not getattr(post_snap, "exists", False):
+        return False
+    post_data = post_snap.to_dict()
+    if type(post_data) is not dict:
+        return False
+
+    post_status, post_intent, _ = parse_provider_operation_intent(post_data, provider)
+    if post_status != "valid" or post_intent is None:
+        return False
+    if post_intent["id"] != claim_id:
+        return False
+    if post_intent["phase"] != "provider_outcome_uncertain":
+        return False
+    if post_intent.get("bound_operation_id") != bound_operation_id:
+        return False
+    if post_intent["kind"] != "business":
+        return False
+    if post_intent["generation"] != current_gen_box[0] or post_intent["lifecycle_epoch"] != current_epoch_box[0]:
+        return False
+    if post_intent["credentials_fingerprint"] != fp_box[0]:
+        return False
+
     return True
+
+
+def classify_google_calendar_reconciliation_record(
+    data: Any,
+    *,
+    contractor_id: str,
+    bound_operation_id: str,
+    claim_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Pure intent-aware Google Calendar reconciliation record classifier.
+
+    Enforces the canonical durable credential contract (envelope floor, usable pair,
+    explicit scope, expiry shape, lifecycle, and AAD decryption) without mutation or provider calls.
+    Returns canonical internal snapshot dict or None if invalid.
+    """
+    if type(data) is not dict:
+        return None
+
+    try:
+        valid_cid = validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return None
+    if valid_cid is None:
+        return None
+
+    if (
+        type(bound_operation_id) is not str
+        or type(bound_operation_id) is bool
+        or not re.fullmatch(r"^[0-9a-f]{64}$", bound_operation_id)
+    ):
+        return None
+
+    if claim_id is not None and (
+        type(claim_id) is not str
+        or type(claim_id) is bool
+        or not _PERSISTED_OPERATION_INTENT_ID_REGEX.fullmatch(claim_id)
+    ):
+        return None
+
+    provider = "google_calendar"
+    intent_status, parsed_intent, _ = parse_provider_operation_intent(data, provider)
+    if intent_status not in ("absent", "valid"):
+        return None
+
+    if intent_status == "valid":
+        if parsed_intent is None:
+            return None
+        if parsed_intent.get("kind") != "business":
+            return None
+        if parsed_intent.get("phase") not in (
+            "provider_request_started",
+            "provider_outcome_uncertain",
+        ):
+            return None
+        if parsed_intent.get("bound_operation_id") != bound_operation_id:
+            return None
+        if claim_id is not None and parsed_intent.get("id") != claim_id:
+            return None
+
+        intent_free_data = dict(data)
+        for key in get_provider_operation_intent_keys(provider):
+            intent_free_data.pop(key, None)
+    else:
+        intent_free_data = dict(data)
+
+    status, snapshot, _ = _classify_durable_provider_record(
+        intent_free_data, provider, valid_cid
+    )
+    if status != "valid_normalized" or snapshot is None:
+        return None
+
+    raw_access = snapshot.get("access_token_raw")
+    raw_refresh = snapshot.get("refresh_token_raw")
+    try:
+        computed_fp = compute_raw_credentials_fingerprint(raw_access, raw_refresh)
+    except Exception:
+        return None
+
+    if intent_status == "valid":
+        if (
+            parsed_intent["generation"] != snapshot["generation"]
+            or parsed_intent["lifecycle_epoch"] != snapshot["lifecycle_epoch"]
+            or parsed_intent["credentials_fingerprint"] != computed_fp
+        ):
+            return None
+
+        return {
+            "authorization_status": "matching_claim",
+            "access_token": snapshot["access_token"],
+            "access_raw": raw_access,
+            "refresh_raw": raw_refresh,
+            "generation": snapshot["generation"],
+            "lifecycle_epoch": snapshot["lifecycle_epoch"],
+            "scope": snapshot.get("scope"),
+            "google_calendar_scope": snapshot.get("google_calendar_scope"),
+            "expires_at": snapshot.get("expires_at"),
+            "google_calendar_token_expires_at": snapshot.get(
+                "google_calendar_token_expires_at"
+            ),
+            "claim_id": parsed_intent["id"],
+            "bound_operation_id": bound_operation_id,
+            "phase": parsed_intent["phase"],
+            "credentials_fingerprint": computed_fp,
+        }
+
+    return {
+        "authorization_status": "verified_absent",
+        "access_token": snapshot["access_token"],
+        "access_raw": raw_access,
+        "refresh_raw": raw_refresh,
+        "generation": snapshot["generation"],
+        "lifecycle_epoch": snapshot["lifecycle_epoch"],
+        "scope": snapshot.get("scope"),
+        "google_calendar_scope": snapshot.get("google_calendar_scope"),
+        "expires_at": snapshot.get("expires_at"),
+        "google_calendar_token_expires_at": snapshot.get(
+            "google_calendar_token_expires_at"
+        ),
+        "credentials_fingerprint": computed_fp,
+    }
+
+
+async def load_google_calendar_reconciliation_snapshot(
+    *,
+    contractor_id: str,
+    bound_operation_id: str,
+    claim_id: str | None = None,
+    observed_generation: int | None = None,
+    observed_lifecycle_epoch: int | None = None,
+    db: Any = None,
+) -> dict[str, Any] | None:
+    """Load fresh durable Google Calendar reconciliation snapshot for started/uncertain bound claims.
+
+    Authorizes despite lease expiry and performs zero writes or token mutation.
+    When claim_id is omitted, discovers the stored claim matching bound_operation_id.
+    """
+    if db is None:
+        try:
+            db = get_firestore_client()
+        except Exception:
+            return None
+    if db is None:
+        return None
+
+    try:
+        valid_cid = validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return None
+    if valid_cid is None:
+        return None
+
+    doc_ref = db.collection("contractors").document(valid_cid)
+    try:
+        doc_snap = doc_ref.get()
+    except Exception:
+        return None
+    if not getattr(doc_snap, "exists", False):
+        return None
+
+    try:
+        d_data = doc_snap.to_dict()
+    except Exception:
+        return None
+    if type(d_data) is not dict:
+        return None
+
+    try:
+        _extract_snapshot_server_time(doc_snap)
+    except Exception:
+        return None
+
+    result = classify_google_calendar_reconciliation_record(
+        d_data,
+        contractor_id=valid_cid,
+        bound_operation_id=bound_operation_id,
+        claim_id=claim_id,
+    )
+    if result is None:
+        return None
+
+    if observed_generation is not None and result["generation"] != observed_generation:
+        return None
+    if (
+        observed_lifecycle_epoch is not None
+        and result["lifecycle_epoch"] != observed_lifecycle_epoch
+    ):
+        return None
+
+    return result
+
+
+async def clear_reconciled_google_calendar_operation_intent_cas(
+    *,
+    contractor_id: str,
+    claim_id: str,
+    bound_operation_id: str,
+    observed_generation: int | None = None,
+    observed_lifecycle_epoch: int | None = None,
+    observed_access_raw: Any = None,
+    observed_refresh_raw: Any = None,
+    db: Any = None,
+) -> bool:
+    """Clear a reconciled Google Calendar operation intent in started or uncertain phase."""
+    if db is None:
+        try:
+            db = get_firestore_client()
+        except Exception:
+            return False
+    if db is None:
+        return False
+
+    try:
+        valid_cid = validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return False
+    if valid_cid is None:
+        return False
+
+    if (
+        type(claim_id) is not str
+        or type(claim_id) is bool
+        or not _PERSISTED_OPERATION_INTENT_ID_REGEX.fullmatch(claim_id)
+    ):
+        return False
+
+    if type(bound_operation_id) is not str or type(bound_operation_id) is bool or not re.fullmatch(r"^[0-9a-f]{64}$", bound_operation_id):
+        return False
+
+    provider = "google_calendar"
+    doc_ref = db.collection("contractors").document(valid_cid)
+    mutated_box = [False]
+
+    @transactional
+    def _clear_txn(transaction):
+        mutated_box[0] = False
+        doc_snap = _get_doc_snapshot_in_txn(doc_ref, transaction)
+        if not getattr(doc_snap, "exists", False):
+            return
+        d_data = doc_snap.to_dict()
+        if type(d_data) is not dict or d_data.get("active") is not True:
+            return
+
+        lifecycle_ok, current_gen, current_epoch, _, _ = parse_durable_lifecycle_counters(d_data, provider)
+        if not lifecycle_ok:
+            return
+
+        if observed_generation is not None and current_gen != observed_generation:
+            return
+        if observed_lifecycle_epoch is not None and current_epoch != observed_lifecycle_epoch:
+            return
+
+        stored_access = d_data.get(f"{provider}_access_token")
+        stored_refresh = d_data.get(f"{provider}_refresh_token")
+        if observed_access_raw is not None and not _exact_raw_credential_equal(stored_access, observed_access_raw):
+            return
+        if observed_refresh_raw is not None and not _exact_raw_credential_equal(stored_refresh, observed_refresh_raw):
+            return
+
+        try:
+            computed_fp = compute_raw_credentials_fingerprint(stored_access, stored_refresh)
+        except Exception:
+            return
+
+        intent_status, parsed_intent, _ = parse_provider_operation_intent(d_data, provider)
+        if intent_status != "valid" or parsed_intent is None:
+            return
+        if parsed_intent["id"] != claim_id:
+            return
+        if parsed_intent["kind"] != "business":
+            return
+        if parsed_intent.get("bound_operation_id") != bound_operation_id:
+            return
+        if parsed_intent["phase"] not in ("provider_request_started", "provider_outcome_uncertain"):
+            return
+        if parsed_intent["generation"] != current_gen or parsed_intent["lifecycle_epoch"] != current_epoch:
+            return
+        if parsed_intent["credentials_fingerprint"] != computed_fp:
+            return
+
+        updates = {f: DELETE_FIELD for f in get_provider_operation_intent_keys(provider) if f in d_data}
+        transaction.update(doc_ref, updates)
+        mutated_box[0] = True
+
+    loop = asyncio.get_running_loop()
+    try:
+        transaction = db.transaction()
+        await loop.run_in_executor(None, lambda: _clear_txn(transaction))
+    except Exception:
+        return False
+
+    if not mutated_box[0]:
+        return False
+
+    post_snap = doc_ref.get()
+    if not getattr(post_snap, "exists", False):
+        return True
+    post_data = post_snap.to_dict()
+    if type(post_data) is not dict:
+        return False
+    p_status, p_parsed, _ = parse_provider_operation_intent(post_data, provider)
+    if p_status == "absent":
+        return True
+    if p_status == "valid" and p_parsed is not None and p_parsed["id"] != claim_id:
+        return True
+    return False
 
 
 async def transition_provider_reauthorization_attempt_to_started_cas(
@@ -2446,7 +2937,14 @@ async def disconnect_provider_envelope_cas(
             raise IntegrationTokenCASConflict("Malformed existing operation intent/quarantine state")
         elif intent_status == "valid" and parsed_intent is not None:
             if parsed_intent["phase"] == "provider_request_started":
-                raise IntegrationTokenCASConflict("Provider operation request started; disconnect pending completion of in-flight operation")
+                raise IntegrationTokenCASConflict(
+                    "Provider operation request started; disconnect pending completion of in-flight operation"
+                )
+            if parsed_intent["phase"] == "provider_outcome_uncertain":
+                raise IntegrationTokenCASConflict(
+                    "Provider operation outcome uncertain; disconnect pending reconciliation"
+                )
+
 
         server_now = _extract_snapshot_server_time(doc_snap)
 
@@ -3972,11 +4470,17 @@ async def consume_oauth_state(
             if intent_status == "valid" and parsed_intent is not None:
                 held_exp = parsed_intent["expires_at"]
                 held_phase = parsed_intent["phase"]
+                held_bound = parsed_intent.get("bound_operation_id")
+                if held_bound is not None and held_phase in ("provider_request_started", "provider_outcome_uncertain"):
+                    transaction.delete(state_ref)
+                    outcome_box[0] = ("lifecycle_mismatch", {}, {})
+                    return
                 if held_exp > server_now:
                     # Active intent of ANY kind blocks with zero HTTP
                     transaction.delete(state_ref)
                     outcome_box[0] = ("lifecycle_mismatch", {}, {})
                     return
+
                 else:
                     # Expired intent
                     if held_phase == "reserved":

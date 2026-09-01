@@ -11,12 +11,18 @@ alwaysApply: true
 3. Reduce in code (SHAs, test counts). Do not LLM-“combine.”
 4. Fresh-context reviewer on `origin/main...HEAD`. Worker ≠ reviewer.
 5. `git push -u origin HEAD` → `gh pr create --repo delimatsuo/heykevin` →
-   `gh pr merge --merge` if reviewed-clean and not owner-gated. Feature rebase:
-   `git push --force-with-lease origin <feature-branch>` only.
+   `gh pr merge --merge` if reviewed-clean and not owner-gated. No branch may be
+   force-pushed; rebasing is allowed only before the first publication; after a
+   branch is published, update it by merging the latest target branch into the
+   feature branch and pushing normally; if history replacement is truly needed,
+   create a new branch and replacement PR instead of rewriting the published
+   branch.
 6. Stage explicit paths. Never `git add -A`, `--no-verify`, or git config.
 7. Before “done”:
-   `PATH="<clone>/.venv/bin:$PATH" python -m pytest -q`
+   `KEVIN_DISABLE_DOTENV=1 PATH="<clone>/.venv/bin:$PATH" python -m pytest -q`
    (Deli’s Mac example: `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`).
+   Prefixing `KEVIN_DISABLE_DOTENV=1` prevents dotenv access in protected
+   agent/test sessions.
    Do not export any name in `FORBIDDEN_ENV_NAMES` from
    `tests/unit/test_visual_diagnosis_*.py` at process start (includes
    `TWILIO_*`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `USER_PHONE`, and the
@@ -25,11 +31,14 @@ alwaysApply: true
 8. Mutation-check new guards. Quote plan criteria; don’t paraphrase.
    Fixture ≠ live Gemini. Default-off on `main` ≠ flags on.
 
-# Model routing (node complexity, not the session)
+# Model routing (exact current policy)
 
-Mechanical: `composer-2.5-fast` or `cursor-grok-4.5-high-fast`.
-Implementation/PRs: `cursor-grok-4.6-xhigh` or `claude-sonnet-5-thinking-high`.
-Review/security: `claude-opus-5-thinking-high` (fallback
-`claude-opus-4-8-thinking-high`, then `cursor-grok-4.6-xhigh`).
-Research: `claude-sonnet-5-thinking-high` or `cursor-grok-4.6-xhigh`, not opus.
-On 429 / usage cap, switch; do not stall. Do not invent slugs.
+- **Sol / Master Model:** Owns architecture, spec/brief writing, ambiguous judgment, independent audit, and all Git operations.
+- **Pinned Builder Coding:** Defaults to headless `agy` with `gemini-3.7-flash-high`.
+- **Mechanical Tiers:** `gemini-3.7-flash-low` and `gemini-3.7-flash-medium` are reserved exclusively for mechanical scaffolds, renames, boilerplate, count checks, and configuration changes.
+- **Prohibited Models:** Never route implementation or audit tasks to `agy` Claude 4.6 models.
+- **Dispatch Rule:** Master states tier and reason before dispatch.
+- **Canonical Transport Command:**
+  ```bash
+  agy -p <brief> --model <tier> --output-format json --dangerously-skip-permissions --print-timeout 30m
+  ```

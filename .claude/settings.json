@@ -1,0 +1,57 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Bash(rm)",
+      "Bash(rm *)",
+      "Bash(/bin/rm)",
+      "Bash(/bin/rm *)",
+      "Bash(/usr/bin/rm)",
+      "Bash(/usr/bin/rm *)",
+      "Bash(git push -f)",
+      "Bash(git push -f *)",
+      "Bash(git push * -f)",
+      "Bash(git push * -f *)",
+      "Bash(git push --force*)",
+      "Bash(git push * --force*)",
+      "Bash(git push +*)",
+      "Bash(git push * +*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyRead": [
+        ".env",
+        ".env.*",
+        "**/.env",
+        "**/.env.*",
+        "./.env",
+        "./.env.*",
+        "./**/.env",
+        "./**/.env.*"
+      ]
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/deny_force_push_hook.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

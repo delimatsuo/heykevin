@@ -6,7 +6,8 @@ import json as _json
 import re as _re
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings
+
+from app.utils.pydantic_settings import DotenvProtectedBaseSettings
 
 PRODUCTION_GCP_PROJECT_ID = "kevin-491315"
 PRODUCTION_CLOUD_RUN_URL = "https://kevin-api-752910912062.us-central1.run.app"
@@ -15,7 +16,7 @@ _E164_RE = _re.compile(r"\+[1-9]\d{7,14}\Z")
 _TWILIO_USAGE_TRIGGER_SID_RE = _re.compile(r"UT[0-9a-fA-F]{32}\Z")
 
 
-class Settings(BaseSettings):
+class Settings(DotenvProtectedBaseSettings):
     # Twilio
     twilio_account_sid: str
     twilio_auth_token: str

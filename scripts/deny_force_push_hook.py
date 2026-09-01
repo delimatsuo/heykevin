@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import sys
+from collections.abc import Callable
 
 COMMAND_SEPARATORS = {
     ";",
@@ -768,6 +769,162 @@ def _unwrap_xargs(tokens: list[str]) -> list[str]:
     return result
 
 
+class _HereDocTarget:
+    """Represents a pending here-doc redirection."""
+
+    __slots__ = ("delimiter", "is_quoted", "strip_tabs")
+
+    def __init__(self, delimiter: str, is_quoted: bool, strip_tabs: bool) -> None:
+        self.delimiter = delimiter
+        self.is_quoted = is_quoted
+        self.strip_tabs = strip_tabs
+
+
+def _parse_heredoc_delimiter(command: str, start: int) -> tuple[_HereDocTarget, int]:
+    """Parse a here-doc redirection starting at index `start` (pointing at first '<' of '<<').
+
+    Returns (_HereDocTarget, next_index_after_delimiter_word).
+    Raises ValueError if delimiter word is missing or quote in delimiter is unclosed.
+    """
+    n = len(command)
+    pos = start + 2
+    strip_tabs = False
+    if pos < n and command[pos] == "-":
+        strip_tabs = True
+        pos += 1
+
+    # Skip optional horizontal whitespace
+    while pos < n and command[pos] in " \t":
+        pos += 1
+
+    if pos >= n or command[pos] in "\r\n;&|()<>":
+        raise ValueError("Missing delimiter word after here-doc redirection")
+
+    delim_chars: list[str] = []
+    is_quoted = False
+    i = pos
+
+    while i < n:
+        ch = command[i]
+        if ch in " \t\r\n;&|()<>":
+            break
+        elif ch == "\\":
+            is_quoted = True
+            i += 1
+            if i < n:
+                if command[i] == "\n":
+                    i += 1
+                    continue
+                delim_chars.append(command[i])
+                i += 1
+            else:
+                raise ValueError("Incomplete backslash in here-doc delimiter")
+        elif ch == "'":
+            is_quoted = True
+            i += 1
+            while i < n and command[i] != "'":
+                delim_chars.append(command[i])
+                i += 1
+            if i >= n:
+                raise ValueError("Unclosed single quote in here-doc delimiter")
+            i += 1
+        elif ch == '"':
+            is_quoted = True
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == "\\":
+                    i += 1
+                    if i >= n:
+                        raise ValueError("Unclosed double quote in here-doc delimiter")
+                    next_ch = command[i]
+                    if next_ch == "\n":
+                        i += 1
+                        continue
+                    elif next_ch in {"$", "`", '"', "\\"}:
+                        delim_chars.append(next_ch)
+                        i += 1
+                        continue
+                    else:
+                        delim_chars.append("\\")
+                        continue
+                else:
+                    delim_chars.append(command[i])
+                    i += 1
+            if i >= n:
+                raise ValueError("Unclosed double quote in here-doc delimiter")
+            i += 1
+        elif ch == "$" and i + 1 < n and command[i + 1] == "'":
+            is_quoted = True
+            i += 2
+            while i < n and command[i] != "'":
+                if command[i] == "\\":
+                    raise ValueError(
+                        "ANSI-C backslash escapes in here-doc delimiters are unsupported and ambiguous"
+                    )
+                delim_chars.append(command[i])
+                i += 1
+            if i >= n:
+                raise ValueError("Unclosed ANSI-C quote in here-doc delimiter")
+            i += 1
+        else:
+            delim_chars.append(ch)
+            i += 1
+
+    if i == pos:
+        raise ValueError("Missing delimiter word after here-doc redirection")
+
+    delimiter = "".join(delim_chars)
+    return _HereDocTarget(delimiter=delimiter, is_quoted=is_quoted, strip_tabs=strip_tabs), i
+
+
+def _consume_heredoc_body(
+    command: str, start: int, target: _HereDocTarget
+) -> tuple[str, int]:
+    """Consume a here-doc body from command starting at line start `start`.
+
+    Returns (body_text, next_index_after_delimiter_line).
+    Raises ValueError if delimiter line is not found before EOF.
+    """
+    n = len(command)
+    i = start
+    body_parts: list[str] = []
+
+    while i <= n:
+        if i == n:
+            raise ValueError(
+                f"Unclosed here-doc body: missing terminating delimiter {target.delimiter!r}"
+            )
+
+        line_start = i
+        newline_idx = command.find("\n", line_start)
+        if newline_idx == -1:
+            line = command[line_start:]
+            next_line_start = n
+        else:
+            line = command[line_start:newline_idx]
+            next_line_start = newline_idx + 1
+
+        if target.strip_tabs:
+            check_line = line.lstrip("\t")
+        else:
+            check_line = line
+
+        if check_line == target.delimiter:
+            body_text = "".join(body_parts)
+            return body_text, next_line_start
+
+        if newline_idx == -1:
+            body_parts.append(line)
+            i = n
+        else:
+            body_parts.append(command[line_start:next_line_start])
+            i = next_line_start
+
+    raise ValueError(
+        f"Unclosed here-doc body: missing terminating delimiter {target.delimiter!r}"
+    )
+
+
 def _strip_comments_preserving_newlines(command: str) -> str:
     """Strip unquoted shell comments while preserving newline command boundaries.
 
@@ -779,8 +936,12 @@ def _strip_comments_preserving_newlines(command: str) -> str:
     Escaped semicolons and parentheses in NORMAL state, as well as semicolons and
     parentheses inside quotes, are replaced with collision-resistant sentinels
     so they are not treated as structural delimiters.
+
+    Here-doc bodies are skipped from the command token stream while preserving
+    the here-doc redirection operator on the command line.
     """
     result: list[str] = []
+    pending_heredocs: list[_HereDocTarget] = []
     i = 0
     n = len(command)
     state = "NORMAL"
@@ -831,6 +992,34 @@ def _strip_comments_preserving_newlines(command: str) -> str:
                 state = "COMMENT"
                 i += 1
                 continue
+            elif ch == "<" and i + 1 < n and command[i + 1] == "<":
+                if i + 2 < n and command[i + 2] == "<":
+                    result.append(command[i : i + 3])
+                    i += 3
+                    prev_char = "<"
+                    continue
+                target, next_i = _parse_heredoc_delimiter(command, i)
+                pending_heredocs.append(target)
+                result.append(command[i:next_i])
+                i = next_i
+                prev_char = target.delimiter[-1] if target.delimiter else ">"
+                continue
+            elif ch == "\n":
+                result.append("\n")
+                if pending_heredocs:
+                    next_start = i + 1
+                    for hd in pending_heredocs:
+                        _, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                    pending_heredocs.clear()
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    prev_char = "\n"
+                    i += 1
+                    continue
             else:
                 result.append(ch)
                 prev_char = ch
@@ -869,7 +1058,7 @@ def _strip_comments_preserving_newlines(command: str) -> str:
             if ch == '"':
                 state = "NORMAL"
                 result.append(ch)
-                prev_char = ch
+                prev_char = '"'
                 i += 1
                 continue
             elif ch == "\\":
@@ -921,12 +1110,30 @@ def _strip_comments_preserving_newlines(command: str) -> str:
         elif state == "COMMENT":
             if ch == "\n":
                 result.append("\n")
-                state = "NORMAL"
-                prev_char = "\n"
+                if pending_heredocs:
+                    next_start = i + 1
+                    state = "NORMAL"
+                    for hd in pending_heredocs:
+                        _, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                    pending_heredocs.clear()
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    state = "NORMAL"
+                    prev_char = "\n"
+                    i += 1
+                    continue
             i += 1
             continue
 
+    if pending_heredocs:
+        raise ValueError("Unclosed here-doc body")
+
     return "".join(result)
+
 
 
 def _tokenize_command_raw(command: str) -> list[list[str]]:
@@ -976,9 +1183,32 @@ def _is_var_assignment(token: str) -> bool:
 
 def _is_redirection(token: str) -> bool:
     """Check if token is a redirection operator."""
-    if token in {">", ">>", "<", "<>", ">&", "<&", "&>", ">|", "1>", "2>", "1>>", "2>>"}:
+    if token in {
+        ">",
+        ">>",
+        "<",
+        "<>",
+        ">&",
+        "<&",
+        "&>",
+        ">|",
+        "1>",
+        "2>",
+        "1>>",
+        "2>>",
+        "<<",
+        "<<-",
+        "<<<",
+        "0<",
+        "0<<",
+        "0<<-",
+        "1<<",
+        "1<<-",
+        "2<<",
+        "2<<-",
+    }:
         return True
-    if len(token) >= 2 and token[0].isdigit() and token[1] in {">", "<"}:
+    if len(token) >= 2 and token[0].isdigit() and (token[1] in {">", "<"} or token[1:3] in {">>", "<<"}):
         return True
     return False
 
@@ -1068,7 +1298,30 @@ def _clean_command_segment(tokens: list[str]) -> list[str]:
     while i < len(tokens):
         token = tokens[i]
         if _is_redirection(token):
-            if token in {">", ">>", "<", "<>", ">&", "<&", "&>", ">|", "1>", "2>", "1>>", "2>>"}:
+            if token in {
+                ">",
+                ">>",
+                "<",
+                "<>",
+                ">&",
+                "<&",
+                "&>",
+                ">|",
+                "1>",
+                "2>",
+                "1>>",
+                "2>>",
+                "<<",
+                "<<-",
+                "<<<",
+                "0<",
+                "0<<",
+                "0<<-",
+                "1<<",
+                "1<<-",
+                "2<<",
+                "2<<-",
+            } or (len(token) >= 2 and token[0].isdigit()):
                 i += 2
             else:
                 i += 1
@@ -1631,13 +1884,583 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
     return False
 
 
-def contains_forced_git_push(command: str) -> bool:
+MAX_SUBSTITUTION_DEPTH = 20
+
+
+def _parse_backtick_body(
+    command: str, start: int, in_double_quotes: bool = False
+) -> tuple[str, int]:
+    """Parse a legacy backtick substitution `...` starting at `start`.
+
+    Returns (unescaped_body, next_index_after_closing_backtick).
+    Raises ValueError if unmatched/unclosed.
+    """
+    n = len(command)
+    i = start + 1
+    body_chars: list[str] = []
+
+    while i < n:
+        ch = command[i]
+        if ch == "`":
+            return "".join(body_chars), i + 1
+
+        if ch == "\\":
+            if i + 1 < n:
+                next_ch = command[i + 1]
+                if next_ch in {"`", "\\", "$"} or (in_double_quotes and next_ch == '"'):
+                    body_chars.append(next_ch)
+                    i += 2
+                    continue
+                else:
+                    body_chars.append("\\")
+                    body_chars.append(next_ch)
+                    i += 2
+                    continue
+            else:
+                body_chars.append("\\")
+                i += 1
+                continue
+
+        body_chars.append(ch)
+        i += 1
+
+    raise ValueError("Unmatched opening backtick in command substitution")
+
+
+def _parse_paren_body(
+    command: str, start: int, prefix_len: int, is_arith: bool = False
+) -> tuple[str, int]:
+    """Parse $(...), <(...), >(...), or $((...)) starting at `start`.
+
+    Returns (body, next_index_after_closing_paren).
+    Raises ValueError if unmatched/unclosed.
+    """
+    n = len(command)
+    i = start + prefix_len
+    body_start = i
+    paren_depth = 2 if is_arith else 1
+    state = "NORMAL"
+    prev_char: str | None = None
+    pending_heredocs: list[_HereDocTarget] = []
+
+    while i < n:
+        ch = command[i]
+
+        if state == "NORMAL":
+            if ch == "\\":
+                i += 2
+                prev_char = "\\"
+                continue
+
+            elif ch == "'":
+                state = "SINGLE_QUOTE"
+                prev_char = "'"
+                i += 1
+                continue
+
+            elif ch == '"':
+                state = "DOUBLE_QUOTE"
+                prev_char = '"'
+                i += 1
+                continue
+
+            elif ch == "#" and (prev_char is None or prev_char in " \t\r\n;&|(){}<>"):
+                state = "COMMENT"
+                i += 1
+                continue
+
+            elif ch == "<" and i + 1 < n and command[i + 1] == "<":
+                if i + 2 < n and command[i + 2] == "<":
+                    i += 3
+                    prev_char = "<"
+                    continue
+                target, next_i = _parse_heredoc_delimiter(command, i)
+                pending_heredocs.append(target)
+                i = next_i
+                prev_char = target.delimiter[-1] if target.delimiter else ">"
+                continue
+
+            elif ch == "`":
+                _, next_i = _parse_backtick_body(command, i, in_double_quotes=False)
+                i = next_i
+                prev_char = "`"
+                continue
+
+            elif ch == "$" and i + 1 < n:
+                if command[i + 1 : i + 3] == "((":
+                    _, next_i = _parse_paren_body(
+                        command, i, prefix_len=3, is_arith=True
+                    )
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                elif command[i + 1] == "(":
+                    _, next_i = _parse_paren_body(
+                        command, i, prefix_len=2, is_arith=False
+                    )
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                else:
+                    prev_char = "$"
+                    i += 1
+                    continue
+
+            elif (ch == "<" or ch == ">") and i + 1 < n and command[i + 1] == "(":
+                _, next_i = _parse_paren_body(
+                    command, i, prefix_len=2, is_arith=False
+                )
+                i = next_i
+                prev_char = ")"
+                continue
+
+            elif ch == "(":
+                paren_depth += 1
+                prev_char = "("
+                i += 1
+                continue
+
+            elif ch == ")":
+                paren_depth -= 1
+                if paren_depth == 0:
+                    if pending_heredocs:
+                        raise ValueError("Unclosed here-doc body in command substitution")
+                    body = command[body_start : (i - 1 if is_arith else i)]
+                    return body, i + 1
+                prev_char = ")"
+                i += 1
+                continue
+
+            elif ch == "\n":
+                if pending_heredocs:
+                    next_start = i + 1
+                    for hd in pending_heredocs:
+                        _, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                    pending_heredocs.clear()
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    prev_char = "\n"
+                    i += 1
+                    continue
+
+            else:
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "SINGLE_QUOTE":
+            if ch == "'":
+                state = "NORMAL"
+                prev_char = "'"
+                i += 1
+                continue
+            else:
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "DOUBLE_QUOTE":
+            if ch == '"':
+                state = "NORMAL"
+                prev_char = '"'
+                i += 1
+                continue
+
+            elif ch == "\\":
+                if i + 1 < n and command[i + 1] in {"$", "`", '"', "\\", "\n"}:
+                    i += 2
+                    prev_char = "\\"
+                    continue
+                else:
+                    i += 1
+                    prev_char = "\\"
+                    continue
+
+            elif ch == "`":
+                _, next_i = _parse_backtick_body(command, i, in_double_quotes=True)
+                i = next_i
+                prev_char = "`"
+                continue
+
+            elif ch == "$" and i + 1 < n:
+                if command[i + 1 : i + 3] == "((":
+                    _, next_i = _parse_paren_body(
+                        command, i, prefix_len=3, is_arith=True
+                    )
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                elif command[i + 1] == "(":
+                    _, next_i = _parse_paren_body(
+                        command, i, prefix_len=2, is_arith=False
+                    )
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                else:
+                    prev_char = "$"
+                    i += 1
+                    continue
+
+            else:
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "COMMENT":
+            if ch == "\n":
+                if pending_heredocs:
+                    next_start = i + 1
+                    state = "NORMAL"
+                    for hd in pending_heredocs:
+                        _, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                    pending_heredocs.clear()
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    state = "NORMAL"
+                    prev_char = "\n"
+                    i += 1
+                    continue
+            i += 1
+            continue
+
+    if pending_heredocs:
+        raise ValueError("Unclosed here-doc body in command substitution")
+    if state == "SINGLE_QUOTE":
+        raise ValueError("Unclosed single quote in command substitution")
+    if state == "DOUBLE_QUOTE":
+        raise ValueError("Unclosed double quote in command substitution")
+    if is_arith:
+        raise ValueError("Unmatched '$((' in arithmetic expansion")
+    if prefix_len == 2 and command[start] in {"<", ">"}:
+        raise ValueError(f"Unmatched '{command[start]}(' in process substitution")
+    raise ValueError("Unmatched '$(' in command substitution")
+
+
+def _extract_heredoc_body_substitutions(body: str) -> list[tuple[str, str]]:
+    """Extract executable substitutions from an unquoted here-doc body.
+
+    Quotes are literal and do not suppress substitutions.
+    Process substitutions <(...) and >(...) are literal text in here-doc bodies.
+    Backslash escapes $, `, \\, and \\n.
+    """
+    substitutions: list[tuple[str, str]] = []
+    i = 0
+    n = len(body)
+
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            if i + 1 < n:
+                next_ch = body[i + 1]
+                if next_ch in {"$", "`", "\\", "\n"}:
+                    i += 2
+                    continue
+                else:
+                    i += 2
+                    continue
+            else:
+                i += 1
+                continue
+
+        elif ch == "`":
+            body_str, next_i = _parse_backtick_body(body, i, in_double_quotes=True)
+            substitutions.append(("backtick", body_str))
+            i = next_i
+            continue
+
+        elif ch == "$" and i + 1 < n:
+            if body[i + 1 : i + 3] == "((":
+                body_str, next_i = _parse_paren_body(body, i, prefix_len=3, is_arith=True)
+                substitutions.append(("arith", body_str))
+                i = next_i
+                continue
+            elif body[i + 1] == "(":
+                body_str, next_i = _parse_paren_body(body, i, prefix_len=2, is_arith=False)
+                substitutions.append(("cmd", body_str))
+                i = next_i
+                continue
+            else:
+                i += 1
+                continue
+
+        else:
+            i += 1
+
+    return substitutions
+
+
+def _extract_raw_substitutions(command: str) -> list[tuple[str, str]]:
+    """Lexically extract immediate executable substitution bodies from a shell command string.
+
+    Returns a list of (kind, body) tuples where kind is one of:
+    'cmd', 'backtick', 'process_in', 'process_out', 'arith'.
+    Raises ValueError on malformed or unclosed substitutions or unclosed here-docs.
+    """
+    substitutions: list[tuple[str, str]] = []
+    pending_heredocs: list[_HereDocTarget] = []
+    i = 0
+    n = len(command)
+    state = "NORMAL"
+    prev_char: str | None = None
+
+    while i < n:
+        ch = command[i]
+
+        if state == "NORMAL":
+            if ch == "\\":
+                i += 2
+                prev_char = "\\"
+                continue
+
+            elif ch == "'":
+                state = "SINGLE_QUOTE"
+                prev_char = "'"
+                i += 1
+                continue
+
+            elif ch == '"':
+                state = "DOUBLE_QUOTE"
+                prev_char = '"'
+                i += 1
+                continue
+
+            elif ch == "#" and (prev_char is None or prev_char in " \t\r\n;&|(){}<>"):
+                state = "COMMENT"
+                i += 1
+                continue
+
+            elif ch == "<" and i + 1 < n and command[i + 1] == "<":
+                if i + 2 < n and command[i + 2] == "<":
+                    i += 3
+                    prev_char = "<"
+                    continue
+                target, next_i = _parse_heredoc_delimiter(command, i)
+                pending_heredocs.append(target)
+                i = next_i
+                prev_char = target.delimiter[-1] if target.delimiter else ">"
+                continue
+
+            elif ch == "`":
+                body, next_i = _parse_backtick_body(command, i, in_double_quotes=False)
+                substitutions.append(("backtick", body))
+                i = next_i
+                prev_char = "`"
+                continue
+
+            elif ch == "$" and i + 1 < n:
+                if command[i + 1 : i + 3] == "((":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=3, is_arith=True
+                    )
+                    substitutions.append(("arith", body))
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                elif command[i + 1] == "(":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=2, is_arith=False
+                    )
+                    substitutions.append(("cmd", body))
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                else:
+                    prev_char = ch
+                    i += 1
+                    continue
+
+            elif ch == "<" and i + 1 < n and command[i + 1] == "(":
+                body, next_i = _parse_paren_body(
+                    command, i, prefix_len=2, is_arith=False
+                )
+                substitutions.append(("process_in", body))
+                i = next_i
+                prev_char = ")"
+                continue
+
+            elif ch == ">" and i + 1 < n and command[i + 1] == "(":
+                body, next_i = _parse_paren_body(
+                    command, i, prefix_len=2, is_arith=False
+                )
+                substitutions.append(("process_out", body))
+                i = next_i
+                prev_char = ")"
+                continue
+
+            elif ch == "\n":
+                if pending_heredocs:
+                    next_start = i + 1
+                    for hd in pending_heredocs:
+                        body, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                        if not hd.is_quoted:
+                            substitutions.extend(
+                                _extract_heredoc_body_substitutions(body)
+                            )
+                    pending_heredocs.clear()
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    prev_char = "\n"
+                    i += 1
+                    continue
+
+            else:
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "SINGLE_QUOTE":
+            if ch == "'":
+                state = "NORMAL"
+                prev_char = "'"
+                i += 1
+                continue
+            else:
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "DOUBLE_QUOTE":
+            if ch == '"':
+                state = "NORMAL"
+                prev_char = '"'
+                i += 1
+                continue
+
+            elif ch == "\\":
+                if i + 1 < n and command[i + 1] in {"$", "`", '"', "\\", "\n"}:
+                    i += 2
+                    prev_char = "\\"
+                    continue
+                else:
+                    i += 1
+                    prev_char = "\\"
+                    continue
+
+            elif ch == "`":
+                body, next_i = _parse_backtick_body(command, i, in_double_quotes=True)
+                substitutions.append(("backtick", body))
+                i = next_i
+                prev_char = "`"
+                continue
+
+            elif ch == "$" and i + 1 < n:
+                if command[i + 1 : i + 3] == "((":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=3, is_arith=True
+                    )
+                    substitutions.append(("arith", body))
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                elif command[i + 1] == "(":
+                    body, next_i = _parse_paren_body(
+                        command, i, prefix_len=2, is_arith=False
+                    )
+                    substitutions.append(("cmd", body))
+                    i = next_i
+                    prev_char = ")"
+                    continue
+                else:
+                    prev_char = ch
+                    i += 1
+                    continue
+
+            else:
+                prev_char = ch
+                i += 1
+                continue
+
+        elif state == "COMMENT":
+            if ch == "\n":
+                if pending_heredocs:
+                    next_start = i + 1
+                    state = "NORMAL"
+                    for hd in pending_heredocs:
+                        body, next_start = _consume_heredoc_body(
+                            command, next_start, hd
+                        )
+                        if not hd.is_quoted:
+                            substitutions.extend(
+                                _extract_heredoc_body_substitutions(body)
+                            )
+                    pending_heredocs.clear()
+                    i = next_start
+                    prev_char = "\n"
+                    continue
+                else:
+                    state = "NORMAL"
+                    prev_char = "\n"
+                    i += 1
+                    continue
+            i += 1
+            continue
+
+    if pending_heredocs:
+        raise ValueError("Unclosed here-doc body")
+
+    if state in {"SINGLE_QUOTE", "DOUBLE_QUOTE"}:
+        raise ValueError(f"Unclosed quote in command: {state}")
+
+    return substitutions
+
+
+def _inspect_substitutions(
+    command: str,
+    checker_fn: Callable[[str, int], bool],
+    depth: int,
+) -> bool:
+    """Inspect executable shell substitutions anywhere in command.
+
+    Recursively scans command substitutions $(...), legacy backticks `...`,
+    Bash process substitutions <(...) / >(...), and arithmetic expansions $((...)).
+    Raises ValueError if depth exceeds MAX_SUBSTITUTION_DEPTH or syntax is unclosed.
+    """
+    if depth > MAX_SUBSTITUTION_DEPTH:
+        raise ValueError(
+            f"Maximum substitution nesting depth ({MAX_SUBSTITUTION_DEPTH}) exceeded"
+        )
+
+    substitutions = _extract_raw_substitutions(command)
+    for kind, body in substitutions:
+        if kind == "arith":
+            if _inspect_substitutions(body, checker_fn, depth + 1):
+                return True
+        else:
+            if checker_fn(body, depth + 1):
+                return True
+
+    return False
+
+
+def contains_forced_git_push(command: str, _depth: int = 0) -> bool:
     """Pure function checking whether a shell command contains a forced git push.
 
-    Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes).
+    Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes
+    or malformed/unmatched command substitutions).
     """
+    if _depth > MAX_SUBSTITUTION_DEPTH:
+        raise ValueError(
+            f"Maximum substitution nesting depth ({MAX_SUBSTITUTION_DEPTH}) exceeded"
+        )
+
     if not command or not command.strip():
         return False
+
+    if _inspect_substitutions(command, contains_forced_git_push, _depth):
+        return True
 
     commands = _tokenize_command_raw(command)
     for cmd_tokens in commands:
@@ -1648,13 +2471,22 @@ def contains_forced_git_push(command: str) -> bool:
     return False
 
 
-def contains_forbidden_rm(command: str) -> bool:
+def contains_forbidden_rm(command: str, _depth: int = 0) -> bool:
     """Pure function checking whether a shell command contains a forbidden destructive rm invocation.
 
-    Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes).
+    Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes
+    or malformed/unmatched command substitutions).
     """
+    if _depth > MAX_SUBSTITUTION_DEPTH:
+        raise ValueError(
+            f"Maximum substitution nesting depth ({MAX_SUBSTITUTION_DEPTH}) exceeded"
+        )
+
     if not command or not command.strip():
         return False
+
+    if _inspect_substitutions(command, contains_forbidden_rm, _depth):
+        return True
 
     commands = _tokenize_command_raw(command)
     for cmd_tokens in commands:
@@ -1663,6 +2495,7 @@ def contains_forbidden_rm(command: str) -> bool:
             return True
 
     return False
+
 
 
 def main() -> None:

@@ -17,13 +17,16 @@ from scripts.deny_force_push_hook import (
     _extract_find_actions,
     _extract_initial_backtick_args,
     _extract_initial_dynamic_args,
+    _extract_raw_substitutions,
     _has_forcing_git_config,
     _has_shell_expansion,
     _inspect_git_invocation,
     _inspect_git_invocation_for_rm,
     _is_all_parens,
     _is_forced_push_args,
+    _parse_backtick_body,
     _parse_git_global_configs,
+    _parse_paren_body,
     _reconstruct_git_args,
     _scan_git_forcing_configs,
     _split_into_commands,
@@ -2802,3 +2805,417 @@ class TestQuotedEscapedParentheses:
         res = self._run_hook(payload)
         assert res.returncode == 2
         assert "Shell tokenization failed" in res.stderr
+
+
+NESTED_BLOCKED_GIT_PUSH_COMMANDS = [
+    'echo "$(git push -f origin HEAD)"',
+    'printf %s "prefix-$(git push --force-with-lease origin HEAD)-suffix"',
+    "echo `git push --mirror origin`",
+    'printf %s "`git -c remote.origin.push=+refs/heads/main:refs/heads/main push origin`"',
+    'echo "$(printf \'%s\' "$(git push -f origin HEAD)")"',
+    'echo "$(( $(git push -f origin HEAD; echo 0) + 1 ))"',
+    "cat <(git push -f origin HEAD)",
+    "tee >(git push --force origin HEAD)",
+]
+
+NESTED_BLOCKED_RM_COMMANDS = [
+    'echo "$(rm -rf target)"',
+    'printf %s "prefix-$(rm --recursive --force target)-suffix"',
+    "echo `rm -fr target`",
+    'echo "$(printf \'%s\' "$(rm -Rf target)")"',
+    "cat <(rm -rf target)",
+    "tee >(rm --force --recursive target)",
+]
+
+NESTED_SAFE_CONTROLS = [
+    "echo '$(git push -f origin HEAD)'",
+    "echo '\\$(git push -f origin HEAD)'",
+    'echo "\\`git push -f origin HEAD\\`"',
+    "echo '$(rm -rf target)'",
+    "echo '\\$(rm -rf target)'",
+    'echo "\\`rm -rf target\\`"',
+    'echo "$(git push origin HEAD)"',
+    'echo "$(rm -r target)"',
+    'echo "$((1 + 2))"',
+    "printf '%s' '<(git push -f origin HEAD)'",
+    "printf '%s' '>(rm -rf target)'",
+]
+
+
+class TestNestedSubstitutionsPure:
+    """Pure-function tests for nested command, backtick, process, and arithmetic substitutions."""
+
+    @pytest.mark.parametrize("command", NESTED_BLOCKED_GIT_PUSH_COMMANDS)
+    def test_blocks_nested_force_push_variants(self, command: str) -> None:
+        assert contains_forced_git_push(command) is True, f"Expected {command!r} to be blocked"
+
+    @pytest.mark.parametrize("command", NESTED_BLOCKED_RM_COMMANDS)
+    def test_blocks_nested_destructive_rm_variants(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is True, f"Expected {command!r} to be blocked"
+
+    @pytest.mark.parametrize("command", NESTED_SAFE_CONTROLS)
+    def test_allows_nested_safe_controls(self, command: str) -> None:
+        assert (
+            contains_forced_git_push(command) is False
+        ), f"Expected {command!r} to be allowed by git guard"
+        assert (
+            contains_forbidden_rm(command) is False
+        ), f"Expected {command!r} to be allowed by rm guard"
+
+    def test_nested_substitution_depth_within_limit(self) -> None:
+        inner = "git push -f origin HEAD"
+        for _ in range(19):
+            inner = f"echo $({inner})"
+        assert contains_forced_git_push(inner) is True
+
+    def test_nested_substitution_depth_exceeded_raises_value_error(self) -> None:
+        inner = "git push -f origin HEAD"
+        for _ in range(21):
+            inner = f"echo $({inner})"
+        with pytest.raises(ValueError, match="Maximum substitution nesting depth"):
+            contains_forced_git_push(inner)
+        with pytest.raises(ValueError, match="Maximum substitution nesting depth"):
+            contains_forbidden_rm(inner)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "$(git push -f origin HEAD"',
+            'echo "`git push -f origin HEAD"',
+            "cat <(git push -f origin HEAD",
+            'echo "$((1 + 2"',
+            'echo "$(printf \'%s\' "$(git push -f origin HEAD)"',
+            'echo "$(rm -rf target"',
+            "tee >(rm -rf target",
+            'echo "$(( $(git push -f origin HEAD; echo 0) + 1 "',
+        ],
+    )
+    def test_malformed_unclosed_substitutions_raise_value_error(self, command: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(command)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(command)
+
+
+class TestNestedSubstitutionsCLI:
+    """CLI end-to-end contract tests for nested and embedded substitutions."""
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    @pytest.mark.parametrize("cmd", NESTED_BLOCKED_GIT_PUSH_COMMANDS)
+    def test_cli_denies_embedded_substitutions_git_push(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PreToolUse"
+        assert hook_out["permissionDecision"] == "deny"
+        assert "no-force-push" in hook_out["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize("cmd", NESTED_BLOCKED_RM_COMMANDS)
+    def test_cli_denies_embedded_substitutions_destructive_rm(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PreToolUse"
+        assert hook_out["permissionDecision"] == "deny"
+        assert "destructive" in hook_out["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize("cmd", NESTED_SAFE_CONTROLS)
+    def test_cli_allows_nested_safe_controls(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'echo "$(git push -f origin HEAD"',
+            'echo "`git push -f origin HEAD"',
+            "cat <(git push -f origin HEAD",
+            'echo "$((1 + 2"',
+            'echo "$(printf \'%s\' "$(git push -f origin HEAD)"',
+            'echo "$(rm -rf target"',
+            "tee >(rm -rf target",
+            'echo "$(( $(git push -f origin HEAD; echo 0) + 1 "',
+        ],
+    )
+    def test_cli_malformed_nested_substitution_fails_closed(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_depth_exceeded_fails_closed(self) -> None:
+        inner = "git push -f origin HEAD"
+        for _ in range(21):
+            inner = f"echo $({inner})"
+        payload = json.dumps({"command": inner})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+
+class TestExtractRawSubstitutions:
+    """Unit tests for _extract_raw_substitutions, _parse_backtick_body, and _parse_paren_body."""
+
+    def test_extracts_various_substitution_types(self) -> None:
+        cmd = 'echo "$(git push -f)" `rm -rf target` <(git push) >(rm -r) $((1 + 2))'
+        extracted = _extract_raw_substitutions(cmd)
+        assert extracted == [
+            ("cmd", "git push -f"),
+            ("backtick", "rm -rf target"),
+            ("process_in", "git push"),
+            ("process_out", "rm -r"),
+            ("arith", "1 + 2"),
+        ]
+
+    def test_skips_single_quoted_and_escaped_constructs(self) -> None:
+        cmd = (
+            "echo '$(git push -f)' '\\$(git push -f)' "
+            '"\\`git push -f\\`" "\\$(git push -f)" '
+            "'<(git push -f)' '>(rm -rf target)'"
+        )
+        assert _extract_raw_substitutions(cmd) == []
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "$(unclosed",
+            "`unclosed",
+            "<(",
+            ">(",
+            "$((1 + ",
+        ],
+    )
+    def test_unmatched_substitutions_raise_value_error(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            _extract_raw_substitutions(cmd)
+
+    def test_parse_backtick_body_unescapes_special_chars(self) -> None:
+        raw = "`echo \\`hello\\` \\$WORLD \\\\`"
+        body, next_idx = _parse_backtick_body(raw, 0)
+        assert body == "echo `hello` $WORLD \\"
+        assert next_idx == len(raw)
+
+    def test_parse_paren_body_handles_nested_quotes_and_parens(self) -> None:
+        raw = "$(printf '%s' ')' >/dev/null; printf git)"
+        body, next_idx = _parse_paren_body(raw, 0, prefix_len=2)
+        assert body == "printf '%s' ')' >/dev/null; printf git"
+        assert next_idx == len(raw)
+
+
+class TestHereDocSubstitutions:
+    """Unit and contract tests for lexical here-doc handling in push and rm guards."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cat <<EOF\n$(git push -f origin HEAD)\nEOF",
+            "cat <<EOF\n'$(git push --force origin HEAD)'\nEOF",
+            "cat <<EOF\n`git push --mirror origin`\nEOF",
+            "cat <<-EOF\n\t$(git push -f origin HEAD)\n\tEOF",
+            "cat <<$EOF\n$(git push -f origin HEAD)\n$EOF",
+            "cat <<'EOF1' <<EOF2\n$(git push -f)\nEOF1\n$(git push -f origin HEAD)\nEOF2",
+            "echo $(cat <<EOF\n$(git push -f origin main)\nEOF\n)",
+        ],
+    )
+    def test_unquoted_heredoc_containing_forced_push_is_blocked(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cat <<EOF\n$(rm -rf target)\nEOF",
+            'cat <<EOF\n"$(rm --recursive --force target)"\nEOF',
+            "cat <<EOF\n`rm -r -f target`\nEOF",
+            "cat <<-EOF\n\t$(rm -rf target)\n\tEOF",
+            "cat <<$EOF\n$(rm -rf target)\n$EOF",
+            "cat <<'EOF1' <<EOF2\n$(rm -rf target)\nEOF1\n$(rm -rf target)\nEOF2",
+            "echo $(cat <<EOF\n$(rm -rf target)\nEOF\n)",
+        ],
+    )
+    def test_unquoted_heredoc_containing_forbidden_rm_is_blocked(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cat <<'EOF'\n$(git push -f origin HEAD)\nEOF",
+            'cat <<"EOF"\n$(git push -f origin HEAD)\nEOF',
+            'cat <<"E\\OF"\n$(git push -f origin HEAD)\nE\\OF',
+            "cat <<''\n$(git push -f origin HEAD)\n\n",
+            'cat <<""\n$(git push -f origin HEAD)\n\n',
+            "cat <<$'EOF'\n$(git push -f origin HEAD)\nEOF",
+            "cat <<$''\n$(git push -f origin HEAD)\n\n",
+            "cat <<pre$'FIX'\n$(git push -f origin HEAD)\npreFIX",
+            'cat <<E"O"F\n$(git push -f origin HEAD)\nEOF',
+            'cat <<"E\\$OF"\n$(git push -f origin HEAD)\nE$OF',
+            "cat <<\\EOF\n$(git push -f origin HEAD)\nEOF",
+            "cat <<-'EOF'\n\t$(git push -f origin HEAD)\n\tEOF",
+            "cat <<-\"EOF\"\n\t$(git push -f origin HEAD)\n\tEOF",
+            "cat <<-\\EOF\n\t$(git push -f origin HEAD)\n\tEOF",
+            "cat <<EOF\n\\$(git push -f origin HEAD)\nEOF",
+            "cat <<EOF\n<(git push -f origin HEAD)\nEOF",
+            "cat <<EOF\n>(git push -f origin HEAD)\nEOF",
+            "cat <<'EOF1' <<'EOF2'\n$(git push -f)\nEOF1\n$(git push -f origin HEAD)\nEOF2",
+            "cat <<'EOF'\ngit push -f origin HEAD\nEOF",
+            "cat <<EOF\ngit push -f origin HEAD\nEOF",
+            "echo $(cat <<'EOF'\n$(git push -f origin main)\nEOF\n)",
+        ],
+    )
+    def test_quoted_and_escaped_heredoc_push_is_safe(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cat <<'EOF'\n$(rm -rf target)\nEOF",
+            'cat <<"EOF"\n$(rm -rf target)\nEOF',
+            'cat <<"E\\OF"\n$(rm -rf target)\nE\\OF',
+            "cat <<''\n$(rm -rf target)\n\n",
+            'cat <<""\n$(rm -rf target)\n\n',
+            "cat <<$'EOF'\n$(rm -rf target)\nEOF",
+            "cat <<$''\n$(rm -rf target)\n\n",
+            "cat <<pre$'FIX'\n$(rm -rf target)\npreFIX",
+            'cat <<E"O"F\n$(rm -rf target)\nEOF',
+            'cat <<"E\\$OF"\n$(rm -rf target)\nE$OF',
+            "cat <<\\EOF\n$(rm -rf target)\nEOF",
+            "cat <<-'EOF'\n\t$(rm -rf target)\n\tEOF",
+            "cat <<-\"EOF\"\n\t$(rm -rf target)\n\tEOF",
+            "cat <<-\\EOF\n\t$(rm -rf target)\n\tEOF",
+            "cat <<EOF\n\\$(rm -rf target)\nEOF",
+            "cat <<EOF\n<(rm -rf target)\nEOF",
+            "cat <<EOF\n>(rm -rf target)\nEOF",
+            "cat <<'EOF1' <<'EOF2'\n$(rm -rf target)\nEOF1\n$(rm -rf target)\nEOF2",
+            "cat <<'EOF'\nrm -rf target\nEOF",
+            "cat <<EOF\nrm -rf target\nEOF",
+            "echo $(cat <<'EOF'\n$(rm -rf target)\nEOF\n)",
+        ],
+    )
+    def test_quoted_and_escaped_heredoc_rm_is_safe(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cat <<",
+            "cat <<-",
+            "cat <<EOF",
+            "cat <<EOF\n$(git push -f origin HEAD)",
+            "cat <<'EOF\nhello\nEOF",
+            "cat <<\"EOF\nhello\nEOF",
+            "cat <<\\EOF\nhello",
+            "cat <<EOF1 <<EOF2\nbody1\nEOF1\nbody2",
+            "cat <<$'",
+            "cat <<$'EOF",
+            "cat <<$'EOF\\'",
+            "cat <<$'E\\u004fF'\nsafe\nEOF\n$(git push -f origin HEAD)\nEu004fF",
+            "cat <<$'E\\u004fF'\nsafe\nEOF\n$(rm -rf target)\nEu004fF",
+            "cat <<$'E\\x4fF'",
+            "cat <<$'E\\117F'",
+            "cat <<$'E\\qOF'",
+            "cat <<$'E\\cOOF'",
+            "cat <<$'E\\tOF'",
+        ],
+    )
+    def test_malformed_heredoc_raises_value_error(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cat <<",
+            "cat <<-",
+            "cat <<EOF",
+            "cat <<EOF\n$(git push -f origin HEAD)",
+            "cat <<$'",
+            "cat <<$'EOF",
+            "cat <<$'EOF\\'",
+            "cat <<$'E\\u004fF'\nsafe\nEOF\n$(git push -f origin HEAD)\nEu004fF",
+            "cat <<$'E\\u004fF'\nsafe\nEOF\n$(rm -rf target)\nEu004fF",
+            "cat <<$'E\\x4fF'",
+            "cat <<$'E\\117F'",
+            "cat <<$'E\\qOF'",
+            "cat <<$'E\\cOOF'",
+            "cat <<$'E\\tOF'",
+        ],
+    )
+    def test_malformed_heredoc_cli_exit_2(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    def test_cli_blocks_unquoted_heredoc_push(self) -> None:
+        payload = json.dumps({"command": "cat <<EOF\n$(git push -f origin HEAD)\nEOF"})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "Git force-push is prohibited" in data["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_cli_blocks_unquoted_heredoc_rm(self) -> None:
+        payload = json.dumps({"command": "cat <<EOF\n$(rm -rf target)\nEOF"})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "Destructive rm commands" in data["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_cli_allows_quoted_heredoc_push_and_rm(self) -> None:
+        for cmd in [
+            "cat <<'EOF'\n$(git push -f origin HEAD)\nEOF",
+            "cat <<'EOF'\n$(rm -rf target)\nEOF",
+            'cat <<"E\\OF"\n$(git push -f origin HEAD)\nE\\OF',
+            "cat <<''\n$(git push -f origin HEAD)\n\n",
+            "cat <<$'EOF'\n$(git push -f origin HEAD)\nEOF",
+            "cat <<$'EOF'\n$(rm -rf target)\nEOF",
+            "cat <<$''\n$(git push -f origin HEAD)\n\n",
+            "cat <<$''\n$(rm -rf target)\n\n",
+            "cat <<pre$'FIX'\n$(git push -f origin HEAD)\npreFIX",
+        ]:
+            payload = json.dumps({"command": cmd})
+            res = subprocess.run(
+                [sys.executable, str(HOOK_SCRIPT_PATH)],
+                input=payload,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert res.returncode == 0
+            assert res.stdout == ""

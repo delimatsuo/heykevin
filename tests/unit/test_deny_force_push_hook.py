@@ -12,7 +12,9 @@ import pytest
 from scripts.deny_force_push_hook import (
     FIND_EXEC_ACTIONS,
     FIND_INPUT_SENTINEL,
+    MAX_GIT_CONFIG_COUNT,
     XARGS_INPUT_SENTINEL,
+    _build_git_config_env,
     _clean_command_segment,
     _extract_find_actions,
     _extract_initial_backtick_args,
@@ -24,7 +26,9 @@ from scripts.deny_force_push_hook import (
     _inspect_git_invocation_for_rm,
     _is_all_parens,
     _is_forced_push_args,
+    _is_git_config_protocol_key,
     _parse_backtick_body,
+    _parse_git_env_configs,
     _parse_git_global_configs,
     _parse_paren_body,
     _reconstruct_git_args,
@@ -32,6 +36,7 @@ from scripts.deny_force_push_hook import (
     _split_into_commands,
     _tokenize_command,
     _tokenize_split_string,
+    _unwrap_command_and_env,
     _unwrap_xargs,
     contains_forbidden_rm,
     contains_forced_git_push,
@@ -149,6 +154,37 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     "command $(printf %s ')' >/dev/null; printf git) push -f origin HEAD",
     '"$(which git)" push -f origin HEAD',
     '"$(which git)" push --mirror origin',
+    # Command-scoped Git config environment protocol forced push
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=ALIAS.FP GIT_CONFIG_VALUE_0='push --force' git fp origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.forceit GIT_CONFIG_VALUE_0='push -f' git forceit origin main",
+    "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push --mirror' git fp origin",
+    'env -S "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=\'push -f\' git fp origin HEAD"',
+    "GIT_CONFIG_VALUE_0='push -f' GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_COUNT=1 git fp origin HEAD",
+    "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.foo GIT_CONFIG_VALUE_0=bar GIT_CONFIG_KEY_1=alias.fp GIT_CONFIG_VALUE_1='push -f' git fp origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0='+HEAD:main' git push origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=+HEAD:main git push origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git push origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' sh -c 'git fp origin HEAD'",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' eval 'git fp origin HEAD'",
+    "find . -exec git -c alias.fp='push -f' fp origin HEAD ';'",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' find . -exec git fp origin HEAD ';'",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=status git -c alias.fp='push -f' fp origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git -c remote.origin.mirror=true push origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0='+HEAD:main' git -c remote.origin.push=HEAD:other push origin",
+    "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=true git push origin HEAD",
+    # Shell alias outer CLI config propagation into nested git
+    "git -c alias.inner='push -f' -c alias.outer='!git inner origin HEAD' outer",
+    "git -c remote.origin.mirror=true -c alias.outer='!git push origin' outer",
+    "git -c remote.origin.push=+HEAD:main -c alias.outer='!git push origin' outer",
+    "git -c remote.origin.mirror=false -c alias.outer='!git -c remote.origin.mirror=true push origin' outer",
+    "git -c remote.origin.push=+HEAD:main -c alias.outer='!git -c remote.origin.push=HEAD:other push origin' outer",
+    # Ignored alias.push regressions (Git ignores aliases named after existing built-in commands)
+    "git -c alias.push=status push -f origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.push GIT_CONFIG_VALUE_0=status git push --force origin HEAD",
+    "git -c alias.push='push origin' push --mirror origin",
+    "git -c alias.push='!echo safe' push +HEAD:main",
+    "git -c alias.push=status -c alias.outer='!git push -f origin HEAD' outer",
 ]
 
 ALLOWED_GIT_PUSH_COMMANDS = [
@@ -204,6 +240,28 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "git -c alias.st='--no-pager status --short' st",
     'git -c alias.outer=\'-c alias.inner="status --short" inner\' outer',
     "git -c alias.a='-c color.ui=false b' -c alias.b='status --short' a",
+    # Safe Command-scoped Git config environment protocol controls
+    "GIT_CONFIG_COUNT=0 git status",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.foo GIT_CONFIG_VALUE_0=bar git status",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.st GIT_CONFIG_VALUE_0=status git st",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push origin' git fp HEAD",
+    "GIT_CONFIG_COUNT=1 echo safe",
+    "GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git status",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' env -u GIT_CONFIG_COUNT git fp",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' env -i git fp",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git push origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git -c remote.origin.mirror=false push origin HEAD",
+    "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=false git push origin HEAD",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git -c alias.fp=status fp",
+    "GIT_CONFIG_KEYBOARD=1 git status",
+    "FOO=bar git status",
+    # Safe shell alias precedence and env isolation controls
+    "git -c remote.origin.mirror=true -c alias.outer='!git -c remote.origin.mirror=false push origin' outer",
+    "git -c alias.st=status -c alias.outer='!git st' outer",
+    "git -c alias.inner='push -f' -c alias.outer='!env -u GIT_CONFIG_COUNT git inner origin HEAD' outer",
+    "git -c alias.inner='push -f' -c alias.outer='!env -i git inner origin HEAD' outer",
+    # Ignored alias.push safe control (Git ignores alias.push; actual push is safe)
+    "git -c alias.push='push -f' push origin HEAD",
     # Safe xargs controls
     "xargs echo hello </dev/null",
     "xargs -0 printf %s </dev/null",
@@ -263,6 +321,13 @@ BLOCKED_RM_COMMANDS = [
     "git -c alias.outer='--no-pager inner' -c alias.inner='!rm -rf target' outer",
     "git -c alias.outer='-c color.ui=false inner' -c alias.inner='!rm -rf target' outer",
     "git -c alias.outer='-c alias.inner=\"!rm -rf target\" inner' outer",
+    "git -c alias.inner='!rm -rf target' -c alias.outer='!git inner' outer",
+    # Command-scoped Git config environment protocol destructive rm
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' git wipe",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' sh -c 'git wipe'",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' eval 'git wipe'",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' find . -exec git wipe ';'",
+    "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm --recursive --force target' git wipe",
     # Multi-action find destructive rm and ordinary boundary controls
     "find /tmp/tree -exec echo {} \\; -exec rm -rf target \\;",
     "find /tmp/tree -exec echo {} ';' -exec rm -rf target ';'",
@@ -315,6 +380,10 @@ ALLOWED_RM_COMMANDS = [
     "$(printf %s ')' >/dev/null; printf rm) -r /tmp/example",
     "$(printf %s '(' >/dev/null; printf rm) --force /tmp/example",
     "echo ')'",
+    # Safe shell alias rm controls
+    "git -c alias.inner='!echo safe' -c alias.outer='!git inner' outer",
+    # Ignored alias.push safe rm control (Git ignores alias.push; does not execute shell alias)
+    "git -c alias.push='!rm -rf target' push origin HEAD",
 ]
 
 
@@ -1313,6 +1382,16 @@ class TestGitAliasResolution:
         assert "ignored" not in configs
         assert remaining == ["-c", "alias.ignored=val", "fp"]
 
+    def test_parse_git_global_configs_ignores_alias_push(self) -> None:
+        args = [
+            "-c", "alias.push=status",
+            "-c", "alias.fp=push -f",
+            "push",
+        ]
+        configs, remaining = _parse_git_global_configs(args)
+        assert configs == {"fp": ("c", "push -f")}
+        assert remaining == ["push"]
+
     @pytest.mark.parametrize(
         "git_args",
         [
@@ -1378,6 +1457,20 @@ class TestGitAliasResolution:
         args = ["--config-env", "alias.other=MY_VAR", "push", "origin", "main"]
         assert _inspect_git_invocation(args) is False
 
+    def test_inspect_git_invocation_ignores_alias_push(self) -> None:
+        assert (
+            _inspect_git_invocation(
+                ["-c", "alias.push=status", "push", "-f", "origin", "HEAD"]
+            )
+            is True
+        )
+        assert (
+            _inspect_git_invocation(
+                ["-c", "alias.push=push -f", "push", "origin", "HEAD"]
+            )
+            is False
+        )
+
     @pytest.mark.parametrize(
         "git_args",
         [
@@ -1399,6 +1492,596 @@ class TestGitAliasResolution:
     def test_inspect_git_invocation_for_rm_allows_safe_shell_alias(self) -> None:
         args = ["-c", "alias.say=!echo hi", "say"]
         assert _inspect_git_invocation_for_rm(args) is False
+
+    def test_inspect_git_invocation_for_rm_ignores_alias_push(self) -> None:
+        assert (
+            _inspect_git_invocation_for_rm(
+                ["-c", "alias.push=!rm -rf target", "push", "origin", "HEAD"]
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c alias.inner='push -f' -c alias.outer='!git inner origin HEAD' outer",
+            "git -c remote.origin.mirror=true -c alias.outer='!git push origin' outer",
+            "git -c remote.origin.push=+HEAD:main -c alias.outer='!git push origin' outer",
+            "git -c remote.origin.mirror=false -c alias.outer='!git -c remote.origin.mirror=true push origin' outer",
+            "git -c remote.origin.push=+HEAD:main -c alias.outer='!git -c remote.origin.push=HEAD:other push origin' outer",
+        ],
+    )
+    def test_shell_alias_propagates_forcing_configs(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c remote.origin.mirror=true -c alias.outer='!git -c remote.origin.mirror=false push origin' outer",
+            "git -c alias.st=status -c alias.outer='!git st' outer",
+            "git -c alias.inner='push -f' -c alias.outer='!env -u GIT_CONFIG_COUNT git inner origin HEAD' outer",
+            "git -c alias.inner='push -f' -c alias.outer='!env -i git inner origin HEAD' outer",
+        ],
+    )
+    def test_shell_alias_safe_precedence_and_env_controls(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    def test_shell_alias_propagates_destructive_rm(self) -> None:
+        assert (
+            contains_forbidden_rm(
+                "git -c alias.inner='!rm -rf target' -c alias.outer='!git inner' outer"
+            )
+            is True
+        )
+        assert (
+            contains_forbidden_rm(
+                "git -c alias.inner='!echo safe' -c alias.outer='!git inner' outer"
+            )
+            is False
+        )
+
+    def test_build_git_config_env_serializes_cleanly(self) -> None:
+        alias_configs = {"inner": ("c", "push -f")}
+        mirror_configs = {"remote.origin.mirror": ("c", "true")}
+        push_configs = [("remote.origin.push", "c", "+HEAD:main")]
+        env = _build_git_config_env(
+            {"EXISTING": "1"}, alias_configs, mirror_configs, push_configs
+        )
+        assert env["EXISTING"] == "1"
+        assert env["GIT_CONFIG_COUNT"] == "3"
+        assert env["GIT_CONFIG_KEY_0"] == "alias.inner"
+        assert env["GIT_CONFIG_VALUE_0"] == "push -f"
+        assert env["GIT_CONFIG_KEY_1"] == "remote.origin.mirror"
+        assert env["GIT_CONFIG_VALUE_1"] == "true"
+        assert env["GIT_CONFIG_KEY_2"] == "remote.origin.push"
+        assert env["GIT_CONFIG_VALUE_2"] == "+HEAD:main"
+
+
+class TestGitEnvConfigProtocol:
+    """Direct unit, contract, and CLI tests for Git command-scoped environment config protocol."""
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_is_git_config_protocol_key(self) -> None:
+        assert _is_git_config_protocol_key("GIT_CONFIG_COUNT") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_COUNT_0") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_KEY_0") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_KEY_12") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_KEY") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_KEYBOARD") is False
+        assert _is_git_config_protocol_key("GIT_CONFIG_VALUE_0") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_VALUE_12") is True
+        assert _is_git_config_protocol_key("GIT_CONFIG_VALUE") is False
+        assert _is_git_config_protocol_key("FOO") is False
+        assert _is_git_config_protocol_key("GIT_SSH_COMMAND") is False
+
+    def test_parse_git_env_configs_empty_and_unrelated(self) -> None:
+        configs, forcing = _parse_git_env_configs({})
+        assert configs == {}
+        assert forcing is False
+
+        configs, forcing = _parse_git_env_configs({"FOO": "bar", "VAR": "1"})
+        assert configs == {}
+        assert forcing is False
+
+        configs, forcing = _parse_git_env_configs({"GIT_CONFIG_KEYBOARD": "1"})
+        assert configs == {}
+        assert forcing is False
+
+        configs, forcing = _parse_git_env_configs({
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        })
+        assert configs == {}
+        assert forcing is False
+
+    def test_parse_git_env_configs_zero_count(self) -> None:
+        configs, forcing = _parse_git_env_configs({"GIT_CONFIG_COUNT": "0"})
+        assert configs == {}
+        assert forcing is False
+
+        configs, forcing = _parse_git_env_configs({
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        })
+        assert configs == {}
+        assert forcing is False
+
+    def test_parse_git_env_configs_valid_alias_and_forcing(self) -> None:
+        env = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+        }
+        configs, forcing = _parse_git_env_configs(env)
+        assert configs == {"fp": ("c", "push -f")}
+        assert forcing is False
+
+        env_upper = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "ALIAS.FP",
+            "GIT_CONFIG_VALUE_0": "push --force",
+        }
+        configs, forcing = _parse_git_env_configs(env_upper)
+        assert configs == {"fp": ("c", "push --force")}
+        assert forcing is False
+
+        env_push_alias = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.push",
+            "GIT_CONFIG_VALUE_0": "status",
+        }
+        configs, forcing = _parse_git_env_configs(env_push_alias)
+        assert configs == {}
+        assert forcing is False
+
+        env_mirror = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "remote.origin.mirror",
+            "GIT_CONFIG_VALUE_0": "true",
+        }
+        configs, forcing = _parse_git_env_configs(env_mirror)
+        assert configs == {}
+        assert forcing is True
+
+        env_push = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "remote.origin.push",
+            "GIT_CONFIG_VALUE_0": "+refs/heads/*:refs/heads/*",
+        }
+        configs, forcing = _parse_git_env_configs(env_push)
+        assert configs == {}
+        assert forcing is True
+
+        env_push_colon = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "remote.origin.push",
+            "GIT_CONFIG_VALUE_0": "+HEAD:main",
+        }
+        configs, forcing = _parse_git_env_configs(env_push_colon)
+        assert configs == {}
+        assert forcing is True
+
+        env_safe_mirror = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "remote.origin.mirror",
+            "GIT_CONFIG_VALUE_0": "false",
+        }
+        configs, forcing = _parse_git_env_configs(env_safe_mirror)
+        assert configs == {}
+        assert forcing is False
+
+        env_multi = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "core.foo",
+            "GIT_CONFIG_VALUE_0": "bar",
+            "GIT_CONFIG_KEY_1": "alias.fp",
+            "GIT_CONFIG_VALUE_1": "push -f",
+        }
+        configs, forcing = _parse_git_env_configs(env_multi)
+        assert configs == {"fp": ("c", "push -f")}
+        assert forcing is False
+
+        env_extra_ignored = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.fp",
+            "GIT_CONFIG_VALUE_0": "push -f",
+            "GIT_CONFIG_KEY_1": "core.foo",
+            "GIT_CONFIG_VALUE_1": "bar",
+        }
+        configs, forcing = _parse_git_env_configs(env_extra_ignored)
+        assert configs == {"fp": ("c", "push -f")}
+        assert forcing is False
+
+        env_mirror_last_safe = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "remote.origin.mirror",
+            "GIT_CONFIG_VALUE_0": "true",
+            "GIT_CONFIG_KEY_1": "remote.origin.mirror",
+            "GIT_CONFIG_VALUE_1": "false",
+        }
+        configs, forcing = _parse_git_env_configs(env_mirror_last_safe)
+        assert configs == {}
+        assert forcing is False
+
+        env_mirror_last_forced = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "remote.origin.mirror",
+            "GIT_CONFIG_VALUE_0": "false",
+            "GIT_CONFIG_KEY_1": "remote.origin.mirror",
+            "GIT_CONFIG_VALUE_1": "true",
+        }
+        configs, forcing = _parse_git_env_configs(env_mirror_last_forced)
+        assert configs == {}
+        assert forcing is True
+
+        env_push_multi_forced = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "remote.origin.push",
+            "GIT_CONFIG_VALUE_0": "+HEAD:main",
+            "GIT_CONFIG_KEY_1": "remote.origin.push",
+            "GIT_CONFIG_VALUE_1": "HEAD:other",
+        }
+        configs, forcing = _parse_git_env_configs(env_push_multi_forced)
+        assert configs == {}
+        assert forcing is True
+
+        env_push_multi_safe = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "remote.origin.push",
+            "GIT_CONFIG_VALUE_0": "HEAD:main",
+            "GIT_CONFIG_KEY_1": "remote.origin.push",
+            "GIT_CONFIG_VALUE_1": "HEAD:other",
+        }
+        configs, forcing = _parse_git_env_configs(env_push_multi_safe)
+        assert configs == {}
+        assert forcing is False
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"GIT_CONFIG_COUNT": "-1"},
+            {"GIT_CONFIG_COUNT": "one", "GIT_CONFIG_KEY_0": "alias.fp", "GIT_CONFIG_VALUE_0": "push -f"},
+            {"GIT_CONFIG_COUNT": "$COUNT", "GIT_CONFIG_KEY_0": "alias.fp", "GIT_CONFIG_VALUE_0": "push -f"},
+            {"GIT_CONFIG_COUNT": " 1 ", "GIT_CONFIG_KEY_0": "alias.fp", "GIT_CONFIG_VALUE_0": "push -f"},
+            {"GIT_CONFIG_COUNT": "+1", "GIT_CONFIG_KEY_0": "alias.fp", "GIT_CONFIG_VALUE_0": "push -f"},
+            {"GIT_CONFIG_COUNT": ""},
+            {"GIT_CONFIG_COUNT": str(MAX_GIT_CONFIG_COUNT + 1)},
+        ],
+    )
+    def test_parse_git_env_configs_malformed_count_raises_value_error(
+        self, env: dict[str, str]
+    ) -> None:
+        with pytest.raises(ValueError):
+            _parse_git_env_configs(env)
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.fp"},
+            {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_VALUE_0": "push -f"},
+            {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_1": "alias.fp", "GIT_CONFIG_VALUE_1": "push -f"},
+            {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "$KEY", "GIT_CONFIG_VALUE_0": "push -f"},
+            {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.fp", "GIT_CONFIG_VALUE_0": "$VALUE"},
+            {"GIT_CONFIG_COUNT": "$COUNT"},
+            {"GIT_CONFIG_KEY_0": "$KEY"},
+            {"GIT_CONFIG_VALUE_0": "$VALUE"},
+        ],
+    )
+    def test_parse_git_env_configs_malformed_pairs_raises_value_error(
+        self, env: dict[str, str]
+    ) -> None:
+        with pytest.raises(ValueError):
+            _parse_git_env_configs(env)
+
+    def test_unwrap_command_and_env(self) -> None:
+        tokens = ["VAR1=a", "VAR2=b", "git", "status"]
+        env_vars, remaining = _unwrap_command_and_env(tokens)
+        assert env_vars == {"VAR1": "a", "VAR2": "b"}
+        assert remaining == ["git", "status"]
+
+        tokens_repeat = ["VAR=1", "VAR=2", "git", "status"]
+        env_vars_repeat, remaining_repeat = _unwrap_command_and_env(tokens_repeat)
+        assert env_vars_repeat == {"VAR": "2"}
+        assert remaining_repeat == ["git", "status"]
+
+        tokens_unset = ["VAR1=1", "env", "-u", "VAR1", "VAR2=2", "git", "status"]
+        env_vars_unset, remaining_unset = _unwrap_command_and_env(tokens_unset)
+        assert env_vars_unset == {"VAR2": "2"}
+        assert remaining_unset == ["git", "status"]
+
+        tokens_split = ["env", "-S", "VAR=1 git status"]
+        env_vars_split, remaining_split = _unwrap_command_and_env(tokens_split)
+        assert env_vars_split == {"VAR": "1"}
+        assert remaining_split == ["git", "status"]
+
+        tokens_sudo = ["sudo", "-u", "root", "VAR=1", "git", "status"]
+        env_vars_sudo, remaining_sudo = _unwrap_command_and_env(tokens_sudo)
+        assert env_vars_sudo == {"VAR": "1"}
+        assert remaining_sudo == ["git", "status"]
+
+        tokens_dynamic_val = ["GIT_CONFIG_VALUE_0=", "$", "VALUE", "git", "fp"]
+        env_vars_dyn, remaining_dyn = _unwrap_command_and_env(tokens_dynamic_val)
+        assert env_vars_dyn == {"GIT_CONFIG_VALUE_0": "$VALUE"}
+        assert remaining_dyn == ["git", "fp"]
+
+        tokens_colon = ["GIT_CONFIG_VALUE_0=+HEAD", ":", "main", "git", "push"]
+        env_vars_col, remaining_col = _unwrap_command_and_env(tokens_colon)
+        assert env_vars_col == {"GIT_CONFIG_VALUE_0": "+HEAD:main"}
+        assert remaining_col == ["git", "push"]
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "GIT_CONFIG_COUNT=$COUNT GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$KEY GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=$VALUE git fp",
+            "GIT_CONFIG_VALUE_0=$VALUE git fp",
+            "GIT_CONFIG_KEY_0=$KEY git fp",
+            "GIT_CONFIG_COUNT=$COUNT git fp",
+            "GIT_CONFIG_COUNT=one GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=-1 git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_1=alias.fp GIT_CONFIG_VALUE_1='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' env -u GIT_CONFIG_KEY_0 git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' GIT_CONFIG_COUNT=2 git fp",
+        ],
+    )
+    def test_pinned_fail_closed_both_guards(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    def test_last_assignment_wins_semantics(self) -> None:
+        cmd_overwrite_to_forced = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push origin' GIT_CONFIG_VALUE_0='push -f' git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_overwrite_to_forced) is True
+
+        cmd_overwrite_to_safe = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f' GIT_CONFIG_VALUE_0='push origin' git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_overwrite_to_safe) is False
+
+        cmd_key_to_forced = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.st "
+            "GIT_CONFIG_VALUE_0=status GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_key_to_forced) is True
+
+        cmd_key_to_safe = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp "
+            "GIT_CONFIG_VALUE_0='push -f' GIT_CONFIG_KEY_0=alias.st GIT_CONFIG_VALUE_0=status git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_key_to_safe) is False
+
+        cmd_count_to_valid = (
+            "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' "
+            "GIT_CONFIG_COUNT=1 git fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_count_to_valid) is True
+
+    def test_nested_executors_preserve_environment(self) -> None:
+        cmd_sh = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' sh -c 'git fp origin HEAD'"
+        assert contains_forced_git_push(cmd_sh) is True
+
+        cmd_eval = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' eval 'git fp origin HEAD'"
+        assert contains_forced_git_push(cmd_eval) is True
+
+        cmd_find = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' find . -exec git fp origin HEAD ';'"
+        assert contains_forced_git_push(cmd_find) is True
+
+        cmd_reviewer_alias = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.forceit GIT_CONFIG_VALUE_0='push -f' git forceit origin main"
+        assert contains_forced_git_push(cmd_reviewer_alias) is True
+
+        cmd_shell_alias_rm = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' git wipe"
+        assert contains_forbidden_rm(cmd_shell_alias_rm) is True
+
+        cmd_sh_wipe = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' sh -c 'git wipe'"
+        assert contains_forbidden_rm(cmd_sh_wipe) is True
+
+        cmd_eval_wipe = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' eval 'git wipe'"
+        assert contains_forbidden_rm(cmd_eval_wipe) is True
+
+        cmd_find_wipe = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' find . -exec git wipe ';'"
+        assert contains_forbidden_rm(cmd_find_wipe) is True
+
+    def test_cli_overrides_env_protocol(self) -> None:
+        cmd_cli_override_safe = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git -c alias.fp=status fp"
+        )
+        assert contains_forced_git_push(cmd_cli_override_safe) is False
+
+        cmd_cli_override_forced = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=status git -c alias.fp='push -f' fp origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_cli_override_forced) is True
+
+        cmd_mirror_cli_override_safe = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git -c remote.origin.mirror=false push origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_mirror_cli_override_safe) is False
+
+        cmd_mirror_cli_override_forced = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git -c remote.origin.mirror=true push origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_mirror_cli_override_forced) is True
+
+        cmd_push_multi_valued_retained = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0='+HEAD:main' git -c remote.origin.push=HEAD:other push origin"
+        )
+        assert contains_forced_git_push(cmd_push_multi_valued_retained) is True
+
+        cmd_env_mirror_last_safe = (
+            "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=false git push origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_env_mirror_last_safe) is False
+
+        cmd_env_mirror_last_forced = (
+            "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=true git push origin HEAD"
+        )
+        assert contains_forced_git_push(cmd_env_mirror_last_forced) is True
+
+    def test_punctuation_in_forced_config_values(self) -> None:
+        cmd_quoted_refspec = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0='+HEAD:main' git push origin"
+        )
+        assert contains_forced_git_push(cmd_quoted_refspec) is True
+
+        cmd_unquoted_refspec = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=+HEAD:main git push origin"
+        )
+        assert contains_forced_git_push(cmd_unquoted_refspec) is True
+
+        cmd_mirror_true = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git push origin"
+        )
+        assert contains_forced_git_push(cmd_mirror_true) is True
+
+        cmd_mirror_false = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git push origin"
+        )
+        assert contains_forced_git_push(cmd_mirror_false) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "GIT_CONFIG_COUNT=$COUNT GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$KEY GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0=$VALUE git fp",
+            "GIT_CONFIG_VALUE_0=$VALUE git fp",
+            "GIT_CONFIG_KEY_0=$KEY git fp",
+            "GIT_CONFIG_COUNT=$COUNT git fp",
+            "GIT_CONFIG_COUNT=one GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=-1 git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_VALUE_0='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_1=alias.fp GIT_CONFIG_VALUE_1='push -f' git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' env -u GIT_CONFIG_KEY_0 git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' GIT_CONFIG_COUNT=2 git fp",
+        ],
+    )
+    def test_cli_fail_closed_exit_2(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+        assert res.stdout == ""
+
+    def test_cli_env_protocol_denies_forced_push_and_rm(self) -> None:
+        payload_push = json.dumps({
+            "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git fp origin HEAD"
+        })
+        res_push = self._run_hook(payload_push)
+        assert res_push.returncode == 0
+        data_push = json.loads(res_push.stdout)
+        assert data_push["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_push["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_reviewer = json.dumps({
+            "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.forceit GIT_CONFIG_VALUE_0='push -f' git forceit origin main"
+        })
+        res_reviewer = self._run_hook(payload_reviewer)
+        assert res_reviewer.returncode == 0
+        data_reviewer = json.loads(res_reviewer.stdout)
+        assert data_reviewer["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_reviewer["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_rm = json.dumps({
+            "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0='!rm -rf target' git wipe"
+        })
+        res_rm = self._run_hook(payload_rm)
+        assert res_rm.returncode == 0
+        data_rm = json.loads(res_rm.stdout)
+        assert data_rm["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data_rm["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_refspec = json.dumps({
+            "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=+HEAD:main git push origin"
+        })
+        res_refspec = self._run_hook(payload_refspec)
+        assert res_refspec.returncode == 0
+        data_refspec = json.loads(res_refspec.stdout)
+        assert data_refspec["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_refspec["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_mirror = json.dumps({
+            "command": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git push origin"
+        })
+        res_mirror = self._run_hook(payload_mirror)
+        assert res_mirror.returncode == 0
+        data_mirror = json.loads(res_mirror.stdout)
+        assert data_mirror["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_mirror["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_mirror_cli_true = json.dumps({
+            "command": (
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror "
+                "GIT_CONFIG_VALUE_0=false git -c remote.origin.mirror=true push origin HEAD"
+            )
+        })
+        res_mirror_cli_true = self._run_hook(payload_mirror_cli_true)
+        assert res_mirror_cli_true.returncode == 0
+        data_mirror_cli_true = json.loads(res_mirror_cli_true.stdout)
+        assert data_mirror_cli_true["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_mirror_cli_true["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_push_multi = json.dumps({
+            "command": (
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push "
+                "GIT_CONFIG_VALUE_0='+HEAD:main' git -c remote.origin.push=HEAD:other push origin"
+            )
+        })
+        res_push_multi = self._run_hook(payload_push_multi)
+        assert res_push_multi.returncode == 0
+        data_push_multi = json.loads(res_push_multi.stdout)
+        assert data_push_multi["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_push_multi["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+        payload_mirror_last_true = json.dumps({
+            "command": (
+                "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror "
+                "GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=true git push origin HEAD"
+            )
+        })
+        res_mirror_last_true = self._run_hook(payload_mirror_last_true)
+        assert res_mirror_last_true.returncode == 0
+        data_mirror_last_true = json.loads(res_mirror_last_true.stdout)
+        assert data_mirror_last_true["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data_mirror_last_true["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_cli_env_protocol_allows_safe_commands(self) -> None:
+        for cmd in [
+            "GIT_CONFIG_COUNT=0 git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.foo GIT_CONFIG_VALUE_0=bar git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.st GIT_CONFIG_VALUE_0=status git st",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push origin' git fp HEAD",
+            "GIT_CONFIG_COUNT=1 echo safe",
+            "GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' env -u GIT_CONFIG_COUNT git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' env -i git fp",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git push origin",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git -c remote.origin.mirror=false push origin HEAD",
+            "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true GIT_CONFIG_KEY_1=remote.origin.mirror GIT_CONFIG_VALUE_1=false git push origin HEAD",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.fp GIT_CONFIG_VALUE_0='push -f' git -c alias.fp=status fp",
+            "GIT_CONFIG_KEYBOARD=1 git status",
+        ]:
+            payload = json.dumps({"command": cmd})
+            res = self._run_hook(payload)
+            assert res.returncode == 0
+            assert res.stdout == ""
 
 
 class TestFindExecutionActions:

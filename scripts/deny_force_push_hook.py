@@ -348,7 +348,7 @@ def _record_alias_config(
         key_stripped = key.strip()
         if key_stripped.lower().startswith("alias."):
             alias_name = key_stripped[len("alias."):].lower()
-            if alias_name:
+            if alias_name and alias_name != "push":
                 setting_stripped = setting.strip()
                 if (
                     len(setting_stripped) >= 2
@@ -361,16 +361,22 @@ def _record_alias_config(
                 alias_configs[alias_name] = (kind, setting)
 
 
-def _parse_git_global_configs(
+def _parse_git_global_options(
     git_args: list[str],
-) -> tuple[dict[str, tuple[str, str]], list[str]]:
-    """Parse git global options, extracting alias configurations and remaining args.
+) -> tuple[
+    dict[str, tuple[str, str]],
+    dict[str, tuple[str, str]],
+    list[tuple[str, str, str]],
+    list[str],
+]:
+    """Parse git global options, extracting alias configurations, mirror configs, push configs, and remaining args.
 
-    Returns (alias_configs, remaining_tokens) where alias_configs maps lowercase alias name
-    to ('c', value) or ('config-env', env_var_name).
+    Returns (alias_configs, mirror_configs, push_configs, remaining_tokens).
     """
     git_args = _reconstruct_git_args(git_args)
     alias_configs: dict[str, tuple[str, str]] = {}
+    mirror_configs: dict[str, tuple[str, str]] = {}
+    push_configs: list[tuple[str, str, str]] = []
     i = 0
     while i < len(git_args):
         arg = git_args[i]
@@ -384,12 +390,14 @@ def _parse_git_global_configs(
             i += 1
             if i < len(git_args):
                 _record_alias_config(alias_configs, git_args[i], "c")
+                _record_forcing_config(mirror_configs, push_configs, git_args[i], "c")
                 i += 1
             continue
 
         if arg.startswith("-c") and not arg.startswith("-C"):
             val = arg[2:]
             _record_alias_config(alias_configs, val, "c")
+            _record_forcing_config(mirror_configs, push_configs, val, "c")
             i += 1
             continue
 
@@ -397,12 +405,14 @@ def _parse_git_global_configs(
             i += 1
             if i < len(git_args):
                 _record_alias_config(alias_configs, git_args[i], "config-env")
+                _record_forcing_config(mirror_configs, push_configs, git_args[i], "config-env")
                 i += 1
             continue
 
         if arg.startswith("--config-env="):
             val = arg[len("--config-env="):]
             _record_alias_config(alias_configs, val, "config-env")
+            _record_forcing_config(mirror_configs, push_configs, val, "config-env")
             i += 1
             continue
 
@@ -429,7 +439,19 @@ def _parse_git_global_configs(
 
         i += 1
 
-    return alias_configs, git_args[i:]
+    return alias_configs, mirror_configs, push_configs, git_args[i:]
+
+
+def _parse_git_global_configs(
+    git_args: list[str],
+) -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """Parse git global options, extracting alias configurations and remaining args.
+
+    Returns (alias_configs, remaining_tokens) where alias_configs maps lowercase alias name
+    to ('c', value) or ('config-env', env_var_name).
+    """
+    alias_configs, _, _, remaining = _parse_git_global_options(git_args)
+    return alias_configs, remaining
 
 
 def _record_forcing_config(
@@ -478,76 +500,13 @@ def _has_forcing_git_config(git_args: list[str]) -> bool:
     Explicit false mirror values (false, no, off, 0) are safe.
     Does not inspect files, git config, or environment variables.
     """
-    git_args = _reconstruct_git_args(git_args)
-    mirror_configs: dict[str, tuple[str, str]] = {}
-    push_configs: list[tuple[str, str, str]] = []
-    i = 0
-    while i < len(git_args):
-        arg = git_args[i]
-        if arg == "--":
-            break
-        if not arg.startswith("-"):
-            break
-
-        if arg == "-c":
-            i += 1
-            if i < len(git_args):
-                _record_forcing_config(mirror_configs, push_configs, git_args[i], "c")
-                i += 1
-            continue
-
-        if arg.startswith("-c") and not arg.startswith("-C"):
-            val = arg[2:]
-            _record_forcing_config(mirror_configs, push_configs, val, "c")
-            i += 1
-            continue
-
-        if arg == "--config-env":
-            i += 1
-            if i < len(git_args):
-                _record_forcing_config(mirror_configs, push_configs, git_args[i], "config-env")
-                i += 1
-            continue
-
-        if arg.startswith("--config-env="):
-            val = arg[len("--config-env="):]
-            _record_forcing_config(mirror_configs, push_configs, val, "config-env")
-            i += 1
-            continue
-
-        if arg in GIT_GLOBAL_OPTS_WITH_ARG:
-            i += 2
-            continue
-
-        if any(
-            arg.startswith(opt + "=")
-            for opt in [
-                "--git-dir",
-                "--work-tree",
-                "--namespace",
-                "--super-prefix",
-                "--exec-path",
-            ]
-        ):
-            i += 1
-            continue
-
-        if arg.startswith("-C") and len(arg) > 2:
-            i += 1
-            continue
-
-        i += 1
-
+    _, mirror_configs, push_configs, _ = _parse_git_global_options(git_args)
     for _key, kind, val in push_configs:
-        if kind == "config-env":
-            return True
-        if val.strip().startswith("+"):
+        if kind == "config-env" or val.strip().startswith("+"):
             return True
 
     for kind, val in mirror_configs.values():
-        if kind == "config-env":
-            return True
-        if val.strip().lower() not in {"false", "no", "off", "0"}:
+        if kind == "config-env" or val.strip().lower() not in {"false", "no", "off", "0"}:
             return True
 
     return False
@@ -556,10 +515,65 @@ def _has_forcing_git_config(git_args: list[str]) -> bool:
 _scan_git_forcing_configs = _has_forcing_git_config
 
 
-def _inspect_git_invocation(git_args: list[str]) -> bool:
+def _build_git_config_env(
+    inherited_env: dict[str, str] | None,
+    alias_configs: dict[str, tuple[str, str]],
+    mirror_configs: dict[str, tuple[str, str]],
+    push_configs: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """Build an inherited environment dictionary carrying the given Git configuration state."""
+    new_env = dict(inherited_env) if inherited_env else {}
+    new_env = {k: v for k, v in new_env.items() if not _is_git_config_protocol_key(k)}
+
+    pairs: list[tuple[str, str]] = []
+    for alias_name, (_kind, val) in alias_configs.items():
+        pairs.append((f"alias.{alias_name}", val))
+    for mirror_key, (_kind, val) in mirror_configs.items():
+        pairs.append((mirror_key, val))
+    for push_key, kind, val in push_configs:
+        if kind == "config-env" and not val.strip().startswith("+"):
+            pairs.append((push_key, f"+{val}"))
+        else:
+            pairs.append((push_key, val))
+
+    if pairs:
+        new_env["GIT_CONFIG_COUNT"] = str(len(pairs))
+        for i, (k, v) in enumerate(pairs):
+            new_env[f"GIT_CONFIG_KEY_{i}"] = k
+            new_env[f"GIT_CONFIG_VALUE_{i}"] = v
+
+    return new_env
+
+
+def _inspect_git_invocation(
+    git_args: list[str],
+    env_alias_configs: dict[str, tuple[str, str]] | None = None,
+    env_has_forcing: bool = False,
+    env_mirror_configs: dict[str, tuple[str, str]] | None = None,
+    env_push_configs: list[tuple[str, str, str]] | None = None,
+    _depth: int = 0,
+    _inherited_env: dict[str, str] | None = None,
+) -> bool:
     """Inspect git command arguments (after 'git') for forced push with alias resolution."""
-    has_forcing_config = _has_forcing_git_config(git_args)
-    alias_configs, remaining = _parse_git_global_configs(git_args)
+    cli_alias_configs, cli_mirror_configs, cli_push_configs, remaining = (
+        _parse_git_global_options(git_args)
+    )
+
+    alias_configs: dict[str, tuple[str, str]] = {}
+    if env_alias_configs:
+        alias_configs.update(env_alias_configs)
+    alias_configs.update(cli_alias_configs)
+
+    mirror_configs: dict[str, tuple[str, str]] = {}
+    if env_mirror_configs:
+        mirror_configs.update(env_mirror_configs)
+    mirror_configs.update(cli_mirror_configs)
+
+    push_configs: list[tuple[str, str, str]] = []
+    if env_push_configs:
+        push_configs.extend(env_push_configs)
+    push_configs.extend(cli_push_configs)
+
     if not remaining:
         return False
 
@@ -571,7 +585,7 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
     while current_tokens:
         lead = current_tokens[0]
         lead_key = lead.lower()
-        if lead_key in alias_configs:
+        if lead_key != "push" and lead_key in alias_configs:
             if depth >= max_depth:
                 raise ValueError(f"Git alias expansion depth exceeded for {lead!r}")
             if lead_key in visited:
@@ -589,7 +603,12 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
                 invocation_args = current_tokens[1:]
                 if invocation_args:
                     shell_cmd = shell_cmd + " " + " ".join(shlex.quote(a) for a in invocation_args)
-                return contains_forced_git_push(shell_cmd)
+                subshell_env = _build_git_config_env(
+                    _inherited_env, alias_configs, mirror_configs, push_configs
+                )
+                return contains_forced_git_push(
+                    shell_cmd, _depth=_depth + 1, _inherited_env=subshell_env
+                )
 
             try:
                 expansion = shlex.split(value, posix=True)
@@ -598,10 +617,12 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
                     f"Failed to parse git alias value {value!r}: {exc}"
                 ) from exc
             combined = expansion + current_tokens[1:]
-            if _has_forcing_git_config(combined):
-                has_forcing_config = True
-            new_alias_configs, remaining_tokens = _parse_git_global_configs(combined)
-            alias_configs.update(new_alias_configs)
+            new_aliases, new_mirrors, new_pushes, remaining_tokens = (
+                _parse_git_global_options(combined)
+            )
+            alias_configs.update(new_aliases)
+            mirror_configs.update(new_mirrors)
+            push_configs.extend(new_pushes)
             current_tokens = remaining_tokens
             continue
         break
@@ -613,6 +634,21 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
     if subcmd != "push":
         return False
 
+    has_forcing_config = False
+    if env_mirror_configs is None and env_push_configs is None and env_has_forcing:
+        has_forcing_config = True
+
+    for _key, kind, val in push_configs:
+        if kind == "config-env" or val.strip().startswith("+"):
+            has_forcing_config = True
+            break
+
+    if not has_forcing_config:
+        for kind, val in mirror_configs.values():
+            if kind == "config-env" or val.strip().lower() not in {"false", "no", "off", "0"}:
+                has_forcing_config = True
+                break
+
     if has_forcing_config:
         return True
 
@@ -620,9 +656,18 @@ def _inspect_git_invocation(git_args: list[str]) -> bool:
     return _is_forced_push_args(push_args)
 
 
-def _inspect_git_invocation_for_rm(git_args: list[str]) -> bool:
+def _inspect_git_invocation_for_rm(
+    git_args: list[str],
+    env_alias_configs: dict[str, tuple[str, str]] | None = None,
+    _depth: int = 0,
+    _inherited_env: dict[str, str] | None = None,
+) -> bool:
     """Inspect git command arguments for shell aliases executing forbidden rm."""
-    alias_configs, remaining = _parse_git_global_configs(git_args)
+    cli_alias_configs, remaining = _parse_git_global_configs(git_args)
+    alias_configs: dict[str, tuple[str, str]] = {}
+    if env_alias_configs:
+        alias_configs.update(env_alias_configs)
+    alias_configs.update(cli_alias_configs)
     if not remaining:
         return False
 
@@ -634,7 +679,7 @@ def _inspect_git_invocation_for_rm(git_args: list[str]) -> bool:
     while current_tokens:
         lead = current_tokens[0]
         lead_key = lead.lower()
-        if lead_key in alias_configs:
+        if lead_key != "push" and lead_key in alias_configs:
             if depth >= max_depth:
                 raise ValueError(f"Git alias expansion depth exceeded for {lead!r}")
             if lead_key in visited:
@@ -652,7 +697,12 @@ def _inspect_git_invocation_for_rm(git_args: list[str]) -> bool:
                 invocation_args = current_tokens[1:]
                 if invocation_args:
                     shell_cmd = shell_cmd + " " + " ".join(shlex.quote(a) for a in invocation_args)
-                return contains_forbidden_rm(shell_cmd)
+                subshell_env = _build_git_config_env(
+                    _inherited_env, alias_configs, {}, []
+                )
+                return contains_forbidden_rm(
+                    shell_cmd, _depth=_depth + 1, _inherited_env=subshell_env
+                )
 
             try:
                 expansion = shlex.split(value, posix=True)
@@ -1409,25 +1459,186 @@ def _is_forbidden_rm_args(rm_args: list[str]) -> bool:
     return has_recursive and has_force
 
 
-def _inspect_single_command_git(tokens: list[str]) -> bool:
-    """Inspect a single clean command segment for forced git push."""
-    idx = 0
-    while idx < len(tokens) and _is_var_assignment(tokens[idx]):
-        idx += 1
-    tokens = tokens[idx:]
+MAX_GIT_CONFIG_COUNT = 1000
 
+
+def _is_git_config_protocol_key(key: str) -> bool:
+    """Return True if key is an exact Git environment config protocol key."""
+    return (
+        key == "GIT_CONFIG_COUNT"
+        or (
+            key.startswith("GIT_CONFIG_KEY_")
+            and key[len("GIT_CONFIG_KEY_") :].isdigit()
+        )
+        or (
+            key.startswith("GIT_CONFIG_VALUE_")
+            and key[len("GIT_CONFIG_VALUE_") :].isdigit()
+        )
+    )
+
+
+def _parse_git_env_details(
+    env_vars: dict[str, str],
+) -> tuple[
+    dict[str, tuple[str, str]],
+    dict[str, tuple[str, str]],
+    list[tuple[str, str, str]],
+]:
+    """Parse and validate Git config environment protocol variables into structured configs.
+
+    Returns (alias_configs, mirror_configs, push_configs).
+    Raises ValueError on missing required indexed members, out-of-bounds count, or dynamically expanded protocol variables.
+    """
+    for k, v in env_vars.items():
+        if _is_git_config_protocol_key(k) and _has_shell_expansion(v):
+            raise ValueError(f"{k} contains shell expansion: {v!r}")
+
+    if "GIT_CONFIG_COUNT" not in env_vars:
+        return {}, {}, []
+
+    count_str = env_vars["GIT_CONFIG_COUNT"]
+    if not count_str or not all(c in "0123456789" for c in count_str):
+        raise ValueError(
+            f"GIT_CONFIG_COUNT must be a literal nonnegative integer, got {count_str!r}"
+        )
+
+    count = int(count_str)
+    if count < 0:
+        raise ValueError(f"GIT_CONFIG_COUNT must be nonnegative, got {count}")
+    if count > MAX_GIT_CONFIG_COUNT:
+        raise ValueError(
+            f"GIT_CONFIG_COUNT {count} exceeds bounded maximum ({MAX_GIT_CONFIG_COUNT})"
+        )
+
+    pairs: list[tuple[str, str]] = []
+    for i in range(count):
+        k_var = f"GIT_CONFIG_KEY_{i}"
+        v_var = f"GIT_CONFIG_VALUE_{i}"
+
+        if k_var not in env_vars:
+            raise ValueError(f"Missing {k_var} for GIT_CONFIG_COUNT={count}")
+        if v_var not in env_vars:
+            raise ValueError(f"Missing {v_var} for GIT_CONFIG_COUNT={count}")
+
+        k_val = env_vars[k_var]
+        v_val = env_vars[v_var]
+
+        pairs.append((k_val, v_val))
+
+    alias_configs: dict[str, tuple[str, str]] = {}
+    mirror_configs: dict[str, tuple[str, str]] = {}
+    push_configs: list[tuple[str, str, str]] = []
+
+    for k_val, v_val in pairs:
+        entry = f"{k_val}={v_val}"
+        _record_alias_config(alias_configs, entry, "c")
+        _record_forcing_config(mirror_configs, push_configs, entry, "c")
+
+    return alias_configs, mirror_configs, push_configs
+
+
+def _parse_git_env_configs(
+    env_vars: dict[str, str],
+) -> tuple[dict[str, tuple[str, str]], bool]:
+    """Parse and validate Git config environment protocol variables.
+
+    Recognizes:
+    - GIT_CONFIG_COUNT
+    - GIT_CONFIG_KEY_<nonnegative index>
+    - GIT_CONFIG_VALUE_<nonnegative index>
+
+    Dynamic protocol variables (containing shell expansions) fail closed immediately.
+    If GIT_CONFIG_COUNT is absent, returns ({}, False) because Git ignores indexed variables.
+    If GIT_CONFIG_COUNT is present, validates that all required indexed members (0 .. count-1) are present and literal.
+    Returns (alias_configs, has_forcing_config).
+    Raises ValueError on missing required indexed members, out-of-bounds count, or dynamically expanded protocol variables.
+    """
+    alias_configs, mirror_configs, push_configs = _parse_git_env_details(env_vars)
+
+    has_forcing = False
+    for _key, kind, val in push_configs:
+        if kind == "config-env" or val.strip().startswith("+"):
+            has_forcing = True
+            break
+
+    if not has_forcing:
+        for kind, val in mirror_configs.values():
+            if kind == "config-env" or val.strip().lower() not in {"false", "no", "off", "0"}:
+                has_forcing = True
+                break
+
+    return alias_configs, has_forcing
+
+
+def _consume_var_assignment(tokens: list[str]) -> tuple[str, str] | None:
+    """If tokens start with a variable assignment, pop it and return (name, val).
+
+    Handles:
+    - Normal assignments: VAR=val, VAR="val", VAR='val'
+    - Split assignments: VAR= followed by $, `, or tokens
+    - Split with colons: VAR=+HEAD:main (where : was split by shlex)
+    """
     if not tokens:
-        return False
+        return None
+
+    tok0 = tokens[0]
+    if _is_var_assignment(tok0):
+        tok = tokens.pop(0)
+        name, val = tok.split("=", 1)
+        if val == "" and tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif tokens[0].startswith("$") or tokens[0].startswith("`"):
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        return name, _restore_sentinels(val)
+
+    if len(tokens) >= 2 and tokens[0].isidentifier() and tokens[1] == "=":
+        name = tokens.pop(0)
+        tokens.pop(0)
+        val = ""
+        if tokens:
+            if tokens[0] == "$":
+                tokens.pop(0)
+                if tokens:
+                    val = "$" + tokens.pop(0)
+                else:
+                    val = "$"
+            elif not _is_redirection(tokens[0]) and tokens[0] not in COMMAND_SEPARATORS:
+                val = tokens.pop(0)
+        while tokens and tokens[0] == ":":
+            tokens.pop(0)
+            if tokens:
+                val = val + ":" + tokens.pop(0)
+        return name, _restore_sentinels(val)
+
+    return None
+
+
+def _unwrap_command_and_env(
+    tokens: list[str],
+    inherited_env: dict[str, str] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Unwrap leading environment assignments and wrapper commands, accumulating env vars."""
+    env_vars: dict[str, str] = dict(inherited_env) if inherited_env else {}
+    tokens = list(tokens)
 
     while tokens:
-        if XARGS_INPUT_SENTINEL in tokens[0]:
-            raise ValueError(
-                f"xargs dynamic executable is not supported: {tokens[0]!r}"
-            )
-        if FIND_INPUT_SENTINEL in tokens[0]:
-            raise ValueError(
-                f"find dynamic executable is not supported: {tokens[0]!r}"
-            )
+        assignment = _consume_var_assignment(tokens)
+        if assignment is not None:
+            name, val = assignment
+            env_vars[name] = val
+            continue
+
+        if XARGS_INPUT_SENTINEL in tokens[0] or FIND_INPUT_SENTINEL in tokens[0]:
+            break
 
         cmd_word = os.path.basename(tokens[0])
 
@@ -1444,10 +1655,13 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
                         tokens.pop(0)
                 elif t.startswith("-"):
                     tokens.pop(0)
-                elif _is_var_assignment(t):
-                    tokens.pop(0)
                 else:
-                    break
+                    sub_assignment = _consume_var_assignment(tokens)
+                    if sub_assignment is not None:
+                        name, val = sub_assignment
+                        env_vars[name] = val
+                    else:
+                        break
             continue
 
         if cmd_word == "env":
@@ -1476,21 +1690,38 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
                     split_tokens = _tokenize_split_string(raw_val)
                     tokens = split_tokens + tokens
                     continue
-                elif t in {"-u", "-C", "--unset", "--chdir"}:
+                elif t in {"-u", "--unset"}:
+                    tokens.pop(0)
+                    if tokens:
+                        unset_name = tokens.pop(0)
+                        env_vars.pop(unset_name, None)
+                    continue
+                elif t.startswith("--unset="):
+                    tokens.pop(0)
+                    unset_name = t.split("=", 1)[1]
+                    env_vars.pop(unset_name, None)
+                    continue
+                elif t in {"-C", "--chdir"}:
                     tokens.pop(0)
                     if tokens:
                         tokens.pop(0)
-                elif (
-                    t.startswith("--unset=")
-                    or t.startswith("--chdir=")
-                ):
+                    continue
+                elif t.startswith("--chdir="):
                     tokens.pop(0)
+                    continue
+                elif t in {"-i", "--ignore-environment", "-"}:
+                    tokens.pop(0)
+                    env_vars.clear()
+                    continue
                 elif t.startswith("-"):
                     tokens.pop(0)
-                elif _is_var_assignment(t):
-                    tokens.pop(0)
                 else:
-                    break
+                    sub_assignment = _consume_var_assignment(tokens)
+                    if sub_assignment is not None:
+                        name, val = sub_assignment
+                        env_vars[name] = val
+                    else:
+                        break
             continue
 
         if cmd_word == "command":
@@ -1588,35 +1819,32 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
             tokens = _unwrap_xargs(tokens)
             continue
 
-        if cmd_word == "find":
-            actions = _extract_find_actions(tokens)
-            if not actions:
-                return False
-            for action in actions:
-                if _inspect_single_command_git(action):
-                    return True
-            return False
-
-        if cmd_word in SHELL_BINARIES:
-            for i in range(1, len(tokens) - 1):
-                token = tokens[i]
-                if token == "--":
-                    break
-                if (
-                    token.startswith("-")
-                    and not token.startswith("--")
-                    and len(token) > 1
-                    and "c" in token[1:]
-                ):
-                    return contains_forced_git_push(_restore_sentinels(tokens[i + 1]))
-            break
-
-        if cmd_word == "eval":
-            tokens.pop(0)
-            return contains_forced_git_push(" ".join(_restore_sentinels(t) for t in tokens))
-
         break
 
+    return env_vars, tokens
+
+
+def _is_git_or_executes_git(tokens: list[str]) -> bool:
+    """Return True if the tokens represent Git or a wrapper/executor that may execute Git."""
+    if not tokens:
+        return False
+    cmd_word = os.path.basename(tokens[0])
+    return (
+        cmd_word == "git"
+        or cmd_word in SHELL_BINARIES
+        or cmd_word in {"eval", "find"}
+        or _extract_initial_dynamic_args(tokens) is not None
+        or _has_shell_expansion(tokens[0])
+    )
+
+
+def _inspect_single_command_git(
+    tokens: list[str],
+    _depth: int = 0,
+    _inherited_env: dict[str, str] | None = None,
+) -> bool:
+    """Inspect a single clean command segment for forced git push."""
+    env_vars, tokens = _unwrap_command_and_env(tokens, inherited_env=_inherited_env)
     if not tokens:
         return False
 
@@ -1627,229 +1855,93 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
     if FIND_INPUT_SENTINEL in tokens[0]:
         raise ValueError(
             f"find dynamic executable is not supported: {tokens[0]!r}"
+        )
+
+    if _is_git_or_executes_git(tokens):
+        env_alias_configs, env_mirror_configs, env_push_configs = (
+            _parse_git_env_details(env_vars)
+        )
+    else:
+        env_alias_configs, env_mirror_configs, env_push_configs = {}, {}, []
+
+    cmd_word = os.path.basename(tokens[0])
+
+    if cmd_word == "find":
+        actions = _extract_find_actions(tokens)
+        if not actions:
+            return False
+        for action in actions:
+            if _inspect_single_command_git(action, _depth=_depth + 1, _inherited_env=env_vars):
+                return True
+        return False
+
+    if cmd_word in SHELL_BINARIES:
+        for i in range(1, len(tokens) - 1):
+            token = tokens[i]
+            if token == "--":
+                break
+            if (
+                token.startswith("-")
+                and not token.startswith("--")
+                and len(token) > 1
+                and "c" in token[1:]
+            ):
+                return contains_forced_git_push(
+                    _restore_sentinels(tokens[i + 1]),
+                    _depth=_depth + 1,
+                    _inherited_env=env_vars,
+                )
+        return False
+
+    if cmd_word == "eval":
+        tokens.pop(0)
+        return contains_forced_git_push(
+            " ".join(_restore_sentinels(t) for t in tokens),
+            _depth=_depth + 1,
+            _inherited_env=env_vars,
         )
 
     dynamic_args = _extract_initial_dynamic_args(tokens)
     if dynamic_args is not None:
-        return _inspect_git_invocation([_restore_sentinels(t) for t in dynamic_args])
+        return _inspect_git_invocation(
+            [_restore_sentinels(t) for t in dynamic_args],
+            env_alias_configs=env_alias_configs,
+            env_mirror_configs=env_mirror_configs,
+            env_push_configs=env_push_configs,
+            _depth=_depth,
+            _inherited_env=env_vars,
+        )
 
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
-        return _inspect_git_invocation([_restore_sentinels(t) for t in tokens[1:]])
+        return _inspect_git_invocation(
+            [_restore_sentinels(t) for t in tokens[1:]],
+            env_alias_configs=env_alias_configs,
+            env_mirror_configs=env_mirror_configs,
+            env_push_configs=env_push_configs,
+            _depth=_depth,
+            _inherited_env=env_vars,
+        )
     if _has_shell_expansion(tokens[0]):
-        return _inspect_git_invocation([_restore_sentinels(t) for t in tokens[1:]])
+        return _inspect_git_invocation(
+            [_restore_sentinels(t) for t in tokens[1:]],
+            env_alias_configs=env_alias_configs,
+            env_mirror_configs=env_mirror_configs,
+            env_push_configs=env_push_configs,
+            _depth=_depth,
+            _inherited_env=env_vars,
+        )
 
     return False
 
 
-def _inspect_single_command_rm(tokens: list[str]) -> bool:
+def _inspect_single_command_rm(
+    tokens: list[str],
+    _depth: int = 0,
+    _inherited_env: dict[str, str] | None = None,
+) -> bool:
     """Inspect a single clean command segment for forbidden destructive rm."""
-    idx = 0
-    while idx < len(tokens) and _is_var_assignment(tokens[idx]):
-        idx += 1
-    tokens = tokens[idx:]
-
-    if not tokens:
-        return False
-
-    while tokens:
-        if XARGS_INPUT_SENTINEL in tokens[0]:
-            raise ValueError(
-                f"xargs dynamic executable is not supported: {tokens[0]!r}"
-            )
-        if FIND_INPUT_SENTINEL in tokens[0]:
-            raise ValueError(
-                f"find dynamic executable is not supported: {tokens[0]!r}"
-            )
-
-        cmd_word = os.path.basename(tokens[0])
-
-        if cmd_word == "sudo":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                elif _is_var_assignment(t):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "env":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-S", "--split-string"}:
-                    tokens.pop(0)
-                    if tokens:
-                        raw_val = tokens.pop(0)
-                        split_tokens = _tokenize_split_string(raw_val)
-                        tokens = split_tokens + tokens
-                    continue
-                elif t.startswith("--split-string="):
-                    tokens.pop(0)
-                    raw_val = t.split("=", 1)[1]
-                    split_tokens = _tokenize_split_string(raw_val)
-                    tokens = split_tokens + tokens
-                    continue
-                elif t.startswith("-S") and len(t) > 2:
-                    tokens.pop(0)
-                    raw_val = t[2:]
-                    split_tokens = _tokenize_split_string(raw_val)
-                    tokens = split_tokens + tokens
-                    continue
-                elif t in {"-u", "-C", "--unset", "--chdir"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif (
-                    t.startswith("--unset=")
-                    or t.startswith("--chdir=")
-                ):
-                    tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                elif _is_var_assignment(t):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "command":
-            tokens.pop(0)
-            while tokens and (tokens[0] in {"-p", "-v", "-V"} or tokens[0] == "--"):
-                tokens.pop(0)
-            continue
-
-        if cmd_word in {"nohup", "builtin", "exec"}:
-            tokens.pop(0)
-            while tokens and tokens[0].startswith("-"):
-                if tokens[0] == "-a":
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif tokens[0] == "--":
-                    tokens.pop(0)
-                    break
-                else:
-                    tokens.pop(0)
-            continue
-
-        if cmd_word == "timeout":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                    break
-                if t in {"-k", "-s", "--kill-after", "--signal"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                else:
-                    tokens.pop(0)
-                    break
-            continue
-
-        if cmd_word == "nice":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-n", "--adjustment"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-") or (len(t) > 1 and t.startswith("+") and t[1:].isdigit()):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "stdbuf":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-i", "-o", "-e", "--input", "--output", "--error"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "time":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-f", "-o", "--format", "--output"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "xargs":
-            tokens = _unwrap_xargs(tokens)
-            continue
-
-        if cmd_word == "find":
-            actions = _extract_find_actions(tokens)
-            if not actions:
-                return False
-            for action in actions:
-                if _inspect_single_command_rm(action):
-                    return True
-            return False
-
-        if cmd_word in SHELL_BINARIES:
-            for i in range(1, len(tokens) - 1):
-                token = tokens[i]
-                if token == "--":
-                    break
-                if (
-                    token.startswith("-")
-                    and not token.startswith("--")
-                    and len(token) > 1
-                    and "c" in token[1:]
-                ):
-                    return contains_forbidden_rm(_restore_sentinels(tokens[i + 1]))
-            break
-
-        if cmd_word == "eval":
-            tokens.pop(0)
-            return contains_forbidden_rm(" ".join(_restore_sentinels(t) for t in tokens))
-
-        break
-
+    env_vars, tokens = _unwrap_command_and_env(tokens, inherited_env=_inherited_env)
     if not tokens:
         return False
 
@@ -1860,6 +1952,48 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
     if FIND_INPUT_SENTINEL in tokens[0]:
         raise ValueError(
             f"find dynamic executable is not supported: {tokens[0]!r}"
+        )
+
+    if _is_git_or_executes_git(tokens):
+        env_alias_configs, _env_has_forcing = _parse_git_env_configs(env_vars)
+    else:
+        env_alias_configs, _env_has_forcing = {}, False
+
+    cmd_word = os.path.basename(tokens[0])
+
+    if cmd_word == "find":
+        actions = _extract_find_actions(tokens)
+        if not actions:
+            return False
+        for action in actions:
+            if _inspect_single_command_rm(action, _depth=_depth + 1, _inherited_env=env_vars):
+                return True
+        return False
+
+    if cmd_word in SHELL_BINARIES:
+        for i in range(1, len(tokens) - 1):
+            token = tokens[i]
+            if token == "--":
+                break
+            if (
+                token.startswith("-")
+                and not token.startswith("--")
+                and len(token) > 1
+                and "c" in token[1:]
+            ):
+                return contains_forbidden_rm(
+                    _restore_sentinels(tokens[i + 1]),
+                    _depth=_depth + 1,
+                    _inherited_env=env_vars,
+                )
+        return False
+
+    if cmd_word == "eval":
+        tokens.pop(0)
+        return contains_forbidden_rm(
+            " ".join(_restore_sentinels(t) for t in tokens),
+            _depth=_depth + 1,
+            _inherited_env=env_vars,
         )
 
     dynamic_args = _extract_initial_dynamic_args(tokens)
@@ -1867,11 +2001,21 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
         restored_dynamic_args = [_restore_sentinels(t) for t in dynamic_args]
         if _is_forbidden_rm_args(restored_dynamic_args):
             return True
-        return _inspect_git_invocation_for_rm(restored_dynamic_args)
+        return _inspect_git_invocation_for_rm(
+            restored_dynamic_args,
+            env_alias_configs=env_alias_configs,
+            _depth=_depth,
+            _inherited_env=env_vars,
+        )
 
     cmd_binary = os.path.basename(tokens[0])
     if cmd_binary == "git":
-        return _inspect_git_invocation_for_rm([_restore_sentinels(t) for t in tokens[1:]])
+        return _inspect_git_invocation_for_rm(
+            [_restore_sentinels(t) for t in tokens[1:]],
+            env_alias_configs=env_alias_configs,
+            _depth=_depth,
+            _inherited_env=env_vars,
+        )
     if cmd_binary == "rm":
         return _is_forbidden_rm_args([_restore_sentinels(t) for t in tokens[1:]])
 
@@ -1879,7 +2023,12 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
         restored_trailing = [_restore_sentinels(t) for t in tokens[1:]]
         if _is_forbidden_rm_args(restored_trailing):
             return True
-        return _inspect_git_invocation_for_rm(restored_trailing)
+        return _inspect_git_invocation_for_rm(
+            restored_trailing,
+            env_alias_configs=env_alias_configs,
+            _depth=_depth,
+            _inherited_env=env_vars,
+        )
 
     return False
 
@@ -2445,7 +2594,11 @@ def _inspect_substitutions(
     return False
 
 
-def contains_forced_git_push(command: str, _depth: int = 0) -> bool:
+def contains_forced_git_push(
+    command: str,
+    _depth: int = 0,
+    _inherited_env: dict[str, str] | None = None,
+) -> bool:
     """Pure function checking whether a shell command contains a forced git push.
 
     Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes
@@ -2465,13 +2618,19 @@ def contains_forced_git_push(command: str, _depth: int = 0) -> bool:
     commands = _tokenize_command_raw(command)
     for cmd_tokens in commands:
         cleaned = _clean_command_segment(cmd_tokens)
-        if _inspect_single_command_git(cleaned):
+        if _inspect_single_command_git(
+            cleaned, _depth=_depth, _inherited_env=_inherited_env
+        ):
             return True
 
     return False
 
 
-def contains_forbidden_rm(command: str, _depth: int = 0) -> bool:
+def contains_forbidden_rm(
+    command: str,
+    _depth: int = 0,
+    _inherited_env: dict[str, str] | None = None,
+) -> bool:
     """Pure function checking whether a shell command contains a forbidden destructive rm invocation.
 
     Raises ValueError if the shell command syntax is invalid (e.g. unclosed quotes
@@ -2491,7 +2650,9 @@ def contains_forbidden_rm(command: str, _depth: int = 0) -> bool:
     commands = _tokenize_command_raw(command)
     for cmd_tokens in commands:
         cleaned = _clean_command_segment(cmd_tokens)
-        if _inspect_single_command_rm(cleaned):
+        if _inspect_single_command_rm(
+            cleaned, _depth=_depth, _inherited_env=_inherited_env
+        ):
             return True
 
     return False

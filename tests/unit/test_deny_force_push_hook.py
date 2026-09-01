@@ -7070,3 +7070,447 @@ class TestDefect86UnaliasDoubleDashOptionParsing:
         elif decision == "allow":
             assert res.returncode == 0
             assert res.stdout == ""
+
+
+class TestDefect90SetsidWrapper:
+    """Tests for Defect #90: util-linux setsid executable wrapper unwrapping and safety contracts."""
+
+    def test_dangerous_direct_forms_pure(self) -> None:
+        assert (
+            contains_forced_git_push("setsid -f git push --force origin HEAD")
+            is True
+        )
+        assert contains_forbidden_rm("setsid -f rm -rf target") is True
+        assert contains_forced_git_push("setsid -c git push -f origin main") is True
+        assert contains_forbidden_rm("setsid -c rm -r -f target") is True
+        assert contains_forced_git_push("setsid -w git push -f origin HEAD") is True
+        assert contains_forbidden_rm("setsid -w rm -fr target") is True
+
+    def test_long_forms_pure(self) -> None:
+        assert (
+            contains_forced_git_push("setsid --fork --wait git push +HEAD:main")
+            is True
+        )
+        assert (
+            contains_forbidden_rm(
+                "setsid --wait rm --recursive --force target"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "setsid --ctty git push --force-with-lease=main origin"
+            )
+            is True
+        )
+        assert (
+            contains_forbidden_rm(
+                "setsid --ctty --fork rm --force --recursive target"
+            )
+            is True
+        )
+
+    def test_grouped_short_execution_flags_pure(self) -> None:
+        assert (
+            contains_forced_git_push("setsid -cfw git push --mirror origin")
+            is True
+        )
+        assert contains_forbidden_rm("setsid -cfw rm -rf target") is True
+        assert contains_forced_git_push("setsid -fc git push -f origin HEAD") is True
+        assert contains_forbidden_rm("setsid -fc rm -rf target") is True
+        assert contains_forced_git_push("setsid -wf git push -f origin HEAD") is True
+        assert contains_forbidden_rm("setsid -wf rm -rf target") is True
+        assert contains_forced_git_push("setsid -cw git push -f origin HEAD") is True
+        assert contains_forbidden_rm("setsid -cw rm -rf target") is True
+        assert (
+            contains_forced_git_push("setsid -wfc git push -f origin HEAD")
+            is True
+        )
+        assert contains_forbidden_rm("setsid -wfc rm -rf target") is True
+
+    def test_option_terminator_double_dash_pure(self) -> None:
+        assert contains_forced_git_push("setsid -- git push -f origin HEAD") is True
+        assert contains_forbidden_rm("setsid -- rm -rf target") is True
+        assert (
+            contains_forced_git_push("setsid -f -- git push --force origin HEAD")
+            is True
+        )
+        assert contains_forbidden_rm("setsid -f -- rm -rf target") is True
+        assert (
+            contains_forced_git_push("setsid -cfw -- git push -f origin HEAD")
+            is True
+        )
+        assert contains_forbidden_rm("setsid -cfw -- rm -rf target") is True
+        assert (
+            contains_forced_git_push("setsid -- -custom-tool git push -f origin HEAD")
+            is False
+        )
+        assert (
+            contains_forbidden_rm("setsid -- -custom-tool rm -rf target")
+            is False
+        )
+
+    def test_absolute_wrapper_path_pure(self) -> None:
+        assert (
+            contains_forced_git_push("/usr/bin/setsid -f git push --force origin HEAD")
+            is True
+        )
+        assert contains_forbidden_rm("/usr/bin/setsid -f rm -rf target") is True
+        assert (
+            contains_forced_git_push("/bin/setsid --fork git push -f origin HEAD")
+            is True
+        )
+        assert contains_forbidden_rm("/bin/setsid --wait rm -rf target") is True
+
+    def test_nested_wrapper_pure(self) -> None:
+        assert (
+            contains_forced_git_push(
+                "setsid -f setsid --wait git push --force origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forbidden_rm("setsid -f setsid --wait rm -rf target")
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "setsid -w setsid -c setsid -f git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forbidden_rm(
+                "setsid -w setsid -c setsid -f rm -rf target"
+            )
+            is True
+        )
+
+    def test_wrapper_compositions_pure(self) -> None:
+        assert (
+            contains_forced_git_push("env FOO=1 setsid -f git push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push("setsid -f env FOO=1 git push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push("sudo setsid -f git push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push("setsid -f sudo git push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "timeout 30 setsid -f git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "setsid -f timeout 30 git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "nice -n 10 setsid -f git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "setsid -f nice -n 10 git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "stdbuf -oL setsid -f git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "setsid -f stdbuf -oL git push -f origin HEAD"
+            )
+            is True
+        )
+        assert (
+            contains_forced_git_push("nohup setsid -f git push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push("time setsid -f git push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push(
+                "find /tmp -exec setsid -f git push -f origin HEAD \\;"
+            )
+            is True
+        )
+        with pytest.raises(
+            ValueError, match=r"(shell expansion|xargs dynamic executable)"
+        ):
+            contains_forced_git_push(
+                "echo HEAD | xargs setsid -f git push -f origin"
+            )
+
+        assert (
+            contains_forbidden_rm("env FOO=1 setsid -f rm -rf target")
+            is True
+        )
+        assert (
+            contains_forbidden_rm("setsid -f env FOO=1 rm -rf target")
+            is True
+        )
+        assert contains_forbidden_rm("sudo setsid -f rm -rf target") is True
+        assert contains_forbidden_rm("setsid -f sudo rm -rf target") is True
+        assert (
+            contains_forbidden_rm("timeout 30 setsid -f rm -rf target")
+            is True
+        )
+        assert (
+            contains_forbidden_rm("setsid -f timeout 30 rm -rf target")
+            is True
+        )
+        assert (
+            contains_forbidden_rm("nice -n 10 setsid -f rm -rf target")
+            is True
+        )
+        assert (
+            contains_forbidden_rm("setsid -f nice -n 10 rm -rf target")
+            is True
+        )
+        assert (
+            contains_forbidden_rm("stdbuf -oL setsid -f rm -rf target")
+            is True
+        )
+        assert (
+            contains_forbidden_rm("setsid -f stdbuf -oL rm -rf target")
+            is True
+        )
+        assert contains_forbidden_rm("nohup setsid -f rm -rf target") is True
+        assert contains_forbidden_rm("time setsid -f rm -rf target") is True
+        with pytest.raises(ValueError, match=r"shell expansion"):
+            contains_forbidden_rm("find /tmp -exec setsid -f rm -rf {} \\;")
+        with pytest.raises(
+            ValueError, match=r"(shell expansion|xargs dynamic executable)"
+        ):
+            contains_forbidden_rm("echo target | xargs setsid -f rm -rf")
+
+    def test_dynamic_executable_after_setsid_pure(self) -> None:
+        assert (
+            contains_forced_git_push("setsid -f $(which git) push -f origin HEAD")
+            is True
+        )
+        assert (
+            contains_forced_git_push('setsid -f "$GIT" push -f origin HEAD')
+            is True
+        )
+        assert (
+            contains_forbidden_rm("setsid -f $(which rm) -rf target")
+            is True
+        )
+        with pytest.raises(ValueError, match=r"xargs dynamic executable"):
+            contains_forced_git_push("echo git | xargs setsid")
+        with pytest.raises(ValueError, match=r"xargs dynamic executable"):
+            contains_forbidden_rm("echo rm | xargs setsid")
+
+    def test_wrapped_shell_stdin_and_scripts_pure(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"(stdin|interactive|script operand)"
+        ):
+            contains_forced_git_push("setsid -f bash")
+        with pytest.raises(ValueError):
+            contains_forced_git_push("setsid -f sh")
+        with pytest.raises(ValueError):
+            contains_forbidden_rm("setsid -f zsh")
+
+        assert (
+            contains_forced_git_push("setsid -f bash scripts/safe.sh")
+            is False
+        )
+        assert contains_forbidden_rm("setsid -f bash scripts/safe.sh") is False
+        assert contains_forced_git_push("setsid -f sh scripts/check.sh") is False
+        assert contains_forbidden_rm("setsid -f sh scripts/check.sh") is False
+
+        assert (
+            contains_forced_git_push('setsid -f bash -c "git push -f origin HEAD"')
+            is True
+        )
+        assert (
+            contains_forbidden_rm('setsid -f bash -c "rm -rf target"')
+            is True
+        )
+
+    def test_safe_controls_pure(self) -> None:
+        assert (
+            contains_forced_git_push("setsid -f git push origin main")
+            is False
+        )
+        assert contains_forbidden_rm("setsid -f rm -f target") is False
+        assert contains_forced_git_push("setsid -f echo hello") is False
+        assert contains_forbidden_rm("setsid -f echo hello") is False
+
+        # No program invocation
+        assert contains_forced_git_push("setsid") is False
+        assert contains_forbidden_rm("setsid") is False
+        assert contains_forced_git_push("setsid -f") is False
+        assert contains_forbidden_rm("setsid -f") is False
+        assert contains_forced_git_push("setsid --fork --wait") is False
+        assert contains_forbidden_rm("setsid --fork --wait") is False
+        assert contains_forced_git_push("setsid -cfw") is False
+        assert contains_forbidden_rm("setsid -cfw") is False
+        assert contains_forced_git_push("setsid --") is False
+        assert contains_forbidden_rm("setsid --") is False
+
+        # Informational terminal options
+        assert contains_forced_git_push("setsid -h") is False
+        assert contains_forbidden_rm("setsid -h") is False
+        assert contains_forced_git_push("setsid --help") is False
+        assert contains_forbidden_rm("setsid --help") is False
+        assert contains_forced_git_push("setsid -V") is False
+        assert contains_forbidden_rm("setsid -V") is False
+        assert contains_forced_git_push("setsid --version") is False
+        assert contains_forbidden_rm("setsid --version") is False
+        assert (
+            contains_forced_git_push("setsid -h git push -f origin HEAD")
+            is False
+        )
+        assert contains_forbidden_rm("setsid -h rm -rf /") is False
+        assert (
+            contains_forced_git_push("setsid --help git push -f origin HEAD")
+            is False
+        )
+        assert contains_forbidden_rm("setsid --help rm -rf /") is False
+        assert (
+            contains_forced_git_push("setsid -V git push -f origin HEAD")
+            is False
+        )
+        assert contains_forbidden_rm("setsid -V rm -rf /") is False
+        assert (
+            contains_forced_git_push("setsid --version git push -f origin HEAD")
+            is False
+        )
+        assert contains_forbidden_rm("setsid --version rm -rf /") is False
+        assert (
+            contains_forced_git_push(
+                "setsid -f --help git push -f origin HEAD"
+            )
+            is False
+        )
+        # Grouped terminal short options (Defect #91)
+        for group in ("-fh", "-hf", "-fV", "-Vw", "-cfh", "-wVc"):
+            assert contains_forced_git_push(f"setsid {group}") is False
+            assert contains_forbidden_rm(f"setsid {group}") is False
+            assert (
+                contains_forced_git_push(
+                    f"setsid {group} git push -f origin HEAD"
+                )
+                is False
+            )
+            assert contains_forbidden_rm(f"setsid {group} rm -rf /") is False
+
+    def test_unknown_options_fail_closed_pure(self) -> None:
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forced_git_push("setsid -x git push -f origin HEAD")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forced_git_push("setsid -fx git push -f origin HEAD")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forced_git_push("setsid -s git push -f origin HEAD")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forced_git_push("setsid --unknown git push -f origin HEAD")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forced_git_push("setsid --fork=yes git push -f origin HEAD")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forbidden_rm("setsid -x rm -rf target")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forbidden_rm("setsid -cfx rm -rf target")
+        with pytest.raises(ValueError, match=r"Unknown setsid option"):
+            contains_forbidden_rm("setsid --invalid rm -rf target")
+        for invalid_opt in ("-fhx", "-xV", "-cfW", "--help=foo", "--version=foo"):
+            with pytest.raises(ValueError, match=r"Unknown setsid option"):
+                contains_forced_git_push(
+                    f"setsid {invalid_opt} git push -f origin HEAD"
+                )
+            with pytest.raises(ValueError, match=r"Unknown setsid option"):
+                contains_forbidden_rm(f"setsid {invalid_opt} rm -rf target")
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("setsid -f git push --force origin HEAD", 0, "deny_push"),
+            ("setsid -f rm -rf target", 0, "deny_rm"),
+            ("setsid --fork --wait git push +HEAD:main", 0, "deny_push"),
+            ("setsid --wait rm --recursive --force target", 0, "deny_rm"),
+            ("setsid -cfw git push --mirror origin", 0, "deny_push"),
+            ("setsid -cfw rm -rf target", 0, "deny_rm"),
+            ("setsid -- git push -f origin HEAD", 0, "deny_push"),
+            ("setsid -- rm -rf target", 0, "deny_rm"),
+            ("/usr/bin/setsid -f git push -f origin HEAD", 0, "deny_push"),
+            ("/usr/bin/setsid -f rm -rf target", 0, "deny_rm"),
+            ("setsid -f git push origin main", 0, "allow"),
+            ("setsid -f rm -f target", 0, "allow"),
+            ("setsid -f echo harmless", 0, "allow"),
+            ("setsid -f", 0, "allow"),
+            ("setsid -h git push -f origin HEAD", 0, "allow"),
+            ("setsid --version rm -rf /", 0, "allow"),
+            ("setsid -fh git push -f origin HEAD", 0, "allow"),
+            ("setsid -hf rm -rf /", 0, "allow"),
+            ("setsid -fV git push -f origin HEAD", 0, "allow"),
+            ("setsid -Vw rm -rf /", 0, "allow"),
+            ("setsid -cfh git push -f origin HEAD", 0, "allow"),
+            ("setsid -wVc rm -rf /", 0, "allow"),
+            ("setsid -x git push -f origin HEAD", 2, "error"),
+            ("setsid -fx git push -f origin HEAD", 2, "error"),
+            ("setsid -fhx git push -f origin HEAD", 2, "error"),
+            ("setsid -xV git push -f origin HEAD", 2, "error"),
+            ("setsid -cfW git push -f origin HEAD", 2, "error"),
+            ("setsid --unknown git push -f origin HEAD", 2, "error"),
+            ("setsid --fork=yes git push -f origin HEAD", 2, "error"),
+            ("setsid --help=foo git push -f origin HEAD", 2, "error"),
+            ("setsid --version=foo rm -rf /", 2, "error"),
+            ("setsid -x rm -rf target", 2, "error"),
+            ("setsid -f bash", 2, "error"),
+            ("setsid -f bash scripts/safe.sh", 0, "allow"),
+        ],
+    )
+    def test_cli_setsid_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )

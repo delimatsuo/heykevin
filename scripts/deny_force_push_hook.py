@@ -2407,6 +2407,38 @@ def _unwrap_command_and_env(
                     break
             continue
 
+        if cmd_word == "setsid":
+            tokens.pop(0)
+            is_terminal_info = False
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"--help", "--version"}:
+                    is_terminal_info = True
+                    tokens.clear()
+                    break
+                if t in {"--ctty", "--fork", "--wait"}:
+                    tokens.pop(0)
+                    continue
+                if t.startswith("--"):
+                    raise ValueError(f"Unknown setsid option: {t!r}")
+                if t.startswith("-") and len(t) > 1:
+                    chars = set(t[1:])
+                    if not chars.issubset({"c", "f", "w", "h", "V"}):
+                        raise ValueError(f"Unknown setsid option: {t!r}")
+                    if chars & {"h", "V"}:
+                        is_terminal_info = True
+                        tokens.clear()
+                        break
+                    tokens.pop(0)
+                    continue
+                break
+            if is_terminal_info:
+                tokens.clear()
+            continue
+
         if cmd_word == "xargs":
             tokens = _unwrap_xargs(tokens)
             continue

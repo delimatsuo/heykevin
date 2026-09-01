@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.deny_force_push_hook
 from scripts.deny_force_push_hook import (
     FIND_EXEC_ACTIONS,
     FIND_INPUT_SENTINEL,
@@ -2772,6 +2773,113 @@ class TestHasForcingGitConfig:
     def test_safe_only_repeated_push_configs_are_not_forcing(self) -> None:
         args = ["-c", "remote.origin.push=main", "-c", "remote.origin.push=HEAD:main"]
         assert _has_forcing_git_config(args) is False
+
+
+class TestDefect129GitBareOption:
+    """Tests for Defect #129: Git --bare global option unsupported/uninspectable repository config."""
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_pure_helpers_raise_on_bare_global_option(self) -> None:
+        git_args = ["--bare", "fp", "origin", "HEAD"]
+        for helper in (
+            _parse_git_global_configs,
+            _has_forcing_git_config,
+            _scan_git_forcing_configs,
+        ):
+            with pytest.raises(
+                ValueError,
+                match=r"^Repository-local Git config via --bare is unsupported/uninspectable$",
+            ):
+                helper(git_args)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git --bare fp origin HEAD",
+            "/usr/bin/git --bare fp origin HEAD",
+            "env git --bare fp origin HEAD",
+            "sh -c 'git --bare fp origin HEAD'",
+        ],
+    )
+    def test_classifiers_raise_exact_value_error_on_bare_commands(
+        self, cmd: str
+    ) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(
+                ValueError,
+                match=r"^Repository-local Git config via --bare is unsupported/uninspectable$",
+            ):
+                checker(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "printf '%s' --bare",
+            "git --no-pager status",
+            "git fp --bare",
+        ],
+    )
+    def test_paired_safe_controls_remain_false(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            json.dumps({"command": "git --bare fp origin HEAD"}),
+            json.dumps({"tool_input": {"command": "git --bare fp origin HEAD"}}),
+        ],
+    )
+    def test_cli_bare_reproduction_exits_2(self, payload: str) -> None:
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert res.stdout == ""
+        assert "--bare" in res.stderr
+
+    def test_mutation_effective_bare_guard_bypass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repro_cmd = "git --bare fp origin HEAD"
+
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(
+                ValueError,
+                match=r"^Repository-local Git config via --bare is unsupported/uninspectable$",
+            ):
+                checker(repro_cmd)
+
+        orig_parse = scripts.deny_force_push_hook._parse_git_global_options
+
+        def mutant_parse_git_global_options(git_args: list[str]):
+            bypassed = [
+                "--harmless-skipped-option" if a == "--bare" else a for a in git_args
+            ]
+            return orig_parse(bypassed)
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._parse_git_global_options",
+            mutant_parse_git_global_options,
+        )
+
+        assert contains_forced_git_push(repro_cmd) is False
+        assert contains_forbidden_rm(repro_cmd) is False
+
+        monkeypatch.undo()
+
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(
+                ValueError,
+                match=r"^Repository-local Git config via --bare is unsupported/uninspectable$",
+            ):
+                checker(repro_cmd)
 
 
 class TestExtractInitialBacktickArgs:

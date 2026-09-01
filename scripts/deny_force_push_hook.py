@@ -575,6 +575,11 @@ def _parse_git_global_options(
                 "Repository-local Git config via -C is unsupported/uninspectable"
             )
 
+        if arg == "--bare":
+            raise ValueError(
+                "Repository-local Git config via --bare is unsupported/uninspectable"
+            )
+
         if arg in GIT_GLOBAL_OPTS_WITH_ARG:
             i += 2
             continue

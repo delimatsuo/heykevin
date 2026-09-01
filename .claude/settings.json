@@ -39,5 +39,20 @@
         "./**/.env.*"
       ]
     }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/deny_force_push_hook.py\"",
+            "if": "Bash(*git *)",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

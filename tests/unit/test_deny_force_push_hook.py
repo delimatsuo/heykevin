@@ -8086,3 +8086,288 @@ class TestDefect97DynamicGitGlobalConfig:
     def test_safe_literal_git_configs_allowed(self, cmd: str) -> None:
         assert contains_forced_git_push(cmd) is False
         assert contains_forbidden_rm(cmd) is False
+
+
+class TestDefect102WatchWrapper:
+    """Tests for Defect #102: procps-ng watch wrapper support."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "watch -n 60 -x git push -f origin HEAD",
+            "watch --interval=60 --exec git push --mirror origin",
+            "watch --interval 60 --exec git push --mirror origin",
+            "watch -n60 -x git push +HEAD:main origin",
+            "watch -xn60 git push -f origin HEAD",
+            "watch -- git push -f origin HEAD",
+            "/usr/bin/watch -x git push -f origin HEAD",
+            "watch git push -f origin HEAD",
+            "watch 'git push --force origin HEAD'",
+            "env FOO=1 watch -x git push -f origin HEAD",
+            "timeout 30 watch -x git push -f origin HEAD",
+            "watch -x ionice -c 3 git push -f origin HEAD",
+            "watch -x watch -x git push -f origin HEAD",
+            "watch watch git push -f origin HEAD",
+            "watch -x watch git push -f origin HEAD",
+            "watch watch -x git push -f origin HEAD",
+            "watch -d -x git push -f origin HEAD",
+            "watch -d=cumulative -x git push -f origin HEAD",
+            "watch --differences -x git push -f origin HEAD",
+            "watch --differences=permanent -x git push -f origin HEAD",
+            "watch --differences git push -f origin HEAD",
+            "watch --differences=permanent git push -f origin HEAD",
+            "watch --beep --color --no-color --errexit --follow --chgexit --precise --no-rerun --no-title --no-wrap -x git push -f origin HEAD",
+            "watch -bcCefgprtwx git push -f origin HEAD",
+            "watch -bcCefgprtw git push -f origin HEAD",
+            "watch git push origin main --force",
+            "watch -x git push origin main -f",
+            "watch -q 10 -x git push -f origin HEAD",
+            "watch -s 10 -x git push -f origin HEAD",
+            "watch --equexit=1 -x git push -f origin HEAD",
+            "watch --shotsdir=/tmp -x git push -f origin HEAD",
+            "find /tmp -exec watch -x git push -f origin HEAD ';'",
+            'bash -c "watch -x git push -f origin HEAD"',
+            'eval "watch -x git push -f origin HEAD"',
+        ],
+    )
+    def test_dangerous_push_wrapped_by_watch_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "watch -n 60 -x rm -rf target",
+            "watch --interval 60 --exec rm -fr target",
+            "watch --interval=60 --exec rm -fr target",
+            "watch -- rm -rf target",
+            "/usr/bin/watch -x rm -rf target",
+            "watch rm -rf target",
+            "watch 'rm --recursive --force target'",
+            "sudo watch -x rm -rf target",
+            "watch -x setsid -f rm -rf target",
+            "watch -x watch -x rm -rf target",
+            "watch watch rm -rf target",
+            "watch -d -x rm -rf target",
+            "watch -d=cumulative -x rm -rf target",
+            "watch --differences -x rm -rf target",
+            "watch --differences=permanent -x rm -rf target",
+            "watch --differences rm -rf target",
+            "watch --differences=permanent rm -rf target",
+            "watch -bcCefgprtwx rm -rf target",
+            "watch -bcCefgprtw rm -rf target",
+            "watch -- rm --recursive --force target",
+            "watch -x rm --recursive --force target",
+            "watch -q 10 -x rm -rf target",
+            "watch -s 10 -x rm -rf target",
+            "watch --equexit=1 -x rm -rf target",
+            "watch --shotsdir=/tmp -x rm -rf target",
+            "timeout 30 watch -x rm -rf target",
+            "env FOO=1 watch -x rm -rf target",
+            "find /tmp -exec watch -x rm -rf target ';'",
+            'bash -c "watch -x rm -rf target"',
+            'eval "watch -x rm -rf target"',
+        ],
+    )
+    def test_dangerous_rm_wrapped_by_watch_pure(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "watch -x git push origin main",
+            "watch -x rm -f target",
+            "watch -x echo harmless",
+            "watch echo harmless",
+            "watch --exec printf %s value",
+            "watch -d echo harmless",
+            "watch --help git push -f origin HEAD",
+            'watch --help "$CMD"',
+            "watch --version rm -rf target",
+            "watch -h git push -f origin HEAD",
+            'watch -h "$CMD"',
+            "watch -v rm -rf target",
+            "watch -vh git push -f origin HEAD",
+            "watch -hx git push -f origin HEAD",
+            "watch -vx rm -rf target",
+            "watch",
+            "watch -n 60",
+            "watch --interval=60",
+            "watch --interval 60",
+            "watch -n",
+            "watch -q",
+            "watch -s",
+            "watch --interval",
+            "watch --equexit",
+            "watch --shotsdir",
+            "watch -d git push origin main",
+            "watch -d=cumulative git push origin main",
+            "watch --differences git push origin main",
+            "watch --differences=permanent git push origin main",
+            "watch --beep --color --no-color --errexit --follow --chgexit --precise --no-rerun --no-title --no-wrap git push origin main",
+            "watch -- -custom_tool git push -f origin HEAD",
+            "watch -x -- -custom_tool rm -rf target",
+        ],
+    )
+    def test_safe_and_terminal_watch_controls_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "watch --unknown git push -f origin HEAD",
+            "watch -z rm -rf target",
+            "watch -xz git push -f origin HEAD",
+            "watch -zx git push -f origin HEAD",
+            "watch --interval=$SECONDS git push -f origin HEAD",
+            "watch --interval=pre${SECONDS}post rm -rf target",
+            "watch -n$SECONDS git push -f origin HEAD",
+            "watch -npre${SECONDS}post rm -rf target",
+            "watch --equexit=$COUNT git push -f origin HEAD",
+            "watch --shotsdir=$DIR rm -rf target",
+            "SECONDS=60 watch --interval=$SECONDS git push -f origin HEAD",
+            "watch --help=foo git push -f origin HEAD",
+            "watch --version=foo rm -rf target",
+            "watch --differences=$DIFF git push -f origin HEAD",
+            "watch --differences=pre${DIFF}post git push -f origin HEAD",
+            "watch -d$DIFF rm -rf target",
+            "watch -d${DIFF} rm -rf target",
+            "watch -d $DIFF rm -rf target",
+            "watch -d=$DIFF rm -rf target",
+            "watch -d=pre${DIFF}post rm -rf target",
+            'watch -n"$SECONDS" git push -f origin HEAD',
+            'watch --interval="$SECONDS" git push -f origin HEAD',
+            "watch -q$COUNT git push -f origin HEAD",
+            "watch -s$DIR rm -rf target",
+            "watch --interval $SECONDS git push -f origin HEAD",
+            "watch --equexit $COUNT git push -f origin HEAD",
+            "watch --shotsdir $DIR rm -rf target",
+            "watch -n `echo 60` git push -f origin HEAD",
+            "COUNT=1; watch --equexit=$COUNT rm -rf target",
+            "DIR=/tmp watch --shotsdir=$DIR git push -f origin HEAD",
+            "watch --beep=yes git push -f origin HEAD",
+            "watch --exec=true git push -f origin HEAD",
+            'watch "$CMD"',
+            "watch $CMD",
+            'watch echo "$ARG"',
+            "watch echo ${ARG}",
+            'watch echo "$(printf \'%s\' \'; rm -rf target\')"',
+            'watch -n 1 echo "$ARG"',
+            'watch -x "$CMD"',
+            'watch -x echo "$ARG"',
+            "watch --exec echo `printf value`",
+            'watch watch "$CMD"',
+        ],
+    )
+    def test_unknown_options_and_dynamic_operands_fail_closed_pure(
+        self, cmd: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("watch -n 60 -x git push -f origin HEAD", 0, "deny_push"),
+            ("watch --interval=60 --exec git push --mirror origin", 0, "deny_push"),
+            ("watch -n60 -x git push +HEAD:main origin", 0, "deny_push"),
+            ("watch -xn60 git push -f origin HEAD", 0, "deny_push"),
+            ("watch -- git push -f origin HEAD", 0, "deny_push"),
+            ("/usr/bin/watch -x git push -f origin HEAD", 0, "deny_push"),
+            ("watch git push -f origin HEAD", 0, "deny_push"),
+            ("watch 'git push --force origin HEAD'", 0, "deny_push"),
+            ("env FOO=1 watch -x git push -f origin HEAD", 0, "deny_push"),
+            ("timeout 30 watch -x git push -f origin HEAD", 0, "deny_push"),
+            ("watch -x ionice -c 3 git push -f origin HEAD", 0, "deny_push"),
+            ("watch -x watch -x git push -f origin HEAD", 0, "deny_push"),
+            ("watch watch git push -f origin HEAD", 0, "deny_push"),
+            ("watch -d -x git push -f origin HEAD", 0, "deny_push"),
+            ("watch --differences -x git push -f origin HEAD", 0, "deny_push"),
+            ("watch -n 60 -x rm -rf target", 0, "deny_rm"),
+            ("watch --interval 60 --exec rm -fr target", 0, "deny_rm"),
+            ("watch -- rm -rf target", 0, "deny_rm"),
+            ("/usr/bin/watch -x rm -rf target", 0, "deny_rm"),
+            ("watch rm -rf target", 0, "deny_rm"),
+            ("watch 'rm --recursive --force target'", 0, "deny_rm"),
+            ("sudo watch -x rm -rf target", 0, "deny_rm"),
+            ("watch -x setsid -f rm -rf target", 0, "deny_rm"),
+            ("watch -x watch -x rm -rf target", 0, "deny_rm"),
+            ("watch watch rm -rf target", 0, "deny_rm"),
+            ("watch -x git push origin main", 0, "allow"),
+            ("watch -x rm -f target", 0, "allow"),
+            ("watch -x echo harmless", 0, "allow"),
+            ("watch echo harmless", 0, "allow"),
+            ("watch --exec printf %s value", 0, "allow"),
+            ("watch -d echo harmless", 0, "allow"),
+            ("watch --help git push -f origin HEAD", 0, "allow"),
+            ('watch --help "$CMD"', 0, "allow"),
+            ("watch --version rm -rf target", 0, "allow"),
+            ("watch -h git push -f origin HEAD", 0, "allow"),
+            ('watch -h "$CMD"', 0, "allow"),
+            ("watch -v rm -rf target", 0, "allow"),
+            ("watch", 0, "allow"),
+            ("watch -n 60", 0, "allow"),
+            ("watch --interval=60", 0, "allow"),
+            ("watch -d git push origin main", 0, "allow"),
+            ("watch -d=cumulative git push origin main", 0, "allow"),
+            ("watch --differences git push origin main", 0, "allow"),
+            ("watch --differences=permanent git push origin main", 0, "allow"),
+            ("watch --unknown git push -f origin HEAD", 2, "error"),
+            ("watch -z rm -rf target", 2, "error"),
+            ("watch -xz git push -f origin HEAD", 2, "error"),
+            ("watch --interval=$SECONDS git push -f origin HEAD", 2, "error"),
+            ("watch --interval=pre${SECONDS}post rm -rf target", 2, "error"),
+            ("watch -n$SECONDS git push -f origin HEAD", 2, "error"),
+            ("watch -npre${SECONDS}post rm -rf target", 2, "error"),
+            ("watch --equexit=$COUNT git push -f origin HEAD", 2, "error"),
+            ("watch --shotsdir=$DIR rm -rf target", 2, "error"),
+            ("SECONDS=60 watch --interval=$SECONDS git push -f origin HEAD", 2, "error"),
+            ("watch --help=foo git push -f origin HEAD", 2, "error"),
+            ("watch --version=foo rm -rf target", 2, "error"),
+            ("watch --differences=$DIFF git push -f origin HEAD", 2, "error"),
+            ("watch -d$DIFF rm -rf target", 2, "error"),
+            ("watch -d${DIFF} rm -rf target", 2, "error"),
+            ("watch -d $DIFF rm -rf target", 2, "error"),
+            ('watch "$CMD"', 2, "error"),
+            ('watch echo "$ARG"', 2, "error"),
+            ('watch -x "$CMD"', 2, "error"),
+            ('watch -x echo "$ARG"', 2, "error"),
+            ("watch --exec echo `printf value`", 2, "error"),
+        ],
+    )
+    def test_cli_watch_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )

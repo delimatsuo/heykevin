@@ -2670,6 +2670,174 @@ def _unwrap_command_and_env(
                 tokens.clear()
             continue
 
+        if cmd_word == "watch":
+            tokens.pop(0)
+            is_terminal = False
+            exec_mode = False
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t == "-":
+                    break
+                if t.startswith("--"):
+                    if t in {"--help", "--version"}:
+                        is_terminal = True
+                        tokens.clear()
+                        break
+                    if t in {
+                        "--beep",
+                        "--color",
+                        "--no-color",
+                        "--errexit",
+                        "--follow",
+                        "--chgexit",
+                        "--precise",
+                        "--no-rerun",
+                        "--no-title",
+                        "--no-wrap",
+                    }:
+                        tokens.pop(0)
+                        continue
+                    if t == "--exec":
+                        exec_mode = True
+                        tokens.pop(0)
+                        continue
+                    if t == "--differences":
+                        tokens.pop(0)
+                        continue
+                    if t.startswith("--differences="):
+                        val = t.split("=", 1)[1]
+                        if _has_shell_expansion(val) or val == "$":
+                            raise ValueError(
+                                f"watch option operand contains shell expansion: {val!r}"
+                            )
+                        tokens.pop(0)
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"watch option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        continue
+                    if t.startswith(("--interval=", "--equexit=", "--shotsdir=")):
+                        val = t.split("=", 1)[1]
+                        if _has_shell_expansion(val) or val == "$":
+                            raise ValueError(
+                                f"watch option operand contains shell expansion: {val!r}"
+                            )
+                        tokens.pop(0)
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"watch option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        continue
+                    if t in {"--interval", "--equexit", "--shotsdir"}:
+                        tokens.pop(0)
+                        if not tokens:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        val = tokens.pop(0)
+                        if _has_shell_expansion(val) or val == "$":
+                            raise ValueError(
+                                f"watch option operand contains shell expansion: {val!r}"
+                            )
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"watch option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        continue
+                    raise ValueError(f"Unknown watch option: {t!r}")
+
+                if t.startswith("-") and len(t) > 1:
+                    tok = tokens.pop(0)
+                    idx = 1
+                    while idx < len(tok):
+                        ch = tok[idx]
+                        if ch in {"h", "v"}:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        if ch in {"b", "c", "C", "e", "f", "g", "p", "r", "t", "w"}:
+                            idx += 1
+                            continue
+                        if ch == "x":
+                            exec_mode = True
+                            idx += 1
+                            continue
+                        if ch == "d":
+                            rest = tok[idx + 1 :]
+                            if rest:
+                                operand = rest
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"watch option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"watch option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                                break
+                            if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                raise ValueError(
+                                    f"watch option operand contains shell expansion: {tokens[0]!r}"
+                                )
+                            idx += 1
+                            continue
+                        if ch in {"n", "q", "s"}:
+                            rest = tok[idx + 1 :]
+                            if rest:
+                                operand = rest
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"watch option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"watch option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                            else:
+                                if not tokens:
+                                    is_terminal = True
+                                    tokens.clear()
+                                    break
+                                operand = tokens.pop(0)
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"watch option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"watch option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                            break
+                        raise ValueError(f"Unknown watch option: -{ch}")
+                    if is_terminal:
+                        break
+                    continue
+
+                break
+
+            if is_terminal:
+                tokens.clear()
+                continue
+
+            if not tokens:
+                continue
+
+            for payload_tok in tokens:
+                if _has_shell_expansion(payload_tok) or payload_tok == "$":
+                    raise ValueError(
+                        f"watch command contains shell expansion: {payload_tok!r}"
+                    )
+
+            if not exec_mode:
+                cmd_str = " ".join(_restore_sentinels(t) for t in tokens)
+                tokens = ["sh", "-c", cmd_str]
+                break
+
+            continue
+
         if cmd_word == "xargs":
             tokens = _unwrap_xargs(tokens)
             continue

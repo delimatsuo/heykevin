@@ -105,6 +105,245 @@ XARGS_OPT_LONG_OPTS = {
 
 XARGS_INPUT_SENTINEL = "$XARGS_INPUT"
 
+FIND_EXEC_ACTIONS = {
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+}
+
+FIND_INPUT_SENTINEL = "$FIND_INPUT"
+
+_LITERAL_SEMICOLON_SENTINEL = "__KEVIN_HOOK_LITERAL_SEMICOLON_SENTINEL_PR212__"
+
+
+def _extract_find_actions(tokens: list[str]) -> list[list[str]]:
+    """Extract command actions from find arguments.
+
+    Recognizes find execution actions (-exec, -execdir, -ok, -okdir).
+    An action command starts immediately after the action flag and ends at '+', ';',
+    or the end of the current token segment.
+
+    Occurrences of '{}' in action arguments are replaced with FIND_INPUT_SENTINEL.
+    Returns a list of command token lists.
+    """
+    actions: list[list[str]] = []
+    i = 1
+    n = len(tokens)
+
+    while i < n:
+        tok = tokens[i]
+        if tok in FIND_EXEC_ACTIONS:
+            i += 1
+            cmd_tokens: list[str] = []
+            while i < n and tokens[i] not in {"+", ";"}:
+                cmd_tokens.append(tokens[i])
+                i += 1
+            if i < n and tokens[i] in {"+", ";"}:
+                i += 1
+            if cmd_tokens:
+                replaced = [
+                    t.replace("{}", FIND_INPUT_SENTINEL) for t in cmd_tokens
+                ]
+                actions.append(replaced)
+        else:
+            i += 1
+
+    return actions
+
+
+def _record_alias_config(
+    alias_configs: dict[str, tuple[str, str]],
+    val: str,
+    kind: str,
+) -> None:
+    """Record an alias config entry if val starts with alias."""
+    if "=" in val:
+        key, setting = val.split("=", 1)
+        key_stripped = key.strip()
+        if key_stripped.lower().startswith("alias."):
+            alias_name = key_stripped[len("alias."):].lower()
+            if alias_name:
+                alias_configs[alias_name] = (kind, setting)
+
+
+def _parse_git_global_configs(
+    git_args: list[str],
+) -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """Parse git global options, extracting alias configurations and remaining args.
+
+    Returns (alias_configs, remaining_tokens) where alias_configs maps lowercase alias name
+    to ('c', value) or ('config-env', env_var_name).
+    """
+    alias_configs: dict[str, tuple[str, str]] = {}
+    i = 0
+    while i < len(git_args):
+        arg = git_args[i]
+        if arg == "--":
+            i += 1
+            break
+        if not arg.startswith("-"):
+            break
+
+        if arg == "-c":
+            i += 1
+            if i < len(git_args):
+                _record_alias_config(alias_configs, git_args[i], "c")
+                i += 1
+            continue
+
+        if arg.startswith("-c") and not arg.startswith("-C"):
+            val = arg[2:]
+            _record_alias_config(alias_configs, val, "c")
+            i += 1
+            continue
+
+        if arg == "--config-env":
+            i += 1
+            if i < len(git_args):
+                _record_alias_config(alias_configs, git_args[i], "config-env")
+                i += 1
+            continue
+
+        if arg.startswith("--config-env="):
+            val = arg[len("--config-env="):]
+            _record_alias_config(alias_configs, val, "config-env")
+            i += 1
+            continue
+
+        if arg in GIT_GLOBAL_OPTS_WITH_ARG:
+            i += 2
+            continue
+
+        if any(
+            arg.startswith(opt + "=")
+            for opt in [
+                "--git-dir",
+                "--work-tree",
+                "--namespace",
+                "--super-prefix",
+                "--exec-path",
+            ]
+        ):
+            i += 1
+            continue
+
+        if arg.startswith("-C") and len(arg) > 2:
+            i += 1
+            continue
+
+        i += 1
+
+    return alias_configs, git_args[i:]
+
+
+def _inspect_git_invocation(git_args: list[str]) -> bool:
+    """Inspect git command arguments (after 'git') for forced push with alias resolution."""
+    alias_configs, remaining = _parse_git_global_configs(git_args)
+    if not remaining:
+        return False
+
+    visited: set[str] = set()
+    depth = 0
+    max_depth = 20
+    current_tokens = list(remaining)
+
+    while current_tokens:
+        lead = current_tokens[0]
+        lead_key = lead.lower()
+        if lead_key in alias_configs:
+            if depth >= max_depth:
+                raise ValueError(f"Git alias expansion depth exceeded for {lead!r}")
+            if lead_key in visited:
+                raise ValueError(f"Git alias cycle detected: {lead!r}")
+            visited.add(lead_key)
+            depth += 1
+            kind, value = alias_configs[lead_key]
+            if kind == "config-env":
+                raise ValueError(
+                    f"Git alias {lead!r} is configured via --config-env which requires forbidden environment inspection"
+                )
+            stripped_val = value.strip()
+            if stripped_val.startswith("!"):
+                shell_cmd = stripped_val[1:].strip()
+                invocation_args = current_tokens[1:]
+                if invocation_args:
+                    shell_cmd = shell_cmd + " " + " ".join(shlex.quote(a) for a in invocation_args)
+                return contains_forced_git_push(shell_cmd)
+
+            try:
+                expansion = shlex.split(value, posix=True)
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to parse git alias value {value!r}: {exc}"
+                ) from exc
+            combined = expansion + current_tokens[1:]
+            new_alias_configs, remaining_tokens = _parse_git_global_configs(combined)
+            alias_configs.update(new_alias_configs)
+            current_tokens = remaining_tokens
+            continue
+        break
+
+    if not current_tokens:
+        return False
+
+    subcmd = current_tokens[0]
+    if subcmd != "push":
+        return False
+
+    push_args = current_tokens[1:]
+    return _is_forced_push_args(push_args)
+
+
+def _inspect_git_invocation_for_rm(git_args: list[str]) -> bool:
+    """Inspect git command arguments for shell aliases executing forbidden rm."""
+    alias_configs, remaining = _parse_git_global_configs(git_args)
+    if not remaining:
+        return False
+
+    visited: set[str] = set()
+    depth = 0
+    max_depth = 20
+    current_tokens = list(remaining)
+
+    while current_tokens:
+        lead = current_tokens[0]
+        lead_key = lead.lower()
+        if lead_key in alias_configs:
+            if depth >= max_depth:
+                raise ValueError(f"Git alias expansion depth exceeded for {lead!r}")
+            if lead_key in visited:
+                raise ValueError(f"Git alias cycle detected: {lead!r}")
+            visited.add(lead_key)
+            depth += 1
+            kind, value = alias_configs[lead_key]
+            if kind == "config-env":
+                raise ValueError(
+                    f"Git alias {lead!r} is configured via --config-env which requires forbidden environment inspection"
+                )
+            stripped_val = value.strip()
+            if stripped_val.startswith("!"):
+                shell_cmd = stripped_val[1:].strip()
+                invocation_args = current_tokens[1:]
+                if invocation_args:
+                    shell_cmd = shell_cmd + " " + " ".join(shlex.quote(a) for a in invocation_args)
+                return contains_forbidden_rm(shell_cmd)
+
+            try:
+                expansion = shlex.split(value, posix=True)
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to parse git alias value {value!r}: {exc}"
+                ) from exc
+            combined = expansion + current_tokens[1:]
+            new_alias_configs, remaining_tokens = _parse_git_global_configs(combined)
+            alias_configs.update(new_alias_configs)
+            current_tokens = remaining_tokens
+            continue
+        break
+
+    return False
+
 
 def _unwrap_xargs(tokens: list[str]) -> list[str]:
     """Unwrap an xargs command segment into wrapped command tokens with dynamic sentinels.
@@ -212,6 +451,9 @@ def _strip_comments_preserving_newlines(command: str) -> str:
     line, after whitespace, or after a command separator/operator) and extend to
     the next newline or EOF. The terminating newline is preserved as a command
     separator.
+
+    Escaped semicolons in NORMAL state and semicolons inside quotes are replaced
+    with _LITERAL_SEMICOLON_SENTINEL so they are not treated as command separators.
     """
     result: list[str] = []
     i = 0
@@ -224,6 +466,11 @@ def _strip_comments_preserving_newlines(command: str) -> str:
 
         if state == "NORMAL":
             if ch == "\\":
+                if i + 1 < n and command[i + 1] == ";":
+                    result.append(_LITERAL_SEMICOLON_SENTINEL)
+                    prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
+                    i += 2
+                    continue
                 result.append(ch)
                 i += 1
                 if i < n:
@@ -256,15 +503,36 @@ def _strip_comments_preserving_newlines(command: str) -> str:
                 continue
 
         elif state == "SINGLE_QUOTE":
-            result.append(ch)
             if ch == "'":
                 state = "NORMAL"
-            prev_char = ch
-            i += 1
-            continue
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+            elif ch == ";":
+                result.append(_LITERAL_SEMICOLON_SENTINEL)
+                prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
+                i += 1
+                continue
+            else:
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
 
         elif state == "DOUBLE_QUOTE":
-            if ch == "\\":
+            if ch == '"':
+                state = "NORMAL"
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
+            elif ch == "\\":
+                if i + 1 < n and command[i + 1] == ";":
+                    result.append(_LITERAL_SEMICOLON_SENTINEL)
+                    prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
+                    i += 2
+                    continue
                 result.append(ch)
                 i += 1
                 if i < n:
@@ -274,12 +542,16 @@ def _strip_comments_preserving_newlines(command: str) -> str:
                 else:
                     prev_char = ch
                 continue
-            result.append(ch)
-            if ch == '"':
-                state = "NORMAL"
-            prev_char = ch
-            i += 1
-            continue
+            elif ch == ";":
+                result.append(_LITERAL_SEMICOLON_SENTINEL)
+                prev_char = _LITERAL_SEMICOLON_SENTINEL[-1]
+                i += 1
+                continue
+            else:
+                result.append(ch)
+                prev_char = ch
+                i += 1
+                continue
 
         elif state == "COMMENT":
             if ch == "\n":
@@ -304,7 +576,11 @@ def _tokenize_command(command: str) -> list[list[str]]:
     if not tokens:
         return []
 
-    return _split_into_commands(tokens)
+    commands = _split_into_commands(tokens)
+    return [
+        [tok.replace(_LITERAL_SEMICOLON_SENTINEL, ";") for tok in cmd]
+        for cmd in commands
+    ]
 
 
 def _tokenize_split_string(split_str: str) -> list[str]:
@@ -469,239 +745,9 @@ def _inspect_single_command_git(tokens: list[str]) -> bool:
             raise ValueError(
                 f"xargs dynamic executable is not supported: {tokens[0]!r}"
             )
-
-        cmd_word = os.path.basename(tokens[0])
-
-        if cmd_word == "sudo":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                elif _is_var_assignment(t):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "env":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-S", "--split-string"}:
-                    tokens.pop(0)
-                    if tokens:
-                        raw_val = tokens.pop(0)
-                        split_tokens = _tokenize_split_string(raw_val)
-                        tokens = split_tokens + tokens
-                    continue
-                elif t.startswith("--split-string="):
-                    tokens.pop(0)
-                    raw_val = t.split("=", 1)[1]
-                    split_tokens = _tokenize_split_string(raw_val)
-                    tokens = split_tokens + tokens
-                    continue
-                elif t.startswith("-S") and len(t) > 2:
-                    tokens.pop(0)
-                    raw_val = t[2:]
-                    split_tokens = _tokenize_split_string(raw_val)
-                    tokens = split_tokens + tokens
-                    continue
-                elif t in {"-u", "-C", "--unset", "--chdir"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif (
-                    t.startswith("--unset=")
-                    or t.startswith("--chdir=")
-                ):
-                    tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                elif _is_var_assignment(t):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "command":
-            tokens.pop(0)
-            while tokens and (tokens[0] in {"-p", "-v", "-V"} or tokens[0] == "--"):
-                tokens.pop(0)
-            continue
-
-        if cmd_word in {"nohup", "builtin", "exec"}:
-            tokens.pop(0)
-            while tokens and tokens[0].startswith("-"):
-                if tokens[0] == "-a":
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif tokens[0] == "--":
-                    tokens.pop(0)
-                    break
-                else:
-                    tokens.pop(0)
-            continue
-
-        if cmd_word == "timeout":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                    break
-                if t in {"-k", "-s", "--kill-after", "--signal"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                else:
-                    tokens.pop(0)
-                    break
-            continue
-
-        if cmd_word == "nice":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-n", "--adjustment"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-") or (len(t) > 1 and t.startswith("+") and t[1:].isdigit()):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "stdbuf":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-i", "-o", "-e", "--input", "--output", "--error"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "time":
-            tokens.pop(0)
-            while tokens:
-                t = tokens[0]
-                if t == "--":
-                    tokens.pop(0)
-                    break
-                if t in {"-f", "-o", "--format", "--output"}:
-                    tokens.pop(0)
-                    if tokens:
-                        tokens.pop(0)
-                elif t.startswith("-"):
-                    tokens.pop(0)
-                else:
-                    break
-            continue
-
-        if cmd_word == "xargs":
-            tokens = _unwrap_xargs(tokens)
-            continue
-
-        if cmd_word in SHELL_BINARIES:
-            for i in range(1, len(tokens) - 1):
-                token = tokens[i]
-                if token == "--":
-                    break
-                if (
-                    token.startswith("-")
-                    and not token.startswith("--")
-                    and len(token) > 1
-                    and "c" in token[1:]
-                ):
-                    return contains_forced_git_push(tokens[i + 1])
-            break
-
-        if cmd_word == "eval":
-            tokens.pop(0)
-            return contains_forced_git_push(" ".join(tokens))
-
-        break
-
-    if not tokens:
-        return False
-
-    if XARGS_INPUT_SENTINEL in tokens[0]:
-        raise ValueError(
-            f"xargs dynamic executable is not supported: {tokens[0]!r}"
-        )
-
-    cmd_binary = os.path.basename(tokens[0])
-    if cmd_binary != "git":
-        return False
-
-    git_args = tokens[1:]
-    subcmd_idx = 0
-
-    while subcmd_idx < len(git_args):
-        arg = git_args[subcmd_idx]
-        if arg == "--":
-            subcmd_idx += 1
-            break
-        if not arg.startswith("-"):
-            break
-
-        if arg in GIT_GLOBAL_OPTS_WITH_ARG:
-            subcmd_idx += 2
-        else:
-            subcmd_idx += 1
-
-    if subcmd_idx >= len(git_args):
-        return False
-
-    subcmd = git_args[subcmd_idx]
-    if subcmd != "push":
-        return False
-
-    push_args = git_args[subcmd_idx + 1 :]
-    return _is_forced_push_args(push_args)
-
-
-def _inspect_single_command_rm(tokens: list[str]) -> bool:
-    """Inspect a single clean command segment for forbidden destructive rm."""
-    idx = 0
-    while idx < len(tokens) and _is_var_assignment(tokens[idx]):
-        idx += 1
-    tokens = tokens[idx:]
-
-    if not tokens:
-        return False
-
-    while tokens:
-        if XARGS_INPUT_SENTINEL in tokens[0]:
+        if FIND_INPUT_SENTINEL in tokens[0]:
             raise ValueError(
-                f"xargs dynamic executable is not supported: {tokens[0]!r}"
+                f"find dynamic executable is not supported: {tokens[0]!r}"
             )
 
         cmd_word = os.path.basename(tokens[0])
@@ -863,6 +909,242 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
             tokens = _unwrap_xargs(tokens)
             continue
 
+        if cmd_word == "find":
+            actions = _extract_find_actions(tokens)
+            if not actions:
+                return False
+            for action in actions:
+                if _inspect_single_command_git(action):
+                    return True
+            return False
+
+        if cmd_word in SHELL_BINARIES:
+            for i in range(1, len(tokens) - 1):
+                token = tokens[i]
+                if token == "--":
+                    break
+                if (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and len(token) > 1
+                    and "c" in token[1:]
+                ):
+                    return contains_forced_git_push(tokens[i + 1])
+            break
+
+        if cmd_word == "eval":
+            tokens.pop(0)
+            return contains_forced_git_push(" ".join(tokens))
+
+        break
+
+    if not tokens:
+        return False
+
+    if XARGS_INPUT_SENTINEL in tokens[0]:
+        raise ValueError(
+            f"xargs dynamic executable is not supported: {tokens[0]!r}"
+        )
+    if FIND_INPUT_SENTINEL in tokens[0]:
+        raise ValueError(
+            f"find dynamic executable is not supported: {tokens[0]!r}"
+        )
+
+    cmd_binary = os.path.basename(tokens[0])
+    if cmd_binary != "git":
+        return False
+
+    return _inspect_git_invocation(tokens[1:])
+
+
+def _inspect_single_command_rm(tokens: list[str]) -> bool:
+    """Inspect a single clean command segment for forbidden destructive rm."""
+    idx = 0
+    while idx < len(tokens) and _is_var_assignment(tokens[idx]):
+        idx += 1
+    tokens = tokens[idx:]
+
+    if not tokens:
+        return False
+
+    while tokens:
+        if XARGS_INPUT_SENTINEL in tokens[0]:
+            raise ValueError(
+                f"xargs dynamic executable is not supported: {tokens[0]!r}"
+            )
+        if FIND_INPUT_SENTINEL in tokens[0]:
+            raise ValueError(
+                f"find dynamic executable is not supported: {tokens[0]!r}"
+            )
+
+        cmd_word = os.path.basename(tokens[0])
+
+        if cmd_word == "sudo":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                elif _is_var_assignment(t):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "env":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-S", "--split-string"}:
+                    tokens.pop(0)
+                    if tokens:
+                        raw_val = tokens.pop(0)
+                        split_tokens = _tokenize_split_string(raw_val)
+                        tokens = split_tokens + tokens
+                    continue
+                elif t.startswith("--split-string="):
+                    tokens.pop(0)
+                    raw_val = t.split("=", 1)[1]
+                    split_tokens = _tokenize_split_string(raw_val)
+                    tokens = split_tokens + tokens
+                    continue
+                elif t.startswith("-S") and len(t) > 2:
+                    tokens.pop(0)
+                    raw_val = t[2:]
+                    split_tokens = _tokenize_split_string(raw_val)
+                    tokens = split_tokens + tokens
+                    continue
+                elif t in {"-u", "-C", "--unset", "--chdir"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif (
+                    t.startswith("--unset=")
+                    or t.startswith("--chdir=")
+                ):
+                    tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                elif _is_var_assignment(t):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "command":
+            tokens.pop(0)
+            while tokens and (tokens[0] in {"-p", "-v", "-V"} or tokens[0] == "--"):
+                tokens.pop(0)
+            continue
+
+        if cmd_word in {"nohup", "builtin", "exec"}:
+            tokens.pop(0)
+            while tokens and tokens[0].startswith("-"):
+                if tokens[0] == "-a":
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif tokens[0] == "--":
+                    tokens.pop(0)
+                    break
+                else:
+                    tokens.pop(0)
+            continue
+
+        if cmd_word == "timeout":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                    break
+                if t in {"-k", "-s", "--kill-after", "--signal"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                else:
+                    tokens.pop(0)
+                    break
+            continue
+
+        if cmd_word == "nice":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-n", "--adjustment"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-") or (len(t) > 1 and t.startswith("+") and t[1:].isdigit()):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "stdbuf":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-i", "-o", "-e", "--input", "--output", "--error"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "time":
+            tokens.pop(0)
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t in {"-f", "-o", "--format", "--output"}:
+                    tokens.pop(0)
+                    if tokens:
+                        tokens.pop(0)
+                elif t.startswith("-"):
+                    tokens.pop(0)
+                else:
+                    break
+            continue
+
+        if cmd_word == "xargs":
+            tokens = _unwrap_xargs(tokens)
+            continue
+
+        if cmd_word == "find":
+            actions = _extract_find_actions(tokens)
+            if not actions:
+                return False
+            for action in actions:
+                if _inspect_single_command_rm(action):
+                    return True
+            return False
+
         if cmd_word in SHELL_BINARIES:
             for i in range(1, len(tokens) - 1):
                 token = tokens[i]
@@ -890,8 +1172,14 @@ def _inspect_single_command_rm(tokens: list[str]) -> bool:
         raise ValueError(
             f"xargs dynamic executable is not supported: {tokens[0]!r}"
         )
+    if FIND_INPUT_SENTINEL in tokens[0]:
+        raise ValueError(
+            f"find dynamic executable is not supported: {tokens[0]!r}"
+        )
 
     cmd_binary = os.path.basename(tokens[0])
+    if cmd_binary == "git":
+        return _inspect_git_invocation_for_rm(tokens[1:])
     if cmd_binary != "rm":
         return False
 

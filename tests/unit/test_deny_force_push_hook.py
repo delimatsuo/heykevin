@@ -10,9 +10,15 @@ import sys
 import pytest
 
 from scripts.deny_force_push_hook import (
+    FIND_EXEC_ACTIONS,
+    FIND_INPUT_SENTINEL,
     XARGS_INPUT_SENTINEL,
     _clean_command_segment,
+    _extract_find_actions,
     _has_shell_expansion,
+    _inspect_git_invocation,
+    _inspect_git_invocation_for_rm,
+    _parse_git_global_configs,
     _tokenize_command,
     _tokenize_split_string,
     _unwrap_xargs,
@@ -110,6 +116,15 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     "env --split-string='git push -unf origin HEAD'",
     "env -S 'VAR=1 git push origin +HEAD:main'",
     "env -S 'VAR=1' git push -f origin main",
+    # Git ordinary aliases starting with Git global options
+    "git -c alias.fp='-c color.ui=false push -f' fp origin HEAD",
+    "git -c alias.fp='--no-pager push -f' fp origin HEAD",
+    "git -c alias.fp='--no-pager push --force' fp origin HEAD",
+    "git -c alias.outer='-c alias.inner=\"push -f\" inner' outer origin HEAD",
+    "git -c alias.a='-c color.ui=false b' -c alias.b='push -f' a origin HEAD",
+    # Find execution multi-action forced push
+    "find /tmp/tree -exec echo {} \\; -exec git push -f origin HEAD \\;",
+    "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD ';'",
 ]
 
 ALLOWED_GIT_PUSH_COMMANDS = [
@@ -157,12 +172,20 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "true # comment\ngit push origin codex/c++",
     "true # comment\ncommand rm -r target",
     "pytest tests/unit",
+    # Safe Git alias controls starting with Git global options
+    "git -c alias.st='-c color.ui=false status --short' st",
+    "git -c alias.st='--no-pager status --short' st",
+    'git -c alias.outer=\'-c alias.inner="status --short" inner\' outer',
+    "git -c alias.a='-c color.ui=false b' -c alias.b='status --short' a",
     # Safe xargs controls
     "xargs echo hello </dev/null",
     "xargs -0 printf %s </dev/null",
     "xargs rm -- target </dev/null",
     "xargs -I{} rm -- {} </dev/null",
     "xargs -J% command rm -- % </dev/null",
+    # Safe multi-action find controls
+    "find /tmp/tree -exec echo {} \\; -exec rm -- {} \\;",
+    "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
 ]
 
 BLOCKED_RM_COMMANDS = [
@@ -202,6 +225,18 @@ BLOCKED_RM_COMMANDS = [
     "env --split-string 'rm -r -f target'",
     "env --split-string='VAR=1 /bin/rm --recursive --force target'",
     "env -S 'VAR=1' command rm -rf target",
+    # Git alias with global options before shell rm
+    "git -c alias.outer='--no-pager inner' -c alias.inner='!rm -rf target' outer",
+    "git -c alias.outer='-c color.ui=false inner' -c alias.inner='!rm -rf target' outer",
+    "git -c alias.outer='-c alias.inner=\"!rm -rf target\" inner' outer",
+    # Multi-action find destructive rm and ordinary boundary controls
+    "find /tmp/tree -exec echo {} \\; -exec rm -rf target \\;",
+    "find /tmp/tree -exec echo {} ';' -exec rm -rf target ';'",
+    "find /tmp/tree -exec echo {} \\; -exec rm -rf -- {} \\;",
+    "find /tmp/tree -exec echo {} ';' -exec rm -rf -- {} ';'",
+    "true; rm -rf target",
+    "echo ';'; rm -rf target",
+    "true # comment\nrm -rf target",
 ]
 
 ALLOWED_RM_COMMANDS = [
@@ -233,6 +268,11 @@ ALLOWED_RM_COMMANDS = [
     "xargs rm -- target </dev/null",
     "xargs -I{} rm -- {} </dev/null",
     "xargs -J% command rm -- % </dev/null",
+    # Safe multi-action find and quoted semicolon controls
+    "find /tmp/tree -exec echo {} \\; -exec rm -- {} \\;",
+    "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
+    "echo ';'",
+    'echo ";"',
 ]
 
 
@@ -764,6 +804,57 @@ class TestTokenizeCommand:
     ) -> None:
         assert _tokenize_command(command) == expected
 
+    def test_multi_action_find_tokenization_escaped_and_quoted(self) -> None:
+        cmd1 = "find /tmp/tree -exec echo {} \\; -exec rm -rf {} \\;"
+        assert _tokenize_command(cmd1) == [
+            [
+                "find",
+                "/tmp/tree",
+                "-exec",
+                "echo",
+                "{}",
+                ";",
+                "-exec",
+                "rm",
+                "-rf",
+                "{}",
+                ";",
+            ]
+        ]
+        cmd2 = "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD {} ';'"
+        assert _tokenize_command(cmd2) == [
+            [
+                "find",
+                "/tmp/tree",
+                "-exec",
+                "echo",
+                "{}",
+                ";",
+                "-exec",
+                "git",
+                "push",
+                "-f",
+                "origin",
+                "HEAD",
+                "{}",
+                ";",
+            ]
+        ]
+
+    def test_ordinary_shell_boundaries_with_quoted_semicolons_and_comments(self) -> None:
+        assert _tokenize_command("true; rm -rf target") == [
+            ["true"],
+            ["rm", "-rf", "target"],
+        ]
+        assert _tokenize_command("echo ';'; rm -rf target") == [
+            ["echo", ";"],
+            ["rm", "-rf", "target"],
+        ]
+        assert _tokenize_command("true # comment\nrm -rf target") == [
+            ["true"],
+            ["rm", "-rf", "target"],
+        ]
+
 
 class TestTokenizeSplitString:
     """Direct unit tests for _tokenize_split_string helper."""
@@ -1125,3 +1216,500 @@ class TestSettingsJsonContract:
             "timeout": 5,
         }
         assert "if" not in command_hook
+
+
+class TestGitAliasResolution:
+    """Direct unit tests for Git alias parsing and resolution."""
+
+    def test_parse_git_global_configs_empty(self) -> None:
+        configs, remaining = _parse_git_global_configs([])
+        assert configs == {}
+        assert remaining == []
+
+    def test_parse_git_global_configs_extracts_c_and_config_env(self) -> None:
+        args = [
+            "-c", "alias.fp=push -f",
+            "-calias.force=push --force",
+            "-c", "user.name=Tester",
+            "--config-env", "alias.env_fp=MY_FP",
+            "--config-env=alias.env_att=ATT_VAR",
+            "-C", "/path/to/repo",
+            "--git-dir=/foo/.git",
+            "--no-pager",
+            "fp",
+            "origin",
+            "HEAD",
+        ]
+        configs, remaining = _parse_git_global_configs(args)
+        assert configs == {
+            "fp": ("c", "push -f"),
+            "force": ("c", "push --force"),
+            "env_fp": ("config-env", "MY_FP"),
+            "env_att": ("config-env", "ATT_VAR"),
+        }
+        assert remaining == ["fp", "origin", "HEAD"]
+
+    def test_parse_git_global_configs_last_value_wins_and_case_insensitivity(self) -> None:
+        args = [
+            "-c", "ALIAS.FP=status",
+            "-c", "alias.fp=push -f",
+            "fp",
+        ]
+        configs, remaining = _parse_git_global_configs(args)
+        assert configs["fp"] == ("c", "push -f")
+        assert remaining == ["fp"]
+
+    def test_parse_git_global_configs_double_dash_terminates(self) -> None:
+        args = [
+            "-c", "alias.fp=push -f",
+            "--",
+            "-c", "alias.ignored=val",
+            "fp",
+        ]
+        configs, remaining = _parse_git_global_configs(args)
+        assert "fp" in configs
+        assert "ignored" not in configs
+        assert remaining == ["-c", "alias.ignored=val", "fp"]
+
+    @pytest.mark.parametrize(
+        "git_args",
+        [
+            ["-c", "alias.fp=push -f", "fp", "origin", "HEAD"],
+            ["-calias.fp=push --force", "fp", "origin", "HEAD"],
+            ["-c", "alias.fp=!git push -f", "fp", "origin", "HEAD"],
+            ["-c", "alias.a=b", "-c", "alias.b=push -f", "a", "origin", "HEAD"],
+            ["-c", "alias.a=b", "-c", "alias.b=c", "-c", "alias.c=push -f", "a", "origin", "HEAD"],
+            ["-c", "ALIAS.FP=push -f", "fp", "origin", "HEAD"],
+            ["-c", "alias.fp=push -f", "FP", "origin", "HEAD"],
+            ["-c", "alias.fp=push --force-with-lease", "fp", "origin", "HEAD"],
+            ["-c", "alias.fp=push origin +main", "fp"],
+            # Ordinary aliases starting with Git global options
+            ["-c", "alias.fp=-c color.ui=false push -f", "fp", "origin", "HEAD"],
+            ["-c", "alias.fp=--no-pager push --force", "fp", "origin", "HEAD"],
+            ["-c", "alias.outer=-c alias.inner='push -f' inner", "outer", "origin", "HEAD"],
+            ["-c", "alias.a=-c color.ui=false b", "-c", "alias.b=push -f", "a", "origin", "HEAD"],
+            ["-c", "alias.a=--no-pager b", "-c", "alias.b=-c color.ui=false push -f", "a", "origin", "HEAD"],
+        ],
+    )
+    def test_inspect_git_invocation_blocks_forced_push_aliases(
+        self, git_args: list[str]
+    ) -> None:
+        assert _inspect_git_invocation(git_args) is True
+
+    @pytest.mark.parametrize(
+        "git_args",
+        [
+            ["-c", "alias.co=checkout", "co", "main"],
+            ["-c", "alias.say=!echo hi", "say"],
+            ["-c", "alias.fp=push -f", "-c", "alias.fp=status", "fp"],
+            ["-c", "alias.p=push", "p", "origin", "main"],
+            ["-c", "alias.p=push", "p", "--follow-tags", "origin", "HEAD"],
+            ["push", "origin", "main"],
+            # Safe controls starting with Git global options
+            ["-c", "alias.st=-c color.ui=false status --short", "st"],
+            ["-c", "alias.st=--no-pager status --short", "st"],
+            ["-c", "alias.outer=-c alias.inner='status --short' inner", "outer"],
+            ["-c", "alias.a=-c color.ui=false b", "-c", "alias.b=status --short", "a"],
+        ],
+    )
+    def test_inspect_git_invocation_allows_safe_aliases(
+        self, git_args: list[str]
+    ) -> None:
+        assert _inspect_git_invocation(git_args) is False
+
+    def test_inspect_git_invocation_cycle_raises_value_error(self) -> None:
+        args = ["-c", "alias.a=b", "-c", "alias.b=a", "a", "origin", "HEAD"]
+        with pytest.raises(ValueError, match="Git alias cycle detected"):
+            _inspect_git_invocation(args)
+
+    def test_inspect_git_invocation_self_cycle_raises_value_error(self) -> None:
+        args = ["-c", "alias.self=self", "self", "origin", "HEAD"]
+        with pytest.raises(ValueError, match="Git alias cycle detected"):
+            _inspect_git_invocation(args)
+
+    def test_inspect_git_invocation_config_env_raises_value_error(self) -> None:
+        args = ["--config-env", "alias.fp=MY_VAR", "fp", "origin", "HEAD"]
+        with pytest.raises(ValueError, match=r"--config-env which requires forbidden environment inspection"):
+            _inspect_git_invocation(args)
+
+    def test_inspect_git_invocation_config_env_unrelated_is_allowed(self) -> None:
+        args = ["--config-env", "alias.other=MY_VAR", "push", "origin", "main"]
+        assert _inspect_git_invocation(args) is False
+
+    @pytest.mark.parametrize(
+        "git_args",
+        [
+            ["-c", "alias.nuke=!rm -rf target", "nuke"],
+            ["-c", "alias.outer=--no-pager inner", "-c", "alias.inner=!rm -rf target", "outer"],
+            ["-c", "alias.outer=-c color.ui=false inner", "-c", "alias.inner=!rm -rf target", "outer"],
+            ["-c", "alias.outer=-c alias.inner='!rm -rf target' inner", "outer"],
+        ],
+    )
+    def test_inspect_git_invocation_for_rm_blocks_shell_nuke_alias(
+        self, git_args: list[str]
+    ) -> None:
+        assert _inspect_git_invocation_for_rm(git_args) is True
+
+    def test_inspect_git_invocation_for_rm_allows_ordinary_alias(self) -> None:
+        args = ["-c", "alias.fp=push -f", "fp", "origin", "HEAD"]
+        assert _inspect_git_invocation_for_rm(args) is False
+
+    def test_inspect_git_invocation_for_rm_allows_safe_shell_alias(self) -> None:
+        args = ["-c", "alias.say=!echo hi", "say"]
+        assert _inspect_git_invocation_for_rm(args) is False
+
+
+class TestFindExecutionActions:
+    """Direct unit tests for find execution action extraction and inspection."""
+
+    def test_extract_find_actions_empty(self) -> None:
+        assert _extract_find_actions([]) == []
+        assert _extract_find_actions(["find", "/tmp/tree", "-print"]) == []
+
+    def test_extract_find_actions_all_action_types(self) -> None:
+        for action in FIND_EXEC_ACTIONS:
+            tokens = ["find", "/tmp/tree", action, "rm", "-rf", "{}", "+"]
+            extracted = _extract_find_actions(tokens)
+            assert extracted == [["rm", "-rf", FIND_INPUT_SENTINEL]]
+
+    def test_extract_find_actions_multiple_actions(self) -> None:
+        tokens = [
+            "find", "/tmp/tree",
+            "-exec", "echo", "{}", "+",
+            "-name", "*.tmp",
+            "-execdir", "command", "rm", "--", "{}", "+",
+        ]
+        extracted = _extract_find_actions(tokens)
+        assert extracted == [
+            ["echo", FIND_INPUT_SENTINEL],
+            ["command", "rm", "--", FIND_INPUT_SENTINEL],
+        ]
+
+        tokens_semi = [
+            "find", "/tmp/tree",
+            "-exec", "echo", "{}", ";",
+            "-execdir", "rm", "-rf", "{}", ";",
+        ]
+        extracted_semi = _extract_find_actions(tokens_semi)
+        assert extracted_semi == [
+            ["echo", FIND_INPUT_SENTINEL],
+            ["rm", "-rf", FIND_INPUT_SENTINEL],
+        ]
+
+    def test_extract_find_actions_semicolon_terminator(self) -> None:
+        tokens = ["find", "/tmp/tree", "-exec", "rm", "-rf", "{}", ";"]
+        extracted = _extract_find_actions(tokens)
+        assert extracted == [["rm", "-rf", FIND_INPUT_SENTINEL]]
+
+    def test_extract_find_actions_end_of_segment_terminator(self) -> None:
+        tokens = ["find", "/tmp/tree", "-exec", "rm", "-rf", "{}"]
+        extracted = _extract_find_actions(tokens)
+        assert extracted == [["rm", "-rf", FIND_INPUT_SENTINEL]]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -exec git push -f origin HEAD +",
+            "find /tmp/tree -execdir git push -fu origin main +",
+            "find /tmp/tree -ok /usr/bin/git push --force origin HEAD +",
+            "find /tmp/tree -okdir git push origin +main +",
+            "find /tmp/tree -exec git -c alias.fp='push -f' fp origin HEAD +",
+            "find /tmp/tree -exec sh -c 'git push -f origin HEAD' {} +",
+            "sudo find /tmp/tree -exec git push -f origin HEAD +",
+            "timeout 10 find /tmp/tree -exec git push -f origin HEAD +",
+            "find /tmp/tree -exec echo {} \\; -exec git push -f origin HEAD \\;",
+            "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD ';'",
+        ],
+    )
+    def test_contains_forced_git_push_blocks_find_actions(self, command: str) -> None:
+        assert contains_forced_git_push(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -exec git push -f origin HEAD {} +",
+            "find /tmp/tree -exec {} push -f origin HEAD +",
+            "find /tmp/tree -execdir {} push -f origin HEAD +",
+            "find /tmp/tree -ok {} push -f origin HEAD +",
+            "find /tmp/tree -okdir {} push -f origin HEAD +",
+            "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD {} ';'",
+            "find /tmp/tree -exec echo {} \\; -exec git push -f origin HEAD {} \\;",
+        ],
+    )
+    def test_contains_forced_git_push_find_dynamic_executable_raises_value_error(
+        self, command: str
+    ) -> None:
+        with pytest.raises(ValueError, match=r"(shell expansion|dynamic executable)"):
+            contains_forced_git_push(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -print",
+            "find /tmp/tree -exec echo {} +",
+            "find /tmp/tree -exec rm -- {} +",
+            "find /tmp/tree -execdir command rm -- {} +",
+            "find /tmp/tree -exec rm -- {} \\;",
+            "find /tmp/tree -execdir command rm -- {} \\;",
+            "find /tmp/tree -name '*.txt' -print",
+            "find /tmp/tree -type f -exec printf '%s\\n' {} +",
+            "find /tmp/tree -exec echo {} \\; -exec rm -- {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
+        ],
+    )
+    def test_contains_forced_git_push_allows_safe_find_controls(
+        self, command: str
+    ) -> None:
+        assert contains_forced_git_push(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -exec rm -rf target +",
+            "find /tmp/tree -exec rm -rf -- {} +",
+            "find /tmp/tree -execdir command rm -rf -- {} +",
+            "find /tmp/tree -ok rm -rf target +",
+            "find /tmp/tree -okdir rm -rf target +",
+            "find /tmp/tree -exec git -c alias.nuke='!rm -rf target' nuke +",
+            "find /tmp/tree -exec sh -c 'rm -rf target' {} +",
+            "sudo find /tmp/tree -exec rm -rf target +",
+            "timeout 10 find /tmp/tree -exec rm -rf target +",
+            "find /tmp/tree -exec echo {} \\; -exec rm -rf target \\;",
+            "find /tmp/tree -exec echo {} ';' -exec rm -rf target ';'",
+            "find /tmp/tree -exec echo {} \\; -exec rm -rf -- {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec rm -rf -- {} ';'",
+        ],
+    )
+    def test_contains_forbidden_rm_blocks_find_actions(self, command: str) -> None:
+        assert contains_forbidden_rm(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -exec rm -rf {} +",
+            "find /tmp/tree -execdir command rm -rf {} +",
+            "find /tmp/tree -ok rm -rf {} +",
+            "find /tmp/tree -okdir rm -rf {} +",
+            "find /tmp/tree -exec rm -rf {} \\;",
+            "sudo find /tmp/tree -exec rm -rf {} +",
+            "find /tmp/tree -exec {} -rf target +",
+            "find /tmp/tree -exec command {} -rf target +",
+            "find /tmp/tree -exec echo {} \\; -exec rm -rf {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec rm -rf {} ';'",
+        ],
+    )
+    def test_contains_forbidden_rm_find_uncertainty_raises_value_error(
+        self, command: str
+    ) -> None:
+        with pytest.raises(ValueError, match=r"(shell expansion|dynamic executable)"):
+            contains_forbidden_rm(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find /tmp/tree -print",
+            "find /tmp/tree -exec echo {} +",
+            "find /tmp/tree -exec rm -- {} +",
+            "find /tmp/tree -execdir command rm -- {} +",
+            "find /tmp/tree -exec rm -- {} \\;",
+            "find /tmp/tree -execdir command rm -- {} \\;",
+            "find /tmp/tree -name '*.txt' -print",
+            "find /tmp/tree -type f -exec printf '%s\\n' {} +",
+            "find /tmp/tree -exec echo {} \\; -exec rm -- {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
+        ],
+    )
+    def test_contains_forbidden_rm_allows_safe_find_controls(
+        self, command: str
+    ) -> None:
+        assert contains_forbidden_rm(command) is False
+
+
+class TestReviewFindingsCLI:
+    """CLI end-to-end contract tests covering exact review findings and safe controls."""
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # Finding A - Exact review reproductions & variations
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c alias.fp='push -f' fp origin HEAD",
+            "git -calias.fp='push --force' fp origin HEAD",
+            "git -c alias.fp='!git push -f' fp origin HEAD",
+            "git -c alias.a=b -c alias.b='push -f' a origin HEAD",
+            "git -c alias.a=b -c alias.b=c -c alias.c='push -f' a origin HEAD",
+            "git -c ALIAS.FP='push -f' fp origin HEAD",
+            "git -c alias.fp='push -f' FP origin HEAD",
+            "sudo git -c alias.fp='push -f' fp origin HEAD",
+            "env -S 'git -c alias.fp=\"push -f\" fp origin HEAD'",
+            # Ordinary aliases starting with Git global options
+            "git -c alias.fp='-c color.ui=false push -f' fp origin HEAD",
+            "git -c alias.fp='--no-pager push -f' fp origin HEAD",
+            "git -c alias.fp='--no-pager push --force' fp origin HEAD",
+            "git -c alias.outer='-c alias.inner=\"push -f\" inner' outer origin HEAD",
+            "git -c alias.a='-c color.ui=false b' -c alias.b='push -f' a origin HEAD",
+        ],
+    )
+    def test_cli_denies_git_alias_forced_push(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["permissionDecision"] == "deny"
+        assert "no-force-push" in hook_out["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c alias.nuke='!rm -rf target' nuke",
+            "sudo git -c alias.nuke='!rm -rf target' nuke",
+            "git -c ALIAS.NUKE='!rm -rf target' nuke",
+            # Ordinary aliases with global options before shell rm
+            "git -c alias.outer='--no-pager inner' -c alias.inner='!rm -rf target' outer",
+            "git -c alias.outer='-c color.ui=false inner' -c alias.inner='!rm -rf target' outer",
+            "git -c alias.outer='-c alias.inner=\"!rm -rf target\" inner' outer",
+        ],
+    )
+    def test_cli_denies_git_alias_destructive_rm(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        hook_out = data["hookSpecificOutput"]
+        assert hook_out["permissionDecision"] == "deny"
+        assert "destructive" in hook_out["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c alias.a=b -c alias.b=a a origin HEAD",
+            "git -c alias.self=self self origin HEAD",
+            "git --config-env alias.fp=MY_VAR fp origin HEAD",
+            "git --config-env=alias.fp=MY_VAR fp origin HEAD",
+        ],
+    )
+    def test_cli_git_alias_cycles_and_config_env_fail_closed(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c alias.co=checkout co main",
+            "git -c alias.say='!echo hi' say",
+            "git -c alias.p=push p origin main",
+            "git --config-env alias.other=MY_VAR push origin main",
+            "git -c alias.fp='push -f' -c alias.fp='status' fp origin HEAD",
+            # Safe controls starting with Git global options
+            "git -c alias.st='-c color.ui=false status --short' st",
+            "git -c alias.st='--no-pager status --short' st",
+            'git -c alias.outer=\'-c alias.inner="status --short" inner\' outer',
+            "git -c alias.a='-c color.ui=false b' -c alias.b='status --short' a",
+        ],
+    )
+    def test_cli_allows_safe_git_aliases(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""
+
+    # Finding B - Exact review reproductions & variations
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "find /tmp/tree -exec rm -rf {} +",
+            "find /tmp/tree -execdir command rm -rf {} +",
+            "find /tmp/tree -ok rm -rf {} +",
+            "find /tmp/tree -okdir rm -rf {} +",
+            "find /tmp/tree -exec git push -f origin HEAD {} +",
+            "find /tmp/tree -exec {} push -f origin HEAD +",
+            "find /tmp/tree -execdir {} push -f origin HEAD +",
+            "sudo find /tmp/tree -exec rm -rf {} +",
+            "find /tmp/tree -exec rm -rf {} \\;",
+            "find /tmp/tree -exec echo {} \\; -exec rm -rf {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec rm -rf {} ';'",
+            "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD {} ';'",
+            "find /tmp/tree -exec echo {} \\; -exec git push -f origin HEAD {} \\;",
+        ],
+    )
+    def test_cli_find_actions_fail_closed(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "find /tmp/tree -exec git push -f origin HEAD +",
+            "find /tmp/tree -exec sh -c 'git push -f origin HEAD' {} +",
+            "find /tmp/tree -exec git -c alias.fp='push -f' fp origin HEAD +",
+            "find /tmp/tree -exec echo {} \\; -exec git push -f origin HEAD \\;",
+            "find /tmp/tree -exec echo {} ';' -exec git push -f origin HEAD ';'",
+        ],
+    )
+    def test_cli_find_actions_deny_git_force_push(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no-force-push" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "find /tmp/tree -exec rm -rf target +",
+            "find /tmp/tree -exec rm -rf -- {} +",
+            "find /tmp/tree -execdir command rm -rf -- {} +",
+            "find /tmp/tree -exec sh -c 'rm -rf target' {} +",
+            "find /tmp/tree -exec git -c alias.nuke='!rm -rf target' nuke +",
+            "find /tmp/tree -exec echo {} \\; -exec rm -rf target \\;",
+            "find /tmp/tree -exec echo {} ';' -exec rm -rf target ';'",
+            "find /tmp/tree -exec echo {} \\; -exec rm -rf -- {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec rm -rf -- {} ';'",
+        ],
+    )
+    def test_cli_find_actions_deny_destructive_rm(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert "hookSpecificOutput" in data
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "destructive" in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "find /tmp/tree -print",
+            "find /tmp/tree -exec echo {} +",
+            "find /tmp/tree -exec rm -- {} +",
+            "find /tmp/tree -execdir command rm -- {} +",
+            "find /tmp/tree -exec rm -- {} \\;",
+            "find /tmp/tree -execdir command rm -- {} \\;",
+            "find /tmp/tree -name '*.txt' -print",
+            "find /tmp/tree -type f -exec printf '%s\\n' {} +",
+            "find /tmp/tree -exec echo {} \\; -exec rm -- {} \\;",
+            "find /tmp/tree -exec echo {} ';' -exec printf '%s\\n' {} ';'",
+        ],
+    )
+    def test_cli_find_safe_controls_allowed(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = self._run_hook(payload)
+        assert res.returncode == 0
+        assert res.stdout == ""

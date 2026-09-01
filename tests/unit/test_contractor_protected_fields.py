@@ -133,8 +133,83 @@ def test_18j_dynamic_operation_intent_keys_subset_of_protected_fields():
     for provider in ["jobber", "google_calendar"]:
         intent_keys = get_provider_operation_intent_keys(provider)
         missing = intent_keys - PROTECTED_FIELDS
-        assert not missing, f"Operation intent keys for provider '{provider}' missing from PROTECTED_FIELDS: {missing}"
+        assert not missing, (
+            f"Operation intent keys for provider '{provider}' missing from PROTECTED_FIELDS: {missing}"
+        )
 
     for provider in VALID_PROVIDERS:
         intent_keys = get_provider_operation_intent_keys(provider)
-        assert intent_keys.issubset(PROTECTED_FIELDS), f"Provider '{provider}' intent keys dynamically violate PROTECTED_FIELDS contract"
+        assert intent_keys.issubset(PROTECTED_FIELDS), (
+            f"Provider '{provider}' intent keys dynamically violate PROTECTED_FIELDS contract"
+        )
+
+
+def test_identity_binding_fields_in_protected_fields():
+    """Proves identity binding fields (owner_phone, owner_phone_e164, apple_user_id) are in PROTECTED_FIELDS under F-04."""
+    identity_fields = {"owner_phone", "owner_phone_e164", "apple_user_id"}
+    missing = identity_fields - PROTECTED_FIELDS
+    assert not missing, f"Missing identity fields in PROTECTED_FIELDS: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_patch_contractor_strips_owner_phone_and_identity_fields(monkeypatch):
+    """Proves that PATCH /api/contractors/{id} strips owner_phone, owner_phone_e164, and apple_user_id."""
+    captured_updates = {}
+
+    async def fake_update_contractor(contractor_id, updates):
+        captured_updates.update(updates)
+        return True
+
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+
+    class PermissiveUpdate(contractors_api.ContractorUpdate):
+        class Config:
+            extra = "allow"
+
+    payload = PermissiveUpdate(
+        business_name="Acme Corp",
+        owner_phone="+14155552671",
+        owner_phone_e164="+14155552671",
+        apple_user_id="hijacked_apple_id",
+    )
+
+    resp = await contractors_api.api_update_contractor(
+        "contractor-1",
+        payload,
+        _admin_request(),
+    )
+    assert resp == {"status": "ok"}
+    assert captured_updates == {"business_name": "Acme Corp"}
+    assert "owner_phone" not in captured_updates
+    assert "owner_phone_e164" not in captured_updates
+    assert "apple_user_id" not in captured_updates
+
+
+@pytest.mark.asyncio
+async def test_patch_contractor_only_owner_phone_returns_no_changes(monkeypatch):
+    """Proves that a PATCH attempting to update only owner_phone returns no changes with zero persistence writes."""
+    update_called = False
+
+    async def fake_update_contractor(contractor_id, updates):
+        nonlocal update_called
+        update_called = True
+        return True
+
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+
+    class PermissiveUpdate(contractors_api.ContractorUpdate):
+        class Config:
+            extra = "allow"
+
+    payload = PermissiveUpdate(
+        owner_phone="+14155552671",
+        owner_phone_e164="+14155552671",
+    )
+
+    resp = await contractors_api.api_update_contractor(
+        "contractor-1",
+        payload,
+        _admin_request(),
+    )
+    assert resp == {"status": "no changes"}
+    assert not update_called

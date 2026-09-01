@@ -58,7 +58,6 @@ GIT_GLOBAL_OPTS_WITH_ARG = {
     "--namespace",
     "--super-prefix",
     "--config-env",
-    "--exec-path",
 }
 
 SHELL_BINARIES = {
@@ -580,6 +579,14 @@ def _parse_git_global_options(
                 "Repository-local Git config via --bare is unsupported/uninspectable"
             )
 
+        if arg.startswith("--exec-path="):
+            raise ValueError(
+                "Custom Git execution path via --exec-path is unsupported/uninspectable"
+            )
+
+        if arg == "--exec-path":
+            return alias_configs, mirror_configs, push_configs, []
+
         if arg in GIT_GLOBAL_OPTS_WITH_ARG:
             i += 2
             continue
@@ -590,7 +597,6 @@ def _parse_git_global_options(
                 "--work-tree",
                 "--namespace",
                 "--super-prefix",
-                "--exec-path",
             ]
         ):
             i += 1
@@ -2173,6 +2179,7 @@ def _inspect_shell_invocation(
 GIT_CONFIG_FILE_SELECTORS = {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"}
 GIT_CONFIG_USER_SEARCH_PATH_INPUTS = {"HOME", "XDG_CONFIG_HOME"}
 GIT_REPOSITORY_CONFIG_SELECTORS = {"GIT_DIR", "GIT_COMMON_DIR"}
+GIT_EXECUTION_PATH_SELECTORS = {"GIT_EXEC_PATH"}
 GIT_CONFIG_SEARCH_PATH_INPUTS = GIT_CONFIG_USER_SEARCH_PATH_INPUTS
 INITIAL_ASSUMED_EXPORTED_KEYS = frozenset(GIT_CONFIG_USER_SEARCH_PATH_INPUTS)
 
@@ -2207,6 +2214,11 @@ def _is_git_repository_config_selector(key: str) -> bool:
     return key in GIT_REPOSITORY_CONFIG_SELECTORS
 
 
+def _is_git_execution_path_selector(key: str) -> bool:
+    """Return True if key selects Git's external subcommand search path."""
+    return key in GIT_EXECUTION_PATH_SELECTORS
+
+
 _is_git_config_search_path_input = _is_git_config_user_search_path_input
 
 
@@ -2217,6 +2229,7 @@ def _is_tracked_git_env_key(key: str) -> bool:
         or _is_git_config_file_selector(key)
         or _is_git_config_user_search_path_input(key)
         or _is_git_repository_config_selector(key)
+        or _is_git_execution_path_selector(key)
     )
 
 
@@ -2255,6 +2268,15 @@ def _validate_git_repository_config_selectors(env_vars: dict[str, str]) -> None:
             )
 
 
+def _validate_git_execution_path_selectors(env_vars: dict[str, str]) -> None:
+    """Fail closed when Git can load an uninspected external subcommand helper."""
+    for selector in GIT_EXECUTION_PATH_SELECTORS:
+        if selector in env_vars:
+            raise ValueError(
+                f"Custom Git execution path via {selector} is unsupported/uninspectable"
+            )
+
+
 _validate_git_config_search_path_inputs = _validate_git_config_user_search_path_inputs
 
 
@@ -2273,6 +2295,7 @@ def _parse_git_env_details(
     _validate_git_config_file_selectors(env_vars)
     _validate_git_config_user_search_path_inputs(env_vars)
     _validate_git_repository_config_selectors(env_vars)
+    _validate_git_execution_path_selectors(env_vars)
 
     for k, v in env_vars.items():
         if _is_git_config_protocol_key(k) and _has_shell_expansion(v):

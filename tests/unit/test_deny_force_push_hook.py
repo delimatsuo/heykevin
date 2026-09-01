@@ -40,6 +40,7 @@ from scripts.deny_force_push_hook import (
     _is_git_config_file_selector,
     _is_git_config_protocol_key,
     _is_git_config_user_search_path_input,
+    _is_git_execution_path_selector,
     _is_tracked_git_env_key,
     _parse_backtick_body,
     _parse_git_env_configs,
@@ -57,6 +58,7 @@ from scripts.deny_force_push_hook import (
     _unwrap_xargs,
     _validate_git_config_file_selectors,
     _validate_git_config_user_search_path_inputs,
+    _validate_git_execution_path_selectors,
     contains_forbidden_rm,
     contains_forced_git_push,
 )
@@ -2880,6 +2882,188 @@ class TestDefect129GitBareOption:
                 match=r"^Repository-local Git config via --bare is unsupported/uninspectable$",
             ):
                 checker(repro_cmd)
+
+
+class TestDefect130GitExecutionPath:
+    """Tests for custom Git helper paths supplied by CLI option or environment."""
+
+    CLI_ERROR = (
+        "Custom Git execution path via --exec-path is unsupported/uninspectable"
+    )
+    ENV_ERROR = (
+        "Custom Git execution path via GIT_EXEC_PATH is unsupported/uninspectable"
+    )
+
+    def _run_hook(self, stdin_payload: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_pure_helpers_raise_on_custom_exec_path_option(self) -> None:
+        git_args = ["--exec-path=/tmp/helpers", "fp", "origin", "HEAD"]
+        for helper in (
+            _parse_git_global_configs,
+            _has_forcing_git_config,
+            _scan_git_forcing_configs,
+        ):
+            with pytest.raises(ValueError, match=f"^{self.CLI_ERROR}$"):
+                helper(git_args)
+
+    def test_bare_exec_path_query_is_terminal_and_consumes_no_operand(self) -> None:
+        assert _reconstruct_git_args(["--exec-path", "push", "-f"]) == [
+            "--exec-path",
+            "push",
+            "-f",
+        ]
+        assert _parse_git_global_configs(["--exec-path"]) == ({}, [])
+        assert _parse_git_global_configs(
+            ["--exec-path", "push", "-f", "origin", "HEAD"]
+        ) == ({}, [])
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git --exec-path=/tmp/helpers fp origin HEAD",
+            "/usr/bin/git --exec-path=/tmp/helpers fp origin HEAD",
+            "env git --exec-path=/tmp/helpers fp origin HEAD",
+            "command git --exec-path=/tmp/helpers fp origin HEAD",
+            "sh -c 'git --exec-path=/tmp/helpers fp origin HEAD'",
+            "find /tmp/tree -exec git --exec-path=/tmp/helpers fp origin HEAD \\;",
+            "git --exec-path= fp origin HEAD",
+        ],
+    )
+    def test_classifiers_fail_closed_on_custom_exec_path_option(
+        self, command: str
+    ) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.CLI_ERROR}$"):
+                checker(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD",
+            "env GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD",
+            "env -i GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD",
+            "export GIT_EXEC_PATH=/tmp/helpers; git fp origin HEAD",
+            "export GIT_EXEC_PATH=/tmp/helpers; sh -c 'git fp origin HEAD'",
+            "GIT_EXEC_PATH=/tmp/helpers sh -c 'git fp origin HEAD'",
+            "env GIT_EXEC_PATH=/tmp/helpers sh -c 'git fp origin HEAD'",
+            "GIT_EXEC_PATH= git fp origin HEAD",
+        ],
+    )
+    def test_classifiers_fail_closed_on_git_exec_path_environment(
+        self, command: str
+    ) -> None:
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                checker(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git --exec-path",
+            "git --exec-path push -f origin HEAD",
+            "git fp --exec-path=/tmp/helpers",
+            "GIT_EXEC_PATH=/tmp/helpers printf ok",
+            "GIT_EXEC_PATH=/tmp/helpers; git status",
+            "export GIT_EXEC_PATH=/tmp/helpers; unset GIT_EXEC_PATH; git status",
+            "export GIT_EXEC_PATH=/tmp/helpers; export -n GIT_EXEC_PATH; git status",
+            "env -u GIT_EXEC_PATH git status",
+            "GIT_EXEC_PATH_LOOKALIKE=/tmp/helpers git status",
+        ],
+    )
+    def test_safe_controls_remain_false(self, command: str) -> None:
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
+
+    def test_environment_selector_helper_contracts(self) -> None:
+        assert _is_git_execution_path_selector("GIT_EXEC_PATH") is True
+        assert _is_git_execution_path_selector("GIT_EXEC_PATH_EXTRA") is False
+        assert _is_git_execution_path_selector("PATH") is False
+        assert _is_tracked_git_env_key("GIT_EXEC_PATH") is True
+        assert _is_tracked_git_env_key("GIT_EXEC_PATH_EXTRA") is False
+        assert INITIAL_ASSUMED_EXPORTED_KEYS == frozenset(
+            {"HOME", "XDG_CONFIG_HOME"}
+        )
+
+        _validate_git_execution_path_selectors({})
+        _validate_git_execution_path_selectors({"SAFE_VAR": "value"})
+        for value in ("/tmp/helpers", ""):
+            with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                _validate_git_execution_path_selectors({"GIT_EXEC_PATH": value})
+
+    @pytest.mark.parametrize(
+        ("payload", "selector"),
+        [
+            (
+                json.dumps(
+                    {"command": "git --exec-path=/tmp/helpers fp origin HEAD"}
+                ),
+                "--exec-path",
+            ),
+            (
+                json.dumps(
+                    {
+                        "tool_input": {
+                            "command": "GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD"
+                        }
+                    }
+                ),
+                "GIT_EXEC_PATH",
+            ),
+        ],
+    )
+    def test_cli_reproductions_exit_2(self, payload: str, selector: str) -> None:
+        result = self._run_hook(payload)
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert selector in result.stderr
+
+    def test_mutation_effective_cli_guard_bypass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        command = "git --exec-path=/tmp/helpers fp origin HEAD"
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.CLI_ERROR}$"):
+                checker(command)
+
+        original = scripts.deny_force_push_hook._parse_git_global_options
+
+        def bypass_exec_path_guard(git_args: list[str]):
+            bypassed = [
+                "--harmless-skipped-option"
+                if arg.startswith("--exec-path=")
+                else arg
+                for arg in git_args
+            ]
+            return original(bypassed)
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._parse_git_global_options",
+            bypass_exec_path_guard,
+        )
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
+
+    def test_mutation_effective_environment_validator_bypass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        command = "GIT_EXEC_PATH=/tmp/helpers git fp origin HEAD"
+        for checker in (contains_forced_git_push, contains_forbidden_rm):
+            with pytest.raises(ValueError, match=f"^{self.ENV_ERROR}$"):
+                checker(command)
+
+        monkeypatch.setattr(
+            "scripts.deny_force_push_hook._validate_git_execution_path_selectors",
+            lambda _env: None,
+        )
+        assert contains_forced_git_push(command) is False
+        assert contains_forbidden_rm(command) is False
 
 
 class TestExtractInitialBacktickArgs:

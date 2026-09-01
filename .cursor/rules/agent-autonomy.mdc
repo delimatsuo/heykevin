@@ -29,9 +29,10 @@ owner per worktree.
   `SERVICE_REQUEST_RECOVERY_ENABLED`, `jobber_lead_capture_enabled`,
   `PUBLIC_DEMO_ENABLED`
 - App Store / TestFlight; Twilio number buy/release; A2P / caller SMS
-- Force-push `main` or `staging`
 - Real caller PII / live customer-number calls
 - Opening `firestore.rules` (deny-all by design) or `database.rules.json`
 - GitHub merge permission deny (paste the exact command)
+
+Force pushes are forbidden on every branch, including `--force-with-lease`, and must not be escalated as an owner approval request; use the published-branch merge or replacement-PR procedure in the active slice instructions.
 
 Push to `main` does not deploy. Default-off merge ≠ activation.

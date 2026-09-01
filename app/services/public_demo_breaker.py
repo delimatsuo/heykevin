@@ -10,6 +10,7 @@ import re
 from pydantic_settings import BaseSettings
 
 from app.utils.logging import get_logger
+from app.utils.pydantic_settings import dotenv_settings_kwargs
 
 logger = get_logger(__name__)
 
@@ -48,7 +49,11 @@ class PublicDemoBreakerSettings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
-breaker_settings = PublicDemoBreakerSettings()
+def get_breaker_settings() -> PublicDemoBreakerSettings:
+    return PublicDemoBreakerSettings(**dotenv_settings_kwargs())
+
+
+breaker_settings = get_breaker_settings()
 
 
 def validate_public_demo_breaker_runtime(

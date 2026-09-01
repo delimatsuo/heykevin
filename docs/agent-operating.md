@@ -22,11 +22,12 @@ things you cannot do.
   `jobber_lead_capture_enabled`, `PUBLIC_DEMO_ENABLED`.
 - App Store / TestFlight upload.
 - Twilio number purchase or release; A2P / caller-facing SMS.
-- Force-push `main` or `staging`.
 - Real caller PII, recordings, or live production calls on customer numbers
   (the owner may live-test; you do not).
 - Opening `firestore.rules` or `database.rules.json` to client access.
 - A GitHub permission deny on merge — paste the exact command, only then.
+
+Force pushes are forbidden on every branch, including `--force-with-lease`, and must not be escalated as an owner approval request; use the published-branch merge or replacement-PR procedure in the active slice instructions.
 
 Merging a reviewed-clean, default-off PR to `main` is allowed: **push to `main`
 does not deploy.** Activating behavior in production still needs an explicit
@@ -107,27 +108,17 @@ It is not a supervisor chat, not LangGraph `StateGraph`, not shared `AgentState`
 - Human (Deli) is the last yes only on irreversible/owner-gated items above.
   You are the last yes on everything else.
 
-## Model routing (complexity of the *node*, not the session)
+## Model routing (current policy)
 
-Use Cursor `Task` subagents with an explicit `model`. Do not default every
-node to the parent model. If a model 429s / “Other Models usage limit”,
-switch; do not stall.
-
-| Node type | Model |
-|---|---|
-| Mechanical transcription, greps, “does this file exist”, fixture mapping | `composer-2.5-fast` or `cursor-grok-4.5-high-fast` |
-| Standard implementation, plans, tests, most PRs | `cursor-grok-4.6-xhigh` or `claude-sonnet-5-thinking-high` |
-| Whole-branch / defect-first review, security/PII, architectural knots | `claude-opus-5-thinking-high` (fallback `claude-opus-4-8-thinking-high`, then `cursor-grok-4.6-xhigh`) |
-| Broad cheap research / web fetch | `claude-sonnet-5-thinking-high` or `cursor-grok-4.6-xhigh` — not opus |
-
-Available slugs (do not invent others): `inherit`,
-`claude-opus-4-8-thinking-high`, `claude-opus-5-thinking-high`,
-`claude-sonnet-5-thinking-high`, `composer-2.5-fast`,
-`cursor-grok-4.5-high-fast`, `cursor-grok-4.6-xhigh`,
-`gemini-3.7-flash-high`, `gpt-5.5-medium`, `gpt-5.6-sol-medium`,
-`gpt-5.6-terra-medium`.
-
-Prefer `cursor-grok-4.6-xhigh` for implementation if opus/sonnet fail.
+- **Sol / Master Model:** Owns architecture, spec/brief writing, ambiguous judgment, independent audit, and all Git operations.
+- **Pinned Builder Coding:** Defaults to headless `agy` with `gemini-3.7-flash-high`.
+- **Mechanical Tiers:** `gemini-3.7-flash-low` and `gemini-3.7-flash-medium` are reserved exclusively for mechanical scaffolds, renames, boilerplate, count checks, and configuration changes.
+- **Prohibited Models:** Never route implementation or audit tasks to `agy` Claude 4.6 models.
+- **Dispatch Rule:** Master states tier and reason before dispatch.
+- **Canonical Transport Command:**
+  ```bash
+  agy -p <brief> --model <tier> --output-format json --dangerously-skip-permissions --print-timeout 30m
+  ```
 
 ## How to run (every slice)
 
@@ -150,9 +141,11 @@ Prefer `cursor-grok-4.6-xhigh` for implementation if opus/sonnet fail.
    of rewriting the published branch.
 7. Required checks before “done”. From the current clone or worktree, put
    that clone’s `.venv/bin` on PATH (Deli’s Mac example:
-   `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`):
+   `/Volumes/Extreme Pro/MYPROJECTS/Kevin/.venv/bin`) and prefix
+   `KEVIN_DISABLE_DOTENV=1` to prevent dotenv access in protected agent/test
+   sessions:
    ```bash
-   PATH="<clone>/.venv/bin:$PATH" python -m pytest -q
+   KEVIN_DISABLE_DOTENV=1 PATH="<clone>/.venv/bin:$PATH" python -m pytest -q
    ```
    Do **not** export any name in `FORBIDDEN_ENV_NAMES` from
    `tests/unit/test_visual_diagnosis_contracts.py` (same set in

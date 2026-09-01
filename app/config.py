@@ -8,6 +8,8 @@ import re as _re
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
+from app.utils.pydantic_settings import dotenv_settings_kwargs
+
 PRODUCTION_GCP_PROJECT_ID = "kevin-491315"
 PRODUCTION_CLOUD_RUN_URL = "https://kevin-api-752910912062.us-central1.run.app"
 PRODUCTION_FIREBASE_DATABASE_URL = "https://kevin-491315-rtdb.firebaseio.com"
@@ -202,7 +204,7 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(**dotenv_settings_kwargs())
 
 
 settings = get_settings()

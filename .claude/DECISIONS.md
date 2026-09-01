@@ -48,7 +48,7 @@ Audit disposition: <pass/fail/remediated>
 ## 6. CI Contract
 - **Required Suites:** All seven Python test shards on every PR targeting `main` or `staging`, plus the quality suite and the stable fail-closed aggregator named `Test`.
 - **Full-Suite Authority:** Once exact-current-HEAD CI is green, treat it as complete verification rather than repeating the entire suite serially within the local session.
-- **Local Probe Gate:** Focused local tests and adversarial probe checks remain mandatory before pushing any commits.
+- **Local Probe Gate:** Focused local tests and adversarial probe checks remain mandatory before pushing any commits. Local test probe invocations must prefix `KEVIN_DISABLE_DOTENV=1` (e.g. `KEVIN_DISABLE_DOTENV=1 python3 -m pytest ...`) to prevent dotenv access in protected agent/test sessions.
 
 ## 7. Decision Rights & Escalation
 - **Reversible Technical Choices:** Decided autonomously by the master model, documented in the PR log, and executed without prompting the owner.

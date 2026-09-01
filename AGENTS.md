@@ -1,6 +1,6 @@
 # Hey Kevin — Project Guide for AI Agents
 
-**Operating law:** [`docs/agent-operating.md`](docs/agent-operating.md). Cursor
+**Operating law:** [`docs/agent-operating.md`](docs/agent-operating.md) | **Standing autonomy policy:** [`.claude/DECISIONS.md`](.claude/DECISIONS.md) (standing owner autonomy policy; newest owner instructions override older routing text). Cursor
 also injects `.cursor/rules/agent-autonomy.mdc`, `graph-engineering.mdc`, and
 `slice-execution.mdc`. Work in a git worktree under `<clone>/.worktrees/`,
 never the primary checkout (it is often behind `origin/main`). Discover or

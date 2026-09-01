@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -72,6 +73,13 @@ BLOCKED_GIT_PUSH_COMMANDS = [
     "git push --force-if-includes",
     "git push --force-if-includes origin main",
     "git push --force-with-lease=refs/heads/main:refs/heads/main origin main",
+    "git push --mirror",
+    "git push --mirror origin main",
+    "git push --m origin",
+    "git push --mi origin",
+    "git push --mir origin",
+    "git push --mirr origin",
+    "git push --mirro origin",
     # Forced refspecs
     "git push origin +main",
     "git push origin +main:main",
@@ -239,6 +247,10 @@ ALLOWED_GIT_PUSH_COMMANDS = [
     "git push -v origin main",
     "git push --dry-run origin main",
     "git push -- origin main",
+    "git push origin -- --mirror",
+    "git push origin -- --m",
+    "git push --mirrorx origin",
+    "git push --no-mirror origin",
     # Other git subcommands (not push)
     "git log push -f",
     "git commit -m 'git push -f'",
@@ -2984,6 +2996,22 @@ class TestReconstructGitArgs:
         raw = ["-C", "/path/to/repo", "-c", "remote.origin.push=+refs/heads/*", ":", "refs/remotes/origin/*", ":", "more", "push", "origin"]
         expected = ["-C", "/path/to/repo", "-c", "remote.origin.push=+refs/heads/*:refs/remotes/origin/*:more", "push", "origin"]
         assert _reconstruct_git_args(raw) == expected
+
+    def test_embedded_dynamic_expansion_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["-c", "pre", "$", "{KEY}post=/tmp/x", "status"])
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["-c", "key=pre", "$", "{VAL}post", "status"])
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["-ckey=pre", "$", "{VAL}post", "status"])
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["--config-env", "pre", "$", "{KEY}post=CFG", "status"])
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["--config-env", "key=pre", "$", "{VAL}post", "status"])
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["--config-env=pre", "$", "{KEY}post=CFG", "status"])
+        with pytest.raises(ValueError, match="Dynamic git config"):
+            _reconstruct_git_args(["--config-env=key", "$", "{VAL}post", "status"])
 
 
 class TestShellExpandedExecutables:
@@ -7514,3 +7542,547 @@ class TestDefect90SetsidWrapper:
                 "destructive"
                 in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
             )
+
+
+class TestDefect94PushMirrorAbbreviations:
+    """Tests for Defect #94: Git push mirror long-option abbreviation support."""
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["--m", "--mi", "--mir", "--mirr", "--mirro", "--mirror"],
+    )
+    def test_direct_mirror_prefixes_pure(self, prefix: str) -> None:
+        assert contains_forced_git_push(f"git push {prefix}") is True
+        assert contains_forced_git_push(f"git push {prefix} origin") is True
+        assert contains_forced_git_push(f"git push {prefix} origin main") is True
+        assert contains_forced_git_push(f"git push origin {prefix}") is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "sudo git push --m origin",
+            "env FOO=1 git push --mi origin",
+            "timeout 30 git push --mir origin",
+            "nice git push --mirr origin",
+            "stdbuf -oL git push --mirro origin",
+            "setsid -f git push --mirror origin",
+            "ionice -t -c 3 git push --m origin",
+            'bash -c "git push --mi origin"',
+            'sh -c "git push --mir origin"',
+            'eval "git push --mirro origin"',
+            "find . -exec git push --m origin ';'",
+            'git -c alias.mp="push --m" mp origin',
+            'git -c alias.mp="push --mi" mp origin',
+            'git -c alias.mp="push --mir" mp origin',
+            'git -c alias.mp="push --mirr" mp origin',
+            'git -c alias.mp="push --mirro" mp origin',
+            'git -c alias.mp="push --mirror" mp origin',
+        ],
+    )
+    def test_wrapper_shell_alias_mirror_prefixes_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin -- --m",
+            "git push origin -- --mi",
+            "git push origin -- --mir",
+            "git push origin -- --mirr",
+            "git push origin -- --mirro",
+            "git push origin -- --mirror",
+            "git push -- --m",
+            "git push -- --mirror",
+            "git push --",
+            "git push --mirrorx origin",
+            "git push --mi=value origin",
+            "git push --no-mirror origin",
+            "git push --no-m origin",
+            "git push --Mirror origin",
+            "git push --M origin",
+            "git push mirror origin",
+            "git push m origin",
+            "git push main",
+        ],
+    )
+    def test_safe_mirror_operands_and_non_matching_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+
+    def test_double_dash_plus_refspec_still_forcing_pure(self) -> None:
+        assert contains_forced_git_push("git push origin -- +main") is True
+        assert contains_forced_git_push("git push -- +HEAD:main") is True
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("git push --m origin", 0, "deny_push"),
+            ("git push --mi origin", 0, "deny_push"),
+            ("git push --mir origin", 0, "deny_push"),
+            ("git push --mirr origin", 0, "deny_push"),
+            ("git push --mirro origin", 0, "deny_push"),
+            ("git push --mirror origin", 0, "deny_push"),
+            ("git push origin -- --mirror", 0, "allow"),
+            ("git push origin -- --m", 0, "allow"),
+            ("git push --mirrorx origin", 0, "allow"),
+            ("git push --no-mirror origin", 0, "allow"),
+        ],
+    )
+    def test_cli_mirror_abbreviations_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+
+
+class TestDefect95GitConfigIncludes:
+    """Tests for Defect #95: Arbitrary Git config include directive fail-closed contracts."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c include.path=/path/to/config status",
+            "git -c include.path=/path/to/config push",
+            "git -c INCLUDE.PATH=/path/to/config status",
+            "git -c InClUdE.pAtH=/path/to/config rm -rf /",
+            "git -cinclude.path=/path/to/config status",
+            "git -cinclude.path=/path/to/config push",
+            "git -c includeIf.gitdir:/path/.path=/path/to/config status",
+            "git -c includeif.gitdir:/path/.path=/path/to/config push",
+            "git -c includeIf.onbranch:main.PATH=/path/to/config status",
+            "git -c includeif.hasconfig:remote.*.url:https://*.path=/path/to/config status",
+            "git -c includeIf.x.path=/path/to/config status",
+            "git -c includeIf.foo.bar.path=/path/to/config status",
+            "git --config-env include.path=ENV_VAR status",
+            "git --config-env=include.path=ENV_VAR status",
+            "git --config-env includeif.gitdir:/path/.path=ENV_VAR status",
+            "git --config-env=includeIf.onbranch:main.path=ENV_VAR push",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=/etc/gitconfig git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=includeIf.gitdir:/tmp.path GIT_CONFIG_VALUE_0=/etc/gitconfig git push",
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=INCLUDE.PATH GIT_CONFIG_VALUE_0=/etc/gitconfig git status",
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=/etc/gitconfig; git status",
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=includeIf.gitdir:/tmp.path GIT_CONFIG_VALUE_0=/etc/gitconfig; git push",
+            "git -c alias.st='-c include.path=foo status' st",
+        ],
+    )
+    def test_include_configs_fail_closed_pure(self, cmd: str) -> None:
+        with pytest.raises(ValueError, match=r"include"):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError, match=r"include"):
+            contains_forbidden_rm(cmd)
+
+    def test_no_file_read_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def forbidden_open(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("File reading is strictly forbidden when parsing config includes")
+
+        monkeypatch.setattr("builtins.open", forbidden_open)
+        with pytest.raises(ValueError, match=r"include"):
+            contains_forced_git_push("git -c include.path=/sensitive/file push")
+        with pytest.raises(ValueError, match=r"include"):
+            contains_forbidden_rm("git -c includeIf.gitdir:/etc.path=/sensitive/file rm -rf target")
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c core.foo=bar status",
+            "git -c remote.origin.url=https://example.com push origin main",
+            "git -c alias.st=status st",
+            "git push -c include.path=foo origin main",
+            "git commit -m 'fixed include.path bug'",
+            "echo 'include.path=/etc/gitconfig'",
+            "git -c include.notpath=foo status",
+            "git -c myinclude.path=foo status",
+            "git -c includeIf.path=foo status",
+            "git -c includeif.path=foo status",
+            "git -c includeIf..path=foo status",
+            "git -c includeif..path=foo status",
+            "git -c includeIf.x.notpath=foo status",
+        ],
+    )
+    def test_safe_unrelated_configs_and_mentions_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c include.path=/path/to/config status",
+            "git -c includeIf.gitdir:/path/.path=/path/to/config push",
+            "git -c includeIf.x.path=/path/to/config status",
+            "git --config-env include.path=ENV_VAR status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=/etc/gitconfig git status",
+        ],
+    )
+    def test_cli_include_configs_fail_closed(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+        assert res.stdout == ""
+
+
+class TestDefect96IoniceWrapper:
+    """Tests for Defect #96: util-linux ionice wrapper support."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "ionice -t -c 3 git push -f origin HEAD",
+            "ionice -t -n 4 git push --force origin HEAD",
+            "ionice -c 3 git push --mirror origin",
+            "ionice -n 4 git push +HEAD:main origin",
+            "ionice -c3 git push -f origin HEAD",
+            "ionice -n4 git push -f origin HEAD",
+            "ionice --ignore git push -f origin HEAD",
+            "ionice --class=3 git push -f origin HEAD",
+            "ionice --classdata=4 git push -f origin HEAD",
+            "ionice --class 3 git push -f origin HEAD",
+            "ionice --classdata 4 git push -f origin HEAD",
+            "ionice -tc3 git push -f origin HEAD",
+            "ionice -tn4 git push -f origin HEAD",
+            "ionice -ch git push -f origin HEAD",
+            "/usr/bin/ionice -t -c 3 git push -f origin HEAD",
+            "ionice -- git push -f origin HEAD",
+            "ionice -t -c 3 -- git push --force origin HEAD",
+            "env FOO=1 ionice -t -c 3 git push -f origin HEAD",
+            "ionice -t -c 3 env FOO=1 git push -f origin HEAD",
+            "sudo ionice -c 3 git push -f origin HEAD",
+            "ionice -c 3 sudo git push -f origin HEAD",
+            "timeout 30 ionice -c 3 git push -f origin HEAD",
+            "ionice -c 3 timeout 30 git push -f origin HEAD",
+            "nice -n 10 ionice -c 3 git push -f origin HEAD",
+            "ionice -c 3 nice -n 10 git push -f origin HEAD",
+            "stdbuf -oL ionice -c 3 git push -f origin HEAD",
+            "ionice -c 3 stdbuf -oL git push -f origin HEAD",
+            "nohup ionice -c 3 git push -f origin HEAD",
+            "time ionice -c 3 git push -f origin HEAD",
+            "setsid -f ionice -c 3 git push -f origin HEAD",
+            "ionice -c 3 setsid -f git push -f origin HEAD",
+            "ionice -c 3 ionice -t -c 2 git push -f origin HEAD",
+            "find /tmp -exec ionice -c 3 git push -f origin HEAD ';'",
+            'bash -c "ionice -c 3 git push -f origin HEAD"',
+            'eval "ionice -c 3 git push -f origin HEAD"',
+        ],
+    )
+    def test_dangerous_push_wrapped_by_ionice_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "ionice -c3 rm -rf target",
+            "ionice -tn4 rm --recursive --force target",
+            "ionice --class=3 rm -rf target",
+            "/bin/ionice -c 3 rm -rf target",
+            "ionice -tc3 -- rm -rf target",
+            "sudo ionice -c 3 rm -rf target",
+            "ionice -c 3 sudo rm -rf target",
+            "timeout 30 ionice -c 3 rm -rf target",
+            "ionice -c 3 timeout 30 rm -rf target",
+            "nice -n 10 ionice -c 3 rm -rf target",
+            "ionice -c 3 nice -n 10 rm -rf target",
+            "stdbuf -oL ionice -c 3 rm -rf target",
+            "ionice -c 3 stdbuf -oL rm -rf target",
+            "nohup ionice -c 3 rm -rf target",
+            "time ionice -c 3 rm -rf target",
+            "setsid -f ionice -c 3 rm -rf target",
+            "ionice -c 3 setsid -f rm -rf target",
+        ],
+    )
+    def test_dangerous_rm_wrapped_by_ionice_pure(self, cmd: str) -> None:
+        assert contains_forbidden_rm(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "ionice -p 123 git push -f origin HEAD",
+            "ionice -p123 git push -f origin HEAD",
+            "ionice -P 456 git push -f origin HEAD",
+            "ionice -P456 git push -f origin HEAD",
+            "ionice -u 1000 git push -f origin HEAD",
+            "ionice -u1000 git push -f origin HEAD",
+            "ionice --pid=123 git push -f origin HEAD",
+            "ionice --pid 123 git push -f origin HEAD",
+            "ionice --pgid=456 git push -f origin HEAD",
+            "ionice --pgid 456 git push -f origin HEAD",
+            "ionice --uid=1000 git push -f origin HEAD",
+            "ionice --uid 1000 git push -f origin HEAD",
+            "ionice -tp123 git push -f origin HEAD",
+            "ionice -pt git push -f origin HEAD",
+            "ionice -p 123 rm -rf /",
+            "ionice -h git push -f origin HEAD",
+            "ionice -V git push -f origin HEAD",
+            "ionice --help git push -f origin HEAD",
+            "ionice --version git push -f origin HEAD",
+            "ionice -hc3 git push -f origin HEAD",
+            "ionice -h rm -rf /",
+            "ionice --help rm -rf /",
+            "ionice --version rm -rf /",
+            "ionice",
+            "ionice -t",
+            "ionice -c 3",
+            "ionice -c",
+            "ionice --class",
+            "ionice --ignore",
+            "ionice --",
+            "ionice -- -custom_tool git push -f origin HEAD",
+            "ionice -c 3 -- -custom_tool rm -rf target",
+            "ionice -t -c 3 git push origin main",
+            "ionice -c 3 rm -f target",
+            "ionice -c 3 echo harmless",
+        ],
+    )
+    def test_safe_and_terminal_ionice_controls_pure(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "ionice -x git push -f origin HEAD",
+            "ionice -z git push -f origin HEAD",
+            "ionice -tz git push -f origin HEAD",
+            "ionice --unknown git push -f origin HEAD",
+            "ionice --classx git push -f origin HEAD",
+            "ionice --help=foo git push -f origin HEAD",
+            "ionice --version=foo git push -f origin HEAD",
+            "ionice --ignore=yes git push -f origin HEAD",
+            "ionice -c $CLASS git push -f origin HEAD",
+            "ionice -c$CLASS git push -f origin HEAD",
+            "ionice -n${DATA} rm -rf target",
+            "ionice --class $CLASS git push -f origin HEAD",
+            "ionice --class=$CLASS git push -f origin HEAD",
+            "ionice --classdata=$DATA rm -rf target",
+            "ionice --classdata=${DATA} git push -f origin HEAD",
+            "ionice --class=pre${CLASS}post git push -f origin HEAD",
+            "CLASS=3 ionice --class=$CLASS git push -f origin HEAD",
+            "DATA=4; ionice --classdata=$DATA rm -rf target",
+            "ionice -cpre${CLASS}post git push -f origin HEAD",
+            "ionice -npre${DATA}post rm -rf target",
+            'ionice -c"$CLASS" git push -f origin HEAD',
+            'ionice --class="$CLASS" git push -f origin HEAD',
+            'ionice --classdata="$DATA" rm -rf target',
+            'ionice -n"$DATA" rm -rf target',
+            "ionice -c `echo 3` git push -f origin HEAD",
+            "ionice -x rm -rf target",
+            "ionice -z rm -rf target",
+            "ionice --unknown rm -rf target",
+            "ionice -c $CLASS rm -rf target",
+            "ionice -t bash",
+        ],
+    )
+    def test_unknown_options_and_dynamic_operands_fail_closed_pure(
+        self, cmd: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.skipif(
+        shutil.which("ionice") is None,
+        reason="ionice utility is not installed on this system",
+    )
+    def test_harmless_linux_ionice_execution(self) -> None:
+        marker = "kevin_hook_ionice_harmless_test"
+        res = subprocess.run(
+            ["ionice", "-t", "-c", "3", sys.executable, "-c", f"print({marker!r})"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0
+        assert marker in res.stdout.strip()
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected_code", "decision"),
+        [
+            ("ionice -t -c 3 git push --force origin HEAD", 0, "deny_push"),
+            ("ionice -c3 rm -rf target", 0, "deny_rm"),
+            ("ionice --class=3 git push +HEAD:main", 0, "deny_push"),
+            ("ionice --classdata=4 rm --recursive --force target", 0, "deny_rm"),
+            ("ionice -tc3 git push --mirror origin", 0, "deny_push"),
+            ("ionice -tn4 rm -rf target", 0, "deny_rm"),
+            ("ionice -- git push -f origin HEAD", 0, "deny_push"),
+            ("ionice -- rm -rf target", 0, "deny_rm"),
+            ("/usr/bin/ionice -t -c 3 git push -f origin HEAD", 0, "deny_push"),
+            ("/usr/bin/ionice -c 3 rm -rf target", 0, "deny_rm"),
+            ("ionice -t -c 3 git push origin main", 0, "allow"),
+            ("ionice -c 3 rm -f target", 0, "allow"),
+            ("ionice -c 3 echo harmless", 0, "allow"),
+            ("ionice -c 3", 0, "allow"),
+            ("ionice -h git push -f origin HEAD", 0, "allow"),
+            ("ionice -V rm -rf /", 0, "allow"),
+            ("ionice --help git push -f origin HEAD", 0, "allow"),
+            ("ionice --version rm -rf /", 0, "allow"),
+            ("ionice -hc3 git push -f origin HEAD", 0, "allow"),
+            ("ionice -p 123 git push -f origin HEAD", 0, "allow"),
+            ("ionice --pid=123 git push -f origin HEAD", 0, "allow"),
+            ("ionice -tp123 git push -f origin HEAD", 0, "allow"),
+            ("ionice -pt git push -f origin HEAD", 0, "allow"),
+            ("ionice -x git push -f origin HEAD", 2, "error"),
+            ("ionice -tz git push -f origin HEAD", 2, "error"),
+            ("ionice --unknown git push -f origin HEAD", 2, "error"),
+            ("ionice --help=foo git push -f origin HEAD", 2, "error"),
+            ("ionice --version=foo rm -rf /", 2, "error"),
+            ("ionice -c $CLASS git push -f origin HEAD", 2, "error"),
+            ("ionice -c$CLASS git push -f origin HEAD", 2, "error"),
+            ("ionice -n${DATA} rm -rf target", 2, "error"),
+            ("ionice --class $CLASS git push -f origin HEAD", 2, "error"),
+            ("ionice --class=$CLASS git push -f origin HEAD", 2, "error"),
+            ("ionice --classdata=$DATA rm -rf target", 2, "error"),
+            ("ionice --classdata=${DATA} git push -f origin HEAD", 2, "error"),
+            ("ionice --class=pre${CLASS}post git push -f origin HEAD", 2, "error"),
+            ("CLASS=3 ionice --class=$CLASS git push -f origin HEAD", 2, "error"),
+            ("DATA=4; ionice --classdata=$DATA rm -rf target", 2, "error"),
+            ("ionice -x rm -rf target", 2, "error"),
+            ("ionice -t bash", 2, "error"),
+            ("ionice -t bash scripts/safe.sh", 0, "allow"),
+        ],
+    )
+    def test_cli_ionice_contract(
+        self, cmd: str, expected_code: int, decision: str
+    ) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == expected_code
+        if decision == "error":
+            assert "Shell tokenization failed" in res.stderr
+            assert res.stdout == ""
+        elif decision == "allow":
+            assert res.returncode == 0
+            assert res.stdout == ""
+        elif decision == "deny_push":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "no-force-push"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+        elif decision == "deny_rm":
+            assert res.returncode == 0
+            data = json.loads(res.stdout)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert (
+                "destructive"
+                in data["hookSpecificOutput"]["permissionDecisionReason"].lower()
+            )
+
+
+class TestDefect97DynamicGitGlobalConfig:
+    """Tests for Defect #97 & #101: Dynamic Git global-config entry/key fail-closed contracts."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c $KEY=/tmp/x status",
+            'git -c "$KEY=/tmp/x" status',
+            "git -c ${KEY}=/tmp/x status",
+            "git -c$KEY=/tmp/x status",
+            "git --config-env $KEY=CFG status",
+            "git --config-env=$KEY=CFG status",
+            'git --config-env "$KEY=CFG" status',
+            'KEY=include.path; git -c "$KEY=/tmp/x" status',
+            'export KEY=include.path; git -c "$KEY=/tmp/x" push origin HEAD',
+            "KEY=include.path; git -c $KEY=/tmp/x status",
+            "export KEY=include.path; git -c $KEY=/tmp/x push origin HEAD",
+            "git -c pre${KEY}post=/tmp/x status",
+            "git -c key=pre${VAL}post status",
+            "git -ckey=pre${VAL}post status",
+            "git --config-env pre${KEY}post=CFG status",
+            "git --config-env key=pre${VAL}post status",
+            "git --config-env=pre${KEY}post=CFG status",
+            "git --config-env=key=pre${VAL}post status",
+            "git -c key=$(echo foo) status",
+            "git -c key=`echo foo` status",
+            "git -c $KEY=/tmp/x rm -rf /",
+            'git -c "$KEY=/tmp/x" rm -rf /',
+            "git -c pre${KEY}post=/tmp/x rm -rf /",
+            "git --config-env $KEY=CFG rm -rf /",
+            "git --config-env=pre${KEY}post=CFG rm -rf /",
+        ],
+    )
+    def test_dynamic_git_configs_fail_closed_pure(self, cmd: str) -> None:
+        with pytest.raises(ValueError):
+            contains_forced_git_push(cmd)
+        with pytest.raises(ValueError):
+            contains_forbidden_rm(cmd)
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c $KEY=/tmp/x status",
+            'git -c "$KEY=/tmp/x" status',
+            "git -c ${KEY}=/tmp/x status",
+            "git -c$KEY=/tmp/x status",
+            "git --config-env $KEY=CFG status",
+            "git --config-env=$KEY=CFG status",
+            'git --config-env "$KEY=CFG" status',
+            'KEY=include.path; git -c "$KEY=/tmp/x" status',
+            'export KEY=include.path; git -c "$KEY=/tmp/x" push origin HEAD',
+            "git -c pre${KEY}post=/tmp/x status",
+            "git -c key=pre${VAL}post status",
+            "git -ckey=pre${VAL}post status",
+            "git --config-env pre${KEY}post=CFG status",
+            "git --config-env key=pre${VAL}post status",
+            "git --config-env=pre${KEY}post=CFG status",
+            "git --config-env=key=pre${VAL}post status",
+            "git -c pre${KEY}post=/tmp/x rm -rf /",
+            "git --config-env=pre${KEY}post=CFG rm -rf /",
+        ],
+    )
+    def test_cli_dynamic_git_configs_fail_closed(self, cmd: str) -> None:
+        payload = json.dumps({"command": cmd})
+        res = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 2
+        assert "Shell tokenization failed" in res.stderr
+        assert res.stdout == ""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git -c foo=bar status",
+            "git -c core.editor=vim status",
+            "git --config-env foo.bar=CFG status",
+            "git status -c include.path=/tmp/x",
+        ],
+    )
+    def test_safe_literal_git_configs_allowed(self, cmd: str) -> None:
+        assert contains_forced_git_push(cmd) is False
+        assert contains_forbidden_rm(cmd) is False

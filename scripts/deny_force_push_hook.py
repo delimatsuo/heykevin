@@ -288,6 +288,14 @@ def _reconstruct_git_args(git_args: list[str]) -> list[str]:
             i += 1
             if i < n:
                 val = git_args[i]
+                if _has_shell_expansion(val):
+                    raise ValueError(
+                        f"Dynamic git config entry is not supported: {val!r}"
+                    )
+                if i + 1 < n and git_args[i + 1] == "$":
+                    raise ValueError(
+                        f"Dynamic git config entry is not supported: {val!r}"
+                    )
                 i += 1
                 while i + 1 < n and git_args[i] == ":":
                     val = val + ":" + git_args[i + 1]
@@ -296,6 +304,19 @@ def _reconstruct_git_args(git_args: list[str]) -> list[str]:
             continue
 
         if arg.startswith("-c") and not arg.startswith("-C"):
+            val = arg[2:]
+            if _has_shell_expansion(val):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {val!r}"
+                )
+            if not val and i + 1 < n and _has_shell_expansion(git_args[i + 1]):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {git_args[i + 1]!r}"
+                )
+            if i + 1 < n and git_args[i + 1] == "$":
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {val!r}"
+                )
             val = arg
             i += 1
             while i + 1 < n and git_args[i] == ":":
@@ -309,6 +330,14 @@ def _reconstruct_git_args(git_args: list[str]) -> list[str]:
             i += 1
             if i < n:
                 val = git_args[i]
+                if _has_shell_expansion(val):
+                    raise ValueError(
+                        f"Dynamic git config entry is not supported: {val!r}"
+                    )
+                if i + 1 < n and git_args[i + 1] == "$":
+                    raise ValueError(
+                        f"Dynamic git config entry is not supported: {val!r}"
+                    )
                 i += 1
                 while i + 1 < n and git_args[i] == ":":
                     val = val + ":" + git_args[i + 1]
@@ -317,6 +346,19 @@ def _reconstruct_git_args(git_args: list[str]) -> list[str]:
             continue
 
         if arg.startswith("--config-env="):
+            val = arg[len("--config-env=") :]
+            if _has_shell_expansion(val):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {val!r}"
+                )
+            if not val and i + 1 < n and _has_shell_expansion(git_args[i + 1]):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {git_args[i + 1]!r}"
+                )
+            if i + 1 < n and git_args[i + 1] == "$":
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {val!r}"
+                )
             val = arg
             i += 1
             while i + 1 < n and git_args[i] == ":":
@@ -337,6 +379,25 @@ def _reconstruct_git_args(git_args: list[str]) -> list[str]:
                 i += 1
             continue
 
+        if any(
+            arg.startswith(opt + "=")
+            for opt in [
+                "--git-dir",
+                "--work-tree",
+                "--namespace",
+                "--super-prefix",
+                "--exec-path",
+            ]
+        ):
+            reconstructed.append(arg)
+            i += 1
+            continue
+
+        if arg.startswith("-C") and len(arg) > 2:
+            reconstructed.append(arg)
+            i += 1
+            continue
+
         reconstructed.append(arg)
         i += 1
 
@@ -349,6 +410,10 @@ def _record_alias_config(
     kind: str,
 ) -> None:
     """Record an alias config entry if val starts with alias."""
+    if _has_shell_expansion(val):
+        raise ValueError(
+            f"Dynamic git config entry is not supported: {val!r}"
+        )
     if "=" in val:
         key, setting = val.split("=", 1)
         key_stripped = key.strip()
@@ -395,13 +460,26 @@ def _parse_git_global_options(
         if arg == "-c":
             i += 1
             if i < len(git_args):
-                _record_alias_config(alias_configs, git_args[i], "c")
-                _record_forcing_config(mirror_configs, push_configs, git_args[i], "c")
+                val = git_args[i]
+                if _has_shell_expansion(val):
+                    raise ValueError(
+                        f"Dynamic git config entry is not supported: {val!r}"
+                    )
+                _record_alias_config(alias_configs, val, "c")
+                _record_forcing_config(mirror_configs, push_configs, val, "c")
                 i += 1
             continue
 
         if arg.startswith("-c") and not arg.startswith("-C"):
             val = arg[2:]
+            if _has_shell_expansion(val):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {val!r}"
+                )
+            if not val and i + 1 < len(git_args) and _has_shell_expansion(git_args[i + 1]):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {git_args[i + 1]!r}"
+                )
             _record_alias_config(alias_configs, val, "c")
             _record_forcing_config(mirror_configs, push_configs, val, "c")
             i += 1
@@ -410,13 +488,26 @@ def _parse_git_global_options(
         if arg == "--config-env":
             i += 1
             if i < len(git_args):
-                _record_alias_config(alias_configs, git_args[i], "config-env")
-                _record_forcing_config(mirror_configs, push_configs, git_args[i], "config-env")
+                val = git_args[i]
+                if _has_shell_expansion(val):
+                    raise ValueError(
+                        f"Dynamic git config entry is not supported: {val!r}"
+                    )
+                _record_alias_config(alias_configs, val, "config-env")
+                _record_forcing_config(mirror_configs, push_configs, val, "config-env")
                 i += 1
             continue
 
         if arg.startswith("--config-env="):
             val = arg[len("--config-env="):]
+            if _has_shell_expansion(val):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {val!r}"
+                )
+            if not val and i + 1 < len(git_args) and _has_shell_expansion(git_args[i + 1]):
+                raise ValueError(
+                    f"Dynamic git config entry is not supported: {git_args[i + 1]!r}"
+                )
             _record_alias_config(alias_configs, val, "config-env")
             _record_forcing_config(mirror_configs, push_configs, val, "config-env")
             i += 1
@@ -467,10 +558,22 @@ def _record_forcing_config(
     kind: str,
 ) -> None:
     """Record a git config entry for forcing inspection."""
+    if _has_shell_expansion(entry):
+        raise ValueError(
+            f"Dynamic git config entry is not supported: {entry!r}"
+        )
     if "=" in entry:
         key, setting = entry.split("=", 1)
         key_stripped = key.strip().lower()
         if key_stripped:
+            if key_stripped == "include.path" or (
+                key_stripped.startswith("includeif.")
+                and key_stripped.endswith(".path")
+                and len(key_stripped) > 15
+            ):
+                raise ValueError(
+                    f"Arbitrary git config include is not supported: {key.strip()!r}"
+                )
             setting_stripped = setting.strip()
             if (
                 len(setting_stripped) >= 2
@@ -488,6 +591,14 @@ def _record_forcing_config(
     else:
         key_stripped = entry.strip().lower()
         if key_stripped:
+            if key_stripped == "include.path" or (
+                key_stripped.startswith("includeif.")
+                and key_stripped.endswith(".path")
+                and len(key_stripped) > 15
+            ):
+                raise ValueError(
+                    f"Arbitrary git config include is not supported: {entry.strip()!r}"
+                )
             setting = "true" if kind == "c" else ""
             if key_stripped.startswith("remote."):
                 if key_stripped.endswith(".mirror") and len(key_stripped) > len("remote..mirror"):
@@ -1529,7 +1640,7 @@ def _is_forced_push_args(push_args: list[str]) -> bool:
                 return True
             if arg.startswith("--force"):
                 return True
-            if arg == "--mirror":
+            if arg in {"--m", "--mi", "--mir", "--mirr", "--mirro", "--mirror"}:
                 return True
             if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1 and "f" in arg[1:]:
                 return True
@@ -2436,6 +2547,126 @@ def _unwrap_command_and_env(
                     continue
                 break
             if is_terminal_info:
+                tokens.clear()
+            continue
+
+        if cmd_word == "ionice":
+            tokens.pop(0)
+            is_terminal = False
+            while tokens:
+                t = tokens[0]
+                if t == "--":
+                    tokens.pop(0)
+                    break
+                if t == "-":
+                    break
+                if t.startswith("--"):
+                    if t in {"--help", "--version"}:
+                        is_terminal = True
+                        tokens.clear()
+                        break
+                    if t in {"--pid", "--pgid", "--uid"} or t.startswith(
+                        ("--pid=", "--pgid=", "--uid=")
+                    ):
+                        is_terminal = True
+                        tokens.clear()
+                        break
+                    if t == "--ignore":
+                        tokens.pop(0)
+                        continue
+                    if t.startswith("--class="):
+                        val = t[len("--class=") :]
+                        if _has_shell_expansion(val):
+                            raise ValueError(
+                                f"ionice option operand contains shell expansion: {val!r}"
+                            )
+                        tokens.pop(0)
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"ionice option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        continue
+                    if t.startswith("--classdata="):
+                        val = t[len("--classdata=") :]
+                        if _has_shell_expansion(val):
+                            raise ValueError(
+                                f"ionice option operand contains shell expansion: {val!r}"
+                            )
+                        tokens.pop(0)
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"ionice option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        continue
+                    if t in {"--class", "--classdata"}:
+                        tokens.pop(0)
+                        if not tokens:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        val = tokens.pop(0)
+                        if _has_shell_expansion(val) or val == "$":
+                            raise ValueError(
+                                f"ionice option operand contains shell expansion: {val!r}"
+                            )
+                        if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                            raise ValueError(
+                                f"ionice option operand contains shell expansion: {tokens[0]!r}"
+                            )
+                        continue
+                    raise ValueError(f"Unknown ionice option: {t!r}")
+
+                if t.startswith("-") and len(t) > 1:
+                    tok = tokens.pop(0)
+                    idx = 1
+                    while idx < len(tok):
+                        ch = tok[idx]
+                        if ch == "t":
+                            idx += 1
+                            continue
+                        if ch in {"h", "V"}:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        if ch in {"p", "P", "u"}:
+                            is_terminal = True
+                            tokens.clear()
+                            break
+                        if ch in {"c", "n"}:
+                            rest = tok[idx + 1 :]
+                            if rest:
+                                operand = rest
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"ionice option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"ionice option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                            else:
+                                if not tokens:
+                                    is_terminal = True
+                                    tokens.clear()
+                                    break
+                                operand = tokens.pop(0)
+                                if _has_shell_expansion(operand) or operand == "$":
+                                    raise ValueError(
+                                        f"ionice option operand contains shell expansion: {operand!r}"
+                                    )
+                                if tokens and (_has_shell_expansion(tokens[0]) or tokens[0] == "$"):
+                                    raise ValueError(
+                                        f"ionice option operand contains shell expansion: {tokens[0]!r}"
+                                    )
+                            break
+                        raise ValueError(f"Unknown ionice option: -{ch}")
+                    if is_terminal:
+                        break
+                    continue
+
+                break
+
+            if is_terminal:
                 tokens.clear()
             continue
 

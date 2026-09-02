@@ -15,6 +15,8 @@ struct OnboardingView: View {
     @State private var acceptedTerms = false
     @State private var phoneNumber = ""
     @State private var isVerizon = AppState.shared.isVerizonCarrier
+    @State private var forwardingInstructions: ForwardingInstructions?
+    private let forwardingCountry = ForwardingCountry.resolve()
     @State private var showPaywall = false
 
     private let businessProductID = "com.kevin.callscreen.business.monthly"
@@ -651,6 +653,19 @@ struct OnboardingView: View {
         }
     }
 
+    private var forwardingCodes: ForwardingCodes {
+        ForwardingDialCodes.codes(
+            countryCode: forwardingCountry,
+            instructions: forwardingInstructions,
+            number: kevinNumber,
+            isVerizon: isVerizon
+        )
+    }
+
+    private var forwardingCountryName: String {
+        Locale.current.localizedString(forRegionCode: forwardingCountry) ?? forwardingCountry
+    }
+
     // MARK: - Forwarding Setup
 
     private var forwardingStep: some View {
@@ -666,29 +681,46 @@ struct OnboardingView: View {
             // codes from it. When this sat below the buttons, a Verizon user
             // following the screen top-to-bottom dialed GSM codes their network
             // silently ignores before ever reaching the picker (review finding
-            // on PR #143).
-            VStack(alignment: .leading, spacing: 6) {
-                Text(String(localized: "Your carrier"))
-                    .font(.subheadline.weight(.medium))
-                Picker(String(localized: "Your carrier"), selection: $isVerizon) {
-                    Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
-                    Text(String(localized: "Verizon")).tag(true)
+            // on PR #143). Outside North America the picker has no meaning —
+            // the codes come from the server for the device's country, or the
+            // standard GSM codes when the server is unreachable.
+            Group {
+                if !ForwardingCountry.isNANP(forwardingCountry) {
+                    Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(String(localized: "Your carrier"))
+                            .font(.subheadline.weight(.medium))
+                        Picker(String(localized: "Your carrier"), selection: $isVerizon) {
+                            Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
+                            Text(String(localized: "Verizon")).tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: isVerizon) { _, newValue in
+                            appState.isVerizonCarrier = newValue
+                        }
+                        Text(String(localized: "Verizon uses different codes — pick first, then dial."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .pickerStyle(.segmented)
-                .onChange(of: isVerizon) { _, newValue in
-                    appState.isVerizonCarrier = newValue
-                }
-                Text(String(localized: "Verizon uses different codes — pick first, then dial."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .task(id: forwardingCountry) {
+                guard !ForwardingCountry.isNANP(forwardingCountry) else { return }
+                // Keep good instructions if a re-run is cancelled or fails;
+                // overwriting with nil would silently revert the dialed codes.
+                if let fetched = await APIClient.shared.getForwardingInstructions(countryCode: forwardingCountry) {
+                    forwardingInstructions = fetched
+                }
+            }
 
             VStack(spacing: 12) {
                 // Step 1: Clear existing forwarding
                 Button {
-                    let code = isVerizon ? "tel:*73" : "tel:%23%2321%23"
-                    if let url = URL(string: code) {
+                    if let url = ForwardingDialCodes.telURL(forwardingCodes.clearExisting) {
                         UIApplication.shared.open(url)
                     }
                 } label: {
@@ -711,9 +743,7 @@ struct OnboardingView: View {
 
                 // Step 2: Set Kevin forwarding
                 Button {
-                    let number = kevinNumber.filter { $0.isNumber }
-                    let code = isVerizon ? "tel:*71\(number)" : "tel:*61*\(number)%23"
-                    if let url = URL(string: code) {
+                    if let url = ForwardingDialCodes.telURL(forwardingCodes.activate) {
                         UIApplication.shared.open(url)
                     }
                 } label: {

@@ -342,12 +342,17 @@ struct PaywallView: View {
 
     private var cancelForwardingButton: some View {
         Button {
-            // Deactivate — must match the activate code exactly.
-            // Verizon: *73 (cancels forwarding). GSM: ##61# (cancels no-answer).
-            let code = appState.isVerizonCarrier
-                ? "tel:*73"
-                : "tel:%23%2361%23"
-            if let url = URL(string: code) {
+            // Deactivate — must cancel exactly what Settings/Onboarding set up.
+            // No fetch here: the built-in deactivate equals the server's
+            // disable_unanswered for every supported country, and NANP keeps
+            // its Verizon/GSM split.
+            let codes = ForwardingDialCodes.codes(
+                countryCode: ForwardingCountry.resolve(),
+                instructions: nil,
+                number: "",
+                isVerizon: appState.isVerizonCarrier
+            )
+            if let url = ForwardingDialCodes.telURL(codes.deactivate) {
                 UIApplication.shared.open(url)
             }
         } label: {

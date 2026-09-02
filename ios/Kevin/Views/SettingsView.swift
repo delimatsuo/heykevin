@@ -38,6 +38,8 @@ struct SettingsView: View {
     @State private var isProvisioningNumber = false
     @State private var businessHoursStart = Calendar.current.date(from: DateComponents(hour: 8, minute: 0)) ?? Date()
     @State private var businessHoursEnd = Calendar.current.date(from: DateComponents(hour: 17, minute: 0)) ?? Date()
+    @State private var forwardingInstructions: ForwardingInstructions?
+    private let forwardingCountry = ForwardingCountry.resolve()
 
     private var kevinNumber: String {
         appState.kevinNumber
@@ -393,23 +395,39 @@ struct SettingsView: View {
                 // MARK: - Call Forwarding
 
                 Section {
-                    Toggle(isOn: $appState.isVerizonCarrier) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(String(localized: "I'm a Verizon customer"))
-                                .font(.subheadline.weight(.medium))
-                            Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
-                                .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                    Group {
+                        if !ForwardingCountry.isNANP(forwardingCountry) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(String(localized: "Carrier codes"))
+                                    .font(.subheadline.weight(.medium))
+                                Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
+                                    .font(.caption)
+                                    .foregroundStyle(Color.secondary)
+                            }
+                        } else {
+                            Toggle(isOn: $appState.isVerizonCarrier) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(String(localized: "I'm a Verizon customer"))
+                                        .font(.subheadline.weight(.medium))
+                                    Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
+                                        .font(.caption)
+                                        .foregroundStyle(Color.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .task(id: forwardingCountry) {
+                        guard !ForwardingCountry.isNANP(forwardingCountry) else { return }
+                        // Keep good instructions if a re-run is cancelled or fails;
+                        // overwriting with nil would silently revert the dialed codes.
+                        if let fetched = await APIClient.shared.getForwardingInstructions(countryCode: forwardingCountry) {
+                            forwardingInstructions = fetched
                         }
                     }
 
                     Button {
-                        // Activate — match the code by carrier.
-                        // Verizon: *71<number> (no-answer forward). GSM: *61*<number># (no-answer forward).
-                        let code = appState.isVerizonCarrier
-                            ? "*71\(dialNumber)"
-                            : "*61*\(dialNumber)%23"
-                        dialCode(code)
+                        // Activate — no-answer forward for the resolved country and carrier.
+                        dialCode(forwardingCodes.activate)
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -426,10 +444,8 @@ struct SettingsView: View {
                     }
 
                     Button(role: .destructive) {
-                        // Deactivate — must match the activate code exactly.
-                        // Verizon: *73 (cancels forwarding). GSM: ##61# (cancels no-answer).
-                        let code = appState.isVerizonCarrier ? "*73" : "%23%2361%23"
-                        dialCode(code)
+                        // Deactivate — must cancel exactly what activate set up.
+                        dialCode(forwardingCodes.deactivate)
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -446,10 +462,11 @@ struct SettingsView: View {
                     }
 
                     Button(role: .destructive) {
-                        // ##002# clears every forwarding type (unconditional, busy,
-                        // no-answer, not-reachable) on GSM networks. Useful when
-                        // prior forwarding from another source is still active.
-                        dialCode("%23%23002%23")
+                        // Erases every forwarding type (unconditional, busy,
+                        // no-answer, not-reachable) on GSM networks — including the
+                        // carrier's own voicemail forwards. Useful when prior
+                        // forwarding from another source is still active.
+                        if let code = forwardingCodes.clearAll { dialCode(code) }
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -464,7 +481,7 @@ struct SettingsView: View {
                                 .foregroundStyle(.red)
                         }
                     }
-                    .disabled(appState.isVerizonCarrier)
+                    .disabled(forwardingCodes.clearAll == nil)
                 } header: {
                     Text(String(localized: "Call Forwarding"))
                 } footer: {
@@ -472,7 +489,10 @@ struct SettingsView: View {
                         Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
                             .foregroundStyle(.orange)
                     } else {
-                        Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used."))
+                        // The Verizon hint only makes sense where the toggle is shown.
+                        Text(ForwardingCountry.isNANP(forwardingCountry)
+                            ? String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used.")
+                            : String(localized: "Tapping opens your phone dialer. Tap Call to confirm."))
                     }
                 }
                 .disabled(appState.kevinNumber.isEmpty)
@@ -732,13 +752,11 @@ struct SettingsView: View {
                     Spacer()
                     Button {
                         if !appState.kevinNumber.isEmpty {
-                            // Match the code to the carrier. Hardcoding the GSM code
-                            // here sent Verizon users a code their network ignores —
-                            // and then showed them a green checkmark for it.
-                            let code = appState.isVerizonCarrier
-                                ? "*71\(dialNumber)"
-                                : "*61*\(dialNumber)%23"
-                            dialCode(code)
+                            // Match the code to the country and carrier. Hardcoding
+                            // the GSM code here sent Verizon users a code their
+                            // network ignores — and then showed them a green
+                            // checkmark for it.
+                            dialCode(forwardingCodes.activate)
                             // Set the optimistic flag only after dialing is attempted.
                             // This still records intent rather than fact — the device
                             // cannot read forwarding state — but it no longer claims
@@ -842,6 +860,19 @@ struct SettingsView: View {
         }
     }
 
+    private var forwardingCodes: ForwardingCodes {
+        ForwardingDialCodes.codes(
+            countryCode: forwardingCountry,
+            instructions: forwardingInstructions,
+            number: dialNumber,
+            isVerizon: appState.isVerizonCarrier
+        )
+    }
+
+    private var forwardingCountryName: String {
+        Locale.current.localizedString(forRegionCode: forwardingCountry) ?? forwardingCountry
+    }
+
     private var dialNumber: String {
         // Strip + and any non-digit characters for carrier codes
         let digits = kevinNumber.filter { $0.isNumber }
@@ -852,8 +883,10 @@ struct SettingsView: View {
         return digits
     }
 
+    /// `code` is the raw carrier string (with literal `#`); encoding is
+    /// centralised in `ForwardingDialCodes.telURL`.
     private func dialCode(_ code: String) {
-        if let url = URL(string: "tel:\(code)") {
+        if let url = ForwardingDialCodes.telURL(code) {
             UIApplication.shared.open(url)
         }
     }

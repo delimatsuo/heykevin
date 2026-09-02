@@ -22,6 +22,22 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api", dependencies=[Depends(verify_api_token)])
 
 # Standard GSM/carrier forwarding codes per country.
+#
+# GSM (3GPP TS 22.030 §6.5.2 / TS 22.082): unconditional forwarding is
+# supplementary service code 21 and no-reply forwarding is code 61; erasing
+# one does not erase the other. Because every entry recommends
+# ``forward_unanswered``, the generic ``disable`` must be the no-reply code.
+# ``##SC#`` is *erasure* rather than ``#SC#`` deactivation on purpose: a
+# deactivated-but-still-registered forward is silently re-enabled by a bare
+# ``*61#``, so erasure is what "turn Kevin off" actually means.
+# ``disable_everything`` (``##002#``) erases every forwarding type at once —
+# including a carrier's own voicemail conditional forwards.
+#
+# NANP (US/CA) rows deliberately carry only the legacy ``disable``. The
+# granular cancel codes are not uniform across the carriers named in
+# ``notes`` (T-Mobile US documents GSM MMI ``##61#``/``##21#``; AT&T documents
+# ``*93`` for no-answer cancel, distinct from ``*73``), so the server does not
+# assert them. Clients must not derive NANP behaviour from this table.
 FORWARDING_CODES = {
     "US": {
         "forward_all": "*72{number}",
@@ -40,49 +56,70 @@ FORWARDING_CODES = {
     "BR": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Vivo, Claro, TIM, Oi.",
         "recommended": "forward_unanswered",
     },
     "GB": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on EE, Vodafone, Three, O2.",
         "recommended": "forward_unanswered",
     },
     "DE": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Telekom, Vodafone, O2.",
         "recommended": "forward_unanswered",
     },
     "FR": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Orange, SFR, Bouygues, Free.",
         "recommended": "forward_unanswered",
     },
     "IT": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on TIM, Vodafone, WindTre, Iliad.",
         "recommended": "forward_unanswered",
     },
     "ES": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Movistar, Vodafone, Orange.",
         "recommended": "forward_unanswered",
     },
     "PT": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on MEO, NOS, Vodafone.",
         "recommended": "forward_unanswered",
     },
@@ -177,7 +214,10 @@ async def get_forwarding_instructions(country_code: str = Query("US", max_length
         return {
             "supported": False,
             "country_code": country_code.upper(),
-            "message": f"Call forwarding instructions not available for {country_code}. {FALLBACK_MESSAGE}",
+            "message": (
+                f"Call forwarding instructions not available for {country_code.upper()}. "
+                f"{FALLBACK_MESSAGE}"
+            ),
         }
     return {
         "supported": True,

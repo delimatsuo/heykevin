@@ -14,6 +14,7 @@
 		1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */; };
 		2603D9A0B3120B8CD74E39BF /* InCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CF580A4F3F56EFF7D346DB8 /* InCallView.swift */; };
 		28FA50EE1B2E526416669436 /* Products.storekit in Resources */ = {isa = PBXBuildFile; fileRef = EA4F50F9BE60CBE958B7212B /* Products.storekit */; };
+		2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */; };
 		32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3218F28F84345FE46322FFD3 /* AccountDeletion.swift */; };
 		3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */; };
 		4AB09E327BD6CE7025092BCE /* ContactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2612E9351242FAB54735AE26 /* ContactsView.swift */; };
@@ -83,6 +84,7 @@
 		88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIdentityRefresher.swift; sourceTree = "<group>"; };
 		8C9DE1B27DFA1888B44DD4C6 /* AppStoreScreenshotFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreScreenshotFixtures.swift; sourceTree = "<group>"; };
 		8CF580A4F3F56EFF7D346DB8 /* InCallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InCallView.swift; sourceTree = "<group>"; };
+		8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersionTests.swift; sourceTree = "<group>"; };
 		8DA8688618EC1418EC76C373 /* WhatsNewSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewSheet.swift; sourceTree = "<group>"; };
 		8FDB20F68C9466D8D53A8852 /* KevinApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KevinApp.swift; sourceTree = "<group>"; };
 		9789C39B3615CCF463FEBAE2 /* InfoPlist.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = InfoPlist.strings; path = es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -177,6 +179,7 @@
 			isa = PBXGroup;
 			children = (
 				EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */,
+				8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */,
 				CB4523976C8CA1F94FD69173 /* ForwardingInstructionsTests.swift */,
 				C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */,
 			);
@@ -348,6 +351,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */,
+				2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */,
 				B670617C06440B284622AA7E /* ForwardingInstructionsTests.swift in Sources */,
 				1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */,
 			);
@@ -480,7 +484,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -493,7 +497,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.9;
+				MARKETING_VERSION = 1.2.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG STAGING";
@@ -567,7 +571,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -580,7 +584,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.9;
+				MARKETING_VERSION = 1.2.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen;
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -695,7 +699,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -708,7 +712,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.9;
+				MARKETING_VERSION = 1.2.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kevin.callscreen;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = STAGING;

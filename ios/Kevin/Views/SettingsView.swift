@@ -614,7 +614,7 @@ struct SettingsView: View {
                     HStack {
                         Text(String(localized: "Version"))
                         Spacer()
-                        Text("1.0.0")
+                        Text(AppVersionService.marketingVersion())
                             .foregroundStyle(Color.secondary)
                     }
 

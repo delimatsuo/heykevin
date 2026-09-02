@@ -22,11 +22,22 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api", dependencies=[Depends(verify_api_token)])
 
 # Standard GSM/carrier forwarding codes per country.
+#
+# On GSM networks, unconditional forwarding is supplementary service code 21
+# and no-reply forwarding is service code 61; erasing one does not erase the
+# other. Because every entry recommends ``forward_unanswered``, the generic
+# ``disable`` must be the no-reply erase code, not the unconditional one.
+# ``disable_everything`` (``##002#``) erases every forwarding type at once.
+# NANP carriers (US/CA) use a single ``*73`` to cancel whatever ``*71``/``*72``
+# set up.
 FORWARDING_CODES = {
     "US": {
         "forward_all": "*72{number}",
         "forward_unanswered": "*71{number}",
         "disable": "*73",
+        "disable_all": "*73",
+        "disable_unanswered": "*73",
+        "disable_everything": "*73",
         "notes": "Works on all major US carriers (AT&T, Verizon, T-Mobile).",
         "recommended": "forward_unanswered",
     },
@@ -34,55 +45,79 @@ FORWARDING_CODES = {
         "forward_all": "*72{number}",
         "forward_unanswered": "*71{number}",
         "disable": "*73",
+        "disable_all": "*73",
+        "disable_unanswered": "*73",
+        "disable_everything": "*73",
         "notes": "Works on all major Canadian carriers (Bell, Rogers, Telus).",
         "recommended": "forward_unanswered",
     },
     "BR": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Vivo, Claro, TIM, Oi.",
         "recommended": "forward_unanswered",
     },
     "GB": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on EE, Vodafone, Three, O2.",
         "recommended": "forward_unanswered",
     },
     "DE": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Telekom, Vodafone, O2.",
         "recommended": "forward_unanswered",
     },
     "FR": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Orange, SFR, Bouygues, Free.",
         "recommended": "forward_unanswered",
     },
     "IT": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on TIM, Vodafone, WindTre, Iliad.",
         "recommended": "forward_unanswered",
     },
     "ES": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on Movistar, Vodafone, Orange.",
         "recommended": "forward_unanswered",
     },
     "PT": {
         "forward_all": "**21*{number}#",
         "forward_unanswered": "**61*{number}#",
-        "disable": "##21#",
+        "disable": "##61#",
+        "disable_all": "##21#",
+        "disable_unanswered": "##61#",
+        "disable_everything": "##002#",
         "notes": "Standard GSM codes. Works on MEO, NOS, Vodafone.",
         "recommended": "forward_unanswered",
     },

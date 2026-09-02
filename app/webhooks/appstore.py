@@ -23,6 +23,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 
@@ -150,19 +151,31 @@ def _decode_notification_payload(signed_payload: str) -> dict:
             except Exception:
                 raise ValueError(f"Certificate chain verification failed at position {i}")
 
-        # Verify JWS signature using leaf cert's public key
+        # Verify JWS signature using leaf cert's public key.
+        #
+        # RFC 7518 §3.4: an ES256 JWS signature is the raw 64-octet
+        # concatenation R || S. `cryptography`'s verify() expects the DER
+        # Dss-Sig-Value form (RFC 3279), so the raw bytes must be re-encoded
+        # first. Passing them straight through raised InvalidSignature on
+        # every genuine Apple notification, so the webhook answered 400 to
+        # all of them and Apple gave up after its retry window.
         signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
         sig_bytes = base64.urlsafe_b64decode(parts[2] + "=" * (4 - len(parts[2]) % 4))
         alg = header.get("alg", "")
 
-        if alg.startswith("ES"):
-            leaf_cert.public_key().verify(
-                sig_bytes,
-                signing_input,
-                ec.ECDSA(hashes.SHA256())
-            )
-        else:
+        if alg != "ES256":
             raise ValueError(f"Unsupported JWS algorithm: {alg}")
+        if len(sig_bytes) != 64:
+            raise ValueError(
+                f"Invalid ES256 JWS signature length: {len(sig_bytes)} (expected 64)"
+            )
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        leaf_cert.public_key().verify(
+            encode_dss_signature(r, s),
+            signing_input,
+            ec.ECDSA(hashes.SHA256()),
+        )
 
     except ValueError:
         raise

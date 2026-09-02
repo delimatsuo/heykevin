@@ -345,7 +345,9 @@ struct PaywallView: View {
             // Deactivate — must cancel exactly what Settings/Onboarding set up.
             // No fetch here: the built-in deactivate equals the server's
             // disable_unanswered for every supported country, and NANP keeps
-            // its Verizon/GSM split.
+            // its Verizon/GSM split. That equality is enforced server-side by
+            // tests/unit/test_forwarding_instructions.py
+            // (test_gsm_disable_unanswered_targets_service_code_61).
             let codes = ForwardingDialCodes.codes(
                 countryCode: ForwardingCountry.resolve(),
                 instructions: nil,

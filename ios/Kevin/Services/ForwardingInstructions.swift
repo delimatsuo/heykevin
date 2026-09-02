@@ -58,8 +58,8 @@ struct ForwardingCodes: Equatable {
     /// Erases every forwarding type at once; nil where no such code exists.
     let clearAll: String?
     /// True when the codes came from the server for the resolved country.
-    /// Screens hide the US carrier picker in that case — it has no meaning
-    /// outside North America.
+    /// Informational: screens gate the US carrier picker on
+    /// `ForwardingCountry.isNANP`, not on this flag.
     let isServerDriven: Bool
 }
 

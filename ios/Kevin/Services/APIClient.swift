@@ -173,6 +173,30 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
+    // MARK: - Forwarding Instructions
+
+    /// Per-country carrier dial codes. Returns nil on any failure — and on the
+    /// backend's pre-fix response shape — so callers fall back to the built-in
+    /// codes the app has always dialed.
+    func getForwardingInstructions(countryCode: String) async -> ForwardingInstructions? {
+        guard !contractorToken.isEmpty else { return nil }
+
+        do {
+            var components = URLComponents(string: "\(baseURL)/api/forwarding-instructions")!
+            components.queryItems = [URLQueryItem(name: "country_code", value: countryCode)]
+            let url = components.url!
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            authorize(&request)
+
+            let (data, response) = try await session.data(for: request)
+            return ForwardingInstructionsParser.parse(response: response, data: data)
+        } catch {
+            debugLog("Forwarding instructions fetch failed: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
     // MARK: - Device Registration
 
     func registerDevice(pushToken: String, voipToken: String = "") async {

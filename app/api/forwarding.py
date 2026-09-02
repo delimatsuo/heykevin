@@ -23,21 +23,26 @@ router = APIRouter(prefix="/api", dependencies=[Depends(verify_api_token)])
 
 # Standard GSM/carrier forwarding codes per country.
 #
-# On GSM networks, unconditional forwarding is supplementary service code 21
-# and no-reply forwarding is service code 61; erasing one does not erase the
-# other. Because every entry recommends ``forward_unanswered``, the generic
-# ``disable`` must be the no-reply erase code, not the unconditional one.
-# ``disable_everything`` (``##002#``) erases every forwarding type at once.
-# NANP carriers (US/CA) use a single ``*73`` to cancel whatever ``*71``/``*72``
-# set up.
+# GSM (3GPP TS 22.030 §6.5.2 / TS 22.082): unconditional forwarding is
+# supplementary service code 21 and no-reply forwarding is code 61; erasing
+# one does not erase the other. Because every entry recommends
+# ``forward_unanswered``, the generic ``disable`` must be the no-reply code.
+# ``##SC#`` is *erasure* rather than ``#SC#`` deactivation on purpose: a
+# deactivated-but-still-registered forward is silently re-enabled by a bare
+# ``*61#``, so erasure is what "turn Kevin off" actually means.
+# ``disable_everything`` (``##002#``) erases every forwarding type at once —
+# including a carrier's own voicemail conditional forwards.
+#
+# NANP (US/CA) rows deliberately carry only the legacy ``disable``. The
+# granular cancel codes are not uniform across the carriers named in
+# ``notes`` (T-Mobile US documents GSM MMI ``##61#``/``##21#``; AT&T documents
+# ``*93`` for no-answer cancel, distinct from ``*73``), so the server does not
+# assert them. Clients must not derive NANP behaviour from this table.
 FORWARDING_CODES = {
     "US": {
         "forward_all": "*72{number}",
         "forward_unanswered": "*71{number}",
         "disable": "*73",
-        "disable_all": "*73",
-        "disable_unanswered": "*73",
-        "disable_everything": "*73",
         "notes": "Works on all major US carriers (AT&T, Verizon, T-Mobile).",
         "recommended": "forward_unanswered",
     },
@@ -45,9 +50,6 @@ FORWARDING_CODES = {
         "forward_all": "*72{number}",
         "forward_unanswered": "*71{number}",
         "disable": "*73",
-        "disable_all": "*73",
-        "disable_unanswered": "*73",
-        "disable_everything": "*73",
         "notes": "Works on all major Canadian carriers (Bell, Rogers, Telus).",
         "recommended": "forward_unanswered",
     },
@@ -212,7 +214,10 @@ async def get_forwarding_instructions(country_code: str = Query("US", max_length
         return {
             "supported": False,
             "country_code": country_code.upper(),
-            "message": f"Call forwarding instructions not available for {country_code}. {FALLBACK_MESSAGE}",
+            "message": (
+                f"Call forwarding instructions not available for {country_code.upper()}. "
+                f"{FALLBACK_MESSAGE}"
+            ),
         }
     return {
         "supported": True,

@@ -2282,6 +2282,38 @@
         }
       }
     },
+    "Country" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "País"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "País"
+          }
+        }
+      }
+    },
+    "Sets the call forwarding codes Kevin shows you." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Define los códigos de desvío de llamadas que Kevin te muestra."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Define os códigos de encaminhamento de chamadas que o Kevin mostra para você."
+          }
+        }
+      }
+    },
     "Plan" : {
 
     },

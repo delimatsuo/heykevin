@@ -173,6 +173,32 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
+    // MARK: - Account Country
+
+    /// Writes the account country through the validated settings endpoint and
+    /// returns the server-confirmed code, or nil on any failure — including a
+    /// 200 whose body carries `error`, which is how a failed save is reported.
+    func updateCountryCode(contractorId: String, countryCode: String) async -> String? {
+        guard !contractorToken.isEmpty else { return nil }
+
+        do {
+            var components = URLComponents(string: "\(baseURL)/api/settings")!
+            components.queryItems = [URLQueryItem(name: "contractor_id", value: contractorId)]
+            var request = URLRequest(url: components.url!)
+            request.httpMethod = "PUT"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 10
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["country_code": countryCode])
+            authorize(&request)
+
+            let (data, response) = try await session.data(for: request)
+            return SettingsCountryParser.parse(response: response, data: data)
+        } catch {
+            debugLog("Update country failed: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
     // MARK: - Forwarding Instructions
 
     /// Per-country carrier dial codes. Returns nil on any failure — and on the

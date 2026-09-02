@@ -257,3 +257,27 @@ final class ForwardingInstructionsTests: XCTestCase {
         XCTAssertFalse(ForwardingCountry.isNANP("BR"))
     }
 }
+
+// MARK: - Account country precedence
+
+extension ForwardingInstructionsTests {
+    func testAccountCountryOverridesDeviceRegion() {
+        // The codes belong to the user's own carrier; the account country is
+        // what they told us, the device region is a guess.
+        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "BR", locale: Locale(identifier: "en_US")), "BR")
+    }
+
+    func testEmptyAccountCountryFallsBackToDeviceRegion() {
+        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "", locale: Locale(identifier: "pt_BR")), "BR")
+        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: nil, locale: Locale(identifier: "en_GB")), "GB")
+    }
+
+    func testMalformedAccountCountryIsIgnored() {
+        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "zz9", locale: Locale(identifier: "en_GB")), "GB")
+        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "B", locale: Locale(identifier: "en_GB")), "GB")
+    }
+
+    func testAccountCountryIsTrimmedAndUppercased() {
+        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: " gb ", locale: Locale(identifier: "en_US")), "GB")
+    }
+}

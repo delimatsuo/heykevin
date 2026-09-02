@@ -349,7 +349,7 @@ struct PaywallView: View {
             // tests/unit/test_forwarding_instructions.py
             // (test_gsm_disable_unanswered_targets_service_code_61).
             let codes = ForwardingDialCodes.codes(
-                countryCode: ForwardingCountry.resolve(),
+                countryCode: ForwardingCountry.resolve(accountCountry: appState.countryCode),
                 instructions: nil,
                 number: "",
                 isVerizon: appState.isVerizonCarrier

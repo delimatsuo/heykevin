@@ -74,10 +74,16 @@ enum ForwardingCountry {
     }
 
     /// The forwarding codes belong to the carrier of the phone being
-    /// forwarded — the user's own SIM — so the device region is the best
-    /// signal available. Defaults to US, which preserves today's behaviour
-    /// for a locale with no region.
-    static func resolve(locale: Locale = .current) -> String {
+    /// forwarded — the user's own SIM. The account country is what the user
+    /// told us and wins when it is a well-formed two-letter code; otherwise
+    /// the device region is the best signal available. Defaults to US, which
+    /// preserves today's behaviour for a locale with no region.
+    static func resolve(accountCountry: String? = nil, locale: Locale = .current) -> String {
+        if let account = accountCountry?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+           account.count == 2,
+           account.allSatisfy({ $0.isASCII && $0.isLetter }) {
+            return account
+        }
         guard let region = locale.region?.identifier, !region.isEmpty else { return "US" }
         return region.uppercased()
     }

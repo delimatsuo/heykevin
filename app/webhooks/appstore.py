@@ -62,8 +62,10 @@ router = APIRouter()
 #   self.check_oid(trusted_chain[0].to_cryptography(), "1.2.840.113635.100.6.11.1")
 #   self.check_oid(trusted_chain[1].to_cryptography(), "1.2.840.113635.100.6.2.1")
 APPLE_CHAIN_LENGTH = 3
-APPLE_LEAF_OID = "1.2.840.113635.100.6.11.1"          # App Store Server Notifications signing leaf
-APPLE_INTERMEDIATE_OID = "1.2.840.113635.100.6.2.1"   # Apple Worldwide Developer Relations intermediate
+# App Store Server Notifications signing leaf
+APPLE_LEAF_OID = "1.2.840.113635.100.6.11.1"
+# Apple Worldwide Developer Relations (WWDR) intermediate
+APPLE_INTERMEDIATE_OID = "1.2.840.113635.100.6.2.1"
 
 
 def _load_trusted_apple_root_fingerprints() -> set[str]:
@@ -119,7 +121,14 @@ def _decode_notification_payload(signed_payload: str) -> dict:
     Apple signs App Store Server Notifications as JWS with RS/ES.
     The x5c header contains the certificate chain; we verify:
     1. The certificate chain is valid and roots to Apple's CA
-    2. The JWS signature is valid
+    2. The chain has exactly APPLE_CHAIN_LENGTH (3) certificates
+    3. The leaf carries the App Store Server Notifications marker OID and
+       the intermediate carries the Apple WWDR marker OID
+    4. The JWS signature is valid
+    5. bundleId is present (fail-closed) in one of data/summary/
+       externalPurchaseToken/appData and matches settings.appstore_bundle_id
+    6. environment, if present, is compared to settings.appstore_environment
+       and a mismatch is logged as a warning only — never rejected
 
     Returns the decoded payload dict, raises ValueError on failure.
     """
@@ -165,7 +174,8 @@ def _decode_notification_payload(signed_payload: str) -> dict:
         # `if len(certificates) != 3: raise VerificationException(...)`.
         if len(certs) != APPLE_CHAIN_LENGTH:
             raise ValueError(
-                f"Certificate chain must have exactly {APPLE_CHAIN_LENGTH} certificates, got {len(certs)}"
+                f"Certificate chain must have exactly {APPLE_CHAIN_LENGTH} "
+                f"certificates, got {len(certs)}"
             )
 
         # F-3: anchor the chain to a known Apple Root CA. The last cert in
@@ -264,15 +274,31 @@ def _decode_notification_payload(signed_payload: str) -> dict:
         raise ValueError(f"Invalid JWS payload: {e}")
 
     # Validate bundle ID. 2026-09-03 follow-up: fail closed — a payload
-    # with no bundleId in either section used to fall through the old
+    # with no bundleId in any section used to fall through the old
     # `if bundle_id and ...` truthy check unrejected. It is now rejected.
+    #
+    # Fix round 1 (2026-09-03, controller ruling): Apple's own verifier
+    # reads bundleId from four mutually exclusive payload sections — data,
+    # summary, externalPurchaseToken, appData — not just the first two.
+    # Sourcing from only two rejected legitimate externalPurchaseToken- or
+    # appData-shaped notifications outright ("Missing bundleId" -> HTTP 400
+    # -> Apple retries, gives up, notification permanently lost). This is
+    # strictly narrower than the pre-task truthy check; nothing loosened.
     from app.config import settings
     signed_data = payload.get("data")
     summary = payload.get("summary")
+    external_purchase_token = payload.get("externalPurchaseToken")
+    app_data = payload.get("appData")
     bundle_id = None
-    for section in (signed_data, summary):
-        if isinstance(section, dict) and isinstance(section.get("bundleId"), str) and section["bundleId"]:
+    bundle_section = None
+    for section in (signed_data, summary, external_purchase_token, app_data):
+        if (
+            isinstance(section, dict)
+            and isinstance(section.get("bundleId"), str)
+            and section["bundleId"]
+        ):
             bundle_id = section["bundleId"]
+            bundle_section = section
             break
     if bundle_id is None:
         raise ValueError("Missing bundleId in notification payload")
@@ -282,8 +308,10 @@ def _decode_notification_payload(signed_payload: str) -> dict:
     # 2026-09-03 follow-up: environment awareness is LOG ONLY, never a
     # rejection (ruling: App Store Connect's sandbox notification URL may
     # point at this same service for TestFlight testers; rejecting would
-    # drop those notifications until the URL routing is confirmed).
-    environment = section.get("environment")
+    # drop those notifications until the URL routing is confirmed). Read
+    # from the section that actually supplied the bundleId (bound above),
+    # not the exhausted loop variable.
+    environment = bundle_section.get("environment")
     if (
         isinstance(environment, str)
         and environment

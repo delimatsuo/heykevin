@@ -378,6 +378,51 @@ def test_bundle_id_from_summary_section_is_accepted(monkeypatch):
     assert decoded == payload
 
 
+def test_bundle_id_from_external_purchase_token_section_is_accepted(monkeypatch):
+    """Fix round 1 finding #1: externalPurchaseToken is one of Apple's four
+    mutually exclusive bundleId sections and must not be rejected outright."""
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "EXTERNAL_PURCHASE_TOKEN",
+        "externalPurchaseToken": {"bundleId": settings.appstore_bundle_id},
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    decoded = appstore_webhook._decode_notification_payload(token)
+
+    assert decoded == payload
+
+
+def test_bundle_id_from_app_data_section_is_accepted(monkeypatch):
+    """Fix round 1 finding #1: appData is one of Apple's four mutually
+    exclusive bundleId sections and must not be rejected outright."""
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "DID_RENEW",
+        "appData": {"bundleId": settings.appstore_bundle_id},
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    decoded = appstore_webhook._decode_notification_payload(token)
+
+    assert decoded == payload
+
+
+def test_app_data_bundle_id_mismatch_is_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    token = _sign_jws(
+        {"notificationType": "DID_RENEW", "appData": {"bundleId": "com.example.not-kevin"}},
+        leaf_key,
+        chain,
+    )
+
+    with pytest.raises(ValueError, match="Bundle ID mismatch"):
+        appstore_webhook._decode_notification_payload(token)
+
+
 def test_environment_mismatch_is_logged_not_rejected(monkeypatch, caplog):
     leaf_key, chain = _fake_apple_chain()
     _trust_root(monkeypatch, chain[-1])
@@ -393,6 +438,25 @@ def test_environment_mismatch_is_logged_not_rejected(monkeypatch, caplog):
 
     assert decoded == payload
     assert "differs from configured" in caplog.text
+
+
+def test_environment_case_only_difference_is_not_logged(monkeypatch, caplog):
+    """Fix round 1 finding #3: pin case-insensitivity specifically — a
+    same-value, different-case environment must not warn or reject."""
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    monkeypatch.setattr(settings, "appstore_environment", "production")
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id, "environment": "Production"},
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    with caplog.at_level(logging.WARNING, logger="app.webhooks.appstore"):
+        decoded = appstore_webhook._decode_notification_payload(token)
+
+    assert decoded == payload
+    assert "differs from configured" not in caplog.text
 
 
 def test_x5c_with_non_string_entry_is_rejected():

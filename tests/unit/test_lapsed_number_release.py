@@ -252,6 +252,18 @@ async def test_recent_inbound_stamp_blocks_lapsed_release(harness):
 
 
 @pytest.mark.asyncio
+async def test_recent_inbound_stamp_blocks_deleted_app_release_end_to_end(harness):
+    """The always-on deleted-app trigger must honour the same stamp the lapsed path does."""
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now, last_inbound_call_at=now - 2 * DAY)
+
+    result = await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.deactivated == [] and harness.sms == []
+    assert result["deleted_app_released"] == 0
+
+
+@pytest.mark.asyncio
 async def test_call_lookup_failure_fails_closed(harness):
     """If we cannot tell whether calls still arrive, we cannot prove the number is quiet."""
     now = time.time()
@@ -407,16 +419,54 @@ _STATUS_RESPONSE = {
 }
 
 
+from app.config import settings  # noqa: E402
+from app.services.subscription import (  # noqa: E402
+    APPSTORE_PRODUCTION_URL,
+    APPSTORE_SANDBOX_URL,
+)
+
+
 @pytest.fixture
 def apple_wire(monkeypatch):
+    """Fakes the App Store transaction-lookup wire for _apple_subscription_statuses.
+
+    Defaults settings.appstore_environment to "production" so the real
+    `_get_transaction_lookup_urls()` (app/services/subscription.py) tries
+    production first and only falls back to sandbox on a 4040010 "not found"
+    -- the fallback behaviour most of these tests exist to cover. A test that
+    wants the staging (sandbox-only) path overrides the environment itself.
+
+    `.requested()` reads respx's own call history and maps each request back
+    to the production or sandbox base it hit, in the order the requests were
+    actually made -- so a test can assert both *which* bases were asked and
+    in what order, without hand-rolling a recorder.
+    """
     monkeypatch.setattr(number_release, "_get_appstore_jwt", lambda: "test.jwt.token")
-    monkeypatch.setattr(number_release, "_get_appstore_url", lambda: "https://api.storekit.apple.com")
+    monkeypatch.setattr(settings, "appstore_environment", "production")
+
+    def requested() -> list[str]:
+        bases = []
+        for call in respx.calls:
+            url = str(call.request.url)
+            if url.startswith(APPSTORE_PRODUCTION_URL):
+                bases.append(APPSTORE_PRODUCTION_URL)
+            elif url.startswith(APPSTORE_SANDBOX_URL):
+                bases.append(APPSTORE_SANDBOX_URL)
+            else:
+                bases.append(url)
+        return bases
+
+    return SimpleNamespace(
+        production_url=APPSTORE_PRODUCTION_URL,
+        sandbox_url=APPSTORE_SANDBOX_URL,
+        requested=requested,
+    )
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_apple_statuses_parses_a_real_status_response(apple_wire):
-    route = respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+    route = respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
         return_value=httpx.Response(200, json=_STATUS_RESPONSE)
     )
 
@@ -429,7 +479,7 @@ async def test_apple_statuses_parses_a_real_status_response(apple_wire):
 @pytest.mark.asyncio
 @respx.mock
 async def test_apple_statuses_empty_data_means_no_hold(apple_wire):
-    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
         return_value=httpx.Response(200, json={**_STATUS_RESPONSE, "data": []})
     )
     assert await number_release._apple_subscription_statuses("2000000123") == []
@@ -438,7 +488,7 @@ async def test_apple_statuses_empty_data_means_no_hold(apple_wire):
 @pytest.mark.asyncio
 @respx.mock
 async def test_apple_statuses_non_200_raises(apple_wire):
-    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
         return_value=httpx.Response(401, json={"errorCode": 4040010})
     )
     with pytest.raises(RuntimeError):
@@ -449,7 +499,7 @@ async def test_apple_statuses_non_200_raises(apple_wire):
 @respx.mock
 async def test_apple_hold_end_to_end_through_the_wire(apple_wire, harness_real_apple):
     """Billing retry reported by Apple, parsed from the real wire shape, holds the number."""
-    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
         return_value=httpx.Response(200, json=_STATUS_RESPONSE)
     )
     now = time.time()
@@ -464,7 +514,7 @@ async def test_apple_hold_end_to_end_through_the_wire(apple_wire, harness_real_a
 @respx.mock
 async def test_apple_expired_end_to_end_through_the_wire_releases(apple_wire, harness_real_apple):
     body = {**_STATUS_RESPONSE, "data": [{**_STATUS_RESPONSE["data"][0], "lastTransactions": [{**_STATUS_RESPONSE["data"][0]["lastTransactions"][0], "status": 2}]}]}
-    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
         return_value=httpx.Response(200, json=body)
     )
     now = time.time()
@@ -473,3 +523,100 @@ async def test_apple_expired_end_to_end_through_the_wire_releases(apple_wire, ha
     await number_release.run_expired_contractor_cleanup_once(now=now)
 
     assert harness_real_apple.deactivated == ["paid"]
+
+
+# --- production-first, sandbox-fallback lookup across App Store environments ---
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_fall_back_to_sandbox_when_production_reports_not_found(apple_wire):
+    """A receipt bound in the sandbox (e.g. a TestFlight tester) 404s on production."""
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(404, json={"errorCode": 4040010})
+    )
+    sandbox_body = {
+        **_STATUS_RESPONSE,
+        "data": [{**_STATUS_RESPONSE["data"][0], "lastTransactions": [
+            {**_STATUS_RESPONSE["data"][0]["lastTransactions"][0], "status": 2}
+        ]}],
+    }
+    respx.get(f"{apple_wire.sandbox_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=sandbox_body)
+    )
+
+    statuses = await number_release._apple_subscription_statuses("2000000123")
+
+    assert statuses == [2]
+    assert apple_wire.requested() == [apple_wire.production_url, apple_wire.sandbox_url]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_do_not_fall_back_on_other_404s(apple_wire):
+    """Only errorCode 4040010 ("not found") triggers the sandbox fallback."""
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(404, json={"errorCode": 4040005})
+    )
+    sandbox_route = respx.get(f"{apple_wire.sandbox_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+
+    with pytest.raises(RuntimeError):
+        await number_release._apple_subscription_statuses("2000000123")
+
+    assert sandbox_route.called is False
+    assert apple_wire.requested() == [apple_wire.production_url]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_not_found_anywhere_raises_and_holds(apple_wire):
+    """Ambiguous ("not found in any environment") must hold, not be read as no-subscription."""
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/x").mock(
+        return_value=httpx.Response(404, json={"errorCode": 4040010})
+    )
+    respx.get(f"{apple_wire.sandbox_url}/inApps/v1/subscriptions/x").mock(
+        return_value=httpx.Response(404, json={"errorCode": 4040010})
+    )
+
+    with pytest.raises(RuntimeError):
+        await number_release._apple_subscription_statuses("x")
+
+    assert await number_release.apple_blocks_release(
+        {"subscription_original_transaction_id": "x"}
+    ) is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_production_hit_never_asks_sandbox(apple_wire):
+    respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+    sandbox_route = respx.get(f"{apple_wire.sandbox_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+
+    statuses = await number_release._apple_subscription_statuses("2000000123")
+
+    assert statuses == [3]
+    assert sandbox_route.called is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_staging_only_asks_sandbox(apple_wire, monkeypatch):
+    monkeypatch.setattr(settings, "appstore_environment", "sandbox")
+    production_route = respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+    respx.get(f"{apple_wire.sandbox_url}/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+
+    statuses = await number_release._apple_subscription_statuses("2000000123")
+
+    assert statuses == [3]
+    assert production_route.called is False
+    assert apple_wire.requested() == [apple_wire.sandbox_url]

@@ -142,7 +142,8 @@ def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
     Two independent conditions, both required:
 
     1. App deletion was detected at least NUMBER_RELEASE_QUIET_DAYS ago.
-    2. No carrier-confirmed forwarded call has arrived within that same window.
+    2. No carrier-confirmed forwarded call and no inbound-call stamp within
+       that same window.
 
     Condition 2 is the one that matters. Twilio reassigns released numbers to other
     customers after the FCC's 45-day aging period. If a user's forward is still
@@ -174,6 +175,17 @@ def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
                 # Present but unreadable — we cannot rule out a live forward.
                 return False
             if now - seen_ts < quiet_window:
+                return False
+
+    # Stamped on every inbound call by the incoming webhook, including calls
+    # on expired accounts, which write no call record. Absence is no evidence
+    # either way (the stamp is younger than most deletions); presence inside
+    # the window means the number is still being called, so hold it.
+    if "last_inbound_call_at" in contractor:
+        stamped = contractor.get("last_inbound_call_at")
+        if stamped is not None:
+            stamp_ts = _readable_timestamp(stamped)
+            if stamp_ts is None or now - stamp_ts < quiet_window:
                 return False
 
     return True

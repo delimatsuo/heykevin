@@ -136,6 +136,25 @@ def _readable_timestamp(value) -> Optional[float]:
     return float(value)
 
 
+def _inbound_stamp_blocks(contractor: dict, now: float, window: float) -> bool:
+    """True when last_inbound_call_at is present and either unreadable or inside the window.
+
+    Absence (or an explicit None) is no evidence either way and never blocks.
+    Shared by the deleted-app and lapsed release guards so the two cannot drift.
+
+    Stamped on every inbound call by the incoming webhook, including calls on
+    expired accounts, which write no call record. Presence inside the window
+    means the number is still being called, so hold it.
+    """
+    if "last_inbound_call_at" not in contractor:
+        return False
+    stamped = contractor.get("last_inbound_call_at")
+    if stamped is None:
+        return False
+    stamp_ts = _readable_timestamp(stamped)
+    return stamp_ts is None or now - stamp_ts < window
+
+
 def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
     """True only if releasing this contractor's Twilio number cannot strand a forward.
 
@@ -177,16 +196,10 @@ def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
             if now - seen_ts < quiet_window:
                 return False
 
-    # Stamped on every inbound call by the incoming webhook, including calls
-    # on expired accounts, which write no call record. Absence is no evidence
-    # either way (the stamp is younger than most deletions); presence inside
-    # the window means the number is still being called, so hold it.
-    if "last_inbound_call_at" in contractor:
-        stamped = contractor.get("last_inbound_call_at")
-        if stamped is not None:
-            stamp_ts = _readable_timestamp(stamped)
-            if stamp_ts is None or now - stamp_ts < quiet_window:
-                return False
+    # Absence is no evidence either way (the stamp is younger than most
+    # deletions) — see _inbound_stamp_blocks.
+    if _inbound_stamp_blocks(contractor, now, quiet_window):
+        return False
 
     return True
 
@@ -244,16 +257,11 @@ def is_safe_to_release_lapsed_number(
             if seen_ts is None or now - seen_ts < window:
                 return False
 
-    # Stamped on every inbound call by the incoming webhook, including calls
-    # on expired accounts, which write no call record. Absent means no call
-    # since the stamp shipped; the sweep only trusts that after a full
-    # observation window (see number_release.py).
-    if "last_inbound_call_at" in contractor:
-        stamped = contractor.get("last_inbound_call_at")
-        if stamped is not None:
-            stamp_ts = _readable_timestamp(stamped)
-            if stamp_ts is None or now - stamp_ts < window:
-                return False
+    # Absent means no call since the stamp shipped; the sweep only trusts
+    # that after a full observation window (see number_release.py) — see
+    # _inbound_stamp_blocks.
+    if _inbound_stamp_blocks(contractor, now, window):
+        return False
 
     if last_call_at is not None:
         call_ts = _readable_timestamp(last_call_at)
@@ -402,12 +410,6 @@ def parse_revocation_date(transaction_info: dict) -> tuple[bool, Optional[float]
 
 PROMO_COUNTER_DOC = "subscription/promo_counter"
 PROMO_MAX = 1000
-
-
-def _get_appstore_url() -> str:
-    if settings.appstore_environment == "production":
-        return APPSTORE_PRODUCTION_URL
-    return APPSTORE_SANDBOX_URL
 
 
 def _get_transaction_lookup_urls() -> list[str]:

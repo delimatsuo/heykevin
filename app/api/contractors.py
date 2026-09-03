@@ -497,6 +497,8 @@ async def api_provision_number(contractor_id: str, request: Request):
         error_msg = str(e)
         if "address" in error_msg.lower() or "rejected" in error_msg.lower():
             return {"status": "error", "message": "Address verification failed. Please check your business address."}
+        if "no twilio regulations" in error_msg.lower():
+            return {"status": "error", "message": "Your country is not yet supported for number provisioning."}
         if "no phone numbers" in error_msg.lower() or "no twilio" in error_msg.lower():
             return {"status": "error", "message": "No phone numbers available in your area. Please try a different city."}
         if "unsupported" in error_msg.lower():

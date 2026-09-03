@@ -19,8 +19,14 @@ handed back to Twilio:
   * an Apple re-check. `expired` is written on DID_FAIL_TO_RENEW, i.e. at the
     start of Apple's billing retry, and the webhook that keeps it current was
     broken for weeks (PR #215). An account that ever bound an Apple receipt
-    is asked about live, and anything Apple still considers active, in
-    billing retry, or in grace holds its number. Any failure to ask holds.
+    is asked about live, in every environment this service may see --
+    production first, then sandbox, on the production service (a receipt
+    bound in the sandbox, e.g. a TestFlight tester, is unknown to production
+    and would otherwise hold the number forever); sandbox only on staging.
+    Anything Apple still considers active, in billing retry, or in grace
+    holds its number. A receipt not found in any environment is ambiguous,
+    not evidence of no subscription, so it holds too. Any failure to ask
+    holds.
 
 The sweep body lived inline in app/main.py until 2026-09-03 with no tests; it
 moved here so it can be driven by tests and so main.py stays a wiring file.
@@ -43,7 +49,8 @@ from app.services.subscription import (
     LAPSED_NUMBER_RELEASE_DAYS,
     NUMBER_RELEASE_QUIET_DAYS,
     _get_appstore_jwt,
-    _get_appstore_url,
+    _get_transaction_lookup_urls,
+    _is_transaction_not_found,
     is_safe_to_release_lapsed_number,
     is_safe_to_release_number,
 )
@@ -74,20 +81,33 @@ LAPSED_NOTICE = (
 
 
 async def _apple_subscription_statuses(original_transaction_id: str) -> list[int]:
-    """Ask the App Store Server API for every status on this receipt. Raises on any failure."""
-    url = f"{_get_appstore_url()}/inApps/v1/subscriptions/{original_transaction_id}"
+    """Ask the App Store Server API for this receipt's statuses, in every environment
+    this service may see: production first, then sandbox on the production service
+    (a receipt bound in the sandbox -- e.g. a TestFlight tester -- is unknown to
+    production and answers 404 errorCode 4040010 there); sandbox only on staging.
+
+    Raises on any failure, including "not found in any environment" -- that is
+    ambiguous, not evidence of no subscription, so it must hold the number
+    rather than be read as safe to release (apple_blocks_release turns any
+    exception here into a hold).
+    """
     token = _get_appstore_jwt()
     async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-    if response.status_code != 200:
-        raise RuntimeError(f"App Store status HTTP {response.status_code}")
-    statuses: list[int] = []
-    for group in response.json().get("data", []):
-        for item in group.get("lastTransactions", []):
-            code = item.get("status")
-            if isinstance(code, int) and not isinstance(code, bool):
-                statuses.append(code)
-    return statuses
+        for base in _get_transaction_lookup_urls():
+            url = f"{base}/inApps/v1/subscriptions/{original_transaction_id}"
+            response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if response.status_code == 200:
+                statuses: list[int] = []
+                for group in response.json().get("data", []):
+                    for item in group.get("lastTransactions", []):
+                        code = item.get("status")
+                        if isinstance(code, int) and not isinstance(code, bool):
+                            statuses.append(code)
+                return statuses
+            if _is_transaction_not_found(response):
+                continue
+            raise RuntimeError(f"App Store status HTTP {response.status_code}")
+    raise RuntimeError("App Store receipt not found in any environment")
 
 
 async def apple_blocks_release(contractor: dict) -> bool:

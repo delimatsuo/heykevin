@@ -232,8 +232,54 @@ def test_lapsed_unreadable_inbound_stamp_blocks():
         assert is_safe_to_release_lapsed_number(c, now, None) is False, bad
 
 
+# ---------------------------------------------------------------------------
+# The always-on deleted-app guard must honour the same inbound-call stamp the
+# lapsed guard already does (F: the incoming webhook writes no call record for
+# an expired account, so last_inbound_call_at is the only evidence a call
+# still landed).
+# ---------------------------------------------------------------------------
+
+
+def test_recent_inbound_stamp_blocks_deleted_app_release():
+    now = time.time()
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 30 * DAY, last_inbound_call_at=now - 2 * DAY), now
+    ) is False
+
+
+def test_old_inbound_stamp_does_not_block_deleted_app_release():
+    now = time.time()
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 30 * DAY, last_inbound_call_at=now - 20 * DAY), now
+    ) is True
+
+
+def test_unreadable_inbound_stamp_blocks_deleted_app_release():
+    now = time.time()
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 30 * DAY, last_inbound_call_at="yesterday"), now
+    ) is False
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 30 * DAY, last_inbound_call_at=True), now
+    ) is False
+
+
+def test_missing_inbound_stamp_does_not_change_deleted_app_release():
+    now = time.time()
+    assert is_safe_to_release_number(_c(deleted_app_detected_at=now - 30 * DAY), now) is True
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 30 * DAY, last_inbound_call_at=None), now
+    ) is True
+
+
 def test_negative_and_bool_timestamps_never_release_on_either_path():
     now = time.time()
     assert is_safe_to_release_number(_c(deleted_app_detected_at=True), now) is False
     assert is_safe_to_release_number(_c(deleted_app_detected_at=now - 60 * DAY, forwarding_last_seen_at=-1), now) is False
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 60 * DAY, last_inbound_call_at=-1), now
+    ) is False
+    assert is_safe_to_release_number(
+        _c(deleted_app_detected_at=now - 60 * DAY, last_inbound_call_at=True), now
+    ) is False
     assert is_safe_to_release_lapsed_number(_lapsed(now, expired_days_ago=90, forwarding_last_seen_at=-1), now, None) is False

@@ -93,8 +93,8 @@ async def fetch_notification_history(
 
     Bounded to ``max_pages`` pages (default 200): raises RuntimeError if
     Apple keeps reporting ``hasMore`` past that, and stops (returning what
-    was collected so far) if a ``paginationToken`` repeats, rather than
-    paging forever.
+    was collected so far, and logging a warning so the truncation is
+    visible) if a ``paginationToken`` repeats, rather than paging forever.
     """
     owns_client = client is None
     http_client = client or httpx.AsyncClient(timeout=30.0)
@@ -102,7 +102,7 @@ async def fetch_notification_history(
     try:
         pagination_token: Optional[str] = None
         seen_tokens: set[str] = set()
-        for _page in range(max_pages):
+        for page_index in range(max_pages):
             body: dict[str, Any] = {
                 "startDate": start_ms,
                 "endDate": end_ms,
@@ -133,9 +133,15 @@ async def fetch_notification_history(
             if not data.get("hasMore"):
                 return items
             next_token = data.get("paginationToken")
-            if not next_token or next_token in seen_tokens:
-                # No usable token to continue with, or Apple repeated one --
-                # stop rather than loop forever.
+            if next_token and next_token in seen_tokens:
+                logger.warning(
+                    "Notification history: repeated paginationToken after %d page(s); "
+                    "stopping with a partial result",
+                    page_index + 1,
+                )
+                return items
+            if not next_token:
+                # No usable token to continue with -- stop rather than loop forever.
                 return items
             seen_tokens.add(next_token)
             pagination_token = next_token
@@ -204,6 +210,11 @@ async def _is_stale_deactivation(
 ) -> bool:
     """True iff a deactivating notification's term is already superseded.
 
+    ``notificationType`` is coerced with ``str(... or "")`` before the
+    membership test (same as ``summarize()``) so a missing, non-string, or
+    unhashable value (e.g. a list) can't raise here -- it just fails the
+    membership test like any other non-deactivating type.
+
     Only ever evaluated for ``_DEACTIVATING_NOTIFICATION_TYPES``. Every
     ambiguous or unreadable case — wrong notification type, no usable
     ``data.signedTransactionInfo``, missing/invalid ``appAccountToken`` or
@@ -219,7 +230,8 @@ async def _is_stale_deactivation(
     renewal is already on file, so this old deactivation must not be
     replayed on top of it.
     """
-    if payload.get("notificationType") not in _DEACTIVATING_NOTIFICATION_TYPES:
+    notification_type = str(payload.get("notificationType") or "")
+    if notification_type not in _DEACTIVATING_NOTIFICATION_TYPES:
         return False
 
     data = payload.get("data")
@@ -301,7 +313,11 @@ class ReplayReport:
     applied: int = 0  # handler returned True
     handler_false: int = 0  # handler returned False
     handler_error: int = 0  # handler raised
+    # Verified, non-stale notifications only -- reconciles exactly with
+    # dry_run + applied + handler_false + handler_error. Stale items are
+    # broken out separately in stale_by_type instead.
     by_type: dict[str, int] = field(default_factory=dict)
+    stale_by_type: dict[str, int] = field(default_factory=dict)
 
 
 def _sort_key(entry: tuple[int, dict, list[dict]]) -> tuple[int, float, int]:
@@ -331,14 +347,18 @@ async def replay(
     ``_sort_key``), then for each one:
 
     1. A stale-deactivation check runs (see ``_is_stale_deactivation``),
-       *regardless of apply*. A stale item increments ``stale_skipped``,
-       emits a "STALE" line, and is never handed to ``handler`` -- not even
-       in dry-run mode, so ``dry_run`` excludes stale items too.
-    2. Otherwise one summary line is emitted via ``emit``. When ``apply`` is
-       True, ``handler`` is awaited: True increments ``applied``, False
-       increments ``handler_false``, and a raised exception increments
-       ``handler_error`` (only its type is logged) and the loop continues
-       to the next item.
+       *regardless of apply*. A stale item increments ``stale_skipped`` and
+       ``stale_by_type``, emits a "STALE" line, and is never handed to
+       ``handler`` -- not even in dry-run mode, so ``dry_run`` excludes
+       stale items too.
+    2. Otherwise one summary line is emitted via ``emit`` and the item's
+       type increments ``by_type`` -- so ``by_type`` only ever counts
+       non-stale, actually-processed notifications, and reconciles exactly
+       with ``dry_run + applied + handler_false + handler_error``. When
+       ``apply`` is True, ``handler`` is awaited: True increments
+       ``applied``, False increments ``handler_false``, and a raised
+       exception increments ``handler_error`` (only its type is logged) and
+       the loop continues to the next item.
     """
     report = ReplayReport(fetched=len(items))
 
@@ -357,13 +377,16 @@ async def replay(
     for _idx, payload, attempts in verified:
         summary = summarize(payload, attempts)
         notification_type = summary["type"] or "UNKNOWN"
-        report.by_type[notification_type] = report.by_type.get(notification_type, 0) + 1
 
         if await _is_stale_deactivation(payload, lookup=lookup):
             report.stale_skipped += 1
+            report.stale_by_type[notification_type] = (
+                report.stale_by_type.get(notification_type, 0) + 1
+            )
             emit(format_summary_line(summary) + "  STALE (account term ends later) — skipped")
             continue
 
+        report.by_type[notification_type] = report.by_type.get(notification_type, 0) + 1
         emit(format_summary_line(summary))
 
         if not apply:

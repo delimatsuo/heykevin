@@ -26,11 +26,20 @@ Always dry-run first and read the totals before applying.
 
 ```bash
 # 1. Dry run: fetch, verify, print a summary line per notification, apply nothing.
+#    Still needs Application Default Credentials for read-only Firestore
+#    access -- the stale-deactivation guard looks up the contractor for
+#    every EXPIRED/DID_FAIL_TO_RENEW/GRACE_PERIOD_EXPIRED/REFUND/REVOKE
+#    notification, even in a dry run. Without ADC, every one of those
+#    lookups fails and the guard treats each one as "not stale" (the
+#    ambiguous-case default), so a dry run without credentials silently
+#    reports every deactivating item as would-apply -- it will not show you
+#    which ones the guard would actually have skipped.
 .venv/bin/python scripts/replay_appstore_notifications.py \
     --environment production --days 180
 
-# 2. Apply once the dry-run totals look right. Needs Firestore access (ADC),
-#    because the handler writes contractor and apple_transactions records.
+# 2. Apply once the dry-run totals look right. Additionally needs *write*
+#    Firestore access (ADC), because the handler writes contractor and
+#    apple_transactions records.
 .venv/bin/python scripts/replay_appstore_notifications.py \
     --environment production --days 180 --apply
 ```
@@ -94,16 +103,21 @@ deactivating notification (`EXPIRED`, `DID_FAIL_TO_RENEW`,
 `GRACE_PERIOD_EXPIRED`, `REFUND`, `REVOKE`) whose implicated subscription
 term has already been superseded by a newer paid term on file for that
 contractor is skipped — printed as `STALE (account term ends later) —
-skipped`, counted in the `stale_skipped` total, and never handed to the
-handler. This check runs in **both** dry-run and `--apply`, so a dry run's
-`dry_run` count already excludes what would have been skipped as stale.
+skipped`, counted in the `stale_skipped` total (broken down by type in
+`stale_by_type`), and never handed to the handler. This check runs in
+**both** dry-run and `--apply`, so a dry run's `dry_run` count already
+excludes what would have been skipped as stale.
 
 That guard covers one specific, worst-case regression. It is **not**
 general idempotency: every non-stale notification in the window is still
 fully re-applied — including re-sent pushes — on every `--apply` run. Do
 not run `--apply` more than once on the same window as a matter of
 routine; if you need to re-check something, dry-run it and read the
-`stale_skipped`/`by_type` totals instead of applying again.
+`stale_skipped`/`stale_by_type`/`by_type` totals together instead of
+applying again — `by_type` only counts non-stale notifications (it
+reconciles exactly with `dry_run + applied + handler_false + handler_error`),
+so a type that's fully accounted for in `stale_by_type` and absent from
+`by_type` was entirely skipped as stale.
 
 ## Credentials
 

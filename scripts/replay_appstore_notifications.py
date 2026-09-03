@@ -293,6 +293,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print("-" * 72)
     print(f"fetched={report.fetched}  rejected={report.rejected}  stale_skipped={report.stale_skipped}")
+    if report.stale_by_type:
+        stale_by_type = "  ".join(f"{k}={v}" for k, v in sorted(report.stale_by_type.items()))
+        print(f"stale_by_type: {stale_by_type}")
     if report.by_type:
         by_type = "  ".join(f"{k}={v}" for k, v in sorted(report.by_type.items()))
         print(f"by_type: {by_type}")

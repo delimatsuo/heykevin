@@ -15,6 +15,7 @@ import base64
 import importlib.util
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -219,7 +220,7 @@ async def test_fetch_raises_when_max_pages_exceeded():
 
 
 @pytest.mark.asyncio
-async def test_fetch_stops_instead_of_looping_forever_on_a_repeated_token():
+async def test_fetch_stops_instead_of_looping_forever_on_a_repeated_token(caplog):
     call_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -236,15 +237,22 @@ async def test_fetch_stops_instead_of_looping_forever_on_a_repeated_token():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
-        items = await fetch_notification_history(
-            base_url=APPSTORE_PRODUCTION_URL,
-            start_ms=1,
-            end_ms=2,
-            only_failures=True,
-            token_factory=lambda: "tok",
-            client=client,
-            max_pages=50,
-        )
+        with caplog.at_level(logging.WARNING):
+            items = await fetch_notification_history(
+                base_url=APPSTORE_PRODUCTION_URL,
+                start_ms=1,
+                end_ms=2,
+                only_failures=True,
+                token_factory=lambda: "tok",
+                client=client,
+                max_pages=50,
+            )
+
+    # A truncated fetch (stopped early due to a repeated token) must be
+    # visible in the logs, not silent.
+    assert any(
+        "repeated paginationToken" in record.getMessage() for record in caplog.records
+    )
 
     # Page 1 has no token yet; page 2 carries "same-token" and Apple hands
     # back "same-token" again -- fetch must stop there rather than loop.
@@ -483,6 +491,47 @@ async def test_replay_by_type_counts_verified_notifications_only():
     )
 
     assert report.by_type == {"DID_RENEW": 2, "REFUND": 1}
+
+
+@pytest.mark.asyncio
+async def test_by_type_excludes_stale_items_and_stale_by_type_counts_them():
+    """by_type must reconcile with the outcome counters (dry_run + applied +
+    handler_false + handler_error) -- a stale item is neither applied, nor
+    dry-run-counted, so it must not be in by_type either. It shows up in
+    stale_by_type instead."""
+    expires_ms = 1_700_000_000_000
+    stale_payload = _deactivating_payload(
+        "EXPIRED", expires_ms=expires_ms, app_account_token="stale-uuid", signed_date=1000
+    )
+    fresh_payload = _deactivating_payload(
+        "REFUND", expires_ms=expires_ms, app_account_token="fresh-uuid", signed_date=2000
+    )
+    renew_payload = {"notificationType": "DID_RENEW", "signedDate": 3000}
+    items = [
+        HistoryItem(signed_payload="stale", send_attempts=[]),
+        HistoryItem(signed_payload="fresh", send_attempts=[]),
+        HistoryItem(signed_payload="renew", send_attempts=[]),
+    ]
+    payloads = {"stale": stale_payload, "fresh": fresh_payload, "renew": renew_payload}
+
+    async def fake_lookup(token):
+        if token == "stale-uuid":
+            return {"subscription_expires": expires_ms / 1000.0 + 500}  # later term on file
+        return {"subscription_expires": expires_ms / 1000.0}
+
+    async def fake_handler(_payload):
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payloads[sp], handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert report.stale_by_type == {"EXPIRED": 1}
+    assert report.by_type == {"REFUND": 1, "DID_RENEW": 1}
+    assert sum(report.by_type.values()) == (
+        report.dry_run + report.applied + report.handler_false + report.handler_error
+    )
 
 
 @pytest.mark.asyncio
@@ -764,6 +813,45 @@ async def test_bool_subscription_expires_is_treated_as_absent():
         lookup=fake_lookup, emit=lambda *_: None,
     )
 
+    assert len(handled) == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_non_string_notification_type_does_not_raise():
+    """A raw `in` test against the frozenset would raise TypeError for an
+    unhashable notificationType (e.g. a list); the str(... or "") coercion
+    must prevent that and simply treat it as non-deactivating."""
+    payload = {
+        "notificationType": ["not", "a", "string"],
+        "signedDate": 1000,
+        "data": {
+            "environment": "Production",
+            "signedTransactionInfo": _unsigned_jws(
+                {"appAccountToken": "uuid-1", "expiresDate": 1_700_000_000_000}
+            ),
+        },
+    }
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    lookup_calls = []
+
+    async def fake_lookup(token):
+        lookup_calls.append(token)
+        return {"subscription_expires": 99_999_999_999.0}
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert lookup_calls == []  # never a deactivating type -- lookup not reached
     assert len(handled) == 1
     assert report.stale_skipped == 0
 

@@ -151,9 +151,14 @@ async def run_expired_contractor_cleanup_once(now: Optional[float] = None) -> di
     loop = asyncio.get_running_loop()
     counts = {"deleted_app_released": 0, "lapsed_released": 0, "skipped": 0}
 
-    lapsed_enabled = await _observation_window_elapsed(db, loop, now) and bool(
-        settings.lapsed_number_release_enabled
-    )
+    # The marker read must never take the always-on deleted-app path down with
+    # it: any failure here just means no lapsed releases this run.
+    try:
+        window_elapsed = await _observation_window_elapsed(db, loop, now)
+    except Exception as e:
+        logger.warning("Number release: observation marker unavailable (%s); lapsed releases held", type(e).__name__)
+        window_elapsed = False
+    lapsed_enabled = window_elapsed and bool(settings.lapsed_number_release_enabled)
 
     docs = await loop.run_in_executor(
         None,

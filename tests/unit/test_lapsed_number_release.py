@@ -82,8 +82,7 @@ class _Db:
         return _Collection(self._stores.setdefault(name, {}))
 
 
-@pytest.fixture
-def harness(monkeypatch):
+def _build_harness(monkeypatch, *, fake_apple: bool = True):
     store: dict[str, dict] = {}
     system: dict[str, dict] = {"number_release": {"observation_started_at": time.time() - 45 * DAY}}
     sms: list[tuple] = []
@@ -111,7 +110,7 @@ def harness(monkeypatch):
             raise value
         return value
 
-    async def fake_apple(original_id):
+    async def fake_apple_statuses(original_id):
         apple_calls.append(original_id)
         value = apple.get(original_id, [])
         if isinstance(value, Exception):
@@ -122,12 +121,24 @@ def harness(monkeypatch):
     monkeypatch.setattr(number_release, "send_sms", fake_sms)
     monkeypatch.setattr(number_release, "deactivate_contractor", fake_deactivate)
     monkeypatch.setattr(number_release, "latest_call_timestamp", fake_latest)
-    monkeypatch.setattr(number_release, "_apple_subscription_statuses", fake_apple)
+    if fake_apple:
+        monkeypatch.setattr(number_release, "_apple_subscription_statuses", fake_apple_statuses)
     monkeypatch.setattr(number_release.settings, "lapsed_number_release_enabled", True)
     return SimpleNamespace(
         store=store, system=system, sms=sms, deactivated=deactivated,
         last_calls=last_calls, on_lookup=on_lookup, apple=apple, apple_calls=apple_calls,
     )
+
+
+@pytest.fixture
+def harness(monkeypatch):
+    return _build_harness(monkeypatch, fake_apple=True)
+
+
+@pytest.fixture
+def harness_real_apple(monkeypatch):
+    """Same harness, but the App Store fetcher is the real one (HTTP mocked with respx)."""
+    return _build_harness(monkeypatch, fake_apple=False)
 
 
 def _lapsed(now: float, days: float = 40, **kw) -> dict:
@@ -344,3 +355,121 @@ async def test_expired_but_recent_account_is_left_alone(harness):
     result = await number_release.run_expired_contractor_cleanup_once(now=now)
 
     assert harness.deactivated == [] and result["lapsed_released"] == 0
+
+
+@pytest.mark.asyncio
+async def test_marker_read_failure_holds_lapsed_but_not_deleted_app_releases(harness, monkeypatch):
+    """The observation marker is a lapsed-only concern; it must never stall the 14-day path."""
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+    harness.store["gone1"] = _deleted_app(now)
+
+    class _BrokenSystem:
+        def document(self, _doc_id):
+            raise RuntimeError("permission denied on system collection")
+
+    real_db = number_release.get_firestore_client()
+
+    class _Db2:
+        def collection(self, name):
+            return _BrokenSystem() if name == "system" else real_db.collection(name)
+
+    monkeypatch.setattr(number_release, "get_firestore_client", lambda: _Db2())
+
+    result = await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.deactivated == ["gone1"]
+    assert result == {"deleted_app_released": 1, "lapsed_released": 0, "skipped": 0}
+
+
+# --- wire layer of the Apple hold ------------------------------------------
+
+import httpx  # noqa: E402
+import respx  # noqa: E402
+
+_STATUS_RESPONSE = {
+    "environment": "Production",
+    "bundleId": "com.kevin.callscreen",
+    "appAppleId": 6761427495,
+    "data": [
+        {
+            "subscriptionGroupIdentifier": "22007035",
+            "lastTransactions": [
+                {
+                    "originalTransactionId": "2000000123",
+                    "status": 3,
+                    "signedTransactionInfo": "eyJhbGciOiJFUzI1NiJ9.e30.sig",
+                    "signedRenewalInfo": "eyJhbGciOiJFUzI1NiJ9.e30.sig",
+                }
+            ],
+        }
+    ],
+}
+
+
+@pytest.fixture
+def apple_wire(monkeypatch):
+    monkeypatch.setattr(number_release, "_get_appstore_jwt", lambda: "test.jwt.token")
+    monkeypatch.setattr(number_release, "_get_appstore_url", lambda: "https://api.storekit.apple.com")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_parses_a_real_status_response(apple_wire):
+    route = respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+
+    statuses = await number_release._apple_subscription_statuses("2000000123")
+
+    assert statuses == [3]
+    assert route.calls.last.request.headers["Authorization"] == "Bearer test.jwt.token"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_empty_data_means_no_hold(apple_wire):
+    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json={**_STATUS_RESPONSE, "data": []})
+    )
+    assert await number_release._apple_subscription_statuses("2000000123") == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_statuses_non_200_raises(apple_wire):
+    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(401, json={"errorCode": 4040010})
+    )
+    with pytest.raises(RuntimeError):
+        await number_release._apple_subscription_statuses("2000000123")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_hold_end_to_end_through_the_wire(apple_wire, harness_real_apple):
+    """Billing retry reported by Apple, parsed from the real wire shape, holds the number."""
+    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=_STATUS_RESPONSE)
+    )
+    now = time.time()
+    harness_real_apple.store["paid"] = _lapsed(now, subscription_original_transaction_id="2000000123")
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness_real_apple.deactivated == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_expired_end_to_end_through_the_wire_releases(apple_wire, harness_real_apple):
+    body = {**_STATUS_RESPONSE, "data": [{**_STATUS_RESPONSE["data"][0], "lastTransactions": [{**_STATUS_RESPONSE["data"][0]["lastTransactions"][0], "status": 2}]}]}
+    respx.get("https://api.storekit.apple.com/inApps/v1/subscriptions/2000000123").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+    now = time.time()
+    harness_real_apple.store["paid"] = _lapsed(now, subscription_original_transaction_id="2000000123")
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness_real_apple.deactivated == ["paid"]

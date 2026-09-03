@@ -144,6 +144,9 @@ def fake_twilio(monkeypatch):
     monkeypatch.setattr(contractors_db.asyncio, "sleep", fake_sleep)
     # provision_twilio_number imports settings locally, so patch the real object.
     monkeypatch.setattr(app_settings, "cloud_run_url", "https://kevin.example.test")
+    monkeypatch.setattr(
+        app_settings, "twilio_regulatory_contact_email", "compliance@example.test", raising=False
+    )
     FakeClient.sleeps = sleeps
     return FakeClient
 
@@ -313,10 +316,9 @@ async def test_regulatory_country_creates_the_bundle_and_buys_with_it(
         "customer_name": "Müller Sanitär GmbH",
     }
     (bundle,) = _only(client.calls, "bundle_create")
-    # Pins the CURRENT production call. It omits `email`, which twilio 9.x
-    # requires — see test_production_kwargs_bind_to_the_real_sdk (xfail).
     assert bundle[1] == {
         "friendly_name": "Müller Sanitär GmbH - Germany number",
+        "email": "compliance@example.test",
         "regulation_sid": "RN" + "2" * 32,
         "iso_country": "DE",
         "number_type": "local",
@@ -447,6 +449,10 @@ _RAW_FRAGMENTS = (
             # problem. Semantically it is closer to "country not supported".
             "No Twilio regulations found for Germany local numbers",
             "No phone numbers available in your area. Please try a different city.",
+        ),
+        (
+            "Regulatory contact email not configured for Germany number provisioning",
+            "Failed to provision phone number. Please try again or contact support.",
         ),
         (
             "Unsupported country: JP",
@@ -610,18 +616,7 @@ def _kwargs_of(call):
     [
         "regulations",
         "address_create",
-        pytest.param(
-            "bundle_create",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "twilio 9.x BundleList.create requires `email`; _create_regulatory_bundle "
-                    "omits it, so EU/BR provisioning raises TypeError before any HTTP. "
-                    "Production bug recorded in docs/current-roadmap.md §6; fixing it must "
-                    "flip this to pass."
-                ),
-            ),
-        ),
+        "bundle_create",
         "item_assignment",
         "bundle_update",
         "search",
@@ -637,3 +632,65 @@ async def test_production_kwargs_bind_to_the_real_sdk(fake_twilio, contractor_st
     (call,) = _only(fake_twilio.instances[0].calls, kind)
     signature = inspect.signature(_SDK_METHODS[kind])
     signature.bind(None, **_kwargs_of(call))  # None stands in for self
+
+
+# ---------------------------------------------------------------------------
+# Regulatory contact email (twilio 9.x BundleList.create requires `email`)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bundle_is_created_with_the_configured_contact_email(
+    fake_twilio, contractor_store, monkeypatch
+):
+    contractor_store["doc"] = _german_business()
+    monkeypatch.setattr(
+        app_settings, "twilio_regulatory_contact_email", "notices@example.test", raising=False
+    )
+
+    await contractors_db.provision_twilio_number("c-de", country_code="DE")
+
+    (bundle,) = _only(fake_twilio.instances[0].calls, "bundle_create")
+    assert bundle[1]["email"] == "notices@example.test"
+
+
+@pytest.mark.asyncio
+async def test_missing_contact_email_refuses_before_any_twilio_call(
+    fake_twilio, contractor_store, monkeypatch
+):
+    # An unconfigured server must fail clearly, not with a TypeError inside
+    # the executor, and must not create a regulation lookup, address or bundle.
+    contractor_store["doc"] = _german_business()
+    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "")
+
+    with pytest.raises(Exception, match="Regulatory contact email not configured"):
+        await contractors_db.provision_twilio_number("c-de", country_code="DE")
+
+    # One client was constructed (before the guard) and asked nothing.
+    assert len(fake_twilio.instances) == 1
+    assert fake_twilio.instances[0].calls == []
+    assert contractor_store["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_contact_email_counts_as_unconfigured(
+    fake_twilio, contractor_store, monkeypatch
+):
+    contractor_store["doc"] = _german_business()
+    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "   ")
+
+    with pytest.raises(Exception, match="Regulatory contact email not configured"):
+        await contractors_db.provision_twilio_number("c-de", country_code="DE")
+
+    assert fake_twilio.instances[0].calls == []
+
+
+@pytest.mark.asyncio
+async def test_contact_email_is_passed_stripped(fake_twilio, contractor_store, monkeypatch):
+    contractor_store["doc"] = _german_business()
+    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "  ops@example.test  ")
+
+    await contractors_db.provision_twilio_number("c-de", country_code="DE")
+
+    (bundle,) = _only(fake_twilio.instances[0].calls, "bundle_create")
+    assert bundle[1]["email"] == "ops@example.test"

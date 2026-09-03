@@ -308,7 +308,7 @@ async def get_calls_for_contractor(contractor_id: str, limit: int = 100) -> list
         return []
 
 
-async def latest_call_timestamp(contractor_id: str):
+async def latest_call_timestamp(contractor_id: str) -> Optional[Any]:
     """Newest call timestamp on record for a contractor, or None if there is none.
 
     Looks back over the full retention window, so None means "no call in the
@@ -331,7 +331,7 @@ async def latest_call_timestamp(contractor_id: str):
             .stream()
         )
 
-    docs = await asyncio.get_event_loop().run_in_executor(None, _query)
+    docs = await asyncio.get_running_loop().run_in_executor(None, _query)
     if not docs:
         return None
     return (docs[0].to_dict() or {}).get("timestamp")

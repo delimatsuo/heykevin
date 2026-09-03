@@ -50,6 +50,7 @@ PROTECTED_FIELDS = frozenset({
     # Forwarding truth — derived from carrier signalling, never client-asserted.
     # A client that could write this would be able to fake an activated forward.
     "forwarding_last_seen_at",
+    "last_inbound_call_at",
     # Integrations — feature flags are enabled by backend/admin flows only.
     "jobber_lead_capture_enabled",
     "jobber_lead_capture_updated_at",

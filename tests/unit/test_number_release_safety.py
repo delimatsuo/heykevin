@@ -210,3 +210,30 @@ def test_lapsed_malformed_records_never_release():
     now = time.time()
     assert is_safe_to_release_lapsed_number(None, now, None) is False
     assert is_safe_to_release_lapsed_number({}, now, None) is False
+
+
+def test_lapsed_recent_inbound_stamp_blocks():
+    """The incoming webhook stamps every call; a recent stamp proves the number is not quiet."""
+    now = time.time()
+    c = _lapsed(now, expired_days_ago=90, last_inbound_call_at=now - 5 * DAY)
+    assert is_safe_to_release_lapsed_number(c, now, None) is False
+
+
+def test_lapsed_old_inbound_stamp_does_not_block():
+    now = time.time()
+    c = _lapsed(now, expired_days_ago=90, last_inbound_call_at=now - 31 * DAY)
+    assert is_safe_to_release_lapsed_number(c, now, None) is True
+
+
+def test_lapsed_unreadable_inbound_stamp_blocks():
+    now = time.time()
+    for bad in ("recently", True, -1, 0):
+        c = _lapsed(now, expired_days_ago=90, last_inbound_call_at=bad)
+        assert is_safe_to_release_lapsed_number(c, now, None) is False, bad
+
+
+def test_negative_and_bool_timestamps_never_release_on_either_path():
+    now = time.time()
+    assert is_safe_to_release_number(_c(deleted_app_detected_at=True), now) is False
+    assert is_safe_to_release_number(_c(deleted_app_detected_at=now - 60 * DAY, forwarding_last_seen_at=-1), now) is False
+    assert is_safe_to_release_lapsed_number(_lapsed(now, expired_days_ago=90, forwarding_last_seen_at=-1), now, None) is False

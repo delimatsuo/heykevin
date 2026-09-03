@@ -2,7 +2,8 @@
 
 The sweep body used to live inline in app/main.py with no tests. It now runs as
 `run_expired_contractor_cleanup_once`, which these tests drive with an in-memory
-Firestore stand-in and fakes for SMS, deactivation, and the latest-call lookup.
+Firestore stand-in and fakes for SMS, deactivation, the latest-call lookup and
+the App Store status check.
 """
 
 from __future__ import annotations
@@ -25,16 +26,16 @@ DAY = 86400
 
 
 class _Snap:
-    def __init__(self, doc_id: str, data: dict):
+    def __init__(self, doc_id: str, data: dict | None):
         self.id = doc_id
         self._data = data
 
     @property
     def exists(self) -> bool:
-        return True
+        return self._data is not None
 
-    def to_dict(self) -> dict:
-        return dict(self._data)
+    def to_dict(self) -> dict | None:
+        return dict(self._data) if self._data is not None else None
 
 
 class _Query:
@@ -55,7 +56,11 @@ class _DocRef:
         self._id = doc_id
 
     def get(self):
-        return _Snap(self._id, self._store[self._id])
+        return _Snap(self._id, self._store.get(self._id))
+
+    def set(self, value: dict, merge: bool = False):
+        current = self._store.get(self._id, {}) if merge else {}
+        self._store[self._id] = {**current, **value}
 
 
 class _Collection:
@@ -70,21 +75,23 @@ class _Collection:
 
 
 class _Db:
-    def __init__(self, store: dict):
-        self._store = store
+    def __init__(self, stores: dict[str, dict]):
+        self._stores = stores
 
     def collection(self, name: str):
-        assert name == "contractors"
-        return _Collection(self._store)
+        return _Collection(self._stores.setdefault(name, {}))
 
 
 @pytest.fixture
 def harness(monkeypatch):
     store: dict[str, dict] = {}
+    system: dict[str, dict] = {"number_release": {"observation_started_at": time.time() - 45 * DAY}}
     sms: list[tuple] = []
     deactivated: list[str] = []
     last_calls: dict[str, object] = {}
     on_lookup: dict[str, object] = {}
+    apple: dict[str, object] = {}
+    apple_calls: list[str] = []
 
     async def fake_sms(to, body, from_number=""):
         sms.append((to, body, from_number))
@@ -104,12 +111,23 @@ def harness(monkeypatch):
             raise value
         return value
 
-    monkeypatch.setattr(number_release, "get_firestore_client", lambda: _Db(store))
+    async def fake_apple(original_id):
+        apple_calls.append(original_id)
+        value = apple.get(original_id, [])
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(number_release, "get_firestore_client", lambda: _Db({"contractors": store, "system": system}))
     monkeypatch.setattr(number_release, "send_sms", fake_sms)
     monkeypatch.setattr(number_release, "deactivate_contractor", fake_deactivate)
     monkeypatch.setattr(number_release, "latest_call_timestamp", fake_latest)
+    monkeypatch.setattr(number_release, "_apple_subscription_statuses", fake_apple)
     monkeypatch.setattr(number_release.settings, "lapsed_number_release_enabled", True)
-    return SimpleNamespace(store=store, sms=sms, deactivated=deactivated, last_calls=last_calls, on_lookup=on_lookup)
+    return SimpleNamespace(
+        store=store, system=system, sms=sms, deactivated=deactivated,
+        last_calls=last_calls, on_lookup=on_lookup, apple=apple, apple_calls=apple_calls,
+    )
 
 
 def _lapsed(now: float, days: float = 40, **kw) -> dict:
@@ -163,6 +181,45 @@ async def test_flag_off_keeps_lapsed_numbers_but_deleted_app_path_still_runs(har
 
 
 @pytest.mark.asyncio
+async def test_first_run_starts_the_observation_window_and_releases_nothing_lapsed(harness):
+    """Without a stamp history nobody can be proven quiet, so the first run only records the start."""
+    harness.system.clear()
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+    harness.store["gone1"] = _deleted_app(now)
+
+    result = await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.system["number_release"]["observation_started_at"] == now
+    assert harness.deactivated == ["gone1"]  # deleted-app path is not held back
+    assert result["lapsed_released"] == 0
+
+
+@pytest.mark.asyncio
+async def test_observation_window_must_be_thirty_days_old(harness):
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+
+    harness.system["number_release"] = {"observation_started_at": now - 29 * DAY}
+    assert (await number_release.run_expired_contractor_cleanup_once(now=now))["lapsed_released"] == 0
+    assert harness.deactivated == []
+
+    harness.system["number_release"] = {"observation_started_at": now - 30 * DAY}
+    assert (await number_release.run_expired_contractor_cleanup_once(now=now))["lapsed_released"] == 1
+
+
+@pytest.mark.asyncio
+async def test_window_marker_is_written_even_while_the_flag_is_off(harness, monkeypatch):
+    monkeypatch.setattr(number_release.settings, "lapsed_number_release_enabled", False)
+    harness.system.clear()
+    now = time.time()
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.system["number_release"]["observation_started_at"] == now
+
+
+@pytest.mark.asyncio
 async def test_recent_inbound_call_blocks_lapsed_release(harness):
     now = time.time()
     harness.store["lapsed1"] = _lapsed(now)
@@ -171,6 +228,16 @@ async def test_recent_inbound_call_blocks_lapsed_release(harness):
     await number_release.run_expired_contractor_cleanup_once(now=now)
 
     assert harness.deactivated == [] and harness.sms == []
+
+
+@pytest.mark.asyncio
+async def test_recent_inbound_stamp_blocks_lapsed_release(harness):
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now, last_inbound_call_at=now - 2 * DAY)
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.deactivated == []
 
 
 @pytest.mark.asyncio
@@ -183,6 +250,50 @@ async def test_call_lookup_failure_fails_closed(harness):
     result = await number_release.run_expired_contractor_cleanup_once(now=now)
 
     assert harness.deactivated == [] and result["lapsed_released"] == 0
+
+
+@pytest.mark.asyncio
+async def test_apple_live_subscription_holds_the_number(harness):
+    """`expired` is written at the start of billing retry; Apple gets the last word."""
+    now = time.time()
+    for code in (1, 3, 4):
+        harness.store.clear(); harness.deactivated.clear()
+        harness.store["paid"] = _lapsed(now, subscription_original_transaction_id="2000000123")
+        harness.apple["2000000123"] = [code]
+        await number_release.run_expired_contractor_cleanup_once(now=now)
+        assert harness.deactivated == [], f"status {code} must hold"
+
+
+@pytest.mark.asyncio
+async def test_apple_expired_or_revoked_allows_release(harness):
+    now = time.time()
+    harness.store["paid"] = _lapsed(now, subscription_original_transaction_id="2000000123")
+    harness.apple["2000000123"] = [2, 5]
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.deactivated == ["paid"]
+
+
+@pytest.mark.asyncio
+async def test_apple_check_failure_holds_the_number(harness):
+    now = time.time()
+    harness.store["paid"] = _lapsed(now, subscription_original_transaction_id="2000000123")
+    harness.apple["2000000123"] = RuntimeError("App Store status HTTP 500")
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.deactivated == []
+
+
+@pytest.mark.asyncio
+async def test_never_paid_account_is_not_checked_with_apple(harness):
+    now = time.time()
+    harness.store["trialonly"] = _lapsed(now)
+
+    await number_release.run_expired_contractor_cleanup_once(now=now)
+
+    assert harness.deactivated == ["trialonly"] and harness.apple_calls == []
 
 
 @pytest.mark.asyncio

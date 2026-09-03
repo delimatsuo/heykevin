@@ -338,6 +338,7 @@ async def _expired_contractor_cleanup():
             logger.warning(f"Expired contractor cleanup error: {e}")
 
 
+@app.on_event("startup")
 async def startup():
     global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task
 

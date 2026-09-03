@@ -108,7 +108,7 @@ _BASELINE_HASHES = {
     # app/services/number_release.py (30-day lapsed-number release, owner
     # decision 2026-09-03). Still only a wiring change to main.py.
     "app/main.py":
-        "7bd82f8178637e43152e1fe6a4e824119bb094f41071d566cc51ec40abd470a7",
+        "06cd4871ed673137d0d86c6f3b1f9b0ed7d3c2998e23e15a886f2ac9ef39dd6e",
     # Re-pinned 2026-08-24 for integration token envelope enablement checks.
     "app/webhooks/media_stream.py":
         "cce7f37acd144358d22a03bb1a43ce46f80075eeeedfcf7e1134fc94b9eedff9",

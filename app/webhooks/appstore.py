@@ -23,8 +23,9 @@ was silently treated as "no check needed"). This module now also enforces:
 (2) the leaf certificate must carry the App Store Server Notifications
 marker OID and the intermediate must carry the Apple WWDR marker OID,
 matching apple/app-store-server-library-python's signed_data_verifier.py;
-(3) bundleId is now fail-closed — a payload missing bundleId in both
-`data` and `summary` is rejected rather than silently passed. Separately,
+(3) bundleId is now fail-closed — a payload missing bundleId in all four
+of `data`, `summary`, `externalPurchaseToken`, and `appData` is rejected
+rather than silently passed. Separately,
 `environment` mismatches (e.g. "Sandbox" vs a `production`-configured
 service) are logged as a warning only, never rejected: App Store Connect's
 sandbox notification URL may point at this same service for TestFlight

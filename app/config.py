@@ -104,6 +104,11 @@ class Settings(DotenvProtectedBaseSettings):
     # enabling in production is an owner action (env change + deploy).
     purge_enabled: bool = False
     purge_grace_days: int = 30
+    # Release Twilio numbers from accounts expired 30+ days with a quiet number
+    # (owner decision 2026-09-03). Default OFF: enabling in production is an
+    # owner action (env change + deploy). The deleted-app release path is
+    # unaffected by this flag.
+    lapsed_number_release_enabled: bool = False
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4

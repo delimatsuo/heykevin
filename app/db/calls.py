@@ -308,6 +308,35 @@ async def get_calls_for_contractor(contractor_id: str, limit: int = 100) -> list
         return []
 
 
+async def latest_call_timestamp(contractor_id: str):
+    """Newest call timestamp on record for a contractor, or None if there is none.
+
+    Looks back over the full retention window, so None means "no call in the
+    last RETENTION_DAYS days". Unlike get_calls_for_contractor this does NOT
+    swallow errors: a failed query raises, so that a release decision can
+    fail closed instead of mistaking an outage for silence. The raw stored
+    value is returned unconverted; callers treat anything non-numeric as
+    unreadable.
+    """
+    db = get_firestore_client()
+    cutoff = time.time() - (RETENTION_DAYS * 86400)
+
+    def _query():
+        return list(
+            db.collection(COLLECTION)
+            .where(filter=FieldFilter("contractor_id", "==", contractor_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff))
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(1)
+            .stream()
+        )
+
+    docs = await asyncio.get_event_loop().run_in_executor(None, _query)
+    if not docs:
+        return None
+    return (docs[0].to_dict() or {}).get("timestamp")
+
+
 async def cleanup_old_calls() -> int:
     """Delete call records older than RETENTION_DAYS. Returns count deleted."""
     try:

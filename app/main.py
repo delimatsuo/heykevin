@@ -322,89 +322,22 @@ async def _lapsed_trial_sweep():
 
 
 async def _expired_contractor_cleanup():
-    """Periodically clean up contractors with deleted app for 14+ days.
+    """Release numbers from accounts that no longer need them. Runs every 6 hours.
 
-    Runs every 6 hours. For contractors where:
-    - subscription_status == "expired"
-    - deleted_app_detected_at is set and > 14 days ago
-
-    Releases Twilio number, sends final SMS, deactivates account.
+    Two triggers, see app/services/number_release.py: deleted app for 14+
+    days (always on) and lapsed subscription for 30+ days
+    (LAPSED_NUMBER_RELEASE_ENABLED, owner-gated). Both require a quiet number.
     """
-    import time
-    from app.db.firestore_client import get_firestore_client
-    from app.services.sms import send_sms
-    from app.services.subscription import is_safe_to_release_number
+    from app.services.number_release import run_expired_contractor_cleanup_once
 
     while True:
         await asyncio.sleep(6 * 3600)  # Every 6 hours
         try:
-            db = get_firestore_client()
-            loop = asyncio.get_event_loop()
-            now = time.time()
-
-            docs = await loop.run_in_executor(
-                None,
-                lambda: list(
-                    db.collection("contractors")
-                    .where("subscription_status", "==", "expired")
-                    .where("active", "==", True)
-                    .stream()
-                )
-            )
-
-            for doc in docs:
-                data = doc.to_dict()
-                # Releasing a number that still has live forwarding sends this
-                # user's calls to whoever Twilio assigns it to next. The guard
-                # requires both an aged deletion signal and a quiet number.
-                if not is_safe_to_release_number(data, now):
-                    continue
-
-                contractor_id = doc.id
-
-                # Re-validate on a fresh read immediately before acting. The
-                # query snapshot above ages as this loop progresses, and a
-                # forwarded call or a device re-registration arriving in that
-                # window writes exactly the evidence that must block release
-                # (review finding on PR #143). Deciding on the stale snapshot
-                # could release a number whose forward just proved live.
-                fresh = await loop.run_in_executor(
-                    None,
-                    lambda cid=contractor_id: db.collection("contractors").document(cid).get(),
-                )
-                data = fresh.to_dict() or {}
-                if not data.get("active") or not is_safe_to_release_number(data, time.time()):
-                    logger.info(
-                        f"14-day cleanup: skipping {contractor_id} — state changed since snapshot"
-                    )
-                    continue
-
-                owner_phone = data.get("owner_phone", "")
-                twilio_number = data.get("twilio_number", "")
-
-                logger.info(f"14-day cleanup: deactivating {contractor_id}")
-
-                # Send final SMS before releasing the number
-                if owner_phone:
-                    final_sms = (
-                        "Kevin AI: Your Kevin number has been released after 14 days. "
-                        "To stop forwarding calls to the old number, dial ##61# "
-                        "(Verizon: dial *73). To reactivate, reinstall Kevin AI."
-                    )
-                    await send_sms(owner_phone, final_sms, from_number=twilio_number)
-
-                try:
-                    from app.db.contractors import deactivate_contractor
-                    await deactivate_contractor(contractor_id)
-                except Exception as e:
-                    logger.error(f"Deactivate failed for {contractor_id}: {e}")
-                    continue
-
+            await run_expired_contractor_cleanup_once()
         except Exception as e:
             logger.warning(f"Expired contractor cleanup error: {e}")
 
 
-@app.on_event("startup")
 async def startup():
     global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task
 

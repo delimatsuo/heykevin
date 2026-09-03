@@ -167,6 +167,74 @@ def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
     return True
 
 
+# Owner decision 2026-09-03: a lapsed account's number is not worth holding
+# past 30 days. Twilio bills $1.15/month per idle US local number.
+LAPSED_NUMBER_RELEASE_DAYS = 30
+
+
+def _readable_timestamp(value) -> Optional[float]:
+    """Return a positive float timestamp, or None if the value is unusable."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value:
+        return None
+    return float(value)
+
+
+def is_safe_to_release_lapsed_number(
+    contractor: Optional[dict], now: float, last_call_at
+) -> bool:
+    """True only if a lapsed account's Twilio number can be released.
+
+    This is the second release trigger, beside is_safe_to_release_number
+    (deleted app). It applies to accounts that simply stopped paying and
+    requires, all at once:
+
+    1. subscription_status == "expired" and a number to release. `active` is
+       never a candidate here: a stale `active` expiry may just be a missed
+       Apple notification, and `trial` must first be swept to `expired`.
+    2. The paid or trial term ended at least LAPSED_NUMBER_RELEASE_DAYS ago.
+       Term end is derived like the call gate does (trial_expires_at), so
+       legacy 3-day trial records get their real 14-day window.
+    3. The number has been quiet for the same window: no carrier-confirmed
+       forwarded call and no inbound call on record. `last_call_at` is the
+       newest call timestamp the caller looked up (None = no calls); anything
+       unreadable blocks, exactly like the deleted-app guard.
+
+    Condition 3 is the one that matters. Twilio recycles released numbers, so
+    releasing one that still receives forwarded calls hands this user's
+    callers to a stranger. Fails closed on every ambiguity.
+    """
+    if not contractor:
+        return False
+
+    status = str(contractor.get("subscription_status") or "").strip().lower()
+    if status != "expired":
+        return False
+    if not str(contractor.get("twilio_number") or "").strip():
+        return False
+
+    term_end = trial_expires_at(contractor)
+    if not term_end:
+        return False
+
+    window = LAPSED_NUMBER_RELEASE_DAYS * 86400
+    if now - term_end < window:
+        return False
+
+    if "forwarding_last_seen_at" in contractor:
+        last_seen = contractor.get("forwarding_last_seen_at")
+        if last_seen is not None:
+            seen_ts = _readable_timestamp(last_seen)
+            if seen_ts is None or now - seen_ts < window:
+                return False
+
+    if last_call_at is not None:
+        call_ts = _readable_timestamp(last_call_at)
+        if call_ts is None or now - call_ts < window:
+            return False
+
+    return True
+
+
 def should_expire_trial(contractor: Optional[dict], now: float) -> bool:
     """True if this contractor is a lapsed trial that should be marked expired.
 

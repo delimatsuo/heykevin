@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ os.environ.setdefault("USER_PHONE", "+15555550101")
 import httpx
 import pytest
 
+from app.db.contractors import get_contractor_by_subscription_uuid
 from app.services.appstore_replay import (
     HistoryItem,
     ReplayReport,
@@ -33,6 +35,8 @@ from app.services.appstore_replay import (
     replay,
     summarize,
 )
+from app.services.subscription import APPSTORE_PRODUCTION_URL, handle_appstore_notification
+from app.webhooks.appstore import _decode_notification_payload
 
 
 def _unsigned_jws(payload: dict) -> str:
@@ -83,7 +87,7 @@ async def test_fetch_paginates_across_pages():
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         items = await fetch_notification_history(
-            base_url="https://api.storekit.itunes.apple.com",
+            base_url=APPSTORE_PRODUCTION_URL,
             start_ms=1_000,
             end_ms=2_000,
             only_failures=True,
@@ -111,7 +115,7 @@ async def test_fetch_sends_expected_request_body_and_auth_header():
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         await fetch_notification_history(
-            base_url="https://api.storekit.itunes.apple.com",
+            base_url=APPSTORE_PRODUCTION_URL,
             start_ms=12345,
             end_ms=67890,
             only_failures=False,
@@ -138,7 +142,7 @@ async def test_fetch_only_failures_true_is_sent_when_requested():
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         await fetch_notification_history(
-            base_url="https://api.storekit.itunes.apple.com",
+            base_url=APPSTORE_PRODUCTION_URL,
             start_ms=1,
             end_ms=2,
             only_failures=True,
@@ -171,7 +175,7 @@ async def test_fetch_raises_runtime_error_on_non_200_with_no_partial_result():
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(RuntimeError) as excinfo:
             await fetch_notification_history(
-                base_url="https://api.storekit.itunes.apple.com",
+                base_url=APPSTORE_PRODUCTION_URL,
                 start_ms=1,
                 end_ms=2,
                 only_failures=True,
@@ -180,6 +184,126 @@ async def test_fetch_raises_runtime_error_on_non_200_with_no_partial_result():
             )
 
     assert "500" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_raises_when_max_pages_exceeded():
+    """Apple always claiming hasMore=true with a fresh token every time must
+    not page forever -- max_pages bounds it and reports why."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.url.params.get("paginationToken", "start")
+        return httpx.Response(
+            200,
+            json={
+                "notificationHistory": [],
+                "hasMore": True,
+                "paginationToken": token + "x",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(RuntimeError) as excinfo:
+            await fetch_notification_history(
+                base_url=APPSTORE_PRODUCTION_URL,
+                start_ms=1,
+                end_ms=2,
+                only_failures=True,
+                token_factory=lambda: "tok",
+                client=client,
+                max_pages=3,
+            )
+
+    assert "max_pages" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_stops_instead_of_looping_forever_on_a_repeated_token():
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "notificationHistory": [{"signedPayload": f"p{call_count}", "sendAttempts": []}],
+                "hasMore": True,
+                "paginationToken": "same-token",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        items = await fetch_notification_history(
+            base_url=APPSTORE_PRODUCTION_URL,
+            start_ms=1,
+            end_ms=2,
+            only_failures=True,
+            token_factory=lambda: "tok",
+            client=client,
+            max_pages=50,
+        )
+
+    # Page 1 has no token yet; page 2 carries "same-token" and Apple hands
+    # back "same-token" again -- fetch must stop there rather than loop.
+    assert call_count == 2
+    assert len(items) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_self_created_client_gets_an_explicit_timeout(monkeypatch):
+    captured_kwargs = {}
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"notificationHistory": [], "hasMore": False})
+
+    def spy_async_client(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        kwargs.pop("timeout", None)
+        return real_async_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", spy_async_client)
+
+    await fetch_notification_history(
+        base_url=APPSTORE_PRODUCTION_URL,
+        start_ms=1,
+        end_ms=2,
+        only_failures=True,
+        token_factory=lambda: "tok",
+    )
+
+    assert captured_kwargs.get("timeout") == 30.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_keeps_the_last_six_send_attempts_not_the_first():
+    attempts = [{"sendAttemptResult": f"R{i}"} for i in range(9)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "notificationHistory": [{"signedPayload": "p1", "sendAttempts": attempts}],
+                "hasMore": False,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        items = await fetch_notification_history(
+            base_url=APPSTORE_PRODUCTION_URL,
+            start_ms=1,
+            end_ms=2,
+            only_failures=True,
+            token_factory=lambda: "tok",
+            client=client,
+        )
+
+    kept = [a["sendAttemptResult"] for a in items[0].send_attempts]
+    assert kept == [f"R{i}" for i in range(3, 9)]
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +485,323 @@ async def test_replay_by_type_counts_verified_notifications_only():
     assert report.by_type == {"DID_RENEW": 2, "REFUND": 1}
 
 
+@pytest.mark.asyncio
+async def test_replay_verify_non_value_error_exception_also_counts_as_rejected():
+    """A malformed payload can make the verifier raise something other than
+    ValueError (e.g. AttributeError on a non-dict `data`); that must still
+    count as rejected and let the run continue, not abort the whole batch."""
+    items = [
+        HistoryItem(signed_payload="bad", send_attempts=[]),
+        HistoryItem(signed_payload="good", send_attempts=[]),
+    ]
+
+    def fake_verify(sp):
+        if sp == "bad":
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+        return {"notificationType": "DID_RENEW", "signedDate": 1000}
+
+    handled = []
+
+    async def fake_handler(payload):
+        handled.append(payload)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=fake_verify, handler=fake_handler, emit=lambda *_: None
+    )
+
+    assert report.rejected == 1
+    assert len(handled) == 1
+
+
+def test_replay_defaults_bind_the_production_implementations():
+    sig = inspect.signature(replay)
+    assert sig.parameters["verify"].default is _decode_notification_payload
+    assert sig.parameters["handler"].default is handle_appstore_notification
+    assert sig.parameters["lookup"].default is get_contractor_by_subscription_uuid
+
+
+# ---------------------------------------------------------------------------
+# stale-deactivation guard
+#
+# EXPIRED/DID_FAIL_TO_RENEW/GRACE_PERIOD_EXPIRED/REFUND/REVOKE must never be
+# applied when a later paid term is already on file for the contractor --
+# otherwise replaying an old deactivation regresses a customer who has since
+# renewed. REFUND_REVERSED is a re-activation, not a deactivation, and is
+# deliberately not covered by this guard.
+# ---------------------------------------------------------------------------
+
+
+def _deactivating_payload(
+    notification_type: str,
+    *,
+    expires_ms: int,
+    app_account_token: str | None = "uuid-1",
+    signed_date: int = 1000,
+) -> dict:
+    transaction_info: dict = {"expiresDate": expires_ms}
+    if app_account_token is not None:
+        transaction_info["appAccountToken"] = app_account_token
+    return {
+        "notificationType": notification_type,
+        "subtype": "",
+        "signedDate": signed_date,
+        "data": {
+            "environment": "Production",
+            "signedTransactionInfo": _unsigned_jws(transaction_info),
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_expired_is_skipped_and_handler_not_called():
+    expires_ms = 1_700_000_000_000
+    payload = _deactivating_payload("EXPIRED", expires_ms=expires_ms)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": expires_ms / 1000.0 + 999}  # later term on file
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert handled == []
+    assert report.stale_skipped == 1
+    assert report.applied == 0
+    assert report.dry_run == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_matching_stored_expiry_exactly_applies():
+    expires_ms = 1_700_000_000_000
+    payload = _deactivating_payload("EXPIRED", expires_ms=expires_ms)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": expires_ms / 1000.0}  # exactly the same term
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert len(handled) == 1
+    assert report.applied == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_refund_on_the_latest_term_applies():
+    expires_ms = 1_700_000_000_000
+    payload = _deactivating_payload("REFUND", expires_ms=expires_ms)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": expires_ms / 1000.0}
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert len(handled) == 1
+    assert report.applied == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_refund_on_an_older_term_is_stale():
+    expires_ms = 1_700_000_000_000
+    payload = _deactivating_payload("REFUND", expires_ms=expires_ms)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": expires_ms / 1000.0 + 100}  # newer term on file
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert handled == []
+    assert report.stale_skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_lookup_raising_does_not_block_apply():
+    payload = _deactivating_payload("EXPIRED", expires_ms=1_700_000_000_000)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def raising_lookup(_token):
+        raise RuntimeError("firestore unavailable")
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=raising_lookup, emit=lambda *_: None,
+    )
+
+    assert len(handled) == 1
+    assert report.applied == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_app_account_token_does_not_block_apply():
+    payload = _deactivating_payload(
+        "EXPIRED", expires_ms=1_700_000_000_000, app_account_token=None
+    )
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    lookup_calls = []
+
+    async def fake_lookup(token):
+        lookup_calls.append(token)
+        return {"subscription_expires": 99_999_999_999.0}
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert lookup_calls == []  # never reached: appAccountToken absent
+    assert len(handled) == 1
+    assert report.applied == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_did_renew_never_triggers_the_stale_lookup():
+    payload = {
+        "notificationType": "DID_RENEW",
+        "subtype": "",
+        "signedDate": 1000,
+        "data": {
+            "environment": "Production",
+            "signedTransactionInfo": _unsigned_jws(
+                {"appAccountToken": "uuid-1", "expiresDate": 1_700_000_000_000}
+            ),
+        },
+    }
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    lookup_calls = []
+
+    async def fake_lookup(token):
+        lookup_calls.append(token)
+        return {"subscription_expires": 99_999_999_999.0}
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert lookup_calls == []
+    assert len(handled) == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_bool_subscription_expires_is_treated_as_absent():
+    expires_ms = 1_700_000_000_000
+    payload = _deactivating_payload("EXPIRED", expires_ms=expires_ms)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": True}  # bool -- must not read as "later"
+
+    handled = []
+
+    async def fake_handler(p):
+        handled.append(p)
+        return True
+
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lambda *_: None,
+    )
+
+    assert len(handled) == 1
+    assert report.stale_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_guard_runs_in_dry_run_too_and_is_excluded_from_dry_run_count():
+    expires_ms = 1_700_000_000_000
+    stale_payload = _deactivating_payload(
+        "EXPIRED", expires_ms=expires_ms, app_account_token="stale-uuid", signed_date=1000
+    )
+    fresh_payload = _deactivating_payload(
+        "EXPIRED", expires_ms=expires_ms, app_account_token="fresh-uuid", signed_date=2000
+    )
+    items = [
+        HistoryItem(signed_payload="stale", send_attempts=[]),
+        HistoryItem(signed_payload="fresh", send_attempts=[]),
+    ]
+    payloads = {"stale": stale_payload, "fresh": fresh_payload}
+
+    async def fake_lookup(token):
+        if token == "stale-uuid":
+            return {"subscription_expires": expires_ms / 1000.0 + 500}
+        return {"subscription_expires": expires_ms / 1000.0}
+
+    async def fake_handler(_p):  # pragma: no cover -- dry run never calls this
+        raise AssertionError("handler must not be called in dry run")
+
+    lines = []
+    report = await replay(
+        items, apply=False, verify=lambda sp: payloads[sp], handler=fake_handler,
+        lookup=fake_lookup, emit=lines.append,
+    )
+
+    assert report.stale_skipped == 1
+    assert report.dry_run == 1
+    assert any("STALE" in line for line in lines)
+
+
 # ---------------------------------------------------------------------------
 # summarize
 # ---------------------------------------------------------------------------
@@ -511,3 +952,60 @@ def test_cli_missing_environment_exits_2(monkeypatch):
     rc = mod.main(["--days", "7"])
 
     assert rc == 2
+
+
+def test_cli_days_and_start_end_are_mutually_exclusive(monkeypatch):
+    mod = _load_cli_module()
+    _forbid_fetch_and_replay(monkeypatch, mod)
+
+    rc = mod.main(
+        ["--days", "5", "--start", "2026-08-01", "--end", "2026-08-02", "--environment", "sandbox"]
+    )
+
+    assert rc == 2
+
+
+def test_cli_start_end_window_is_inclusive_of_the_end_date(monkeypatch):
+    """A single-day --start/--end window must cover the whole end day, not
+    exclude it -- otherwise --end 2026-08-31 silently drops Aug 31 itself."""
+    mod = _load_cli_module()
+
+    captured = {}
+
+    async def fake_fetch(*, base_url, start_ms, end_ms, only_failures):
+        captured["start_ms"] = start_ms
+        captured["end_ms"] = end_ms
+        return []
+
+    async def fake_replay(items, *, apply):
+        return ReplayReport(fetched=0)
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", fake_replay)
+
+    rc = mod.main(
+        ["--start", "2026-08-01", "--end", "2026-08-01", "--environment", "sandbox"]
+    )
+
+    assert rc == 0
+    assert captured["end_ms"] - captured["start_ms"] == 24 * 3600 * 1000
+
+
+def test_cli_replay_exception_is_caught_and_reported(monkeypatch, capsys):
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        return [HistoryItem(signed_payload="p1", send_attempts=[])]
+
+    async def fake_replay(items, *, apply):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", fake_replay)
+
+    rc = mod.main(["--days", "7", "--environment", "sandbox"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "fetched=1" in out
+    assert "aborted" in out

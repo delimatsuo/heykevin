@@ -11,12 +11,33 @@ production webhook uses, prints a PII-free summary line per notification,
 and totals. It never writes anything unless you pass ``--apply``.
 
 **Always dry-run first, then re-run with --apply once the totals look
-right.** Applying replays each verified payload through the same handler
-the live webhook calls, which requires Firestore access (Application
-Default Credentials) because the handler writes contractor and
-apple_transactions records. Applying is idempotent per transaction: the
-handler dedupes through the ``apple_transactions`` collection, so re-running
-with --apply on already-applied notifications is safe.
+right.** Dry runs need read-only Firestore access (Application Default
+Credentials) too -- see the stale-deactivation guard below. Applying
+additionally writes: it replays each verified payload through the same
+handler the live webhook calls, which writes contractor and
+apple_transactions records.
+
+**Applying is NOT a general notification dedupe.** ``claim_transaction``
+(inside the handler) is an ownership *binding*, not a replay guard: once a
+contractor already owns a given original_transaction_id, a repeat
+notification for it is a same-contractor no-op for that binding, but the
+handler still runs its full state transition every time it is invoked --
+including, for EXPIRED / DID_FAIL_TO_RENEW / REFUND / REVOKE, an
+unconditional "mark this contractor expired" write and a re-sent "your
+subscription has ended" push. This script includes one targeted guard for
+the worst case of that: a deactivating notification whose implicated term
+has already been superseded by a newer paid term on file is skipped (logged
+as "STALE ... skipped", counted separately, never applied) in both dry-run
+and --apply. That guard covers exactly one regression, not general
+idempotency -- **run --apply once per incident, read the totals, and stop.**
+Re-running --apply on the same window re-does every non-stale write and
+re-sends every non-stale expiry push again.
+
+``--all`` (fetch everything in the window, not just onlyFailures=true) is
+higher risk to combine with --apply than the default: it pulls in
+notifications Apple already delivered successfully the first time, which
+means the deactivating writes/pushes above fire again for those too. Use it
+only to double-check a period's completeness, and dry-run it first.
 
     # Dry run (default): fetch, verify, print, apply nothing.
     .venv/bin/python scripts/replay_appstore_notifications.py \\
@@ -32,8 +53,11 @@ service. ``--from-cloud-run SERVICE`` copies them (plus APPSTORE_ENVIRONMENT
 and FIRESTORE_PROJECT_ID) from a live Cloud Run service's env into this
 process instead of requiring them locally -- it never prints a value.
 
+``--start``/``--end`` are both inclusive (UTC calendar days); ``--days`` and
+``--start``/``--end`` are mutually exclusive.
+
 Exit codes: 0 success, 1 API/verification-infrastructure error, 2
-configuration error (missing credentials, bad dates).
+configuration error (missing credentials, bad dates, conflicting date flags).
 """
 
 from __future__ import annotations
@@ -105,10 +129,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--days", type=int, default=None,
         help=f"How many days of history to fetch, up to {MAX_HISTORY_DAYS} (default 180). "
-             "Mutually exclusive with --start/--end.",
+             "Mutually exclusive with --start/--end (exit 2 if both are given).",
     )
-    parser.add_argument("--start", default=None, help="Window start, YYYY-MM-DD (UTC). Requires --end.")
-    parser.add_argument("--end", default=None, help="Window end, YYYY-MM-DD (UTC). Requires --start.")
+    parser.add_argument(
+        "--start", default=None,
+        help="Window start, YYYY-MM-DD (UTC), inclusive. Requires --end. Mutually exclusive with --days.",
+    )
+    parser.add_argument(
+        "--end", default=None,
+        help="Window end, YYYY-MM-DD (UTC), inclusive (covers the whole day). Requires --start. "
+             "Mutually exclusive with --days.",
+    )
     parser.add_argument(
         "--all", action="store_true",
         help="Fetch all notifications, not just ones Apple failed to deliver "
@@ -135,23 +166,35 @@ def _parse_ymd(value: str) -> datetime:
 
 
 def _resolve_window(args: argparse.Namespace, now: datetime) -> tuple[datetime, datetime] | None:
-    """Return (start, end) as timezone-aware UTC datetimes, or None on bad input (caller exits 2)."""
+    """Return (start, end) as timezone-aware UTC datetimes, or None on bad input (caller exits 2).
+
+    --start/--end are both inclusive UTC calendar days, so --end is
+    resolved to the instant *after* that day ends (start of the next day)
+    -- otherwise a notification signed on the --end date itself would be
+    silently excluded from the window.
+    """
+    if args.days is not None and (args.start or args.end):
+        print("error: --days is mutually exclusive with --start/--end", file=sys.stderr)
+        return None
+
     if args.start or args.end:
         if not (args.start and args.end):
             print("error: --start and --end must be given together", file=sys.stderr)
             return None
         try:
             start_dt = _parse_ymd(args.start)
-            end_dt = _parse_ymd(args.end)
+            end_dt_raw = _parse_ymd(args.end)
         except ValueError as e:
             print(f"error: invalid date (expected YYYY-MM-DD): {e}", file=sys.stderr)
             return None
-        if start_dt > end_dt:
+        if start_dt > end_dt_raw:
             print("error: --start must not be after --end", file=sys.stderr)
             return None
         if (now - start_dt).days > MAX_HISTORY_DAYS:
             print(f"error: --start must be within the past {MAX_HISTORY_DAYS} days", file=sys.stderr)
             return None
+        # Inclusive end: cover the entire --end calendar day.
+        end_dt = end_dt_raw + timedelta(days=1)
         return start_dt, end_dt
 
     days = args.days if args.days is not None else MAX_HISTORY_DAYS
@@ -218,8 +261,12 @@ def main(argv: list[str] | None = None) -> int:
 
     only_failures = not args.all
     mode = "APPLY" if args.apply else "DRY RUN"
+    # end_dt is an exclusive upper bound (the instant after the last
+    # inclusive day ends) -- step back a moment before printing so the
+    # displayed window shows the calendar day the caller actually asked for.
+    display_end_date = (end_dt - timedelta(microseconds=1)).date().isoformat()
     print(
-        f"window: {start_dt.date().isoformat()} .. {end_dt.date().isoformat()} (UTC)  "
+        f"window: {start_dt.date().isoformat()} .. {display_end_date} (UTC, inclusive)  "
         f"environment={environment}  onlyFailures={only_failures}  mode={mode}"
     )
 
@@ -236,10 +283,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    report = asyncio.run(replay(items, apply=args.apply))
+    try:
+        report = asyncio.run(replay(items, apply=args.apply))
+    except Exception as e:  # noqa: BLE001 - keep totals visible even on an unexpected failure
+        print("-" * 72)
+        print(f"fetched={len(items)} (replay aborted before totals were available)")
+        print(f"error: replay failed: {type(e).__name__}", file=sys.stderr)
+        return 1
 
     print("-" * 72)
-    print(f"fetched={report.fetched}  rejected={report.rejected}")
+    print(f"fetched={report.fetched}  rejected={report.rejected}  stale_skipped={report.stale_skipped}")
     if report.by_type:
         by_type = "  ".join(f"{k}={v}" for k, v in sorted(report.by_type.items()))
         print(f"by_type: {by_type}")

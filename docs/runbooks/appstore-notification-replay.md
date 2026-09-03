@@ -44,9 +44,12 @@ already set) and never prints a value.
 
 By default the script asks Apple for `onlyFailures=true` — the
 notifications Apple itself knows never reached the server successfully.
-Pass `--all` to fetch everything in the window instead (useful when
-double-checking a period rather than assuming Apple's own bookkeeping is
-complete).
+`--all` fetches everything in the window instead, including notifications
+Apple already delivered successfully the first time. **Treat `--all
+--apply` as a higher-risk combination, not a routine one** — see
+Idempotency below for why re-applying an already-delivered notification is
+not a no-op. Use `--all` only to double-check a period's completeness, and
+always dry-run it first.
 
 ## The 180-day limit
 
@@ -54,7 +57,9 @@ Apple's Get Notification History only covers the past 180 days. `--days`
 defaults to 180 and refuses anything larger (exit code 2). Use `--start`
 / `--end` (`YYYY-MM-DD`, UTC) instead of `--days` to target a narrower
 window inside that range — useful for isolating one incident without
-re-verifying everything.
+re-verifying everything. `--start`/`--end` are both **inclusive** (the
+`--end` day is fully covered), and `--days` cannot be combined with
+`--start`/`--end` (exit code 2 if both are given).
 
 ## What "rejected" means
 
@@ -67,15 +72,38 @@ fetch is unexpected and worth investigating before applying the rest of
 the batch — it should not normally happen for payloads that came straight
 from Apple's own API.
 
-## Idempotency
+## Idempotency — read this before a second `--apply` run
 
-Applying is safe to re-run. `handle_appstore_notification` dedupes through
-the `apple_transactions` collection (`claim_transaction`) before writing
-any subscription state, so replaying a notification that was already
-applied — by this script or by the live webhook — is a no-op for that
-transaction, not a double-write. This is what makes it safe to run the
-apply pass more than once, or to run it after some notifications in the
-window already made it through the (now-fixed) live webhook.
+**Applying is not a general notification dedupe. Run `--apply` once per
+incident, read the totals, and stop.**
+
+`claim_transaction` (inside the handler) is an ownership *binding*, not a
+replay guard. Once a contractor already owns a given
+`original_transaction_id`, a repeat notification for it is a same-contractor
+no-op for that binding — but the handler still runs its full state
+transition every time it is invoked. For `EXPIRED`, `DID_FAIL_TO_RENEW`,
+`REFUND`, and `REVOKE`, that means an **unconditional** write of
+`subscription_status = "expired"` and a re-sent "your subscription has
+ended" push, every single time, regardless of what has happened to the
+account since. Replaying an old `EXPIRED` for a customer who has since
+renewed would otherwise flip them straight back to a non-dismissible
+paywall with AI screening off.
+
+This script includes one targeted guard against exactly that regression: a
+deactivating notification (`EXPIRED`, `DID_FAIL_TO_RENEW`,
+`GRACE_PERIOD_EXPIRED`, `REFUND`, `REVOKE`) whose implicated subscription
+term has already been superseded by a newer paid term on file for that
+contractor is skipped — printed as `STALE (account term ends later) —
+skipped`, counted in the `stale_skipped` total, and never handed to the
+handler. This check runs in **both** dry-run and `--apply`, so a dry run's
+`dry_run` count already excludes what would have been skipped as stale.
+
+That guard covers one specific, worst-case regression. It is **not**
+general idempotency: every non-stale notification in the window is still
+fully re-applied — including re-sent pushes — on every `--apply` run. Do
+not run `--apply` more than once on the same window as a matter of
+routine; if you need to re-check something, dry-run it and read the
+`stale_skipped`/`by_type` totals instead of applying again.
 
 ## Credentials
 
@@ -85,9 +113,12 @@ window already made it through the (now-fixed) live webhook.
   or via `--from-cloud-run <service>`.
 - `--environment {production,sandbox}` selects Apple's base URL; defaults
   to `$APPSTORE_ENVIRONMENT`.
-- `--apply` additionally needs Firestore access via Application Default
-  Credentials, because the handler writes contractor and
-  `apple_transactions` records. Dry runs need no Firestore access at all.
+- Both dry runs and `--apply` need **read-only** Firestore access via
+  Application Default Credentials — the stale-deactivation guard above
+  looks up the contractor for every deactivating notification, even in a
+  dry run, so it can report `stale_skipped` accurately.
+- `--apply` additionally needs **write** access, because the handler
+  writes contractor and `apple_transactions` records.
 
 No secrets are ever printed. Per-notification output is limited to
 notification type/subtype, the signed date, environment, a 6-character

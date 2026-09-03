@@ -157,6 +157,8 @@ def _make_cert(
     *,
     is_ca: bool,
     oids: tuple[str, ...] = (),
+    not_before: datetime | None = None,
+    not_after: datetime | None = None,
 ):
     now = datetime.now(timezone.utc)
     builder = (
@@ -165,8 +167,8 @@ def _make_cert(
         .issuer_name(issuer)
         .public_key(subject_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(minutes=5))
-        .not_valid_after(now + timedelta(days=1))
+        .not_valid_before(not_before if not_before is not None else now - timedelta(minutes=5))
+        .not_valid_after(not_after if not_after is not None else now + timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=is_ca, path_length=None), critical=True)
     )
     for oid in oids:
@@ -181,26 +183,37 @@ def _fake_apple_chain(
     *,
     leaf_oids: tuple[str, ...] | None = None,
     intermediate_oids: tuple[str, ...] | None = None,
+    not_before: datetime | None = None,
+    not_after: datetime | None = None,
 ):
     """Return (leaf_private_key, [leaf, intermediate, root]) — the x5c order.
 
     By default the leaf and intermediate carry Apple's marker OIDs (as real
-    App Store Server Notifications certs do). Pass overrides to build
-    malformed chains for negative tests.
+    App Store Server Notifications certs do), and every cert in the chain is
+    valid from 5 minutes ago to 1 day from now. Pass `not_before`/`not_after`
+    to build a chain whose certs (all three, so the chain is internally
+    consistent) share a different validity window instead — used by the
+    signedDate-vs-validity tests. Pass leaf_oids/intermediate_oids overrides
+    to build malformed chains for negative tests.
     """
     if leaf_oids is None:
         leaf_oids = (appstore_webhook.APPLE_LEAF_OID,)
     if intermediate_oids is None:
         intermediate_oids = (appstore_webhook.APPLE_INTERMEDIATE_OID,)
     root_key = ec.generate_private_key(ec.SECP256R1())
-    root = _make_cert("Fake Apple Root CA", _name("Fake Apple Root CA"), root_key, root_key, is_ca=True)
+    root = _make_cert(
+        "Fake Apple Root CA", _name("Fake Apple Root CA"), root_key, root_key,
+        is_ca=True, not_before=not_before, not_after=not_after,
+    )
     inter_key = ec.generate_private_key(ec.SECP256R1())
     inter = _make_cert(
-        "Fake WWDR CA", root.subject, root_key, inter_key, is_ca=True, oids=intermediate_oids,
+        "Fake WWDR CA", root.subject, root_key, inter_key, is_ca=True,
+        oids=intermediate_oids, not_before=not_before, not_after=not_after,
     )
     leaf_key = ec.generate_private_key(ec.SECP256R1())
     leaf = _make_cert(
-        "Fake App Store Signer", inter.subject, inter_key, leaf_key, is_ca=False, oids=leaf_oids,
+        "Fake App Store Signer", inter.subject, inter_key, leaf_key, is_ca=False,
+        oids=leaf_oids, not_before=not_before, not_after=not_after,
     )
     return leaf_key, [leaf, inter, root]
 
@@ -216,6 +229,11 @@ def _trust_root(monkeypatch, root: x509.Certificate) -> None:
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _ms(dt: datetime) -> int:
+    """Milliseconds since epoch, as Apple's `signedDate` field encodes it."""
+    return int(dt.timestamp() * 1000)
 
 
 def _sign_jws(payload: dict, leaf_key, chain, *, raw_signature: bool = True) -> str:
@@ -467,3 +485,148 @@ def test_x5c_with_non_string_entry_is_rejected():
 
     with pytest.raises(ValueError, match="Malformed x5c"):
         appstore_webhook._decode_notification_payload(token)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-03 follow-up (Task 8): certificate validity is checked at the
+# payload's signedDate, mirroring apple/app-store-server-library-python's
+# signed_data_verifier.py, which pins its trust store to signedDate when
+# online checks are off. This lets the replay tool verify history from
+# after Apple's signing leaf has since expired or rotated, without ever
+# widening acceptance beyond the pre-existing now-based check for anything
+# other than a genuine chain that was valid at its own signing time.
+# ---------------------------------------------------------------------------
+
+
+def test_expired_leaf_is_accepted_when_signed_inside_its_window(monkeypatch):
+    T = datetime.now(timezone.utc)
+    leaf_key, chain = _fake_apple_chain(
+        not_before=T - timedelta(days=30), not_after=T - timedelta(days=1),
+    )
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id},
+        "signedDate": _ms(T - timedelta(days=10)),
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    decoded = appstore_webhook._decode_notification_payload(token)
+
+    assert decoded == payload
+
+
+def test_expired_leaf_is_rejected_without_signed_date(monkeypatch):
+    T = datetime.now(timezone.utc)
+    leaf_key, chain = _fake_apple_chain(
+        not_before=T - timedelta(days=30), not_after=T - timedelta(days=1),
+    )
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id},
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="outside its validity window"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_signed_date_before_leaf_validity_is_rejected(monkeypatch):
+    T = datetime.now(timezone.utc)
+    leaf_key, chain = _fake_apple_chain(
+        not_before=T - timedelta(days=30), not_after=T - timedelta(days=1),
+    )
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id},
+        "signedDate": _ms(T - timedelta(days=40)),
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="outside its validity window"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_future_signed_date_falls_back_to_now(monkeypatch):
+    """A not-yet-valid leaf (validity starts tomorrow) plus a signedDate that
+    lies inside that future window must still be rejected: the future
+    signedDate is ignored, "now" is used instead, and now precedes
+    not_before."""
+    T = datetime.now(timezone.utc)
+    leaf_key, chain = _fake_apple_chain(
+        not_before=T + timedelta(days=1), not_after=T + timedelta(days=30),
+    )
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id},
+        "signedDate": _ms(T + timedelta(days=10)),
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="outside its validity window"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+@pytest.mark.parametrize("bad_signed_date", ["1700000000000", True, -5, 0])
+def test_malformed_signed_date_falls_back_to_now(monkeypatch, bad_signed_date):
+    T = datetime.now(timezone.utc)
+    leaf_key, chain = _fake_apple_chain(
+        not_before=T - timedelta(days=30), not_after=T - timedelta(days=1),
+    )
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id},
+        "signedDate": bad_signed_date,
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="outside its validity window"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_effective_validation_time_helper():
+    T = datetime.now(timezone.utc)
+
+    in_window = appstore_webhook._effective_validation_time(
+        {"signedDate": _ms(T - timedelta(days=1))}
+    )
+    assert abs((in_window - (T - timedelta(days=1))).total_seconds()) < 1
+
+    near_future = appstore_webhook._effective_validation_time(
+        {"signedDate": _ms(T + timedelta(minutes=4))}
+    )
+    assert abs((near_future - (T + timedelta(minutes=4))).total_seconds()) < 1
+
+    far_future = appstore_webhook._effective_validation_time(
+        {"signedDate": _ms(T + timedelta(minutes=6))}
+    )
+    assert abs((far_future - datetime.now(timezone.utc)).total_seconds()) < 5
+
+    absurd = appstore_webhook._effective_validation_time({"signedDate": 10**18})
+    assert abs((absurd - datetime.now(timezone.utc)).total_seconds()) < 5
+
+    missing = appstore_webhook._effective_validation_time({})
+    assert abs((missing - datetime.now(timezone.utc)).total_seconds()) < 5
+
+
+def test_malformed_payload_json_is_rejected_before_certificate_work():
+    """The payload is parsed for its signedDate right after the header, so a
+    malformed payload must be rejected before x5c is even inspected (this
+    header carries no certificate chain at all — a "Missing x5c" rejection
+    here would prove the ordering is wrong)."""
+    header = {"alg": "ES256", "x5c": []}
+    h = _b64url(json.dumps(header).encode())
+
+    not_json = _b64url(b"not-json")
+    token = f"{h}.{not_json}.{_b64url(b'sig')}"
+    with pytest.raises(ValueError, match="Invalid JWS payload"):
+        appstore_webhook._decode_notification_payload(token)
+
+    array_payload = _b64url(json.dumps([1, 2, 3]).encode())
+    token2 = f"{h}.{array_payload}.{_b64url(b'sig')}"
+    with pytest.raises(ValueError, match="not a JSON object"):
+        appstore_webhook._decode_notification_payload(token2)

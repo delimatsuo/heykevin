@@ -74,12 +74,15 @@ re-verifying everything. `--start`/`--end` are both **inclusive** (the
 
 Every fetched item is verified with the production webhook's own JWS
 verifier before anything else happens to it — same certificate-chain
-pinning, same signature check, same bundle ID check. An item that fails
-verification is counted as `rejected` and is **never** applied, regardless
-of `--apply`. A non-zero `rejected` count on a legitimate Apple history
-fetch is unexpected and worth investigating before applying the rest of
-the batch — it should not normally happen for payloads that came straight
-from Apple's own API.
+pinning, same signature check, same bundle ID check. Certificate validity
+is checked at each notification's own signing time (its payload's
+`signedDate`), not wall-clock now, so a signing leaf that has since
+expired or rotated does not cause historical notifications to be
+rejected. An item that fails verification is counted as `rejected` and is
+**never** applied, regardless of `--apply`. A non-zero `rejected` count on
+a legitimate Apple history fetch is unexpected and worth investigating
+before applying the rest of the batch — it should not normally happen for
+payloads that came straight from Apple's own API.
 
 ## Idempotency — read this before a second `--apply` run
 

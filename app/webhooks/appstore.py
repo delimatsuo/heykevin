@@ -36,7 +36,7 @@ routing is confirmed (ruling, 2026-09-03).
 import base64
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography import x509
@@ -116,12 +116,41 @@ def _has_extension(cert: x509.Certificate, oid: str) -> bool:
         return False
 
 
+_FUTURE_SIGNED_DATE_TOLERANCE = timedelta(minutes=5)
+
+
+def _effective_validation_time(payload: dict) -> datetime:
+    """The instant at which the certificate chain must be valid.
+
+    Apple's verifier pins its trust store to the payload's signedDate when
+    online checks are off, so history still verifies after the signing
+    leaf expires. Mirror that: use signedDate (ms since epoch) when it is
+    a positive number and not in the future beyond a small tolerance;
+    otherwise fall back to now. A missing, malformed, or future-dated
+    signedDate never widens acceptance beyond the pre-existing now-based
+    check.
+    """
+    now = datetime.now(timezone.utc)
+    raw = payload.get("signedDate")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return now
+    try:
+        signed_at = datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return now
+    if signed_at > now + _FUTURE_SIGNED_DATE_TOLERANCE:
+        return now
+    return signed_at
+
+
 def _decode_notification_payload(signed_payload: str) -> dict:
     """Decode and verify an Apple-signed JWS notification.
 
     Apple signs App Store Server Notifications as JWS with RS/ES.
     The x5c header contains the certificate chain; we verify:
-    1. The certificate chain is valid and roots to Apple's CA
+    1. The certificate chain is valid and roots to Apple's CA. Validity is
+       checked at the payload's signedDate when present (as Apple's own
+       verifier does), falling back to wall-clock now.
     2. The chain has exactly APPLE_CHAIN_LENGTH (3) certificates
     3. The leaf carries the App Store Server Notifications marker OID and
        the intermediate carries the Apple WWDR marker OID
@@ -143,6 +172,24 @@ def _decode_notification_payload(signed_payload: str) -> dict:
         header = json.loads(base64.urlsafe_b64decode(padded_header))
     except Exception as e:
         raise ValueError(f"Invalid JWS header: {e}")
+
+    # 2026-09-03 follow-up (Task 8): decode the payload JSON early — right
+    # after the header, before any certificate work — so its signedDate can
+    # pick the certificate validity-check instant below. This is safe:
+    # nothing from the payload is trusted until the JWS signature verifies
+    # further down (the bundleId/environment checks still happen only after
+    # that, unchanged); the payload is used here only to choose *when* "now"
+    # means for the validity window, exactly as Apple's own verifier pins
+    # its trust store to signedDate.
+    padded_payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded_payload))
+    except Exception as e:
+        raise ValueError(f"Invalid JWS payload: {e}")
+    if not isinstance(payload, dict):
+        raise ValueError("JWS payload is not a JSON object")
+
+    effective_time = _effective_validation_time(payload)
 
     # Extract certificate chain from x5c header
     x5c = header.get("x5c", [])
@@ -190,17 +237,25 @@ def _decode_notification_payload(signed_payload: str) -> dict:
                 "Certificate chain does not anchor to a trusted Apple Root CA"
             )
 
-        # F-3: validity-window check on every cert in the chain. Even with
-        # the root anchor pinned, an expired or not-yet-valid cert means
-        # we should refuse the notification.
-        now = datetime.now(timezone.utc)
+        # F-3 (2026-09-03 follow-up, Task 8): validity-window check on every
+        # cert in the chain, evaluated at the payload's signedDate rather
+        # than wall-clock now (falling back to now when signedDate is
+        # missing, malformed, or future-dated) — mirroring
+        # apple/app-store-server-library-python's signed_data_verifier.py,
+        # which pins its trust store to the payload's signedDate when
+        # online checks are off. This is what lets the notification-history
+        # replay tool keep verifying genuine notifications after Apple's
+        # signing leaf has since expired or rotated. Even with the root
+        # anchor pinned, a cert outside its validity window at that instant
+        # means we should refuse the notification.
         for idx, cert in enumerate(certs):
             not_before = cert.not_valid_before_utc
             not_after = cert.not_valid_after_utc
-            if now < not_before or now > not_after:
+            if effective_time < not_before or effective_time > not_after:
                 raise ValueError(
                     f"Certificate at chain position {idx} is outside its "
-                    f"validity window (not_before={not_before.isoformat()} "
+                    f"validity window at {effective_time.isoformat()} "
+                    f"(not_before={not_before.isoformat()} "
                     f"not_after={not_after.isoformat()})"
                 )
 
@@ -266,13 +321,6 @@ def _decode_notification_payload(signed_payload: str) -> dict:
         raise ValueError("JWS signature verification failed")
     except Exception as e:
         raise ValueError(f"Certificate/signature verification error: {e}")
-
-    # Decode payload
-    padded_payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(padded_payload))
-    except Exception as e:
-        raise ValueError(f"Invalid JWS payload: {e}")
 
     # Validate bundle ID. 2026-09-03 follow-up: fail closed — a payload
     # with no bundleId in any section used to fall through the old

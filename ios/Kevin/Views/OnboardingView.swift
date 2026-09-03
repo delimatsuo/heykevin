@@ -935,6 +935,10 @@ struct OnboardingView: View {
             if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
             if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
             if !subTier.isEmpty { appState.subscriptionTier = subTier }
+            // The forwarding step keys its dial codes on the account country.
+            if let country = SettingsCountry.accountCountry(from: profile) {
+                appState.countryCode = country
+            }
         }
 
         // If account has no Kevin number, provision one before completing restore
@@ -1058,6 +1062,9 @@ struct OnboardingView: View {
                 if let subUUID = profile["subscription_uuid"] as? String, !subUUID.isEmpty {
                     appState.subscriptionUUID = subUUID
                 }
+                if let country = SettingsCountry.accountCountry(from: profile) {
+                    appState.countryCode = country
+                }
                 step = .forwarding
                 isLoading = false
                 return
@@ -1156,6 +1163,9 @@ struct OnboardingView: View {
             // Reuse existing number
             kevinNumber = existingNumber
             appState.kevinNumber = kevinNumber
+            if let country = SettingsCountry.accountCountry(from: profile) {
+                appState.countryCode = country
+            }
         } else if !appState.kevinNumber.isEmpty {
             kevinNumber = appState.kevinNumber
         } else {
@@ -1166,6 +1176,11 @@ struct OnboardingView: View {
                !phoneNumber.isEmpty {
                 kevinNumber = phoneNumber
                 appState.kevinNumber = kevinNumber
+                // Provisioning is where the server finally resolves the account
+                // country from the phone; adopt it before the forwarding step.
+                if let country = SettingsCountry.accountCountry(from: provResult ?? [:]) {
+                    appState.countryCode = country
+                }
             } else {
                 let message = provResult?["message"] as? String
                 errorMessage = message ?? String(localized: "Failed to provision number. Please try again.")

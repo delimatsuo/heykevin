@@ -76,7 +76,7 @@ async def test_provision_number_endpoint_defaults_blank_country_to_us(monkeypatc
 
     response = await contractors_api.api_provision_number("contractor-1", request)
 
-    assert response == {"status": "ok", "phone_number": "+16505551212"}
+    assert response == {"status": "ok", "phone_number": "+16505551212", "country_code": "US"}
     assert seen["provisioned"] == {"contractor_id": "contractor-1", "country_code": "US"}
     assert seen["updated"] == {
         "contractor_id": "contractor-1",
@@ -121,6 +121,7 @@ async def test_provision_number_endpoint_reuses_existing_number(monkeypatch):
         "status": "ok",
         "phone_number": "+16505551212",
         "existing": True,
+        "country_code": "US",
     }
 
 
@@ -189,3 +190,87 @@ def test_jobber_lead_capture_flag_is_server_protected():
     assert "service_request_mutations_enabled" in contractors_db.PROTECTED_FIELDS
     assert "customer_memory_capture_enabled" in contractors_db.PROTECTED_FIELDS
     assert "customer_memory_personalization_enabled" in contractors_db.PROTECTED_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_provision_number_endpoint_returns_the_country_it_resolved(monkeypatch):
+    """The client keys its call-forwarding codes on the account country, and
+    provisioning is where that country is finally resolved from the phone — so
+    the response must carry it rather than leaving the client with a guess.
+    (GB rather than BR: regulatory countries refuse to provision without a
+    business address, which is a different contract. The number must be one
+    phonenumbers maps to GB: 07700 900xxx is Ofcom's fictional block and
+    07911 belongs to Guernsey.)"""
+
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "twilio_number": "",
+            "country_code": "",
+            "owner_phone": "+447400123456",
+        }
+
+    async def fake_update_contractor(contractor_id, updates):
+        return True
+
+    async def fake_provision_twilio_number(contractor_id, country_code="US"):
+        return "+447700900456"
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(contractors_db, "provision_twilio_number", fake_provision_twilio_number)
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
+
+    response = await contractors_api.api_provision_number("contractor-1", request)
+
+    assert response["status"] == "ok"
+    assert response["country_code"] == "GB"
+
+
+@pytest.mark.asyncio
+async def test_provision_number_endpoint_reports_country_for_an_existing_number(monkeypatch):
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "twilio_number": "+441onexisting",
+            "country_code": "gb",
+            "owner_phone": "+447700900123",
+        }
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
+
+    response = await contractors_api.api_provision_number("contractor-1", request)
+
+    assert response == {
+        "status": "ok",
+        "phone_number": "+441onexisting",
+        "existing": True,
+        "country_code": "GB",
+    }
+
+
+@pytest.mark.parametrize("stored", ["XX", 55, None, "  "])
+@pytest.mark.asyncio
+async def test_provision_number_endpoint_existing_number_reports_us_for_unusable_stored_country(
+    monkeypatch, stored
+):
+    """Mirror GET /api/settings: an unsupported, non-string, or blank stored
+    country is reported as the default "US", never echoed and never a 500, so
+    the two endpoints cannot disagree about the same field."""
+
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "twilio_number": "+16505551212",
+            "country_code": stored,
+            "owner_phone": "+16505551212",
+        }
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
+
+    response = await contractors_api.api_provision_number("contractor-1", request)
+
+    assert response["status"] == "ok"
+    assert response["country_code"] == "US"

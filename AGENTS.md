@@ -92,7 +92,7 @@ Kevin/
 ├── .claude/
 │   └── deploy-config.yaml        # Deployment config read by /deploy-staging skill
 ├── .github/workflows/
-│   ├── deploy.yml                # CI: tests → deploy to Cloud Run on push to main/staging
+│   ├── deploy.yml                # CI: tests on every PR; staging on push to staging or dispatch with candidate_sha; production by manual dispatch only
 │   └── rollback.yml              # Manual rollback workflow
 └── DEPLOY-SETUP.md               # WIF setup instructions, deployment notes
 ```

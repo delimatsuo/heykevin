@@ -489,10 +489,12 @@ async def test_apple_statuses_empty_data_means_no_hold(apple_wire):
 @respx.mock
 async def test_apple_statuses_non_200_raises(apple_wire):
     respx.get(f"{apple_wire.production_url}/inApps/v1/subscriptions/2000000123").mock(
-        return_value=httpx.Response(401, json={"errorCode": 4040010})
+        return_value=httpx.Response(500, json={"errorCode": 4040010})
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc_info:
         await number_release._apple_subscription_statuses("2000000123")
+
+    assert "(production)" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

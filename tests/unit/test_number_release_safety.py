@@ -18,7 +18,10 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15555550100")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("USER_PHONE", "+15555550101")
 
-from app.services.subscription import is_safe_to_release_number  # noqa: E402
+from app.services.subscription import (  # noqa: E402
+    _inbound_stamp_blocks,
+    is_safe_to_release_number,
+)
 
 DAY = 86400
 
@@ -283,3 +286,39 @@ def test_negative_and_bool_timestamps_never_release_on_either_path():
         _c(deleted_app_detected_at=now - 60 * DAY, last_inbound_call_at=True), now
     ) is False
     assert is_safe_to_release_lapsed_number(_lapsed(now, expired_days_ago=90, forwarding_last_seen_at=-1), now, None) is False
+
+
+# ---------------------------------------------------------------------------
+# Direct tests for the shared helper (_inbound_stamp_blocks) both guards above
+# call. Covered indirectly through is_safe_to_release_number/
+# is_safe_to_release_lapsed_number already; these pin the helper's own
+# contract so the two guards cannot drift apart from each other.
+# ---------------------------------------------------------------------------
+
+
+def test_inbound_stamp_helper_absent_key_does_not_block():
+    now = time.time()
+    assert _inbound_stamp_blocks({}, now, 14 * DAY) is False
+
+
+def test_inbound_stamp_helper_none_does_not_block():
+    now = time.time()
+    assert _inbound_stamp_blocks({"last_inbound_call_at": None}, now, 14 * DAY) is False
+
+
+def test_inbound_stamp_helper_unreadable_values_block():
+    now = time.time()
+    for bad in ("yesterday", True, -1, 0):
+        assert _inbound_stamp_blocks({"last_inbound_call_at": bad}, now, 14 * DAY) is True, bad
+
+
+def test_inbound_stamp_helper_inside_window_blocks():
+    now = time.time()
+    c = {"last_inbound_call_at": now - 2 * DAY}
+    assert _inbound_stamp_blocks(c, now, 14 * DAY) is True
+
+
+def test_inbound_stamp_helper_outside_window_does_not_block():
+    now = time.time()
+    c = {"last_inbound_call_at": now - 20 * DAY}
+    assert _inbound_stamp_blocks(c, now, 14 * DAY) is False

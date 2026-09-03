@@ -29,9 +29,15 @@ async def test_create_contractor_defaults_blank_country_to_us(monkeypatch):
     async def fake_update_contractor(*_args, **_kwargs):
         return True
 
+    async def fake_get_contractor_by_apple_user_id(_apple_user_id):
+        return None
+
     monkeypatch.setattr(contractors_api, "_enforce_apple_identity", fake_enforce_apple_identity)
     monkeypatch.setattr(contractors_api, "create_contractor", fake_create_contractor)
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+    monkeypatch.setattr(
+        contractors_db, "get_contractor_by_apple_user_id", fake_get_contractor_by_apple_user_id
+    )
 
     response = await contractors_api.api_create_contractor(
         contractors_api.ContractorCreate(

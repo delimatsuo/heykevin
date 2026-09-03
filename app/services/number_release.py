@@ -46,6 +46,7 @@ from app.db.contractors import deactivate_contractor
 from app.db.firestore_client import get_firestore_client
 from app.services.sms import send_sms
 from app.services.subscription import (
+    APPSTORE_PRODUCTION_URL,
     LAPSED_NUMBER_RELEASE_DAYS,
     NUMBER_RELEASE_QUIET_DAYS,
     _get_appstore_jwt,
@@ -106,7 +107,8 @@ async def _apple_subscription_statuses(original_transaction_id: str) -> list[int
                 return statuses
             if _is_transaction_not_found(response):
                 continue
-            raise RuntimeError(f"App Store status HTTP {response.status_code}")
+            env = "production" if base == APPSTORE_PRODUCTION_URL else "sandbox"
+            raise RuntimeError(f"App Store status HTTP {response.status_code} ({env})")
     raise RuntimeError("App Store receipt not found in any environment")
 
 

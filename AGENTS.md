@@ -202,7 +202,10 @@ Defined in `.github/workflows/deploy.yml`:
 - **PRs to `staging` or `main`** run the `Test` job only. No deploy.
 - **Push to `staging` branch** runs `Test` then deploys `kevin-api-staging`.
 - **Push to `main` runs no deploy.** Production is manual.
-- **Production deploys are manual:** `gh workflow run deploy.yml -f target=production --ref main`.
+- **Staging dispatch needs `candidate_sha`:** `gh workflow run deploy.yml --repo delimatsuo/heykevin -f target=staging -f candidate_sha=<sha> --ref main`. The value must be the exact lowercase 40-character SHA of a remote branch head (run `git fetch origin main && git rev-parse origin/main` first). Without it the run executes `Test` and then **skips `Deploy to Staging` by design** — a wasted run, not an error.
+- **Production dispatch must NOT pass `candidate_sha`** (the job fails if it does). It deploys whatever `main`'s head is at the instant of dispatch — fetch and record `git rev-parse origin/main` immediately before dispatching, and say that SHA when reporting. The run then waits at the `production` environment approval gate; only Deli approves it, never an agent and never via the API.
+- **One dispatch at a time.** Every `workflow_dispatch` run from `main` shares one concurrency group and `cancel-in-progress` is off for dispatches. A run parked at the approval gate **holds the group**: the next dispatch sits `pending` behind it, and a further dispatch **cancels the pending one** (observed 2026-09-03: a staging dispatch was cancelled by a production dispatch 21 seconds later, and a duplicate production run held the group for three hours). Cancel or approve the parked run before dispatching again; cancelling is Deli's call, not an agent's.
+- **Production deploys are manual:** `gh workflow run deploy.yml --repo delimatsuo/heykevin -f target=production --ref main` (or "Run workflow" on the `Deploy` workflow in the Actions tab with `target=production`). The job refuses to run from any ref other than `main`.
 
 ### Environments
 | | Production | Staging |

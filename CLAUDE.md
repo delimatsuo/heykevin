@@ -179,11 +179,18 @@ Kevin speaks and understands **all languages automatically**. Deepgram runs in `
 
 ### Backend
 ```bash
-# Normal production deploy: use the manual GitHub Actions workflow from main
-gh workflow run deploy.yml -f target=production --ref main
+# Staging deploy (manual): candidate_sha is REQUIRED and must be the exact
+# lowercase 40-char head of a remote branch — fetch first.
+git fetch origin main
+gh workflow run deploy.yml --repo delimatsuo/heykevin -f target=staging -f candidate_sha=$(git rev-parse origin/main) --ref main
 
 # Smoke-test staging before production
 scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging
+
+# Production deploy (manual): NO candidate_sha. Deploys main's head at the instant
+# of dispatch, then waits at the `production` environment approval gate (Deli clicks).
+git fetch origin main && git rev-parse origin/main   # record what will deploy
+gh workflow run deploy.yml --repo delimatsuo/heykevin -f target=production --ref main
 ```
 
 ### iOS
@@ -202,7 +209,10 @@ Defined in `.github/workflows/deploy.yml`:
 - **PRs to `staging` or `main`** run the `Test` job only. No deploy.
 - **Push to `staging` branch** runs `Test` then `Deploy to Staging` (`kevin-api-staging`).
 - **Push to `main` runs nothing.** Merging a PR to `main` does not deploy. CLAUDE.md previously claimed otherwise; that was wrong.
-- **Production deploys are manual:** `gh workflow run deploy.yml -f target=production --ref main` (or click "Run workflow" in the Actions tab on the `Deploy` workflow with `target=production`). The job refuses to run from any ref other than `main`.
+- **Staging dispatch needs `candidate_sha`:** `gh workflow run deploy.yml --repo delimatsuo/heykevin -f target=staging -f candidate_sha=<sha> --ref main`. The value must be the exact lowercase 40-character SHA of a remote branch head (run `git fetch origin main && git rev-parse origin/main` first). Without it the run executes `Test` and then **skips `Deploy to Staging` by design** — a wasted run, not an error.
+- **Production dispatch must NOT pass `candidate_sha`** (the job fails if it does). It deploys whatever `main`'s head is at the instant of dispatch — fetch and record `git rev-parse origin/main` immediately before dispatching, and say that SHA when reporting. The run then waits at the `production` environment approval gate; only Deli approves it, never an agent and never via the API.
+- **One dispatch at a time.** Every `workflow_dispatch` run from `main` shares one concurrency group and `cancel-in-progress` is off for dispatches. A run parked at the approval gate **holds the group**: the next dispatch sits `pending` behind it, and a further dispatch **cancels the pending one** (observed 2026-09-03: a staging dispatch was cancelled by a production dispatch 21 seconds later, and a duplicate production run held the group for three hours). Cancel or approve the parked run before dispatching again; cancelling is Deli's call, not an agent's.
+- **Production deploys are manual:** `gh workflow run deploy.yml --repo delimatsuo/heykevin -f target=production --ref main` (or "Run workflow" on the `Deploy` workflow in the Actions tab with `target=production`). The job refuses to run from any ref other than `main`.
 - Run `scripts/smoke_release.sh https://kevin-api-staging-l63rergg7a-uc.a.run.app staging` after the staging deploy and before production. Set `ADMIN_API_TOKEN` to include the authenticated admin overview smoke check.
 - Direct `gcloud run deploy kevin-api --source .` from a developer machine also works, but it bypasses CI tests and deploy approval, so prefer the workflow_dispatch path after staging is verified.
 
@@ -266,5 +276,5 @@ Key variables — full list managed via `gcloud run services update`:
 | `PIN_RATE_WINDOW_SECONDS` | Rolling-window length for `PIN_RATE_LIMIT`, in seconds (F-15). Default `3600` (60 min). |
 | `MAX_UPLOAD_BYTES` | Hard cap on `/api/estimates/{token}/upload` request bodies (F-10). Default `52428800` (50 MiB). The endpoint streams the body and aborts with HTTP 413 the moment the running total exceeds this value, preventing DoS via memory exhaustion. |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key applied to call transcripts at rest (F-11). Generate with `python scripts/gen_transcript_key.py`. When unset, transcripts are written in plaintext (legacy mode); reads remain backwards compatible. |
-| `TWILIO_REGULATORY_CONTACT_EMAIL` | Contact email Twilio holds on regulatory bundles for EU/BR number provisioning (twilio 9.x `BundleList.create` requires it). Unset → regulatory-country provisioning refuses with a clear server-side error ("Regulatory contact email not configured"); US/CA/GB unaffected. Set on `kevin-api` 2026-09-03 (`kevin-api-00265-jr8`); staging still unset — once this code deploys to staging, staging's EU/BR provisioning refuses on config until the variable is set there. |
+| `TWILIO_REGULATORY_CONTACT_EMAIL` | Contact email Twilio holds on regulatory bundles for EU/BR number provisioning (twilio 9.x `BundleList.create` requires it). Unset → regulatory-country provisioning refuses with a clear server-side error ("Regulatory contact email not configured"); US/CA/GB unaffected. Set on `kevin-api` (`kevin-api-00265-jr8`) and on `kevin-api-staging` 2026-09-03; both services carry it. |
 | `LAPSED_NUMBER_RELEASE_ENABLED` | Release the Twilio number of any account that has been `expired` for 30+ days with no forwarded or inbound call in that window (inbound calls are stamped on the contractor as `last_inbound_call_at` by the incoming webhook, including calls on expired accounts), at most 5 per 6-hour sweep run per Cloud Run instance, with an SMS notice to the owner. Two extra holds: releases start only once the stamp has been live for 30 days (`system/number_release.observation_started_at`, written on the first sweep after deploy even while the flag is off), and any account that ever bound an Apple receipt is re-checked live; ACTIVE, IN_BILLING_RETRY, IN_GRACE_PERIOD or a failed check holds the number. If this code is ever rolled back after the marker was written, delete `system/number_release` before re-enabling so the window restarts. Default `false`; the 14-day deleted-app release runs regardless. Owner decision 2026-09-03: an idle number costs $1.15/month and is not worth holding past 30 days. |

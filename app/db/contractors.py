@@ -655,11 +655,7 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     if country_code not in COUNTRY_NAMES:
         raise Exception(f"Unsupported country: {country_code}")
 
-    client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-    loop = asyncio.get_event_loop()
-
-    # For regulatory countries, create a bundle first
-    bundle_sid = None
+    business_address = business_city = business_name = ""
     if country_code in REGULATORY_COUNTRIES:
         business_address = contractor.get("business_address", "")
         business_city = contractor.get("business_city", "")
@@ -667,6 +663,11 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         if not business_address or not business_city:
             raise Exception("Business address and city required for number provisioning in this country")
 
+    client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+    loop = asyncio.get_event_loop()
+
+    bundle_sid = None
+    if country_code in REGULATORY_COUNTRIES:
         bundle_sid = await _create_regulatory_bundle(
             client, loop, country_code, business_name, business_address, business_city
         )

@@ -210,10 +210,25 @@ async def test_regulatory_country_without_address_raises_before_any_twilio_call(
     with pytest.raises(Exception, match="Business address and city required"):
         await contractors_db.provision_twilio_number("c-de", country_code="DE")
 
-    # The client object is constructed before this guard (construction is
-    # local, no I/O); what matters is that nothing is asked of Twilio.
-    assert all(client.calls == [] for client in fake_twilio.instances)
+    # The address guard now runs before the Twilio client is even
+    # constructed, so no client exists and nothing was asked of Twilio.
+    assert fake_twilio.instances == []
     assert contractor_store["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_regulatory_country_without_address_never_constructs_the_twilio_client(
+    contractor_store, monkeypatch
+):
+    class ClientConstructedBeforeGuard:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Twilio client constructed before the address guard")
+
+    monkeypatch.setattr(twilio.rest, "Client", ClientConstructedBeforeGuard)
+    contractor_store["doc"] = _german_business(business_address="")
+
+    with pytest.raises(Exception, match="Business address and city required"):
+        await contractors_db.provision_twilio_number("c-de", country_code="DE")
 
 
 @pytest.mark.asyncio
@@ -445,10 +460,8 @@ _RAW_FRAGMENTS = (
             "No phone numbers available in your area. Please try a different city.",
         ),
         (
-            # Pins current behaviour: a missing regulation is reported as a numbers
-            # problem. Semantically it is closer to "country not supported".
             "No Twilio regulations found for Germany local numbers",
-            "No phone numbers available in your area. Please try a different city.",
+            "Your country is not yet supported for number provisioning.",
         ),
         (
             "Regulatory contact email not configured for Germany number provisioning",

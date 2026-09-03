@@ -62,6 +62,12 @@ def setup_logging(level: str = "INFO"):
     # Geocoding call). Same for httpcore's connection logs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # twilio-python (twilio/http/__init__.py, log_request/log_response) logs
+    # every REST call at INFO: the request line with its query string, the
+    # query params, and all non-authorization headers. Lookup and list calls
+    # put caller phone numbers in that URL, so keep the SDK at WARNING.
+    for name in ("twilio", "twilio.http_client", "twilio.async_http_client"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

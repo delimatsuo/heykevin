@@ -125,6 +125,17 @@ def evaluate_subscription_access(
 NUMBER_RELEASE_QUIET_DAYS = 14
 
 
+def _readable_timestamp(value) -> Optional[float]:
+    """Return a positive float timestamp, or None if the value is unusable.
+
+    Rejects bools (a subclass of int), non-numbers, zero and negatives, so a
+    corrupt field can never satisfy a "quiet for N days" comparison.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
 def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
     """True only if releasing this contractor's Twilio number cannot strand a forward.
 
@@ -149,8 +160,8 @@ def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
 
     quiet_window = NUMBER_RELEASE_QUIET_DAYS * 86400
 
-    deleted_at = contractor.get("deleted_app_detected_at")
-    if not isinstance(deleted_at, (int, float)) or not deleted_at:
+    deleted_at = _readable_timestamp(contractor.get("deleted_app_detected_at"))
+    if deleted_at is None:
         return False
     if now - deleted_at < quiet_window:
         return False
@@ -158,11 +169,84 @@ def is_safe_to_release_number(contractor: Optional[dict], now: float) -> bool:
     if "forwarding_last_seen_at" in contractor:
         last_seen = contractor.get("forwarding_last_seen_at")
         if last_seen is not None:
-            if not isinstance(last_seen, (int, float)) or not last_seen:
+            seen_ts = _readable_timestamp(last_seen)
+            if seen_ts is None:
                 # Present but unreadable — we cannot rule out a live forward.
                 return False
-            if now - last_seen < quiet_window:
+            if now - seen_ts < quiet_window:
                 return False
+
+    return True
+
+
+# Owner decision 2026-09-03: a lapsed account's number is not worth holding
+# past 30 days. Twilio bills $1.15/month per idle US local number.
+LAPSED_NUMBER_RELEASE_DAYS = 30
+
+
+def is_safe_to_release_lapsed_number(
+    contractor: Optional[dict], now: float, last_call_at
+) -> bool:
+    """True only if a lapsed account's Twilio number can be released.
+
+    This is the second release trigger, beside is_safe_to_release_number
+    (deleted app). It applies to accounts that simply stopped paying and
+    requires, all at once:
+
+    1. subscription_status == "expired" and a number to release. `active` is
+       never a candidate here: a stale `active` expiry may just be a missed
+       Apple notification, and `trial` must first be swept to `expired`.
+    2. The paid or trial term ended at least LAPSED_NUMBER_RELEASE_DAYS ago.
+       Term end is derived like the call gate does (trial_expires_at), so
+       legacy 3-day trial records get their real 14-day window.
+    3. The number has been quiet for the same window: no carrier-confirmed
+       forwarded call and no inbound call on record. `last_call_at` is the
+       newest call timestamp the caller looked up (None = no calls); anything
+       unreadable blocks, exactly like the deleted-app guard.
+
+    Condition 3 is the one that matters. Twilio recycles released numbers, so
+    releasing one that still receives forwarded calls hands this user's
+    callers to a stranger. Fails closed on every ambiguity.
+    """
+    if not contractor:
+        return False
+
+    status = str(contractor.get("subscription_status") or "").strip().lower()
+    if status != "expired":
+        return False
+    if not str(contractor.get("twilio_number") or "").strip():
+        return False
+
+    term_end = trial_expires_at(contractor)
+    if not term_end:
+        return False
+
+    window = LAPSED_NUMBER_RELEASE_DAYS * 86400
+    if now - term_end < window:
+        return False
+
+    if "forwarding_last_seen_at" in contractor:
+        last_seen = contractor.get("forwarding_last_seen_at")
+        if last_seen is not None:
+            seen_ts = _readable_timestamp(last_seen)
+            if seen_ts is None or now - seen_ts < window:
+                return False
+
+    # Stamped on every inbound call by the incoming webhook, including calls
+    # on expired accounts, which write no call record. Absent means no call
+    # since the stamp shipped; the sweep only trusts that after a full
+    # observation window (see number_release.py).
+    if "last_inbound_call_at" in contractor:
+        stamped = contractor.get("last_inbound_call_at")
+        if stamped is not None:
+            stamp_ts = _readable_timestamp(stamped)
+            if stamp_ts is None or now - stamp_ts < window:
+                return False
+
+    if last_call_at is not None:
+        call_ts = _readable_timestamp(last_call_at)
+        if call_ts is None or now - call_ts < window:
+            return False
 
     return True
 

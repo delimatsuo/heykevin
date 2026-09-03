@@ -249,6 +249,29 @@ async def _record_forwarding_evidence(contractor_id: str, seen_at: float):
         logger.warning(f"Could not record forwarding evidence: {type(e).__name__}")
 
 
+async def _record_inbound_call_evidence(contractor_id: str, seen_at: float):
+    """Stamp last_inbound_call_at on every inbound call, whatever the route.
+
+    The number-release sweep treats a number as quiet only if nothing has
+    reached it for 30 days. Calls on expired accounts take the ring-through
+    or voicemail branch below and never write a call record, so without this
+    stamp they would be invisible to that check. Same contract as
+    _record_forwarding_evidence: best-effort, fire-and-forget, hourly throttle.
+    """
+    try:
+        from app.db.contractors import get_contractor, update_contractor
+
+        contractor = await get_contractor(contractor_id)
+        if not contractor:
+            return
+        previous = contractor.get("last_inbound_call_at") or 0
+        if isinstance(previous, (int, float)) and seen_at - previous < 3600:
+            return
+        await update_contractor(contractor_id, {"last_inbound_call_at": seen_at})
+    except Exception as e:
+        logger.warning(f"Failed to record inbound call evidence for {contractor_id}: {e}")
+
+
 async def _handle_deleted_app(
     contractor_id: str,
     caller_phone: str,
@@ -319,6 +342,9 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 asyncio.create_task(
                     _record_forwarding_evidence(contractor_id, time.time())
                 )
+            # Every inbound call, forwarded or not, before the subscription
+            # branch so expired accounts are covered too.
+            asyncio.create_task(_record_inbound_call_evidence(contractor_id, time.time()))
         else:
             contractor_id = ""
             owner_name = settings.user_name

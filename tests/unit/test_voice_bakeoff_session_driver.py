@@ -70,8 +70,10 @@ _EXPECTED_LIVE_HASHES = {
     # owner-approved purge spec). Keep in sync with the pin in
     # test_voice_bakeoff_turn_composition.py and update only with a reviewed
     # main.py change.
+    # Re-pinned 2026-09-03: _expired_contractor_cleanup delegates to
+    # app/services/number_release.py (30-day lapsed-number release).
     Path("app/main.py"):
-        "ef0822b399b292cf56345dd8f73adf13b9c33ec3877bf806a38bbbcf793555f9",
+        "06cd4871ed673137d0d86c6f3b1f9b0ed7d3c2998e23e15a886f2ac9ef39dd6e",
     # Re-pinned 2026-08-24 for integration token envelope enablement checks.
     Path("app/webhooks/media_stream.py"):
         "cce7f37acd144358d22a03bb1a43ce46f80075eeeedfcf7e1134fc94b9eedff9",

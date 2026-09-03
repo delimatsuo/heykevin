@@ -39,7 +39,10 @@ struct SettingsView: View {
     @State private var businessHoursStart = Calendar.current.date(from: DateComponents(hour: 8, minute: 0)) ?? Date()
     @State private var businessHoursEnd = Calendar.current.date(from: DateComponents(hour: 17, minute: 0)) ?? Date()
     @State private var forwardingInstructions: ForwardingInstructions?
-    private let forwardingCountry = ForwardingCountry.resolve()
+    @State private var countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: "")
+    @State private var isSavingCountry = false
+    @State private var countrySaveError = ""
+    private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
 
     private var kevinNumber: String {
         appState.kevinNumber
@@ -74,6 +77,29 @@ struct SettingsView: View {
                         // is the confusion this section exists to remove.
                         Text(planLabel)
                             .foregroundStyle(Color.secondary)
+                    }
+
+                    // Only a user pick reaches the binding's setter and can write;
+                    // profile load and failure-revert assign countrySelection
+                    // directly and therefore never write to the server.
+                    Picker(selection: countryBinding) {
+                        ForEach(SettingsCountry.supported, id: \.self) { code in
+                            Text(SettingsCountry.displayName(code)).tag(code)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "Country"))
+                            Text(String(localized: "Sets the call forwarding codes Kevin shows you."))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
+                    }
+                    .disabled(isSavingCountry)
+
+                    if !countrySaveError.isEmpty {
+                        Text(countrySaveError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
                     }
 
                     Button {
@@ -945,6 +971,12 @@ struct SettingsView: View {
                 let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
                 appState.autoReplySms = autoReply
 
+                // Load account country (root-authoritative on the server)
+                if let cc = contractor["country_code"] as? String, SettingsCountry.isSupported(cc) {
+                    appState.countryCode = cc.uppercased()
+                    countrySelection = cc.uppercased()
+                }
+
                 // Load business hours
                 let formatter = DateFormatter()
                 formatter.dateFormat = "HH:mm"
@@ -983,6 +1015,42 @@ struct SettingsView: View {
         } catch {
             debugLog("Update SIT tone setting failed: \(error)")
             await MainActor.run { saveError = String(localized: "Failed to save setting. Please try again.") }
+        }
+    }
+
+    private var countryBinding: Binding<String> {
+        Binding(
+            get: { countrySelection },
+            set: { picked in
+                countrySelection = picked
+                if SettingsCountryFlow.shouldWrite(picked: picked, accountCountry: appState.countryCode) {
+                    saveCountry(picked)
+                }
+            }
+        )
+    }
+
+    private func saveCountry(_ code: String) {
+        guard !appState.contractorId.isEmpty, !isSavingCountry else { return }
+        countrySaveError = ""
+        isSavingCountry = true
+        Task {
+            let returned = await APIClient.shared.updateCountryCode(
+                contractorId: appState.contractorId,
+                countryCode: code
+            )
+            await MainActor.run {
+                isSavingCountry = false
+                if SettingsCountryFlow.isConfirmed(requested: code, returned: returned) {
+                    appState.countryCode = code
+                } else {
+                    // Revert without writing: assigning the state directly
+                    // bypasses the binding's setter. The forwarding codes must
+                    // never follow a country the server did not confirm.
+                    countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
+                    countrySaveError = String(localized: "Failed to save setting. Please try again.")
+                }
+            }
         }
     }
 
@@ -1194,6 +1262,9 @@ struct SettingsView: View {
             case .deleted:
                 appState.contractorId = ""
                 appState.kevinNumber = ""
+                // Otherwise a new account on this device would key its forwarding
+                // codes on the deleted account's country.
+                appState.countryCode = ""
                 appState.isOnboarded = false
                 APIClient.shared.contractorToken = ""
             case .failed:

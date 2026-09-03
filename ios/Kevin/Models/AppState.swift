@@ -229,6 +229,12 @@ class AppState: ObservableObject {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.kevinLanguage, forKey: "kevinLanguage") } }
     }
 
+    // Account country (ISO 3166-1 alpha-2), root-authoritative on the server;
+    // mirrored here so forwarding codes key on it. Empty = not yet loaded.
+    @Published var countryCode: String = UserDefaults.standard.string(forKey: "countryCode") ?? "" {
+        didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.countryCode, forKey: "countryCode") } }
+    }
+
     // Unread calls — tracked locally by call ID
     @Published var readCallIds: Set<String> = {
         let arr = UserDefaults.standard.stringArray(forKey: "readCallIds") ?? []

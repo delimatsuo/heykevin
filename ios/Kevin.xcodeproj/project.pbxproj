@@ -39,11 +39,13 @@
 		BDD86EC278FFF225F73A8773 /* KeychainManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 359DC411E16B65BDC5671DB2 /* KeychainManager.swift */; };
 		C9EA0A211944CEE40CEC243D /* CallHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09A23D5E418687FDCFD9F90B /* CallHistoryView.swift */; };
 		CBC1321AF32D63C2E942389B /* PhoneFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */; };
+		CE4E2CEC954085A7FD2B48AB /* SettingsCountryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */; };
 		D84086E76D3C95C468C1232A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F13DF6B56C517300EE66A80B /* SettingsView.swift */; };
 		D941F4E2B5D75A232360FEDB /* UpdateGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A88828214BCFD33CE2F29216 /* UpdateGate.swift */; };
 		D982E08E8C9387D1889A8CE3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 355A811D1510B586161B0963 /* PrivacyInfo.xcprivacy */; };
 		EC3DBCCF4D0EC9EB624553E4 /* AppStoreScreenshotFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C9DE1B27DFA1888B44DD4C6 /* AppStoreScreenshotFixtures.swift */; };
 		EC5B03A1FF79D48D9FB5C28A /* WhatsNewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DA8688618EC1418EC76C373 /* WhatsNewSheet.swift */; };
+		F32453F5B03451C8BD41203F /* SettingsCountry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B7722B929833EF075295A83 /* SettingsCountry.swift */; };
 		F9A91D699C206F4EA85584A3 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 5B8F3D0C955D71321170BC03 /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
@@ -82,6 +84,7 @@
 		7D5BA48FE5494D5FC061B7B7 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
 		82CF29BB00A2E1D12106350D /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIdentityRefresher.swift; sourceTree = "<group>"; };
+		8B7722B929833EF075295A83 /* SettingsCountry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsCountry.swift; sourceTree = "<group>"; };
 		8C9DE1B27DFA1888B44DD4C6 /* AppStoreScreenshotFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreScreenshotFixtures.swift; sourceTree = "<group>"; };
 		8CF580A4F3F56EFF7D346DB8 /* InCallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InCallView.swift; sourceTree = "<group>"; };
 		8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersionTests.swift; sourceTree = "<group>"; };
@@ -98,6 +101,7 @@
 		EA4F50F9BE60CBE958B7212B /* Products.storekit */ = {isa = PBXFileReference; path = Products.storekit; sourceTree = "<group>"; };
 		EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDeletionTests.swift; sourceTree = "<group>"; };
 		EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSyncManager.swift; sourceTree = "<group>"; };
+		F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsCountryTests.swift; sourceTree = "<group>"; };
 		F13DF6B56C517300EE66A80B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -181,6 +185,7 @@
 				EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */,
 				8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */,
 				CB4523976C8CA1F94FD69173 /* ForwardingInstructionsTests.swift */,
+				F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */,
 				C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */,
 			);
 			path = KevinTests;
@@ -214,6 +219,7 @@
 				EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */,
 				030EFAEC8F57B2AEEA9D3692 /* ForwardingInstructions.swift */,
 				359DC411E16B65BDC5671DB2 /* KeychainManager.swift */,
+				8B7722B929833EF075295A83 /* SettingsCountry.swift */,
 				62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */,
 				26F75183A354A43842B21498 /* SubscriptionVerification.swift */,
 			);
@@ -353,6 +359,7 @@
 				3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */,
 				2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */,
 				B670617C06440B284622AA7E /* ForwardingInstructionsTests.swift in Sources */,
+				CE4E2CEC954085A7FD2B48AB /* SettingsCountryTests.swift in Sources */,
 				1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -382,6 +389,7 @@
 				B1252FCCDCACDFED84D7082E /* PaywallView.swift in Sources */,
 				CBC1321AF32D63C2E942389B /* PhoneFormatter.swift in Sources */,
 				8B6E78B156D9D3B1709602BA /* ServicesView.swift in Sources */,
+				F32453F5B03451C8BD41203F /* SettingsCountry.swift in Sources */,
 				D84086E76D3C95C468C1232A /* SettingsView.swift in Sources */,
 				925E51ED40B8CFE41A644C3E /* SubscriptionManager.swift in Sources */,
 				949E492170B9C2A6AFE5A138 /* SubscriptionVerification.swift in Sources */,

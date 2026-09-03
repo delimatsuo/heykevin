@@ -16,7 +16,7 @@ struct OnboardingView: View {
     @State private var phoneNumber = ""
     @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var forwardingInstructions: ForwardingInstructions?
-    private let forwardingCountry = ForwardingCountry.resolve()
+    private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
     @State private var showPaywall = false
 
     private let businessProductID = "com.kevin.callscreen.business.monthly"

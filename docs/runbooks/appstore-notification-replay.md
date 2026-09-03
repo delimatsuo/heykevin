@@ -76,7 +76,8 @@ Every fetched item is verified with the production webhook's own JWS
 verifier before anything else happens to it — same certificate-chain
 pinning, same signature check, same bundle ID check. Certificate validity
 is checked at each notification's own signing time (its payload's
-`signedDate`), not wall-clock now, so a signing leaf that has since
+`signedDate`), not wall-clock now, falling back to the current time when a
+payload carries no usable signedDate, so a signing leaf that has since
 expired or rotated does not cause historical notifications to be
 rejected. An item that fails verification is counted as `rejected` and is
 **never** applied, regardless of `--apply`. A non-zero `rejected` count on

@@ -37,6 +37,7 @@ from cryptography.x509.oid import NameOID
 from fastapi import HTTPException
 
 from app.api import contractors as contractors_api
+from app.db import contractors as contractors_db
 from app.services import apple_auth
 from app.webhooks import appstore as appstore_webhook
 
@@ -166,6 +167,22 @@ def _non_admin_request() -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(is_admin=False, contractor_id=""))
 
 
+async def _fake_no_apple_id_match(_apple_user_id: str):
+    """No contractor is already bound to the caller's Apple ID.
+
+    `api_create_contractor` does a call-time
+    `from app.db.contractors import get_contractor_by_apple_user_id` dedupe
+    lookup before it ever reaches the owner_phone-based hijack check these
+    tests exercise. Left unmocked, that lookup reaches real Firestore and
+    hangs under a network-denied sandbox (PR #229 fixed the identical
+    pattern in tests/unit/test_twilio_provisioning.py). Every test below
+    passes a nonblank apple_user_id that must NOT already match an existing
+    record, so returning None here reproduces the intended scenario as well
+    as unblocking it offline.
+    """
+    return None
+
+
 @pytest.fixture
 def stub_apple_identity(monkeypatch):
     """Bypass the real Apple JWKS round-trip; assert sub == expected_user_id
@@ -226,6 +243,7 @@ async def test_phone_lookup_rejects_apple_id_mismatch(stub_apple_identity, monke
     )
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update)
     monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_uuid)
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(
@@ -272,6 +290,7 @@ async def test_phone_lookup_allows_apple_id_match(stub_apple_identity, monkeypat
     )
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update)
     monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_uuid)
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
 
     response = await contractors_api.api_create_contractor(
         contractors_api.ContractorCreate(
@@ -329,6 +348,7 @@ async def test_phone_lookup_rejects_legacy_record_with_blank_apple_id(
     monkeypatch.setattr(contractors_api, "update_contractor", fail_update)
     monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
     monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fail_ensure_uuid)
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(
@@ -375,6 +395,7 @@ async def test_international_phone_hijack_rejection(stub_apple_identity, monkeyp
         "app.db.contractors.get_contractor_by_owner_phone", fake_get_by_phone
     )
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update)
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(
@@ -426,6 +447,7 @@ async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
     monkeypatch.setattr(contractors_api, "update_contractor", fail_update)
     monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
     monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fail_ensure_uuid)
+    monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(

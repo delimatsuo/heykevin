@@ -36,6 +36,7 @@ routing is confirmed (ruling, 2026-09-03).
 import base64
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -132,7 +133,12 @@ def _effective_validation_time(payload: dict) -> datetime:
     """
     now = datetime.now(timezone.utc)
     raw = payload.get("signedDate")
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, (int, float))
+        or not math.isfinite(raw)
+        or raw <= 0
+    ):
         return now
     try:
         signed_at = datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
@@ -172,6 +178,8 @@ def _decode_notification_payload(signed_payload: str) -> dict:
         header = json.loads(base64.urlsafe_b64decode(padded_header))
     except Exception as e:
         raise ValueError(f"Invalid JWS header: {e}")
+    if not isinstance(header, dict):
+        raise ValueError("JWS header is not a JSON object")
 
     # 2026-09-03 follow-up (Task 8): decode the payload JSON early — right
     # after the header, before any certificate work — so its signedDate can

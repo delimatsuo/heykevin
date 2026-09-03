@@ -25,6 +25,9 @@ class Settings(DotenvProtectedBaseSettings):
     # Optional A2P Messaging Service. Empty keeps the legacy From-only payload.
     twilio_messaging_service_sid: str = ""
     twilio_sms_status_callback_url: str = ""
+    # Contact email Twilio holds on regulatory bundles (required by BundleList.create
+    # in twilio 9.x). Empty means regulatory-country provisioning refuses clearly.
+    twilio_regulatory_contact_email: str = ""
 
     # Vapi (deprecated — kept for backward compat)
     vapi_api_key: str = ""

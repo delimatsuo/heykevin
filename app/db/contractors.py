@@ -546,7 +546,17 @@ async def _create_regulatory_bundle(client, loop, country_code: str, business_na
 
     Returns the bundle SID. Raises if the bundle cannot be created or approved.
     """
+    from app.config import settings
+
     country_name = COUNTRY_NAMES.get(country_code, "")
+
+    # twilio 9.x requires a contact email on the bundle; without one the SDK
+    # raises TypeError inside the executor. Refuse clearly before any call.
+    contact_email = (settings.twilio_regulatory_contact_email or "").strip()
+    if not contact_email:
+        raise Exception(
+            f"Regulatory contact email not configured for {country_name} number provisioning"
+        )
 
     # Look up the regulation SID for this country + number type
     regulations = await loop.run_in_executor(
@@ -578,6 +588,7 @@ async def _create_regulatory_bundle(client, loop, country_code: str, business_na
         None,
         lambda: client.numbers.v2.regulatory_compliance.bundles.create(
             friendly_name=f"{business_name} - {country_name} number",
+            email=contact_email,
             regulation_sid=regulation_sid,
             iso_country=country_code,
             number_type="local",

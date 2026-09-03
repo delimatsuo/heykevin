@@ -879,7 +879,14 @@ struct SettingsView: View {
             let (data, _) = try await URLSession.shared.data(for: request)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let number = json["phone_number"] as? String, !number.isEmpty {
-                await MainActor.run { appState.kevinNumber = number }
+                let country = SettingsCountry.accountCountry(from: json)
+                await MainActor.run {
+                    appState.kevinNumber = number
+                    if let country {
+                        appState.countryCode = country
+                        countrySelection = country
+                    }
+                }
             }
         } catch {
             debugLog("Provision from settings failed: \(error)")
@@ -972,9 +979,9 @@ struct SettingsView: View {
                 appState.autoReplySms = autoReply
 
                 // Load account country (root-authoritative on the server)
-                if let cc = contractor["country_code"] as? String, SettingsCountry.isSupported(cc) {
-                    appState.countryCode = cc.uppercased()
-                    countrySelection = cc.uppercased()
+                if let country = SettingsCountry.accountCountry(from: contractor) {
+                    appState.countryCode = country
+                    countrySelection = country
                 }
 
                 // Load business hours

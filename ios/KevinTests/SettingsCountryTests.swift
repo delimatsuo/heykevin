@@ -111,3 +111,19 @@ extension SettingsCountryTests {
         XCTAssertFalse(SettingsCountryFlow.isConfirmed(requested: "GB", returned: nil))
     }
 }
+
+// MARK: - Reading the account country from a server dictionary
+
+extension SettingsCountryTests {
+    func testAccountCountryIsReadAndUppercased() {
+        XCTAssertEqual(SettingsCountry.accountCountry(from: ["country_code": "br", "status": "ok"]), "BR")
+        XCTAssertEqual(SettingsCountry.accountCountry(from: ["country_code": "GB"]), "GB")
+    }
+
+    func testAccountCountryIsNilWhenMissingUnsupportedOrNotAString() {
+        XCTAssertNil(SettingsCountry.accountCountry(from: ["status": "ok"]))
+        XCTAssertNil(SettingsCountry.accountCountry(from: ["country_code": "ZZ"]))
+        XCTAssertNil(SettingsCountry.accountCountry(from: ["country_code": 55]))
+        XCTAssertNil(SettingsCountry.accountCountry(from: ["country_code": ""]))
+    }
+}

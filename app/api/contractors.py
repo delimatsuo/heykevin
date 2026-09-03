@@ -449,19 +449,34 @@ async def api_get_contractor(contractor_id: str, request: Request):
 async def api_provision_number(contractor_id: str, request: Request):
     """Provision a Twilio number for a contractor."""
     require_contractor_access(request, contractor_id)
-    from app.db.contractors import provision_twilio_number, REGULATORY_COUNTRIES
+    from app.db.contractors import provision_twilio_number, REGULATORY_COUNTRIES, SUPPORTED_COUNTRIES
 
     contractor = await get_contractor(contractor_id)
     if not contractor:
         return {"status": "error", "message": "Contractor not found"}
     existing_number = contractor.get("twilio_number", "")
     if existing_number:
+        # Mirror GET /api/settings: report the stored country only when it is a
+        # supported string, else the same "US" default, so the two endpoints
+        # can never disagree about one field and corrupt data cannot 500.
+        stored_country = contractor.get("country_code")
+        reported_country = (
+            stored_country.strip().upper()
+            if isinstance(stored_country, str)
+            and stored_country.strip().upper() in SUPPORTED_COUNTRIES
+            else "US"
+        )
         logger.info(
             "Provision-number request for %s reused existing number %s",
             contractor_id,
             redact_phone(existing_number),
         )
-        return {"status": "ok", "phone_number": existing_number, "existing": True}
+        return {
+            "status": "ok",
+            "phone_number": existing_number,
+            "existing": True,
+            "country_code": reported_country,
+        }
 
     country_code = _resolve_country_code(
         contractor.get("country_code", ""),
@@ -476,7 +491,7 @@ async def api_provision_number(contractor_id: str, request: Request):
 
     try:
         number = await provision_twilio_number(contractor_id, country_code=country_code)
-        return {"status": "ok", "phone_number": number}
+        return {"status": "ok", "phone_number": number, "country_code": country_code}
     except Exception as e:
         logger.error(f"Number provisioning failed for {contractor_id}: {e}", exc_info=True)
         error_msg = str(e)

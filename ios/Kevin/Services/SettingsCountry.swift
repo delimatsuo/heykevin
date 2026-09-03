@@ -12,6 +12,13 @@ enum SettingsCountry {
     static func displayName(_ code: String, locale: Locale = .current) -> String {
         locale.localizedString(forRegionCode: code) ?? code
     }
+
+    /// The account country carried by a contractor profile or provisioning
+    /// response, or nil when absent, unsupported, or not a string.
+    static func accountCountry(from dictionary: [String: Any]) -> String? {
+        guard let raw = dictionary["country_code"] as? String, isSupported(raw) else { return nil }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
 }
 
 /// Extracts the country the server actually returned from `PUT /api/settings`.

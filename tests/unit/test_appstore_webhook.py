@@ -133,6 +133,7 @@ async def test_unexpected_service_exception_returns_500(monkeypatch):
 
 import base64
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
@@ -141,14 +142,24 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.x509.oid import NameOID
 
+from app.config import settings
+
 
 def _name(common_name: str) -> x509.Name:
     return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
 
 
-def _make_cert(common_name: str, issuer: x509.Name, issuer_key, subject_key, *, is_ca: bool):
+def _make_cert(
+    common_name: str,
+    issuer: x509.Name,
+    issuer_key,
+    subject_key,
+    *,
+    is_ca: bool,
+    oids: tuple[str, ...] = (),
+):
     now = datetime.now(timezone.utc)
-    return (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(_name(common_name))
         .issuer_name(issuer)
@@ -157,18 +168,40 @@ def _make_cert(common_name: str, issuer: x509.Name, issuer_key, subject_key, *, 
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=is_ca, path_length=None), critical=True)
-        .sign(issuer_key, hashes.SHA256())
     )
+    for oid in oids:
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(x509.ObjectIdentifier(oid), b"\x05\x00"),
+            critical=False,
+        )
+    return builder.sign(issuer_key, hashes.SHA256())
 
 
-def _fake_apple_chain():
-    """Return (leaf_private_key, [leaf, intermediate, root]) — the x5c order."""
+def _fake_apple_chain(
+    *,
+    leaf_oids: tuple[str, ...] | None = None,
+    intermediate_oids: tuple[str, ...] | None = None,
+):
+    """Return (leaf_private_key, [leaf, intermediate, root]) — the x5c order.
+
+    By default the leaf and intermediate carry Apple's marker OIDs (as real
+    App Store Server Notifications certs do). Pass overrides to build
+    malformed chains for negative tests.
+    """
+    if leaf_oids is None:
+        leaf_oids = (appstore_webhook.APPLE_LEAF_OID,)
+    if intermediate_oids is None:
+        intermediate_oids = (appstore_webhook.APPLE_INTERMEDIATE_OID,)
     root_key = ec.generate_private_key(ec.SECP256R1())
     root = _make_cert("Fake Apple Root CA", _name("Fake Apple Root CA"), root_key, root_key, is_ca=True)
     inter_key = ec.generate_private_key(ec.SECP256R1())
-    inter = _make_cert("Fake WWDR CA", root.subject, root_key, inter_key, is_ca=True)
+    inter = _make_cert(
+        "Fake WWDR CA", root.subject, root_key, inter_key, is_ca=True, oids=intermediate_oids,
+    )
     leaf_key = ec.generate_private_key(ec.SECP256R1())
-    leaf = _make_cert("Fake App Store Signer", inter.subject, inter_key, leaf_key, is_ca=False)
+    leaf = _make_cert(
+        "Fake App Store Signer", inter.subject, inter_key, leaf_key, is_ca=False, oids=leaf_oids,
+    )
     return leaf_key, [leaf, inter, root]
 
 
@@ -208,7 +241,14 @@ def _sign_jws(payload: dict, leaf_key, chain, *, raw_signature: bool = True) -> 
 def test_es256_raw_signature_per_rfc7518_is_accepted(monkeypatch):
     leaf_key, chain = _fake_apple_chain()
     _trust_root(monkeypatch, chain[-1])
-    payload = {"notificationType": "DID_RENEW", "data": {"environment": "Production"}}
+    # bundleId is required under the 2026-09-03 fail-closed rule; it was
+    # previously optional here (the old check was `if bundle_id and ...`),
+    # but this test's intent — that a correctly-formed raw ES256 signature
+    # per RFC 7518 is accepted — is unaffected by adding it.
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id, "environment": "Production"},
+    }
 
     decoded = appstore_webhook._decode_notification_payload(
         _sign_jws(payload, leaf_key, chain, raw_signature=True)
@@ -256,4 +296,110 @@ def test_bundle_id_mismatch_is_rejected_after_valid_signature(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="Bundle ID mismatch"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-03 follow-up: exactly-3 certificate chain, Apple marker OIDs on
+# leaf/intermediate, bundleId fail-closed, environment mismatch is log-only.
+# ---------------------------------------------------------------------------
+
+
+def test_two_cert_chain_is_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    leaf, _inter, root = chain
+    token = _sign_jws({"notificationType": "DID_RENEW", "data": {}}, leaf_key, [leaf, root])
+
+    with pytest.raises(ValueError, match="exactly 3"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_four_cert_chain_is_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    leaf, inter, root = chain
+    token = _sign_jws({"notificationType": "DID_RENEW", "data": {}}, leaf_key, [leaf, inter, root, root])
+
+    with pytest.raises(ValueError, match="exactly 3"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_leaf_without_marker_oid_is_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain(leaf_oids=())
+    _trust_root(monkeypatch, chain[-1])
+    token = _sign_jws({"notificationType": "DID_RENEW", "data": {}}, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="Leaf certificate lacks"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_intermediate_without_marker_oid_is_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain(intermediate_oids=())
+    _trust_root(monkeypatch, chain[-1])
+    token = _sign_jws({"notificationType": "DID_RENEW", "data": {}}, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="Intermediate certificate lacks"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_swapped_marker_oids_are_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain(
+        leaf_oids=(appstore_webhook.APPLE_INTERMEDIATE_OID,),
+        intermediate_oids=(appstore_webhook.APPLE_LEAF_OID,),
+    )
+    _trust_root(monkeypatch, chain[-1])
+    token = _sign_jws({"notificationType": "DID_RENEW", "data": {}}, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="Leaf certificate lacks"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_missing_bundle_id_is_rejected(monkeypatch):
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    token = _sign_jws({"notificationType": "TEST", "data": {}}, leaf_key, chain)
+
+    with pytest.raises(ValueError, match="Missing bundleId"):
+        appstore_webhook._decode_notification_payload(token)
+
+
+def test_bundle_id_from_summary_section_is_accepted(monkeypatch):
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    payload = {
+        "notificationType": "RENEWAL_EXTENSION",
+        "summary": {"bundleId": settings.appstore_bundle_id},
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    decoded = appstore_webhook._decode_notification_payload(token)
+
+    assert decoded == payload
+
+
+def test_environment_mismatch_is_logged_not_rejected(monkeypatch, caplog):
+    leaf_key, chain = _fake_apple_chain()
+    _trust_root(monkeypatch, chain[-1])
+    monkeypatch.setattr(settings, "appstore_environment", "production")
+    payload = {
+        "notificationType": "DID_RENEW",
+        "data": {"bundleId": settings.appstore_bundle_id, "environment": "Sandbox"},
+    }
+    token = _sign_jws(payload, leaf_key, chain)
+
+    with caplog.at_level(logging.WARNING, logger="app.webhooks.appstore"):
+        decoded = appstore_webhook._decode_notification_payload(token)
+
+    assert decoded == payload
+    assert "differs from configured" in caplog.text
+
+
+def test_x5c_with_non_string_entry_is_rejected():
+    header = {"alg": "ES256", "x5c": [12345]}
+    h = _b64url(json.dumps(header).encode())
+    p = _b64url(json.dumps({"notificationType": "DID_RENEW", "data": {}}).encode())
+    token = f"{h}.{p}.{_b64url(b'sig')}"
+
+    with pytest.raises(ValueError, match="Malformed x5c"):
         appstore_webhook._decode_notification_payload(token)

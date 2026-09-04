@@ -189,21 +189,27 @@ number that would collide at signup collides here too. Three outcomes:
 On the message and enumeration (T-4): `api_create_contractor` actually returns
 three distinct 409 bodies for what a caller experiences as one outcome —
 "An account already exists for this phone number. Please contact support to
-recover your account." for the ambiguity case and for a legacy match with no
-`apple_user_id`, but "An account already exists for this phone number under a
-different Apple ID." for an active match whose `apple_user_id` differs from the
-caller's, which is the realistic collision shape. That three-body split is
-itself a small existence oracle: the response text tells a caller whether a
-collision is a legacy record or an Apple-ID mismatch, not merely that one
-exists. The rebind endpoint does not replicate that split. It returns exactly
-one message for every collision shape it can produce — ambiguity error or an
-active-contractor match — so a rebind caller learns nothing about *why* a
-number collided, only *that* it did. This is a deliberate unification, not a
-byte-for-byte match with `api_create_contractor`'s text (see §5): closing the
-oracle on this path is worthwhile on its own even though
-`api_create_contractor`'s three-body split is unchanged; if Deli later wants
-that split closed too, it is a separate, smaller fix to the create endpoint,
-not a reason to hold this one back.
+recover your account." for the ambiguity case *and* for a legacy match with no
+`apple_user_id`, but the more specific "An account already exists for this
+phone number under a different Apple ID." for an active match whose
+`apple_user_id` differs from the caller's, which is the realistic collision
+shape. That three-body split is itself a small existence oracle: the response
+text tells a caller whether a collision is a legacy record or an Apple-ID
+mismatch, not merely that one exists. The rebind endpoint returns exactly one
+message for every collision shape it can produce — ambiguity error or an
+active-contractor match — and that message is the same "...Please contact
+support to recover your account." string create already returns in two of its
+three branches. Reusing it is deliberate, not an oversight: it introduces no
+new string for an attacker to fingerprint, and it keeps the rebind's
+user-facing text consistent with the rest of the product. The security
+property that matters here is internal to the rebind, not about matching or
+diverging from create's wording: every rebind collision, whatever its cause,
+gets the *same* message, so the response never tells a rebind caller whether
+the target number is owned, ambiguous, or free. What the rebind deliberately
+does not do is reproduce create's more specific third body — it never returns
+"...under a different Apple ID." for any collision, including the
+active-contractor-match case where create would use exactly that string. See
+§5 for the exact bodies side by side.
 
 Note the lookup queries only `active == True` documents, so a deactivated
 account that once held the number does not block the rebind. That is the
@@ -377,12 +383,18 @@ All three live under the authenticated contractor router.
 The `An account already exists...` 409 above deliberately covers both of its
 causes — an active contractor already owning the target, or
 `PhoneDedupeAmbiguityError` — with one message, so a rebind caller cannot tell
-those two shapes apart from response text (T-4). It is **not** the same string
-as any of `api_create_contractor`'s three 409 bodies (two of which read
-"...Please contact support to recover your account.", the third "...under a
-different Apple ID."; see §3 Step 3): the rebind intentionally unifies what the
-create endpoint splits into two, rather than reusing either of the create
-endpoint's strings. A wrong code returns `404 No verification in progress`
+those two shapes apart from response text (T-4). That string is byte-identical
+to two of `api_create_contractor`'s three 409 bodies (the ambiguity case and
+the legacy-match-with-no-`apple_user_id` case both read "...Please contact
+support to recover your account."), and that overlap is deliberate: reusing
+create's existing generic string adds no new distinguishable response for an
+attacker to fingerprint, and it keeps the product's user-facing text
+consistent. The rebind does **not** reproduce create's third, more specific
+body — "...under a different Apple ID." — for any collision cause, including
+the active-match case where create would use it; see §3 Step 3 for why
+collapsing every rebind collision onto one message, rather than mirroring
+create's three-way split, is the security property that actually matters here.
+A wrong code returns `404 No verification in progress`
 **only** after the challenge is destroyed on the fifth failure; a wrong code with
 attempts remaining returns `400 Invalid code` with the remaining count omitted.
 
@@ -545,7 +557,7 @@ Negative tests, one per threat in §1:
 | T-1 | PATCH with `owner_phone` still drops it (extend `test_contractor_protected_fields.py`); a rebind targeting a number owned by another active account returns the generic 409 and writes nothing; a `start` for a `contractor_id` the token does not own returns 403 |
 | T-2 | A `verify` succeeds only for the code sent to the target; a code delivered to the *old* number is never accepted (no such code is ever generated); see T-7 below — those tests are what actually prove possession of the target number alone, with no valid session or Apple proof, is insufficient to write anything |
 | T-3 | Five wrong codes destroy the challenge and the sixth returns 404; comparison uses `hmac.compare_digest`; a 7-digit or alphabetic code is rejected on shape before any Firestore read |
-| T-4 | The collision 409 (an active contractor owns the target) and the ambiguity 409 (`PhoneDedupeAmbiguityError`) are byte-identical to *each other*; the rebind returns this same single message for every collision shape, and it is **not** asserted equal to any of `api_create_contractor`'s three 409 strings — the rebind intentionally has its own message (§3 Step 3); `start` never returns the target's full number |
+| T-4 | The collision 409 (an active contractor owns the target) and the ambiguity 409 (`PhoneDedupeAmbiguityError`) are byte-identical to *each other* — the rebind returns exactly one message for every collision shape it can produce. The test pins that single string as a literal in the rebind's own test file; it does not import or assert equality against `api_create_contractor`'s message constant, so the two endpoints' wording can evolve independently — even though today the rebind's string happens to match two of create's three bodies and never matches the third ("...under a different Apple ID.", §3 Step 3); `start` never returns the target's full number |
 | T-5 | With the account's `owner_phone_e164` mutated between start and verify, the transaction aborts with the CAS 409 and no field is written; a collision introduced between start and verify is caught by the in-transaction re-check |
 | T-6 | A successful rebind clears `forwarding_last_seen_at`, leaves `last_inbound_call_at` untouched, and returns both the old country's disable codes and the new country's enable codes |
 | T-7 | `start` without `apple_identity_token`, with a token whose `sub` differs from the stored `apple_user_id`, with a stale `iat`, and on an account with no `apple_user_id`, all return the generic 401; a request authenticated with the global admin bearer token and no `apple_identity_token` also returns the generic 401 and writes nothing — this is the test that proves the rebind endpoints do not inherit `_enforce_apple_identity`'s `is_admin` bypass |

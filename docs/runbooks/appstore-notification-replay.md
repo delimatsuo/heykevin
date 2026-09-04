@@ -164,21 +164,44 @@ email/phone.
 
 ## If the dry run fails to connect
 
-Any fetch failure — not just a non-200 from Apple — exits 1 with a
-one-line message naming the exception type, the base URL that was being
-called, and the environment (e.g. `error: Fetch failed against
-https://api.storekit.itunes.apple.com (production): ConnectError`), never
-a raw traceback and never the token, the JWT, or a transaction identifier.
+Every fetch failure exits 1 instead of a raw traceback, but the message
+shape depends on what actually failed — there are three:
 
-If that message is a name-resolution or connection error rather than an
-HTTP status from Apple, it most likely means the App Store host constant
-is wrong for this endpoint. The script reuses `APPSTORE_PRODUCTION_URL` /
-`APPSTORE_SANDBOX_URL` from `app/services/subscription.py` — the same
-constants the production service already verifies live purchases against
-for other App Store Server API calls, so those are the first (and most
-likely only) thing to check. All four candidate Apple hostnames considered
-for this service resolve fine in DNS, so a connection failure here points
-at *which endpoint*, not at basic network reachability. Which host Apple
-actually serves the Get Notification History endpoint from is otherwise
-unverified until a real dry run against it succeeds — this note
-deliberately does not assert that beyond what's checked above.
+- **A non-200 response from Apple** (a `RuntimeError` raised inside
+  `fetch_notification_history`) prints Apple's own message unchanged: the
+  HTTP status and a truncated response body straight from Apple's response
+  — e.g. `error: Get Notification History failed: HTTP 401 ...`. That
+  response body is not filtered for PII by this script, same as it has
+  always been; it names neither the base URL nor the exception type,
+  because that is not the kind of failure this is.
+- **A genuine connection failure** — DNS, TCP, TLS, timeout
+  (`httpx.TransportError` or `OSError`) — prints two lines: the exception
+  type, the base URL that was being called, the environment, and the
+  exception's own message (e.g. `error: Fetch failed against
+  https://api.storekit.itunes.apple.com (production): ConnectError: ...`),
+  followed by a line pointing at the App Store host constant. These
+  exception messages are safe to print in full — a socket/DNS/TLS failure
+  never carries the Authorization header, the token, or a transaction
+  identifier.
+- **Anything else** — most likely `token_factory()`
+  (`app.services.subscription._get_appstore_jwt`) raising while signing the
+  request, e.g. a malformed `APPSTORE_PRIVATE_KEY` — prints only the
+  exception type (its message is not proven credential-free the way a
+  transport error's is, so it is withheld) plus a line pointing at the App
+  Store credentials specifically, naming `APPSTORE_PRIVATE_KEY` (it must be
+  a PEM private key; `--from-cloud-run` copies it pipe-separated and it
+  must be un-mangled back into real newlines), and suggesting a re-run
+  under `python -X faulthandler` for a full traceback.
+
+For the connection-failure case specifically: it most likely means the App
+Store host constant is wrong for this endpoint. The script reuses
+`APPSTORE_PRODUCTION_URL` / `APPSTORE_SANDBOX_URL` from
+`app/services/subscription.py` — the same constants the production service
+already verifies live purchases against for other App Store Server API
+calls, so those are the first (and most likely only) thing to check. All
+four candidate Apple hostnames considered for this service resolve fine in
+DNS, so a connection failure here points at *which endpoint*, not at basic
+network reachability. Which host Apple actually serves the Get
+Notification History endpoint from is otherwise unverified until a real
+dry run against it succeeds — this note deliberately does not assert that
+beyond what's checked above.

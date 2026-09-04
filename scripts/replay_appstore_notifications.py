@@ -71,6 +71,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
+
 # app.config.settings freezes at first import of any app.* module, so the
 # sys.path insertion happens here (safe -- no app.* import yet) and every
 # app.* import is deferred until after --from-cloud-run has had a chance to
@@ -274,8 +276,13 @@ def main(argv: list[str] | None = None) -> int:
         display_end_date = (end_dt - timedelta(microseconds=1)).date().isoformat()
         window_desc = f"{start_dt.date().isoformat()} .. {display_end_date} (UTC, inclusive)"
     else:
+        # start_dt is `now - N days` at the current time of day, not midnight
+        # -- a bare date here would silently make the printed window look
+        # like it covers the whole boundary day when --days actually
+        # excludes its oldest hours. Print both ends as exact instants.
+        start_iso = start_dt.isoformat().replace("+00:00", "Z")
         now_iso = end_dt.isoformat().replace("+00:00", "Z")
-        window_desc = f"{start_dt.date().isoformat()} .. now ({now_iso}) (UTC)"
+        window_desc = f"{start_iso} .. now ({now_iso}) (UTC)"
     print(
         f"window: {window_desc}  "
         f"environment={environment}  onlyFailures={only_failures}  mode={mode}"
@@ -291,18 +298,26 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     except Exception as exc:  # noqa: BLE001 - every fetch failure (a non-200 from
-        # Apple, a DNS/connection error, a timeout, ...) must exit 1 with a usable
-        # message, never a raw traceback -- see the runbook's "If the dry run
-        # fails to connect" section. Never prints the token, the JWT, or any
-        # transaction identifier.
+        # Apple, a connection/DNS failure, a credentials problem raised while
+        # signing the request, ...) must exit 1 with a usable message, never a
+        # raw traceback -- see the runbook's "If the dry run fails to connect"
+        # section. Which details are safe to print depends on which of these
+        # this is; see the three branches below.
         if isinstance(exc, RuntimeError):
             # fetch_notification_history's own message already names Apple's
             # HTTP status and a truncated response body -- unchanged from
-            # before this guard widened.
+            # before this guard widened. That body comes straight from Apple
+            # and is not filtered for PII by this script, same as always.
             print(f"error: {exc}", file=sys.stderr)
-        else:
+        elif isinstance(exc, (httpx.TransportError, OSError)):
+            # A genuine connection/DNS/TLS/timeout failure -- the most likely
+            # real-world cause is a wrong App Store host constant. These
+            # exception messages are the diagnostic here and are safe to
+            # print in full: they describe a socket/TLS/DNS failure and never
+            # carry the Authorization header, the token, or a transaction id.
             print(
-                f"error: Fetch failed against {base_url} ({environment}): {type(exc).__name__}",
+                f"error: Fetch failed against {base_url} ({environment}): "
+                f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
             print(
@@ -310,6 +325,27 @@ def main(argv: list[str] | None = None) -> int:
                 "the App Store host constant is wrong for this endpoint -- check "
                 "APPSTORE_PRODUCTION_URL / APPSTORE_SANDBOX_URL in "
                 "app/services/subscription.py.",
+                file=sys.stderr,
+            )
+        else:
+            # Not a connection failure -- most likely token_factory()
+            # (_get_appstore_jwt) raised while signing the request, e.g. a
+            # malformed APPSTORE_PRIVATE_KEY (--from-cloud-run copies it
+            # pipe-separated; it must be un-mangled back into real newlines
+            # before it is a usable PEM key). Only the exception type is
+            # printed here -- unlike httpx.TransportError above, an arbitrary
+            # exception's message is not proven credential-free.
+            print(
+                f"error: Fetch failed against {base_url} ({environment}): {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            print(
+                "error: this does not look like a connection failure -- check the App "
+                "Store credentials, especially APPSTORE_PRIVATE_KEY (must be a PEM "
+                "private key; --from-cloud-run copies it pipe-separated and it must be "
+                "un-mangled back into real newlines). Re-run with `python -X "
+                "faulthandler scripts/replay_appstore_notifications.py ...` for a full "
+                "traceback.",
                 file=sys.stderr,
             )
         return 1

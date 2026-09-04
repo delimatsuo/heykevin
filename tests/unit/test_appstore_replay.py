@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -938,7 +939,6 @@ async def test_stale_line_carries_both_iso_dates_and_no_extra_pii():
 
     assert report.stale_skipped == 1
     [stale_line] = lines
-    assert "STALE" in stale_line
 
     account_iso = (
         datetime.fromtimestamp(stored_expires_seconds, tz=timezone.utc)
@@ -950,8 +950,14 @@ async def test_stale_line_carries_both_iso_dates_and_no_extra_pii():
         .isoformat()
         .replace("+00:00", "Z")
     )
-    assert account_iso in stale_line
-    assert notification_iso in stale_line
+    # Assert the whole rendered clause, not two independent substring checks
+    # -- two separate `in` assertions would still pass if the two dates were
+    # transposed (account vs. notification swapped).
+    expected_clause = (
+        f"STALE (account term ends {account_iso}, "
+        f"this notification's term ended {notification_iso}) — skipped"
+    )
+    assert expected_clause in stale_line
 
     assert full_original_id not in stale_line
     assert app_account_token not in stale_line
@@ -1192,16 +1198,19 @@ def test_cli_replay_exception_is_caught_and_reported(monkeypatch, capsys):
     assert "aborted" in out
 
 
-def test_cli_fetch_connect_error_exits_1_with_type_and_base_url_no_secrets(monkeypatch, capsys):
-    """A connection failure (the likely case: a wrong App Store hostname)
-    must not reach the operator as a raw traceback -- it exits 1 with a
-    usable, PII-free message naming the exception type and the base URL."""
+def test_cli_fetch_connect_error_exits_1_with_type_base_url_and_host_guidance(monkeypatch, capsys):
+    """A genuine connection failure (the likely real case: a wrong App Store
+    hostname) must not reach the operator as a raw traceback -- it exits 1
+    naming the exception type, the base URL, the exception's own message
+    (a socket/DNS/TLS failure never carries the Authorization header or a
+    credential, so it is safe and useful to show in full), and the
+    host-constant guidance."""
     mod = _load_cli_module()
 
-    secret_marker = "eyJhbGciOiJFUzI1NiJ9.super-secret-jwt-body.sig-should-not-print"
+    detail = "Connection refused: [Errno 61]"
 
     async def fake_fetch(**_kwargs):
-        raise httpx.ConnectError(f"Connection refused (debug detail: {secret_marker})")
+        raise httpx.ConnectError(detail)
 
     async def _unexpected_replay(*_args, **_kwargs):
         raise AssertionError("replay should not be called when fetch fails")
@@ -1216,7 +1225,45 @@ def test_cli_fetch_connect_error_exits_1_with_type_and_base_url_no_secrets(monke
     combined = captured.out + captured.err
     assert "ConnectError" in combined
     assert APPSTORE_SANDBOX_URL in combined
+    assert detail in combined
+    assert "host constant" in combined
+
+
+def test_cli_fetch_non_transport_error_gets_credential_guidance_not_host_guidance(
+    monkeypatch, capsys
+):
+    """Not every fetch failure is a connection problem: token_factory()
+    (_get_appstore_jwt) runs inside fetch_notification_history's own try
+    block, so a malformed APPSTORE_PRIVATE_KEY (mis-un-mangled by
+    --from-cloud-run's pipe-separated copy) raises something like
+    ValueError, not httpx.TransportError and not RuntimeError. That must
+    not be misdiagnosed as a wrong host constant -- it needs its own
+    credential-specific guidance, and unlike the transport-error branch,
+    only the exception TYPE is printed here (its message is not proven
+    credential-free), so a secret embedded in that message must never leak."""
+    mod = _load_cli_module()
+
+    secret_marker = "eyJhbGciOiJFUzI1NiJ9.super-secret-jwt-body.sig-should-not-print"
+
+    async def fake_fetch(**_kwargs):
+        raise ValueError(f"Could not deserialize key data (debug: {secret_marker})")
+
+    async def _unexpected_replay(*_args, **_kwargs):
+        raise AssertionError("replay should not be called when fetch fails")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", _unexpected_replay)
+
+    rc = mod.main(["--days", "7", "--environment", "sandbox"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "ValueError" in combined
     assert secret_marker not in combined
+    assert "host constant" not in combined
+    assert "APPSTORE_PRIVATE_KEY" in combined
+    assert "faulthandler" in combined
 
 
 def test_cli_fetch_runtime_error_still_exits_1_and_reports_status(monkeypatch, capsys):
@@ -1243,7 +1290,11 @@ def test_cli_fetch_runtime_error_still_exits_1_and_reports_status(monkeypatch, c
 
 def test_cli_days_banner_says_now_not_inclusive(monkeypatch, capsys):
     """--days ends at the current instant, not a whole calendar day -- the
-    banner must say so honestly instead of claiming 'inclusive'."""
+    banner must say so honestly instead of claiming 'inclusive'. And the
+    start is `now - N days` at the current time of day, not midnight, so a
+    bare start date would silently exclude the oldest hours of the boundary
+    day from the totals the owner reconciles -- the start must be an exact
+    ISO instant too, same as the end."""
     mod = _load_cli_module()
 
     async def fake_fetch(**_kwargs):
@@ -1258,9 +1309,14 @@ def test_cli_days_banner_says_now_not_inclusive(monkeypatch, capsys):
     rc = mod.main(["--days", "7", "--environment", "sandbox"])
 
     assert rc == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out + captured.err  # must not pass vacuously if the banner moved to stderr
     assert "inclusive" not in out
     assert "now" in out
+    # Two full ISO-8601 UTC instants (start and "now"), not a bare
+    # YYYY-MM-DD start date.
+    iso_instants = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", out)
+    assert len(iso_instants) == 2
 
 
 def test_cli_start_end_banner_still_says_inclusive(monkeypatch, capsys):
@@ -1282,5 +1338,6 @@ def test_cli_start_end_banner_still_says_inclusive(monkeypatch, capsys):
     )
 
     assert rc == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out + captured.err  # must not pass vacuously if the banner moved to stderr
     assert "inclusive" in out

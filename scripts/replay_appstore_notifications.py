@@ -160,6 +160,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Source APPSTORE_*/FIRESTORE_PROJECT_ID credentials from this Cloud Run "
              "service's env before doing anything else. Never prints a value.",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Re-raise the original exception after reporting, for a full traceback. "
+             "May print the exception's own message, so use it locally rather than "
+             "pasting the output anywhere.",
+    )
     return parser
 
 
@@ -299,10 +305,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - every fetch failure (a non-200 from
         # Apple, a connection/DNS failure, a credentials problem raised while
-        # signing the request, ...) must exit 1 with a usable message, never a
-        # raw traceback -- see the runbook's "If the dry run fails to connect"
-        # section. Which details are safe to print depends on which of these
-        # this is; see the three branches below.
+        # signing the request, ...) must exit 1 with a usable message by default,
+        # never a raw traceback -- see the runbook's "If the dry run fails to
+        # connect" section. Which details are safe to print depends on which of
+        # these this is; see the three branches below. --debug re-raises (bare
+        # `raise`, preserving the original traceback) after those messages are
+        # printed, for whichever branch this was -- not only the credential one,
+        # since a transport or Apple-status failure can want a traceback too.
         if isinstance(exc, RuntimeError):
             # fetch_notification_history's own message already names Apple's
             # HTTP status and a truncated response body -- unchanged from
@@ -343,11 +352,13 @@ def main(argv: list[str] | None = None) -> int:
                 "error: this does not look like a connection failure -- check the App "
                 "Store credentials, especially APPSTORE_PRIVATE_KEY (must be a PEM "
                 "private key; --from-cloud-run copies it pipe-separated and it must be "
-                "un-mangled back into real newlines). Re-run with `python -X "
-                "faulthandler scripts/replay_appstore_notifications.py ...` for a full "
-                "traceback.",
+                "un-mangled back into real newlines). Re-run with --debug for a full "
+                "traceback (may print the exception's own message, so use it locally "
+                "rather than pasting the output anywhere).",
                 file=sys.stderr,
             )
+        if args.debug:
+            raise
         return 1
 
     try:

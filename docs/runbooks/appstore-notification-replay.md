@@ -190,8 +190,15 @@ shape depends on what actually failed — there are three:
   transport error's is, so it is withheld) plus a line pointing at the App
   Store credentials specifically, naming `APPSTORE_PRIVATE_KEY` (it must be
   a PEM private key; `--from-cloud-run` copies it pipe-separated and it
-  must be un-mangled back into real newlines), and suggesting a re-run
-  under `python -X faulthandler` for a full traceback.
+  must be un-mangled back into real newlines), and suggesting a re-run with
+  `--debug` for a full traceback.
+
+Add `--debug` to re-raise the original exception (a bare re-raise,
+preserving the traceback) after those messages print, instead of exiting 1
+-- for any of the three branches above, not only the credential one. This
+is the one way to see the exception's own message when the default output
+withholds it (the credential branch above). It may print that message, so
+use `--debug` locally and do not paste its output anywhere.
 
 For the connection-failure case specifically: it most likely means the App
 Store host constant is wrong for this endpoint. The script reuses

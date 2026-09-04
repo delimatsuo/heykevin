@@ -1263,7 +1263,64 @@ def test_cli_fetch_non_transport_error_gets_credential_guidance_not_host_guidanc
     assert secret_marker not in combined
     assert "host constant" not in combined
     assert "APPSTORE_PRIVATE_KEY" in combined
-    assert "faulthandler" in combined
+    # The guidance must point at a route that actually produces a traceback.
+    # `python -X faulthandler` does nothing for an ordinary caught exception
+    # that is never re-raised -- it only dumps on a fatal signal or an
+    # explicit dump_traceback() call -- so an operator following that
+    # instruction would get the same suppressed output as without it. The
+    # real route is --debug (see the test below), and this message must
+    # name that instead.
+    assert "--debug" in combined
+    assert "faulthandler" not in combined
+
+
+def test_cli_debug_flag_reraises_credential_error_after_printing_guidance(monkeypatch, capsys):
+    """--debug is the operator's real route to the one sentence the default
+    output withholds (the exception's own message, e.g. "Could not
+    deserialize key data") for a non-transport failure like a malformed
+    APPSTORE_PRIVATE_KEY. It must re-raise the original exception (not
+    return 1) after the guidance text has already been printed."""
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        raise ValueError("Could not deserialize key data")
+
+    async def _unexpected_replay(*_args, **_kwargs):
+        raise AssertionError("replay should not be called when fetch fails")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", _unexpected_replay)
+
+    with pytest.raises(ValueError, match="Could not deserialize key data"):
+        mod.main(["--days", "7", "--environment", "sandbox", "--debug"])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "ValueError" in combined
+    assert "APPSTORE_PRIVATE_KEY" in combined
+
+
+def test_cli_debug_flag_reraises_transport_error_too(monkeypatch, capsys):
+    """--debug applies to all three fetch-failure branches, not only the
+    credential one -- a transport failure can want a traceback too."""
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        raise httpx.ConnectError("Connection refused")
+
+    async def _unexpected_replay(*_args, **_kwargs):
+        raise AssertionError("replay should not be called when fetch fails")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", _unexpected_replay)
+
+    with pytest.raises(httpx.ConnectError, match="Connection refused"):
+        mod.main(["--days", "7", "--environment", "sandbox", "--debug"])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "ConnectError" in combined
+    assert "host constant" in combined
 
 
 def test_cli_fetch_runtime_error_still_exits_1_and_reports_status(monkeypatch, capsys):

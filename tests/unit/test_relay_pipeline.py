@@ -969,4 +969,3 @@ def test_personal_mode_has_no_tools_even_with_calendar_or_jobber():
     gemini._contractor_config = pipeline._contractor_config
     gemini._log_voice_timing = lambda *args, **kwargs: None
     assert gemini._build_gemini_tools() == []
-

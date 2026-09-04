@@ -1057,4 +1057,3 @@ async def test_claude_personal_mode_suppresses_tools_even_when_calendar_configur
 
     assert len(recorded_requests) == 1
     assert "tools" not in recorded_requests[0]
-

@@ -60,4 +60,3 @@ def test_personal_prompt_requires_name_and_reason_before_hold():
     assert "regarding" in lowered
     assert "stay completely silent" in lowered
     assert "does not use calendars" in lowered
-

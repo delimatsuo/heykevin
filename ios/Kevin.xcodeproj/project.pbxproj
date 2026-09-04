@@ -17,7 +17,9 @@
 		2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */; };
 		32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3218F28F84345FE46322FFD3 /* AccountDeletion.swift */; };
 		3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */; };
+		479B0649B257EABB4768194C /* RegulatoryAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51D990DFEA3460D9F31B5803 /* RegulatoryAddress.swift */; };
 		4AB09E327BD6CE7025092BCE /* ContactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2612E9351242FAB54735AE26 /* ContactsView.swift */; };
+		50F4C8B9EF0C72931D9F16CF /* RegulatoryAddressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 873DFCD1C285EE67D8AB70C0 /* RegulatoryAddressTests.swift */; };
 		63B9A02E0F7BB4CA8F62DABB /* CallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5785E9B2BC1B30AE3E1FBD /* CallManager.swift */; };
 		67B3C158C6AC0D76A0DC4377 /* AppVersionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */; };
 		6B58067C9247D03F41C2016B /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55C15FE7B191D1F576798620 /* Theme.swift */; };
@@ -74,6 +76,7 @@
 		359DC411E16B65BDC5671DB2 /* KeychainManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainManager.swift; sourceTree = "<group>"; };
 		40B745FA4D84858230574C78 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		47EE37D6867D61B09BEC0482 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		51D990DFEA3460D9F31B5803 /* RegulatoryAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegulatoryAddress.swift; sourceTree = "<group>"; };
 		52F406181EC42D36B29CFB8E /* Kevin.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Kevin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		55C15FE7B191D1F576798620 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		5B8F3D0C955D71321170BC03 /* InfoPlist.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = InfoPlist.strings; path = "pt-BR.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
@@ -83,6 +86,7 @@
 		75E7CE6639F7C036F139197C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7D5BA48FE5494D5FC061B7B7 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
 		82CF29BB00A2E1D12106350D /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		873DFCD1C285EE67D8AB70C0 /* RegulatoryAddressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegulatoryAddressTests.swift; sourceTree = "<group>"; };
 		88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIdentityRefresher.swift; sourceTree = "<group>"; };
 		8B7722B929833EF075295A83 /* SettingsCountry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsCountry.swift; sourceTree = "<group>"; };
 		8C9DE1B27DFA1888B44DD4C6 /* AppStoreScreenshotFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreScreenshotFixtures.swift; sourceTree = "<group>"; };
@@ -185,6 +189,7 @@
 				EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */,
 				8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */,
 				CB4523976C8CA1F94FD69173 /* ForwardingInstructionsTests.swift */,
+				873DFCD1C285EE67D8AB70C0 /* RegulatoryAddressTests.swift */,
 				F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */,
 				C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */,
 			);
@@ -219,6 +224,7 @@
 				EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */,
 				030EFAEC8F57B2AEEA9D3692 /* ForwardingInstructions.swift */,
 				359DC411E16B65BDC5671DB2 /* KeychainManager.swift */,
+				51D990DFEA3460D9F31B5803 /* RegulatoryAddress.swift */,
 				8B7722B929833EF075295A83 /* SettingsCountry.swift */,
 				62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */,
 				26F75183A354A43842B21498 /* SubscriptionVerification.swift */,
@@ -359,6 +365,7 @@
 				3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */,
 				2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */,
 				B670617C06440B284622AA7E /* ForwardingInstructionsTests.swift in Sources */,
+				50F4C8B9EF0C72931D9F16CF /* RegulatoryAddressTests.swift in Sources */,
 				CE4E2CEC954085A7FD2B48AB /* SettingsCountryTests.swift in Sources */,
 				1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */,
 			);
@@ -388,6 +395,7 @@
 				6E591A2E51F727C78074B843 /* OnboardingView.swift in Sources */,
 				B1252FCCDCACDFED84D7082E /* PaywallView.swift in Sources */,
 				CBC1321AF32D63C2E942389B /* PhoneFormatter.swift in Sources */,
+				479B0649B257EABB4768194C /* RegulatoryAddress.swift in Sources */,
 				8B6E78B156D9D3B1709602BA /* ServicesView.swift in Sources */,
 				F32453F5B03451C8BD41203F /* SettingsCountry.swift in Sources */,
 				D84086E76D3C95C468C1232A /* SettingsView.swift in Sources */,

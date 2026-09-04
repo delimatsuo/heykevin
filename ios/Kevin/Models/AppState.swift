@@ -175,6 +175,22 @@ class AppState: ObservableObject {
             DispatchQueue.main.async { UserDefaults.standard.set(self.businessName, forKey: "businessName") }
         }
     }
+    // Business street address and city required for Twilio number
+    // provisioning in regulatory countries (RegulatoryAddress.countries).
+    // Business contact details, not credentials, so UserDefaults matches
+    // businessName rather than the Keychain.
+    @Published var businessAddress: String = UserDefaults.standard.string(forKey: "businessAddress") ?? "" {
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.businessAddress, forKey: "businessAddress") }
+        }
+    }
+    @Published var businessCity: String = UserDefaults.standard.string(forKey: "businessCity") ?? "" {
+        didSet {
+            if inScreenshotFixture { return }
+            DispatchQueue.main.async { UserDefaults.standard.set(self.businessCity, forKey: "businessCity") }
+        }
+    }
     @Published var serviceType: String = UserDefaults.standard.string(forKey: "serviceType") ?? "" {
         didSet {
             if inScreenshotFixture { return }

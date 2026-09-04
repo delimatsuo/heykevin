@@ -1,6 +1,22 @@
 import SwiftUI
 import AuthenticationServices
 
+/// User-facing text for a failed `RegulatoryAddress.validate` result.
+private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.ValidationResult) -> String {
+    switch result {
+    case .valid:
+        return ""
+    case .missingAddress:
+        return String(localized: "Business address is required for your country.")
+    case .missingCity:
+        return String(localized: "City is required for your country.")
+    case .addressTooLong:
+        return String(localized: "Business address must be 500 characters or fewer.")
+    case .cityTooLong:
+        return String(localized: "City must be 100 characters or fewer.")
+    }
+}
+
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
     @State private var step: OnboardingStep = .welcome
@@ -18,6 +34,15 @@ struct OnboardingView: View {
     @State private var forwardingInstructions: ForwardingInstructions?
     private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
     @State private var showPaywall = false
+    // Business street address and city: captured here only when a
+    // provisioning attempt fails for an address reason (the server has
+    // already resolved the account country by then; the client never
+    // guesses it). Seeded from AppState so a value the user already saved
+    // in Settings — or entered on a previous provisioning attempt — is
+    // never asked for twice.
+    @State private var regulatoryAddress = AppState.shared.businessAddress
+    @State private var regulatoryCity = AppState.shared.businessCity
+    @State private var regulatoryAddressError = ""
 
     private let businessProductID = "com.kevin.callscreen.business.monthly"
 
@@ -636,9 +661,32 @@ struct OnboardingView: View {
                     .foregroundStyle(.red)
                     .font(.caption)
 
+                if RegulatoryAddress.needsAddressCapture(errorMessage: errorMessage) {
+                    VStack(spacing: 12) {
+                        TextField(String(localized: "Business Address"), text: $regulatoryAddress)
+                            .textFieldStyle(.roundedBorder)
+                            .textContentType(.fullStreetAddress)
+
+                        TextField(String(localized: "City"), text: $regulatoryCity)
+                            .textFieldStyle(.roundedBorder)
+                            .textContentType(.addressCity)
+
+                        if !regulatoryAddressError.isEmpty {
+                            Text(regulatoryAddressError)
+                                .foregroundStyle(.red)
+                                .font(.caption)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Button(String(localized: "Try Again")) {
-                    errorMessage = ""
-                    Task { await provision(mode: selectedMode) }
+                    if RegulatoryAddress.needsAddressCapture(errorMessage: errorMessage) {
+                        Task { await retryProvisioningWithAddress() }
+                    } else {
+                        errorMessage = ""
+                        Task { await provision(mode: selectedMode) }
+                    }
                 }
 
                 Button(String(localized: "Start Over")) {
@@ -1082,7 +1130,9 @@ struct OnboardingView: View {
                     mode: mode,
                     ownerPhone: phoneNumber,
                     appleUserId: appState.appleUserId,
-                    appleIdentityToken: appState.appleIdentityToken
+                    appleIdentityToken: appState.appleIdentityToken,
+                    businessAddress: appState.businessAddress,
+                    businessCity: appState.businessCity
                 )
             }
             let result: [String: Any]?
@@ -1215,6 +1265,38 @@ struct OnboardingView: View {
         AppDelegate.requestPushAuthorization()
         step = .forwarding
         isLoading = false
+    }
+
+    /// Validates the address captured on the provisioning-failure screen,
+    /// saves it, and only then retries provisioning. If the create call
+    /// itself failed (`contractorId` empty), there is nothing to patch yet —
+    /// skip straight to the existing retry path, which will send the address
+    /// via `createContractor` this time.
+    @MainActor
+    private func retryProvisioningWithAddress() async {
+        let result = RegulatoryAddress.validate(address: regulatoryAddress, city: regulatoryCity)
+        guard result == .valid else {
+            regulatoryAddressError = regulatoryAddressErrorMessage(for: result)
+            return
+        }
+        regulatoryAddressError = ""
+        appState.businessAddress = regulatoryAddress
+        appState.businessCity = regulatoryCity
+
+        let contractorId = appState.contractorId
+        if !contractorId.isEmpty {
+            let saved = await APIClient.shared.updateBusinessAddress(
+                contractorId: contractorId,
+                address: regulatoryAddress,
+                city: regulatoryCity
+            )
+            guard saved else {
+                regulatoryAddressError = String(localized: "Failed to save address. Please try again.")
+                return
+            }
+        }
+        errorMessage = ""
+        await provision(mode: selectedMode)
     }
 
     @MainActor

@@ -432,7 +432,7 @@ final class APIClient: @unchecked Sendable {
     /// ``BootstrapAuthError/unauthenticated`` on HTTP 401 so the caller can
     /// re-prompt for a fresh Sign-in with Apple credential and retry. Returns
     /// `nil` on any other non-2xx response or transport failure.
-    func createContractor(ownerName: String, businessName: String, serviceType: String, mode: String = "business", ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "") async throws -> [String: Any]? {
+    func createContractor(ownerName: String, businessName: String, serviceType: String, mode: String = "business", ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "", businessAddress: String = "", businessCity: String = "") async throws -> [String: Any]? {
         do {
             let url = URL(string: "\(baseURL)/api/contractors")!
             var request = URLRequest(url: url)
@@ -451,6 +451,14 @@ final class APIClient: @unchecked Sendable {
             }
             if !appleIdentityToken.isEmpty {
                 body["apple_identity_token"] = appleIdentityToken
+            }
+            let trimmedAddress = businessAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedAddress.isEmpty {
+                body["business_address"] = trimmedAddress
+            }
+            let trimmedCity = businessCity.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedCity.isEmpty {
+                body["business_city"] = trimmedCity
             }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             authorize(&request)
@@ -702,6 +710,23 @@ final class APIClient: @unchecked Sendable {
 
         let (_, response) = try await retryRequest(request)
         return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// Saves the business street address and city regulatory countries
+    /// require before Twilio number provisioning can succeed
+    /// (`RegulatoryAddress.countries`). Thin wrapper over `patchContractor` —
+    /// no new endpoint.
+    func updateBusinessAddress(contractorId: String, address: String, city: String) async -> Bool {
+        let body: [String: Any] = [
+            "business_address": address.trimmingCharacters(in: .whitespacesAndNewlines),
+            "business_city": city.trimmingCharacters(in: .whitespacesAndNewlines),
+        ]
+        do {
+            return try await patchContractor(contractorId, body: body)
+        } catch {
+            debugLog("Update business address failed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     // MARK: - Contractor Mode

@@ -7,6 +7,22 @@ private func debugLog(_ message: String) {
     #endif
 }
 
+/// User-facing text for a failed `RegulatoryAddress.validate` result.
+private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.ValidationResult) -> String {
+    switch result {
+    case .valid:
+        return ""
+    case .missingAddress:
+        return String(localized: "Business address is required for your country.")
+    case .missingCity:
+        return String(localized: "City is required for your country.")
+    case .addressTooLong:
+        return String(localized: "Business address must be 500 characters or fewer.")
+    case .cityTooLong:
+        return String(localized: "City must be 100 characters or fewer.")
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.scenePhase) private var scenePhase
@@ -42,6 +58,8 @@ struct SettingsView: View {
     @State private var countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: "")
     @State private var isSavingCountry = false
     @State private var countrySaveError = ""
+    @State private var isSavingRegulatoryAddress = false
+    @State private var regulatoryAddressError = ""
     private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
 
     private var kevinNumber: String {
@@ -261,6 +279,36 @@ struct SettingsView: View {
                             Spacer()
                             Text(appState.businessName.isEmpty ? String(localized: "Not set") : appState.businessName)
                                 .foregroundStyle(appState.businessName.isEmpty ? .tertiary : .secondary)
+                        }
+
+                        // Business street address and city: required before
+                        // Twilio number provisioning can succeed in the six
+                        // regulatory countries (RegulatoryAddress.countries).
+                        // Hidden entirely for every other account country.
+                        if RegulatoryAddress.requiresAddress(countryCode: appState.countryCode) {
+                            TextField(String(localized: "Business Address"), text: $appState.businessAddress)
+                                .textContentType(.fullStreetAddress)
+                                .font(.subheadline)
+                            TextField(String(localized: "City"), text: $appState.businessCity)
+                                .textContentType(.addressCity)
+                                .font(.subheadline)
+
+                            if !regulatoryAddressError.isEmpty {
+                                Text(regulatoryAddressError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+
+                            Button {
+                                saveRegulatoryAddress()
+                            } label: {
+                                if isSavingRegulatoryAddress {
+                                    ProgressView()
+                                } else {
+                                    Text(String(localized: "Save Address"))
+                                }
+                            }
+                            .disabled(isSavingRegulatoryAddress)
                         }
 
                         DatePicker(String(localized: "Open"), selection: $businessHoursStart, displayedComponents: .hourAndMinute)
@@ -964,12 +1012,16 @@ struct SettingsView: View {
             knowledgeText = contractor["knowledge"] as? String ?? ""
             let name = contractor["owner_name"] as? String ?? ""
             let biz = contractor["business_name"] as? String ?? ""
+            let bizAddress = contractor["business_address"] as? String ?? ""
+            let bizCity = contractor["business_city"] as? String ?? ""
             let svc = contractor["service_type"] as? String ?? ""
             let mode = contractor["effective_mode"] as? String ?? contractor["mode"] as? String ?? "personal"
             let ringThrough = contractor["ring_through_contacts"] as? Bool ?? true
             await MainActor.run {
                 if !name.isEmpty { appState.userName = name }
                 if !biz.isEmpty { appState.businessName = biz }
+                if !bizAddress.isEmpty { appState.businessAddress = bizAddress }
+                if !bizCity.isEmpty { appState.businessCity = bizCity }
                 if !svc.isEmpty { appState.serviceType = svc }
                 appState.mode = (mode == "personal") ? "personal" : "business"
                 appState.ringThroughContacts = ringThrough
@@ -1056,6 +1108,39 @@ struct SettingsView: View {
                     // never follow a country the server did not confirm.
                     countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
                     countrySaveError = String(localized: "Failed to save setting. Please try again.")
+                }
+            }
+        }
+    }
+
+    /// Validates and saves the business street address and city that
+    /// regulatory countries require before Twilio number provisioning can
+    /// succeed. On success, normalizes AppState to the trimmed values the
+    /// server now holds.
+    private func saveRegulatoryAddress() {
+        guard !appState.contractorId.isEmpty, !isSavingRegulatoryAddress else { return }
+        let result = RegulatoryAddress.validate(address: appState.businessAddress, city: appState.businessCity)
+        guard result == .valid else {
+            regulatoryAddressError = regulatoryAddressErrorMessage(for: result)
+            return
+        }
+        regulatoryAddressError = ""
+        isSavingRegulatoryAddress = true
+        let address = appState.businessAddress
+        let city = appState.businessCity
+        Task {
+            let success = await APIClient.shared.updateBusinessAddress(
+                contractorId: appState.contractorId,
+                address: address,
+                city: city
+            )
+            await MainActor.run {
+                isSavingRegulatoryAddress = false
+                if success {
+                    appState.businessAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
+                    appState.businessCity = city.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    regulatoryAddressError = String(localized: "Failed to save setting. Please try again.")
                 }
             }
         }
